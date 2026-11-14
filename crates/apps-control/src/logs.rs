@@ -83,7 +83,7 @@ impl LogHub {
     }
 
     pub fn sink(self: &Arc<Self>, key: impl Into<String>, stream: Stream) -> LogSink {
-        LogSink { hub: self.clone(), key: Arc::from(key.into()), stream, instance: None, deployment: None }
+        LogSink { hub: self.clone(), key: Arc::from(key.into()), stream, instance: None, deployment: None, redact: None }
     }
 
     fn push(&self, key: &str, line: LogLine) {
@@ -152,12 +152,28 @@ impl LogHub {
         lines.split_off(skip)
     }
 
-    /// Lines that contain `q` (any case), newest last, at most `limit`: the lines in memory, then
-    /// the stored chunks newest first (those older than `since` skipped by name), until `limit`
-    /// matches or [`SEARCH_BYTES`] read. The flag says whether it stopped before reading all.
+    /// How many of the lines still in memory since `since` contain `q` (any case) and came from
+    /// the app (stdout, stderr): cheap, for an alert judged every minute (nothing stored is read).
+    pub fn count_recent(&self, key: &str, q: &str, since: i64) -> usize {
+        let q = q.to_lowercase();
+        let logs = self.logs.lock();
+        let Some(l) = logs.get(key) else { return 0 };
+        l.ring.iter().rev().take_while(|ln| ln.t >= since).filter(|ln| matches!(ln.stream, Stream::Stdout | Stream::Stderr) && ln.text.to_lowercase().contains(&q)).count()
+    }
+
+    /// Lines that contain `q` (any case), newest last, at most `limit` ([`Self::read`]).
     pub async fn search(&self, key: &str, q: &str, since: Option<i64>, limit: usize) -> (Vec<LogLine>, bool) {
         let q = q.to_lowercase();
-        let hit = |l: &LogLine| l.text.to_lowercase().contains(&q) && since.is_none_or(|s| l.t >= s);
+        self.read(key, move |l| l.text.to_lowercase().contains(&q), since, None, limit).await
+    }
+
+    /// Lines `keep` keeps, made at `since` or later and before `before`, newest last, at most
+    /// `limit`: the lines in memory, then the stored chunks newest first (a chunk that starts
+    /// at `before` or later skipped by its name, and none read past one that starts before
+    /// `since`), until `limit` lines or [`SEARCH_BYTES`] read. The flag says whether it stopped
+    /// before reading all.
+    pub async fn read(&self, key: &str, keep: impl Fn(&LogLine) -> bool, since: Option<i64>, before: Option<i64>, limit: usize) -> (Vec<LogLine>, bool) {
+        let hit = |l: &LogLine| since.is_none_or(|s| l.t >= s) && before.is_none_or(|b| l.t < b) && keep(l);
         let mem: Vec<LogLine> = self.logs.lock().get(key).map(|l| l.ring.iter().cloned().collect()).unwrap_or_default();
         let first_mem = mem.first().map(|l| l.t);
         let mut found: Vec<LogLine> = mem.into_iter().rev().filter(|l| hit(l)).take(limit).collect();
@@ -168,18 +184,23 @@ impl LogHub {
             let mut chunks = objects.list(&prefix(key)).await.unwrap_or_default();
             chunks.sort();
             let mut read = 0usize;
+            let starts = |chunk: &str| chunk.rsplit('/').next().and_then(|n| n.split('-').next()).and_then(|n| n.parse::<i64>().ok());
             for (chunk, _) in chunks.iter().rev() {
-                // `<first ms>-<seq>.ndjson`: a chunk that starts before `since` may still end after it.
                 if found.len() >= limit || read > SEARCH_BYTES {
                     cut = true;
                     break;
+                }
+                // `<first ms>-<seq>.ndjson`: every line of one that starts at `before` is later.
+                if before.is_some_and(|b| starts(chunk).is_some_and(|t| t >= b)) {
+                    continue;
                 }
                 let Ok(Some(b)) = objects.get(chunk).await else { continue };
                 read += b.len();
                 let mut part: Vec<LogLine> = b.split(|c| *c == b'\n').filter_map(|l| serde_json::from_slice(l).ok()).collect();
                 part.retain(|l: &LogLine| first_mem.is_none_or(|f| l.t < f) && hit(l));
                 found.extend(part.into_iter().rev().take(limit - found.len()));
-                if since.is_some_and(|s| chunk.rsplit('/').next().and_then(|n| n.split('-').next()).and_then(|n| n.parse::<i64>().ok()).is_some_and(|t| t < s)) {
+                // One that starts before `since` may still end after it; none older can.
+                if since.is_some_and(|s| starts(chunk).is_some_and(|t| t < s)) {
                     break;
                 }
             }
@@ -283,6 +304,8 @@ pub struct LogSink {
     stream: Stream,
     instance: Option<Arc<str>>,
     deployment: Option<Arc<str>>,
+    /// Never written: a secret the lines may hold (a build's cache namespace), shown as `…`.
+    redact: Option<Arc<str>>,
 }
 
 impl LogSink {
@@ -298,8 +321,16 @@ impl LogSink {
         LogSink { deployment: Some(deployment.into()), ..self.clone() }
     }
 
+    /// The same sink, with `secret` taken out of every line it writes.
+    pub fn redacting(&self, secret: &str) -> LogSink {
+        LogSink { redact: (!secret.is_empty()).then(|| secret.into()), ..self.clone() }
+    }
+
     pub fn line(&self, text: impl AsRef<str>) {
         let mut text = text.as_ref().trim_end_matches(['\r', '\n']).to_string();
+        if let Some(r) = &self.redact {
+            text = text.replace(&**r, "…");
+        }
         if text.len() > LINE_MAX {
             let mut cut = LINE_MAX;
             while !text.is_char_boundary(cut) {
@@ -387,6 +418,10 @@ mod tests {
         let (found, cut) = hub.search("env:svc_x/production", "Error", None, 100).await;
         assert_eq!(found.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["ERROR db timeout", "error: retry"]);
         assert!(!cut);
+        // A window back in time (`before` the newer lines: only the stored ones), filtered.
+        let newer = hub.tail("env:svc_x/production", 2, None).await[0].t;
+        let (old, _) = hub.read("env:svc_x/production", |l| l.text.starts_with("GET"), None, Some(newer), 100).await;
+        assert_eq!(old.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["GET / 200", "GET /a 200"]);
     }
 
     #[tokio::test]

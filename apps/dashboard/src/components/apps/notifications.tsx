@@ -13,8 +13,13 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "alert.memory", label: "Memory alert" },
   { value: "alert.errors", label: "5xx alert" },
   { value: "alert.latency", label: "Latency alert" },
+  { value: "alert.log", label: "Log alert" },
   { value: "cron.failed", label: "Cron run failed" },
   { value: "job.failed", label: "Job failed" },
+  { value: "domain.active", label: "Domain live" },
+  { value: "domain.expiring", label: "Domain unverified" },
+  { value: "domain.expired", label: "Domain removed" },
+  { value: "domain.tls_failed", label: "Certificate failed" },
 ];
 
 const KINDS: { value: NotifyTarget["kind"]; label: string; placeholder: string }[] = [
@@ -28,9 +33,19 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   const [targets, setTargets] = useState<NotifyTarget[] | null>(null);
   const [kind, setKind] = useState<NotifyTarget["kind"]>("slack");
   const [url, setUrl] = useState("");
-  const [events, setEvents] = useState<NotifyEvent[]>(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "cron.failed"]);
+  const [events, setEvents] = useState<NotifyEvent[]>(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed"]);
+  const [envs, setEnvs] = useState("");
+  const [previews, setPreviews] = useState(false);
+  // Only some of the project's services (none chosen: every one).
+  const [all, setAll] = useState<{ id: string; name: string }[]>([]);
+  const [only, setOnly] = useState<string[]>([]);
+  useEffect(() => {
+    appsApi.services(project).then((s) => setAll(s.map((x) => ({ id: x.id, name: x.name }))), () => setAll([]));
+  }, [project]);
   const [secret, setSecret] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
+  // The target whose events are being changed (in place: its URL and secret stay).
+  const [editing, setEditing] = useState<string | null>(null);
   const { copied, copy } = useCopy();
   const load = useCallback(() => appsApi.notifyTargets(project).then(setTargets, () => setTargets([])), [project]);
   useEffect(() => {
@@ -38,16 +53,19 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   }, [load]);
 
   const add = async () => {
-    const t = await runner.run("notification", () => appsApi.addNotifyTarget(project, { kind, url: url.trim(), events }));
+    const environments = envs.split(",").map((e) => e.trim()).filter(Boolean);
+    const t = await runner.run("notification", () => appsApi.addNotifyTarget(project, { kind, url: url.trim(), events, environments, previews, ...(only.length ? { services: only } : {}) }));
     if (t) {
       setUrl("");
+      setEnvs("");
+      setOnly([]);
       setSecret(t.secret ?? null);
       void load();
     }
   };
 
   return (
-    <Panel title={`Notifications for ${projectName}`} aside={<span className="text-[12px] text-muted">every service in the project</span>}>
+    <Panel title={`Notifications for ${projectName}`} aside={<span className="text-[12px] text-muted">the project's services</span>}>
       {targets && targets.length > 0 && (
         <ul className="divide-y divide-line border-b border-line">
           {targets.map((t) => (
@@ -57,9 +75,17 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
                 <span className="font-medium">{KINDS.find((k) => k.value === t.kind)?.label}</span>
                 <span className="font-mono text-[12px] text-muted">{t.host}</span>
                 <span className="text-[12px] text-subtle">{t.events.map((e) => EVENTS.find((x) => x.value === e)?.label ?? e).join(", ")}</span>
+                <span className="text-[12px] text-subtle">
+                  · {t.services.length ? t.services.map((id) => all.find((s) => s.id === id)?.name ?? id).join(", ") : "every service"}
+                  {" "}· {t.environments.length ? t.environments.join(", ") : "every environment"}
+                  {t.previews ? ", previews too" : ""}
+                </span>
                 <span className="ml-auto flex gap-1.5">
                   <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("test", () => appsApi.testNotifyTarget(project, t.id)).then((r) => r && !r.ok && runner.setError(`The test didn't arrive: ${r.error ?? "no answer"}`))}>
                     <Send className="size-3.5" /> Test
+                  </button>
+                  <button type="button" className={btn} aria-expanded={editing === t.id} onClick={() => setEditing(editing === t.id ? null : t.id)}>
+                    Events
                   </button>
                   <button type="button" className={btn} onClick={() => setOpen(open === t.id ? null : t.id)}>
                     Deliveries
@@ -69,6 +95,18 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
                   </button>
                 </span>
               </div>
+              {editing === t.id && (
+                <EditEvents
+                  current={t.events}
+                  busy={runner.busy !== null}
+                  onSave={async (events) => {
+                    if (await runner.run("events", () => appsApi.updateNotifyTarget(project, t.id, { events }))) {
+                      setEditing(null);
+                      void load();
+                    }
+                  }}
+                />
+              )}
               {open === t.id && <Deliveries project={project} target={t.id} />}
             </li>
           ))}
@@ -96,7 +134,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
           ))}
         </select>
         <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder={KINDS.find((k) => k.value === kind)?.placeholder} aria-label="URL" spellCheck={false} autoComplete="off" className={`${input} min-w-0 flex-1 font-mono text-[12px]`} />
-        <div className="flex gap-2 text-[12px] text-muted">
+        <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-muted">
           {EVENTS.map((e) => (
             <label key={e.value} className="inline-flex items-center gap-1">
               <input type="checkbox" checked={events.includes(e.value)} onChange={(x) => setEvents((es) => (x.target.checked ? [...es, e.value] : es.filter((v) => v !== e.value)))} />
@@ -104,6 +142,21 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
             </label>
           ))}
         </div>
+        <input value={envs} onChange={(e) => setEnvs(e.target.value)} placeholder="every environment" aria-label="Only these environments (comma-separated)" title="Only these environments' events (comma-separated); empty: every environment" spellCheck={false} autoComplete="off" className={`${input} w-44 font-mono text-[12px]`} />
+        {all.length > 1 && (
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-muted" role="group" aria-label="Only these services (none: every one)">
+            {all.map((s) => (
+              <label key={s.id} className="inline-flex items-center gap-1">
+                <input type="checkbox" checked={only.includes(s.id)} onChange={(x) => setOnly((o) => (x.target.checked ? [...o, s.id] : o.filter((v) => v !== s.id)))} />
+                {s.name}
+              </label>
+            ))}
+          </div>
+        )}
+        <label className="inline-flex items-center gap-1 text-[12px] text-muted" title="Each pull request's preview: its failed deploys and alerts too">
+          <input type="checkbox" checked={previews} onChange={(e) => setPreviews(e.target.checked)} />
+          Include previews
+        </label>
         <button type="submit" className={primary} disabled={!url.trim() || !events.length || runner.busy !== null}>
           Add
         </button>
@@ -131,5 +184,23 @@ function Deliveries({ project, target }: { project: string; target: string }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+/** A target's events, changed in place. A resolved alert goes to whoever gets that alert. */
+function EditEvents({ current, busy, onSave }: { current: NotifyEvent[]; busy: boolean; onSave: (events: NotifyEvent[]) => void }) {
+  const [events, setEvents] = useState<NotifyEvent[]>(current);
+  return (
+    <div className="rise mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted">
+      {EVENTS.map((e) => (
+        <label key={e.value} className="inline-flex items-center gap-1">
+          <input type="checkbox" checked={events.includes(e.value)} onChange={(x) => setEvents((es) => (x.target.checked ? [...es, e.value] : es.filter((v) => v !== e.value)))} />
+          {e.label}
+        </label>
+      ))}
+      <button type="button" className={btn} disabled={busy || events.length === 0} onClick={() => onSave(events)}>
+        Save
+      </button>
+    </div>
   );
 }

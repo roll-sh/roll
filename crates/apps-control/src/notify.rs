@@ -15,8 +15,33 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 10] = ["deploy.failed", "crash_loop", "deploy.active", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "cron.failed", "job.failed"];
-const DEFAULT_EVENTS: [&str; 8] = ["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "cron.failed"];
+pub const EVENTS: [&str; 15] = [
+    "deploy.failed",
+    "crash_loop",
+    "deploy.active",
+    "spend.alert",
+    "spend.limit",
+    "alert.memory",
+    "alert.errors",
+    "alert.latency",
+    "alert.log",
+    "cron.failed",
+    "job.failed",
+    "domain.active",
+    "domain.expiring",
+    "domain.expired",
+    "domain.tls_failed",
+];
+const DEFAULT_EVENTS: [&str; 12] = ["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed"];
+/// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
+/// (whoever heard an alert hears it clear; there's nothing else to ask for).
+fn wants(events: &[String], kind: &str, data: &Value) -> bool {
+    match kind {
+        "alert.resolved" => data["alert"].as_str().is_some_and(|a| events.iter().any(|e| e == a)),
+        k => events.iter().any(|e| e == k),
+    }
+}
+
 /// Targets per project.
 const MAX_TARGETS: usize = 20;
 /// After the first try: the waits before the next ones.
@@ -27,23 +52,13 @@ impl Apps {
     /// answer this once.
     pub async fn add_target(self: &Arc<Self>, project: &str, body: Value) -> Result<Value> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["kind", "url", "events"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["kind", "url", "events", "environments", "services", "previews"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
         let kind = o.get("kind").and_then(Value::as_str).unwrap_or("webhook").to_string();
         let url = o.get("url").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("url is required".into()))?.trim().to_string();
         let host = self.check_target(&kind, &url)?;
-        let events: Vec<String> = match o.get("events") {
-            None | Some(Value::Null) => DEFAULT_EVENTS.map(String::from).to_vec(),
-            Some(Value::Array(a)) => {
-                let e: Vec<String> = a.iter().filter_map(Value::as_str).map(String::from).collect();
-                if e.is_empty() || e.len() != a.len() || e.iter().any(|x| !EVENTS.contains(&x.as_str())) {
-                    return Err(Error::BadRequest(format!("events are some of {}", EVENTS.join(", "))));
-                }
-                e
-            }
-            Some(_) => return Err(Error::BadRequest("events is a list".into())),
-        };
+        let (events, filters) = self.target_fields(project, &o, None).await?;
         let p = project.to_string();
         {
             let this = self.clone();
@@ -56,12 +71,80 @@ impl Apps {
         }
         let secret = (kind == "webhook").then(|| format!("whsec_{}", crate::model::random(32)));
         let (k, u, s2, ev) = (kind.clone(), url.clone(), secret.clone(), events.clone());
-        let t = self.db(move |s| s.add_target(&p, &k, &host, &u, s2.as_deref(), &ev)).await?;
+        let t = self.db(move |s| s.add_target(&p, &k, &host, &u, s2.as_deref(), &ev, &filters)).await?;
         let mut v = serde_json::to_value(&t).expect("JSON");
         if let Some(s) = secret {
             v["secret"] = json!(s);
         }
         Ok(v)
+    }
+
+    /// A target's events and filters from a body: what's absent is `current`'s (an edit), else
+    /// the defaults (a new one). A service by its name or id, kept by id; only the project's.
+    async fn target_fields(self: &Arc<Self>, project: &str, o: &serde_json::Map<String, Value>, current: Option<&NotifyTarget>) -> Result<(Vec<String>, crate::store::TargetFilters)> {
+        let events: Vec<String> = match o.get("events") {
+            None | Some(Value::Null) => current.map_or_else(|| DEFAULT_EVENTS.map(String::from).to_vec(), |c| c.events.clone()),
+            Some(Value::Array(a)) => {
+                let e: Vec<String> = a.iter().filter_map(Value::as_str).map(String::from).collect();
+                if e.is_empty() || e.len() != a.len() || e.iter().any(|x| !EVENTS.contains(&x.as_str())) {
+                    return Err(Error::BadRequest(format!("events are some of {}", EVENTS.join(", "))));
+                }
+                e
+            }
+            Some(_) => return Err(Error::BadRequest("events is a list".into())),
+        };
+        let names = |field: &str| -> Result<Option<Vec<String>>> {
+            match o.get(field) {
+                None => Ok(None),
+                Some(Value::Null) => Ok(Some(Vec::new())),
+                Some(Value::Array(a)) if a.len() <= 50 => {
+                    let v: Vec<String> = a.iter().filter_map(Value::as_str).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    if v.len() != a.len() {
+                        return Err(Error::BadRequest(format!("{field} is a list of names")));
+                    }
+                    Ok(Some(v))
+                }
+                Some(_) => Err(Error::BadRequest(format!("{field} is a list of at most 50 names"))),
+            }
+        };
+        let environments = match names("environments")? {
+            Some(v) => v,
+            None => current.map(|c| c.environments.clone()).unwrap_or_default(),
+        };
+        // A service by its name or id, kept by id (a rename doesn't drop it); only the project's.
+        let p = project.to_string();
+        let mut services = current.map(|c| c.services.clone()).unwrap_or_default();
+        if let Some(wanted) = names("services")? {
+            services.clear();
+            let pp = p.clone();
+            let all = self.db(move |s| s.services(Some(&pp))).await?;
+            for w in wanted {
+                let svc = all.iter().find(|s| s.id == w || s.name == w).ok_or_else(|| Error::BadRequest(format!("services: the project has no service {w}")))?;
+                services.push(svc.id.clone());
+            }
+        }
+        // New targets leave previews out (each pull request's failed deploys would reach the
+        // team), unless asked, or unless they name an environment that is one.
+        let previews = match o.get("previews") {
+            None => current.is_some_and(|c| c.previews),
+            Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(Error::BadRequest("previews is true or false".into())),
+        };
+        Ok((events, crate::store::TargetFilters { environments, services, previews }))
+    }
+
+    /// `PATCH …/notifications/{nid}`: its events, environments, services and previews (what's
+    /// absent stays). Its URL and secret don't change: a new URL is a new target.
+    pub async fn update_target(self: &Arc<Self>, project: &str, id: &str, body: Value) -> Result<NotifyTarget> {
+        let o = body.as_object().cloned().unwrap_or_default();
+        if let Some(k) = o.keys().find(|k| !["events", "environments", "services", "previews"].contains(&k.as_str())) {
+            return Err(Error::BadRequest(format!("{k} can't be changed (a new URL is a new target)")));
+        }
+        let current = self.targets(project).await?.into_iter().find(|t| t.id == id).ok_or_else(|| Error::NotFound(format!("no notification target {id}")))?;
+        let (events, filters) = self.target_fields(project, &o, Some(&current)).await?;
+        let (p, i) = (project.to_string(), id.to_string());
+        self.db(move |s| s.update_target(&p, &i, &events, &filters)).await
     }
 
     /// A target's URL: HTTPS, a public host, and for Slack and Discord their webhook hosts.
@@ -149,6 +232,8 @@ impl Apps {
         let Ok(events) = self.db(move |s| s.events(cursor, 200)).await else { return };
         let Some(last) = events.last().map(|e| e.seq) else { return };
         let mut queued = Vec::new();
+        // Whether an environment is a preview's, looked up once per pass.
+        let mut ephemeral: std::collections::HashMap<(String, String), bool> = std::collections::HashMap::new();
         for e in &events {
             // A project's own events (spend) name it; a service's are its project's.
             let p = match e.data["project"].as_str().filter(|_| e.service.is_empty()) {
@@ -159,8 +244,21 @@ impl Apps {
                     svc.project
                 }
             };
+            let key = (e.service.clone(), e.environment.clone());
+            let preview = match ephemeral.get(&key) {
+                Some(b) => *b,
+                None => {
+                    let (sid, en) = key.clone();
+                    // One already deleted (a closed pull request's last failed deploy) is still a
+                    // preview: by its name, as roll previews makes them.
+                    let named = en.starts_with("pv-");
+                    let b = !sid.is_empty() && self.db(move |s| s.environment(&sid, &en)).await.map_or(named, |r| r.ephemeral);
+                    ephemeral.insert(key, b);
+                    b
+                }
+            };
             for t in self.db(move |s| s.targets(&p)).await.unwrap_or_default() {
-                if t.events.contains(&e.kind) {
+                if wants(&t.events, &e.kind, &e.data) && t.follows(&e.service, &e.environment, preview) {
                     queued.push((t.id.clone(), e.seq, e.kind.clone()));
                 }
             }
@@ -242,6 +340,17 @@ impl Apps {
             "alert.memory" => (format!("{what}: memory"), format!("Its instances used {}% of their {} MB limit for five minutes (the alert is at {}%).", e.data["value"], e.data["limit_mb"], e.data["threshold"])),
             "alert.errors" => (format!("{what}: errors"), format!("{}% of its {} requests in five minutes answered 5xx (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["threshold"])),
             "alert.latency" => (format!("{what}: slow"), format!("Its p95 latency reached {} ms (the alert is at {} ms).", e.data["value"], e.data["threshold"])),
+            "alert.log" => (format!("{what}: its log says {}", e.data["pattern"]), format!("{} lines in five minutes matched (the alert is at {}).", e.data["count"], e.data["threshold"])),
+            "alert.resolved" => {
+                let which = match e.data["alert"].as_str() {
+                    Some("alert.memory") => "memory",
+                    Some("alert.errors") => "errors",
+                    Some("alert.latency") => "latency",
+                    Some("alert.log") => "log",
+                    _ => "an",
+                };
+                (format!("{what}: {which} alert resolved"), format!("The {which} alert cleared: the last five minutes are under its threshold."))
+            }
             "cron.failed" | "job.failed" => {
                 let what_ran = if e.kind == "cron.failed" { "A scheduled run" } else { "A job" };
                 let how = match (e.data["status"].as_str(), e.data["exit_code"].as_i64()) {
@@ -252,6 +361,19 @@ impl Apps {
                 (format!("{what}: {} failed", if e.kind == "cron.failed" { "cron run" } else { "job" }), format!("{what_ran} {how}."))
             }
             "crash_loop" => (format!("{what}: crashing"), format!("{} crashes in 10 minutes; the last because {}.", e.data["crashes"], e.data["last_error"].as_str().unwrap_or("it exited"))),
+            "domain.active" => (format!("{what}: {} is live", e.data["hostname"].as_str().unwrap_or("a domain")), "Its DNS checks out; it serves the environment now.".to_string()),
+            "domain.expiring" => (
+                format!("{what}: {} isn't verified", e.data["hostname"].as_str().unwrap_or("a domain")),
+                format!("It's removed tomorrow unless its DNS checks out: {}", e.data["error"].as_str().unwrap_or("its records aren't there yet")),
+            ),
+            "domain.tls_failed" => (
+                format!("{what}: {}'s certificate failed", e.data["hostname"].as_str().unwrap_or("a domain")),
+                format!("Visitors over HTTPS get an error until it's issued: {}", e.data["error"].as_str().unwrap_or("its provider gave no reason")),
+            ),
+            "domain.expired" => (
+                format!("{what}: {} was removed", e.data["hostname"].as_str().unwrap_or("a domain")),
+                "It stayed unverified for 7 days, so the name is free again; add it again once its DNS is set.".to_string(),
+            ),
             other => (format!("{what}: {other}"), String::new()),
         }
     }

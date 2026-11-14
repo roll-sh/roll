@@ -32,6 +32,8 @@ impl IntoResponse for Error {
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Conflict(_) => StatusCode::CONFLICT,
             Error::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Error::Forbidden(_) => StatusCode::FORBIDDEN,
+            Error::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Error::Db(_) | Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status == StatusCode::INTERNAL_SERVER_ERROR {
@@ -65,7 +67,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
         .route("/v1/apps/projects/{project}/drains/{did}", axum::routing::delete(delete_drain))
-        .route("/v1/apps/projects/{project}/notifications/{nid}", axum::routing::delete(delete_target))
+        .route("/v1/apps/projects/{project}/notifications/{nid}", axum::routing::delete(delete_target).patch(update_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/test", post(test_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries", get(deliveries))
         .route("/v1/apps/services/{id}/registry", put(put_registry).delete(delete_registry))
@@ -74,7 +76,9 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys"), get(deploys).post(create_deploy).layer(DefaultBodyLimit::max(apps.cfg.upload_max)))
         .route(&format!("{env}/deploys/{{dep}}"), get(get_deploy))
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
+        .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
+        .route(&format!("{env}/rollback"), post(rollback_previous))
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
         .route(&format!("{env}/redeploy"), post(redeploy))
         .route(&format!("{env}/promote"), post(promote))
@@ -82,15 +86,21 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/volume/backups"), get(backups).post(backup_volume))
         .route(&format!("{env}/volume/backups/{{bid}}/restore"), post(restore_volume))
         .route(&format!("{env}/restart"), post(restart))
+        .route(&format!("{env}/instances/{{name}}/restart"), post(restart_instance))
         .route(&format!("{env}/sleep"), post(sleep))
         .route(&format!("{env}/wake"), post(wake))
         .route(&format!("{env}/variables"), get(variables).patch(change_variables))
+        .route(&format!("{env}/pending"), get(pending))
         .route(&format!("{env}/variables/values"), get(reveal))
         .route(&format!("{env}/logs"), get(env_logs))
         .route(&format!("{env}/metrics"), get(metrics))
         .route(&format!("{env}/usage"), get(usage))
         .route(&format!("{env}/runs"), get(runs).post(run_now))
+        .route(&format!("{env}/runs/{{run}}"), get(get_run))
+        .route(&format!("{env}/runs/{{run}}/logs"), get(run_logs))
+        .route(&format!("{env}/runs/{{run}}/cancel"), post(cancel_run))
         .route(&format!("{env}/shell"), get(shell))
+        .route(&format!("{env}/tunnel"), get(tunnel))
         .route(&format!("{env}/shell/sessions"), post(open_session))
         .route(&format!("{env}/shell/sessions/{{sh}}"), axum::routing::delete(close_session))
         .route(&format!("{env}/shell/sessions/{{sh}}/screen"), get(session_screen))
@@ -107,6 +117,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
     Router::new()
         .route("/v1/apps", get(overview))
         .route("/v1/apps/plan", post(plan))
+        .route("/v1/apps/import", post(import))
         .route("/v1/apps/services", get(list_services).post(create_service))
         .route("/v1/apps/projects/{project}/services", get(project_services).post(create_project_service))
         .merge(service_routes)
@@ -130,6 +141,42 @@ async fn overview(State(apps): S) -> R {
     ok(o)
 }
 
+/// A project in one file, read (no service made): a roll.toml's `[apps]` and `[databases]`, or
+/// a Compose file turned into them, checked as `roll up --all` checks them. The dashboard's import
+/// plans against the project with it and makes what's missing through the usual routes.
+async fn import(b: Bytes) -> R {
+    use apps_build::project::{compose_to_toml, entry_kind, entry_run, parse_project};
+    let v = body(&b)?;
+    let text = |k: &str| v.get(k).and_then(Value::as_str);
+    if [text("roll_toml"), text("compose")].into_iter().flatten().any(|t| t.len() > 1 << 20) {
+        return Err(Error::BadRequest("the file is at most 1 MiB".into()));
+    }
+    let (toml_text, notes) = match (text("roll_toml"), text("compose")) {
+        (Some(t), None) => (t.to_string(), Vec::new()),
+        // Off the runtime's threads: a large file is a few hundred milliseconds of parsing.
+        (None, Some(c)) => {
+            let c = c.to_string();
+            tokio::task::spawn_blocking(move || compose_to_toml(&c)).await.map_err(|e| Error::Internal(e.to_string()))?.map_err(|e| Error::BadRequest(e.to_string()))?
+        }
+        _ => return Err(Error::BadRequest("give roll_toml or compose".into())),
+    };
+    let f = parse_project(&toml_text).map_err(|e| Error::BadRequest(e.to_string()))?;
+    let apps: serde_json::Map<String, Value> = f
+        .apps
+        .iter()
+        .map(|(n, a)| {
+            let source = match entry_kind(a) {
+                "repo" => json!({ "kind": "repo", "repo": a.repo, "root": a.root }),
+                "image" => json!({ "kind": "image", "image": a.image }),
+                _ => json!({ "kind": "upload", "root": a.root.as_deref().unwrap_or(".") }),
+            };
+            let links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "name": l })).collect();
+            (n.clone(), json!({ "source": source, "branch": a.branch, "run": entry_run(a), "links": links, "variables": a.variables }))
+        })
+        .collect();
+    ok(json!({ "roll_toml": toml_text, "notes": notes, "apps": apps, "databases": f.databases }))
+}
+
 /// `POST /v1/apps/plan`: what a build would detect, for a repo at a revision or for files.
 async fn plan(State(apps): S, b: Bytes) -> R {
     let v = body(&b)?;
@@ -139,7 +186,9 @@ async fn plan(State(apps): S, b: Bytes) -> R {
         if map.len() > 2000 || map.values().map(String::len).sum::<usize>() > 8 << 20 {
             return Err(Error::BadRequest("files is at most 2000 files and 8 MiB".into()));
         }
-        let p = apps_build::plan(&apps_build::MapTree(map), &overrides.overrides()).map_err(|e| Error::BadRequest(e.to_string()))?;
+        // As a new web service would build (a Procfile's `web:`).
+        let o = apps_build::Overrides { process: Some("web".into()), ..overrides.overrides() };
+        let p = apps_build::plan(&apps_build::MapTree(map), &o).map_err(|e| Error::BadRequest(e.to_string()))?;
         return ok(p);
     }
     let repo = v.get("repo").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("repo or files is required".into()))?.to_string();
@@ -177,7 +226,10 @@ async fn plan(State(apps): S, b: Bytes) -> R {
             build.start = build.start.or(ws.start);
             context = dir.clone();
         }
-        let o = build.overrides();
+        // As a new web service would build (a Procfile's `web:`), but from a workspace's root: its
+        // Procfile is the repo's.
+        let process = (context == root).then(|| "web".to_string());
+        let o = apps_build::Overrides { process, ..build.overrides() };
         let p = tokio::task::spawn_blocking(move || apps_build::plan(&apps_build::DirTree::new(context), &o)).await.map_err(|e| Error::Internal(e.to_string()))?;
         p.map(|mut p| {
             p.notes.splice(0..0, said);
@@ -208,7 +260,14 @@ async fn project_services(State(apps): S, Path(project): Path<String>) -> R {
 }
 
 async fn create_service(State(apps): S, ext: Extensions, b: Bytes) -> R {
-    let s = apps.create_service(body(&b)?, actor(&ext)).await?;
+    let b = body(&b)?;
+    let values: Vec<&str> = b["variables"].as_object().into_iter().flatten().filter_map(|(_, v)| v.as_str()).collect();
+    if let (Some(project), Some(name)) = (b["project"].as_str(), b["name"].as_str())
+        && values.iter().any(|v| v.contains("${{"))
+    {
+        apps.check_references(project, name, crate::model::PRODUCTION, &values, asker(&ext)).await?;
+    }
+    let s = apps.create_service(b, actor(&ext)).await?;
     Ok((StatusCode::CREATED, Json(s)).into_response())
 }
 
@@ -256,8 +315,14 @@ async fn links(State(apps): S, Path(id): Path<String>) -> R {
     ok(apps.links(&id).await?)
 }
 
-async fn activity(State(apps): S, Path(id): Path<String>) -> R {
-    ok(apps.activity(&id).await?)
+#[derive(Deserialize)]
+struct ActivityQuery {
+    /// Every kind of event, not only the audit trail: the service's timeline.
+    all: Option<String>,
+}
+
+async fn activity(State(apps): S, Path(id): Path<String>, Query(q): Query<ActivityQuery>) -> R {
+    ok(apps.activity(&id, truthy(&q.all)).await?)
 }
 
 async fn put_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
@@ -302,6 +367,10 @@ async fn targets(State(apps): S, Path(project): Path<String>) -> R {
 async fn add_target(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
     let t = apps.add_target(&project, body(&b)?).await?;
     Ok((StatusCode::CREATED, Json(t)).into_response())
+}
+
+async fn update_target(State(apps): S, Path((project, nid)): Path<(String, String)>, b: Bytes) -> R {
+    ok(apps.update_target(&project, &nid, body(&b)?).await?)
 }
 
 async fn delete_target(State(apps): S, Path((project, nid)): Path<(String, String)>) -> R {
@@ -409,8 +478,14 @@ async fn delete_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-async fn deploys(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
-    ok(apps.deployments(&id, &env).await?)
+#[derive(serde::Deserialize)]
+struct DeploysQuery {
+    /// Made before then (unix ms; the last one's `created_at`): the next page.
+    before: Option<i64>,
+}
+
+async fn deploys(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<DeploysQuery>) -> R {
+    ok(apps.deployments(&id, &env, q.before).await?)
 }
 
 /// JSON (`NewDeploy`), or a gzipped tar of the tree (`roll up`).
@@ -425,11 +500,16 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
         // Percent-encoded UTF-8 (a commit subject isn't ASCII): `roll up` sends it so.
         let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();
         let revision = headers.get("x-roll-revision").and_then(|v| v.to_str().ok()).filter(|r| (7..=64).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_hexdigit()));
-        apps.deploy(&id, &env, json!({ "message": message, "revision": revision }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
+        let no_cache = headers.get("x-roll-no-cache").is_some_and(|v| v == "1");
+        apps.deploy(&id, &env, json!({ "message": message, "revision": revision, "no_cache": no_cache }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
     } else {
         apps.deploy(&id, &env, body(&b)?, By { trigger: Trigger::Manual, actor }, None, key).await?
     };
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
+}
+
+async fn deploy_commits(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
+    ok(apps.deploy_commits(&id, &env, &dep).await?)
 }
 
 async fn get_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
@@ -449,13 +529,23 @@ struct LogQuery {
     status: Option<String>,
     /// Access lines that took at least this long.
     min_ms: Option<u64>,
+    /// Access lines of answers roll gave itself, and why (`firewall`, `rate_limit`, `wake`…; `any`:
+    /// every one of them).
+    by: Option<String>,
+    /// Lines made before then (unix ms): reading back through the stored chunks.
+    before: Option<i64>,
+    /// One instance's lines, or one deployment's, or one stream's (`stdout`, `stderr`, `system`).
+    instance: Option<String>,
+    deployment: Option<String>,
+    stream: Option<String>,
 }
 
 /// Which access lines `status` and `min_ms` keep (`None`: all of them).
 fn http_filter(q: &LogQuery) -> crate::Result<Option<impl Fn(&crate::logs::LogLine) -> bool + Send + Sync + 'static>> {
-    if q.status.is_none() && q.min_ms.is_none() {
+    if q.status.is_none() && q.min_ms.is_none() && q.by.is_none() {
         return Ok(None);
     }
+    let want_by = q.by.clone().filter(|b| !b.trim().is_empty());
     let range = match q.status.as_deref().map(str::trim) {
         None | Some("") => (0, 999),
         Some(s) if s.len() == 3 && s.ends_with("xx") => {
@@ -474,7 +564,9 @@ fn http_filter(q: &LogQuery) -> crate::Result<Option<impl Fn(&crate::logs::LogLi
     Ok(Some(move |l: &crate::logs::LogLine| {
         let v: Value = serde_json::from_str(&l.text).unwrap_or(Value::Null);
         let status = v["status"].as_u64().unwrap_or(0) as u16;
-        (range.0..=range.1).contains(&status) && v["ms"].as_u64().unwrap_or(0) >= min
+        (range.0..=range.1).contains(&status)
+            && v["ms"].as_u64().unwrap_or(0) >= min
+            && want_by.as_deref().is_none_or(|b| v["by"].as_str().is_some_and(|got| b == "any" || got == b))
     }))
 }
 
@@ -488,11 +580,29 @@ type Keep = Option<Box<dyn Fn(&LogLine) -> bool + Send + Sync>>;
 
 async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tokio::sync::watch::Receiver<bool>>, keep: Keep) -> R {
     let tail = q.tail.unwrap_or(500).min(crate::logs::RING);
-    if let Some(text) = q.q.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        if text.len() > 200 {
-            return Err(Error::BadRequest("q is at most 200 characters".into()));
-        }
-        let (lines, cut) = apps.logs.search(&key, text, q.since, tail).await;
+    let text = q.q.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_lowercase);
+    if text.as_ref().is_some_and(|t| t.len() > 200) {
+        return Err(Error::BadRequest("q is at most 200 characters".into()));
+    }
+    let stream = match q.stream.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => None,
+        Some(s) => Some(serde_json::from_value::<crate::logs::Stream>(json!(s)).map_err(|_| Error::BadRequest("stream is stdout, stderr, system, http or build".into()))?),
+    };
+    // Every filter in one: the route's own (`keep`), then the asker's.
+    let (instance, deployment) = (q.instance.clone().filter(|s| !s.is_empty()), q.deployment.clone().filter(|s| !s.is_empty()));
+    let narrowed = keep.is_some() || instance.is_some() || deployment.is_some() || stream.is_some();
+    let keep: Keep = narrowed.then(|| {
+        let k = keep;
+        Box::new(move |l: &LogLine| {
+            k.as_ref().is_none_or(|k| k(l))
+                && instance.as_deref().is_none_or(|i| l.instance.as_deref() == Some(i))
+                && deployment.as_deref().is_none_or(|d| l.deployment.as_deref() == Some(d))
+                && stream.is_none_or(|s| l.stream == s)
+        }) as Box<dyn Fn(&LogLine) -> bool + Send + Sync>
+    });
+    // Read back (a search, a time window, or filtered): memory, then the stored chunks.
+    if text.is_some() || q.before.is_some() || (keep.is_some() && !truthy(&q.follow)) {
+        let (lines, cut) = apps.logs.read(&key, |l| keep.as_ref().is_none_or(|k| k(l)) && text.as_ref().is_none_or(|t| l.text.to_lowercase().contains(t)), q.since, q.before, tail).await;
         let mut r = Json(lines).into_response();
         if cut {
             r.headers_mut().insert("x-roll-search-truncated", axum::http::HeaderValue::from_static("1"));
@@ -500,12 +610,7 @@ async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tok
         return Ok(r);
     }
     if !truthy(&q.follow) {
-        let Some(k) = &keep else { return ok(apps.logs.tail(&key, tail, q.since).await) };
-        // Filtered: read back as far as memory holds, then the newest `tail` matches.
-        let mut lines = apps.logs.tail(&key, crate::logs::RING, q.since).await;
-        lines.retain(|l| k(l));
-        let cut = lines.len().saturating_sub(tail);
-        return ok(lines.split_off(cut));
+        return ok(apps.logs.tail(&key, tail, q.since).await);
     }
     // A finished build's log is read, not followed: nothing more comes, and following would
     // bring a retired log back into memory.
@@ -619,6 +724,11 @@ async fn env_logs(State(apps): S, Path((id, env)): Path<(String, String)>, Query
 /// `roll_auth::Grant`). Nothing a client sends is believed.
 /// Who acted, for the activity log: a scoped token by its name, a signed-in admin by their user
 /// id, else the operator.
+/// Who asks, for another product's rule (roll secrets' reveal): what rolld's gate put on it.
+fn asker(ext: &Extensions) -> crate::integrations::Asker<'_> {
+    crate::integrations::Asker { operator: roll_auth::Operator::on(ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(ext) }
+}
+
 fn actor(ext: &Extensions) -> Option<String> {
     if let Some(g) = roll_auth::Grant::on(ext) {
         return Some(format!("token:{}", g.name));
@@ -629,8 +739,12 @@ fn actor(ext: &Extensions) -> Option<String> {
     roll_auth::Operator::on(ext).then(|| "operator".to_string())
 }
 
-async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
-    let d = apps.redeploy(&id, &env, if b.is_empty() { Value::Null } else { body(&b)? }, actor(&ext)).await?;
+async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
+    let key = match headers.get("idempotency-key") {
+        Some(v) => Some(v.to_str().map_err(|_| Error::BadRequest("Idempotency-Key is printable ASCII".into()))?),
+        None => None,
+    };
+    let d = apps.redeploy(&id, &env, if b.is_empty() { Value::Null } else { body(&b)? }, actor(&ext), key).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
@@ -703,8 +817,15 @@ async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: E
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
-async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions) -> R {
-    let d = apps.rollback(&id, &env, &dep, actor(&ext)).await?;
+async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
+    let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
+    let d = apps.rollback(&id, &env, &dep, actor(&ext), keep).await?;
+    Ok((StatusCode::ACCEPTED, Json(d)).into_response())
+}
+
+async fn rollback_previous(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
+    let d = apps.rollback_previous(&id, &env, actor(&ext), keep).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
@@ -717,6 +838,12 @@ async fn restart(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     Ok((StatusCode::ACCEPTED, Json(e)).into_response())
 }
 
+async fn restart_instance(State(apps): S, Path((id, env, name)): Path<(String, String, String)>, ext: Extensions) -> R {
+    let e = apps.restart_instance(&id, &env, &name).await?;
+    apps.audit("instance.restarted", &id, &env, actor(&ext), json!({ "instance": name })).await;
+    ok(e)
+}
+
 async fn sleep(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     ok(apps.sleep(&id, &env).await?)
 }
@@ -725,23 +852,34 @@ async fn wake(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     ok(apps.wake(&id, &env).await?)
 }
 
+/// `GET …/pending`: what the next deploy changes (names, never values).
+async fn pending(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    ok(apps.pending(&id, &env).await?)
+}
+
 async fn variables(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
-    ok(apps.variables(&id, &env, false).await?)
+    ok(apps.variables(&id, &env, None).await?)
 }
 
 async fn reveal(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
-    let v = apps.variables(&id, &env, true).await?;
+    let who = asker(&ext);
+    let v = apps.variables(&id, &env, Some(who)).await?;
     apps.audit("variables.revealed", &id, &env, actor(&ext), json!({})).await;
     ok(v)
 }
 
 async fn change_variables(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let change = body(&b)?;
+    let values: Vec<&str> = change["set"].as_object().into_iter().flatten().filter_map(|(_, v)| v.as_str()).collect();
+    if values.iter().any(|v| v.contains("${{")) {
+        let svc = apps.service(&id).await?;
+        apps.check_references(&svc.project, &svc.name, &env, &values, asker(&ext)).await?;
+    }
     let v = apps.change_variables(&id, &env, change.clone()).await?;
     apps.settings_changed();
     // Names only: a value never reaches the trail.
     let set: Vec<String> = change["set"].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
-    apps.audit("variables", &id, &env, actor(&ext), json!({ "set": set, "unset": change["unset"] })).await;
+    apps.audit("variables", &id, &env, actor(&ext), json!({ "set": set, "unset": change["unset"], "seal": change["seal"] })).await;
     ok(v)
 }
 
@@ -749,9 +887,16 @@ async fn change_variables(State(apps): S, Path((id, env)): Path<(String, String)
 struct Window {
     minutes: Option<i64>,
     days: Option<i64>,
+    /// `prometheus`: the metrics as a scraper reads them.
+    format: Option<String>,
 }
 
 async fn metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
+    // For a scraper (Prometheus, Grafana Agent): the last finished minute as gauges.
+    if w.format.as_deref() == Some("prometheus") {
+        let text = apps.metrics_prometheus(&id, &env).await?;
+        return Ok(([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], text).into_response());
+    }
     ok(apps.metrics(&id, &env, w.minutes.unwrap_or(60)).await?)
 }
 
@@ -768,13 +913,24 @@ struct ShellQuery {
 }
 
 /// `GET …/shell` (a WebSocket): a shell in a running instance; see `crate::shell`.
-async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<ShellQuery>, ws: axum::extract::ws::WebSocketUpgrade) -> R {
+async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<ShellQuery>, ext: Extensions, ws: axum::extract::ws::WebSocketUpgrade) -> R {
+    // A shell reads every variable: roll secrets' reveal rule, as for their values.
+    apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
     let slot = apps.shell_slot(&id, &env)?;
     let target = apps.shell_target(&id, &env, q.instance.as_deref()).await?;
     let (cols, rows) = (q.cols.unwrap_or(80).clamp(10, 1000), q.rows.unwrap_or(24).clamp(2, 500));
     // Keys and resizes are small: nothing near axum's 64 MiB default is held for a peer.
     let ws = ws.max_message_size(1 << 20).max_frame_size(1 << 20);
     Ok(ws.on_upgrade(move |socket| apps.bridge_shell(socket, target, slot, cols, rows)).into_response())
+}
+
+/// `GET …/tunnel` (a WebSocket): one TCP connection to the service's port; see `crate::tunnel`.
+async fn tunnel(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, ws: axum::extract::ws::WebSocketUpgrade) -> R {
+    let slot = apps.tunnel_slot(&id, &env)?;
+    let lease = apps.tunnel_target(&id, &env).await?;
+    apps.audit("tunnel.opened", &id, &env, actor(&ext), json!({})).await;
+    let ws = ws.max_message_size(1 << 20).max_frame_size(1 << 20);
+    Ok(ws.on_upgrade(move |socket| apps.bridge_tunnel(socket, lease, slot)).into_response())
 }
 
 #[derive(Deserialize)]
@@ -786,7 +942,8 @@ struct OpenSession {
 }
 
 /// `POST …/shell/sessions`: a shell over HTTP (the dashboard's terminal); see `crate::shell`.
-async fn open_session(State(apps): S, Path((id, env)): Path<(String, String)>, b: Bytes) -> R {
+async fn open_session(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
     let o: OpenSession = if b.is_empty() { OpenSession { instance: None, cols: None, rows: None } } else { serde_json::from_slice(&b).map_err(|e| Error::BadRequest(e.to_string()))? };
     let sh = apps.open_session(&id, &env, o.instance.as_deref(), o.cols.unwrap_or(80).clamp(10, 1000), o.rows.unwrap_or(24).clamp(2, 500)).await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": sh }))).into_response())
@@ -859,8 +1016,10 @@ async fn cancel_job(State(apps): S, Path((id, env, job)): Path<(String, String, 
 }
 
 /// A job's output; `follow` streams it until the job ends.
-async fn job_logs(State(apps): S, Path((id, env, job)): Path<(String, String, String)>, Query(q): Query<LogQuery>) -> R {
+async fn job_logs(State(apps): S, Path((id, env, job)): Path<(String, String, String)>, Query(q): Query<LogQuery>, ext: Extensions) -> R {
     let j = apps.job(&id, &env, &job).await?;
+    let who = asker(&ext);
+    apps.check_secret_reveal(&id, &env, who).await?;
     let (tx, rx) = tokio::sync::watch::channel(j.status != crate::model::RunStatus::Running);
     if j.status == crate::model::RunStatus::Running {
         let (apps2, id2, env2, job2) = (apps.clone(), id.clone(), env.clone(), job.clone());
@@ -887,6 +1046,40 @@ async fn runs(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     apps.environment(&id, &env).await?;
     let (s, e) = (id.clone(), env.clone());
     ok(apps.db(move |st| st.runs(&s, &e, 50)).await?)
+}
+
+async fn get_run(State(apps): S, Path((id, env, run)): Path<(String, String, String)>) -> R {
+    ok(apps.cron_run(&id, &env, &run).await?)
+}
+
+async fn cancel_run(State(apps): S, Path((id, env, run)): Path<(String, String, String)>) -> R {
+    ok(apps.cancel_run(&id, &env, &run).await?)
+}
+
+/// A cron run's output: its container's lines in the environment's log (read as that log is:
+/// they're there for anyone who reads it); `follow` streams them until the run ends.
+async fn run_logs(State(apps): S, Path((id, env, run)): Path<(String, String, String)>, Query(q): Query<LogQuery>) -> R {
+    let r = apps.cron_run(&id, &env, &run).await?;
+    let instance = crate::live::run_name(&id, &env, &r.deployment, &r.id);
+    let (tx, rx) = tokio::sync::watch::channel(r.status != crate::model::RunStatus::Running);
+    if r.status == crate::model::RunStatus::Running {
+        let (apps2, id2, env2, run2) = (apps.clone(), id.clone(), env.clone(), run.clone());
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                match apps2.cron_run(&id2, &env2, &run2).await {
+                    Ok(r) if r.status == crate::model::RunStatus::Running => {}
+                    _ => break,
+                }
+                if tx.is_closed() {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = tx.send(true);
+        });
+    }
+    stream_log(&apps, format!("env:{id}/{env}"), q, Some(rx), Some(Box::new(move |l: &LogLine| l.instance.as_deref() == Some(instance.as_str())))).await
 }
 
 async fn run_now(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {

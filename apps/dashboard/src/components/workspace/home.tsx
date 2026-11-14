@@ -19,10 +19,12 @@ export function Home() {
     <AppShell crumb="Home">
       <section className="rise">
         <h1 className="text-[20px] font-semibold tracking-[-0.045em]">Projects</h1>
-        <p className="mt-0.5 text-[12.5px] text-muted">Each project groups its databases, caches, streams and buckets on one canvas.</p>
+        <p className="mt-0.5 text-[12.5px] text-muted">Each project groups its services, databases, caches, streams and buckets on one canvas.</p>
         <div className="mt-4 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
           {ws.projects.map((p) => {
             const s = spendOf(ws, p.resources);
+            // What's failing in it (a crash loop, a failed deploy, a database down): seen before opening it.
+            const failing = p.resources.filter((r) => ws.inventory.get(resourceKey(r))?.state === "failed").length;
             return (
               <Link
                 key={p.id}
@@ -46,6 +48,12 @@ export function Home() {
                     </span>
                   ))}
                 </div>
+                {failing > 0 && (
+                  <div className="mt-2 flex items-center gap-1.5 text-[11.5px] text-danger">
+                    <i className="size-1.5 rounded-full bg-danger" />
+                    {failing} {failing === 1 ? "needs" : "need"} attention
+                  </div>
+                )}
                 <div className="mt-3 flex justify-between border-t border-line pt-2 font-mono text-[11px] text-subtle">
                   <span>{usd(s.usd)} so far</span>
                   <span>≈ {usd(projectMonth(s.usd, month))}</span>

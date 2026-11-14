@@ -6,6 +6,7 @@
 //! a slim runtime image with BuildKit. It only reads files: no network, no processes. The design
 //! is "Builds" in docs/apps/README.md.
 
+mod caches;
 mod cargo;
 mod df;
 mod docker;
@@ -13,6 +14,7 @@ mod golang;
 mod java;
 mod node;
 mod php;
+pub mod project;
 mod python;
 mod ruby;
 mod static_site;
@@ -24,6 +26,7 @@ mod version;
 
 use serde::{Deserialize, Serialize};
 
+pub use caches::{LAYERS_ARG, isolate_caches};
 pub use tree::{DirTree, MapTree, Tree};
 pub use node::{WorkspaceApp, workspace_app};
 pub use uses::{Datastore, uses};
@@ -62,6 +65,10 @@ pub struct Overrides {
     /// is the stage's build argument, so a changed value rebuilds what read it.
     #[serde(skip)]
     pub build_env: Vec<String>,
+    /// The Procfile's process this service runs (`web`, `worker`): its command is the start
+    /// command when nothing above names one. None reads no Procfile.
+    #[serde(skip)]
+    pub process: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -96,6 +103,10 @@ pub struct Plan {
     /// make and link them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uses: Vec<Datastore>,
+    /// The Procfile's `release:` (Heroku's release phase): the pre-deploy command when the
+    /// service sets none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -135,7 +146,31 @@ pub enum Error {
 
 /// Detects how `tree` builds and runs. `tree` is the service's root directory.
 pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
+    // A Procfile (Heroku's; Nixpacks and Railpack read it too) names the start command when
+    // the service doesn't, unless the tree's own Dockerfile has its CMD.
+    // A static site stays one (its files served, nothing running) whatever a Procfile says.
+    let procfile = procfile(tree);
+    let own_dockerfile = overrides.builder == Builder::Dockerfile || tree.read("Dockerfile").is_some();
     let mut p = detect(tree, overrides)?;
+    let from_procfile = match (&overrides.process, overrides.start.as_deref().map(str::trim).filter(|s| !s.is_empty())) {
+        (Some(process), None) if !own_dockerfile && p.provider != Provider::Static => procfile.get(process.as_str()).map(|cmd| (process.clone(), cmd.clone())),
+        _ => None,
+    };
+    if let Some((process, cmd)) = &from_procfile {
+        p = detect(tree, &Overrides { start: Some(cmd.clone()), ..overrides.clone() })?;
+        let said = format!("start is set in the service: {cmd}");
+        p.notes.retain(|n| *n != said);
+        p.notes.push(format!("start: the Procfile's {process}: {cmd}"));
+    }
+    // Heroku's release phase runs once per app: for its web service, not its workers or crons.
+    if !own_dockerfile
+        && p.provider != Provider::Static
+        && overrides.process.as_deref() == Some("web")
+        && let Some(cmd) = procfile.get("release")
+    {
+        p.release = Some(cmd.clone());
+        p.notes.push(format!("pre-deploy: the Procfile's release: {cmd}"));
+    }
     for (store, why) in uses(tree) {
         p.uses.push(store);
         p.notes.push(format!("{why}: it uses {}", store.label()));
@@ -199,6 +234,7 @@ impl Overrides {
             start: clean(&self.start),
             spa: self.spa,
             build_env: self.build_env.clone(),
+            process: self.process.clone(),
         }
     }
 }
@@ -260,8 +296,24 @@ impl Draft {
             notes,
             spa: false,
             uses: Vec::new(),
+            release: None,
         }
     }
+}
+
+/// A Procfile's processes: `name: command` lines (`#` comments; names of letters, digits, `_`
+/// and `-`).
+fn procfile(tree: &dyn Tree) -> std::collections::BTreeMap<String, String> {
+    let Some(t) = text(tree, "Procfile") else { return Default::default() };
+    t.lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            let (name, cmd) = l.split_once(':')?;
+            let (name, cmd) = (name.trim(), cmd.trim());
+            let ok = !l.starts_with('#') && !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') && !cmd.is_empty();
+            ok.then(|| (name.to_string(), cmd.to_string()))
+        })
+        .collect()
 }
 
 /// A file as text (lossy: providers only look for markers in it).

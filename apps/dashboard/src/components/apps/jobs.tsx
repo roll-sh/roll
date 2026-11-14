@@ -1,6 +1,6 @@
 import { Play, Square, TerminalSquare } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { appsApi, followLog, runStatus, type CronRun, type Job, type LogLine } from "@/lib/apps-api";
+import { appsApi, followChanges, followLog, runStatus, type CronRun, type Job, type LogLine } from "@/lib/apps-api";
 import { btn, EmptyPanel, input, Panel, primary } from "../ui";
 import { usePageVisible } from "./live";
 import { clock, LogView, message, type Runner } from "./shared";
@@ -52,9 +52,14 @@ export function JobsTab({ service, env, runner, cron = false }: { service: strin
   const visible = usePageVisible();
   useEffect(() => {
     if (!running || !visible) return;
-    const t = setInterval(() => void load(), 1500);
-    return () => clearInterval(t);
-  }, [running, load, visible]);
+    // A job's end is a tick on the service's change stream; a slow poll is the safety net.
+    const stop = followChanges(service, { onChange: () => void load() });
+    const t = setInterval(() => void load(), 15000);
+    return () => {
+      stop();
+      clearInterval(t);
+    };
+  }, [running, load, visible, service]);
 
   useEffect(() => {
     if (!selected) return;
@@ -99,7 +104,7 @@ export function JobsTab({ service, env, runner, cron = false }: { service: strin
 
   return (
     <div className="space-y-6">
-      {cron && <ScheduledRuns service={service} env={env} />}
+      {cron && <ScheduledRuns service={service} env={env} runner={runner} />}
       <Panel title="Run a command" aside={<span className="text-[12px] text-muted">in a fresh container of the live deployment, with its variables</span>}>
         <form
           className="flex flex-wrap gap-2 px-5 py-4"
@@ -145,7 +150,10 @@ export function JobsTab({ service, env, runner, cron = false }: { service: strin
                       onClick={() => setSelected(j.id)}
                       className={`w-full px-5 py-3 text-left transition-colors duration-150 hover:bg-panel-2 ${j.id === selected ? "bg-panel-2" : ""}`}
                     >
-                      <span className="block truncate font-mono text-[12px]">{j.command}</span>
+                      <span className="block truncate font-mono text-[12px]">
+                        {j.command}
+                        {(j.tasks ?? 1) > 1 && <span className="text-muted"> × {j.tasks}</span>}
+                      </span>
                       <span className="mt-1 flex items-center justify-between gap-2">
                         <JobBadge job={j} />
                         <span className="font-mono text-[11px] text-subtle">{clock(j.started_at, true)}</span>
@@ -176,37 +184,75 @@ export function JobsTab({ service, env, runner, cron = false }: { service: strin
   );
 }
 
-/** A cron service's recent runs: when, how it ended, how long it took. */
-function ScheduledRuns({ service, env }: { service: string; env: string }) {
+/** A cron service's recent runs: when, how it ended, how long it took; one opened shows its output (and cancels while it runs). */
+function ScheduledRuns({ service, env, runner }: { service: string; env: string; runner: Runner }) {
   const [runs, setRuns] = useState<CronRun[] | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const [lines, setLines] = useState<LogLine[]>([]);
   const visible = usePageVisible();
+  const load = useCallback(() => appsApi.runs(service, env).then(setRuns).catch(() => {}), [service, env]);
   useEffect(() => {
     if (!visible) return;
-    let live = true;
-    const load = () => appsApi.runs(service, env).then((r) => live && setRuns(r)).catch(() => {});
     void load();
     const t = setInterval(load, 10_000);
-    return () => {
-      live = false;
-      clearInterval(t);
-    };
-  }, [service, env, visible]);
+    return () => clearInterval(t);
+  }, [load, visible]);
+  useEffect(() => {
+    if (!open) return;
+    const buffer: LogLine[] = [];
+    setLines([]);
+    return followLog(
+      { run: { service, env, run: open } },
+      {
+        tail: 2000,
+        onReset: () => {
+          buffer.length = 0;
+          setLines([]);
+        },
+        onLine: (l) => {
+          buffer.push(l);
+          if (buffer.length > MAX_LINES) buffer.splice(0, buffer.length - MAX_LINES);
+          setLines(buffer.slice());
+        },
+      },
+    );
+  }, [service, env, open]);
+  const current = runs?.find((r) => r.id === open) ?? null;
   return (
-    <Panel title="Scheduled runs">
+    <Panel
+      title="Scheduled runs"
+      aside={
+        current?.status === "running" && (
+          <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("cancel run", () => appsApi.cancelRun(service, env, current.id)).then(load)}>
+            <Square className="size-3.5" /> Cancel
+          </button>
+        )
+      }
+    >
       {!runs?.length ? (
         <p className="px-5 py-4 text-[13px] text-muted">No runs yet. The schedule starts one; Run now on this page starts one at once.</p>
       ) : (
-        <ul className="divide-y divide-line">
-          {runs.slice(0, 10).map((r) => (
-            <li key={r.id} className="flex items-center justify-between gap-3 px-5 py-2.5">
-              <JobBadge job={r} />
-              <span className="font-mono text-[11.5px] text-subtle">
-                {clock(r.started_at, true)}
-                {r.finished_at ? ` · ${Math.max(1, Math.round((r.finished_at - r.started_at) / 1000))} s` : ""}
-              </span>
-            </li>
-          ))}
-        </ul>
+        <>
+          <ul className="divide-y divide-line">
+            {runs.slice(0, 10).map((r) => (
+              <li key={r.id}>
+                <button
+                  type="button"
+                  aria-expanded={open === r.id}
+                  onClick={() => setOpen((o) => (o === r.id ? null : r.id))}
+                  className={`flex w-full items-center justify-between gap-3 px-5 py-2.5 text-left transition-colors hover:bg-fg/[0.03] ${open === r.id ? "bg-fg/[0.04]" : ""}`}
+                >
+                  <JobBadge job={r} />
+                  <span className="font-mono text-[11.5px] text-subtle">
+                    {clock(r.started_at, true)}
+                    {r.finished_at ? ` · ${Math.max(1, Math.round((r.finished_at - r.started_at) / 1000))} s` : ""}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+          {open && <LogView lines={lines} empty={<span className="text-muted">No output from this run.</span>} className="h-[320px] border-t border-line" />}
+        </>
       )}
     </Panel>
   );

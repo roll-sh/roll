@@ -1,13 +1,17 @@
 import { Trash2 } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useReducedMotion } from "@roll/brand";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { appsApi, SERVICE_NAME, type Build, type Environment, type Prices, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, primary } from "../ui";
 import { ActivityPanel } from "./activity";
 import { DrainsPanel } from "./drains";
-import { EnvironmentPanel } from "./environment";
+import { DuplicatePanel } from "./duplicate";
+import { EnvironmentPanel, InstancesPanel } from "./environment";
 import { NotificationsPanel } from "./notifications";
 import { SpendPanel } from "./spend";
+import { resourceKey } from "@/lib/workspace-resources";
+import { useWorkspace } from "@/lib/workspace-store";
 import { CPU, MEMORY, mb, type Runner } from "./shared";
 
 
@@ -20,6 +24,8 @@ interface Form {
   image: string;
   builder: Build["builder"];
   dockerfile: string;
+  /** The Dockerfile's stage to build. */
+  target: string;
   install: string;
   build: string;
   buildStart: string;
@@ -30,6 +36,7 @@ interface Form {
   start: string;
   preDeploy: string;
   schedule: string;
+  timezone: string;
   timeout: string;
   min: string;
   max: string;
@@ -38,12 +45,26 @@ interface Form {
   memory: number;
   healthPath: string;
   healthTimeout: string;
+  drain: string;
+  cpuTarget: string;
   alertMemory: string;
   alertErrors: string;
   alertP95: string;
+  alertLog: string;
+  alertLogCount: string;
   rolloutSteps: string;
   rolloutStep: string;
   rolloutErrors: string;
+  h2c: boolean;
+  public: boolean;
+  restart: "always" | "on_failure" | "never";
+  restartTries: string;
+  affinity: boolean;
+  tcp: boolean;
+  rollbackOnCrash: boolean;
+  scaleStream: string;
+  scaleGroup: string;
+  scalePer: string;
   suspendAfter: string;
   sleepAfter: string;
   volumeMount: string;
@@ -61,6 +82,7 @@ export function formOf(s: Service): Form {
     image: s.source.kind === "image" ? s.source.image : "",
     builder: s.build.builder,
     dockerfile: str(s.build.dockerfile),
+    target: str(s.build.target),
     install: str(s.build.install),
     build: str(s.build.build),
     buildStart: str(s.build.start),
@@ -70,6 +92,7 @@ export function formOf(s: Service): Form {
     start: str(s.run.start),
     preDeploy: str(s.run.pre_deploy),
     schedule: str(s.run.schedule),
+    timezone: str(s.run.timezone),
     timeout: str(s.run.timeout_s),
     min: str(s.run.min_instances),
     max: str(s.run.max_instances),
@@ -78,12 +101,26 @@ export function formOf(s: Service): Form {
     memory: s.run.memory_mb,
     healthPath: str(s.run.health_path),
     healthTimeout: str(s.run.health_timeout_s),
+    drain: str(s.run.drain_s),
+    cpuTarget: str(s.run.cpu_target),
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
     alertP95: str(s.run.alerts?.p95_ms),
+    alertLog: s.run.alerts?.log_match ?? "",
+    alertLogCount: str(s.run.alerts?.log_count ?? 10),
     rolloutSteps: (s.run.rollout?.steps ?? []).join(", "),
     rolloutStep: str(s.run.rollout?.step_s),
     rolloutErrors: str(s.run.rollout?.error_pct),
+    h2c: !!s.run.h2c,
+    public: s.run.public !== false,
+    restart: s.run.restart ?? "always",
+    restartTries: str(s.run.restart_tries),
+    affinity: !!s.run.affinity,
+    tcp: !!s.run.tcp,
+    rollbackOnCrash: !!s.run.rollback_on_crash,
+    scaleStream: s.run.scale?.stream ?? "",
+    scaleGroup: s.run.scale?.group ?? "",
+    scalePer: str(s.run.scale?.per_instance),
     suspendAfter: str(s.run.suspend_after_s),
     sleepAfter: str(s.run.sleep_after_s),
     volumeMount: s.run.volume?.mount ?? "",
@@ -108,6 +145,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   const build: Reset<Build> = {};
   if (f.builder !== before.builder) build.builder = f.builder;
   if (f.dockerfile !== before.dockerfile) build.dockerfile = text(f.dockerfile);
+  if (f.target !== before.target) build.target = text(f.target);
   if (f.install !== before.install) build.install = text(f.install);
   if (f.build !== before.build) build.build = text(f.build);
   if (f.buildStart !== before.buildStart) build.start = text(f.buildStart);
@@ -122,6 +160,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.start !== before.start) run.start = text(f.start);
   if (f.preDeploy !== before.preDeploy) run.pre_deploy = text(f.preDeploy);
   if (f.schedule !== before.schedule) run.schedule = text(f.schedule);
+  if (f.timezone !== before.timezone) run.timezone = text(f.timezone);
   if (f.timeout !== before.timeout) run.timeout_s = num(f.timeout);
   if (f.min !== before.min) run.min_instances = num(f.min);
   if (f.max !== before.max) run.max_instances = num(f.max);
@@ -130,10 +169,29 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.memory !== before.memory) run.memory_mb = f.memory;
   if (f.healthPath !== before.healthPath) run.health_path = text(f.healthPath);
   if (f.healthTimeout !== before.healthTimeout) run.health_timeout_s = num(f.healthTimeout);
-  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95)
-    run.alerts = { memory_pct: Number(f.alertMemory) || 0, error_pct: Number(f.alertErrors) || 0, p95_ms: Number(f.alertP95) || 0 };
+  if (f.drain !== before.drain) run.drain_s = num(f.drain);
+  if (f.cpuTarget !== before.cpuTarget) run.cpu_target = num(f.cpuTarget);
+  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount)
+    run.alerts = {
+      memory_pct: Number(f.alertMemory) || 0,
+      error_pct: Number(f.alertErrors) || 0,
+      p95_ms: Number(f.alertP95) || 0,
+      ...(f.alertLog.trim() ? { log_match: f.alertLog.trim() } : {}),
+      log_count: Number(f.alertLogCount) || 10,
+    };
   if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors)
     run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5 };
+  if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
+  if (f.public !== before.public) run.public = f.public ? null : false;
+  if (f.affinity !== before.affinity) run.affinity = f.affinity ? true : null;
+  if (f.tcp !== before.tcp) run.tcp = f.tcp ? true : null;
+  if (f.rollbackOnCrash !== before.rollbackOnCrash) run.rollback_on_crash = f.rollbackOnCrash ? true : null;
+  if (f.restart !== before.restart || f.restartTries !== before.restartTries) {
+    run.restart = f.restart === "always" ? null : f.restart;
+    run.restart_tries = f.restart === "on_failure" ? num(f.restartTries) : null;
+  }
+  if (f.scaleStream !== before.scaleStream || f.scaleGroup !== before.scaleGroup || f.scalePer !== before.scalePer)
+    run.scale = f.scaleStream && f.scaleGroup.trim() ? { stream: f.scaleStream, group: f.scaleGroup.trim(), ...(f.scalePer.trim() ? { per_instance: Number(f.scalePer) } : {}) } : null;
   if (f.suspendAfter !== before.suspendAfter) run.suspend_after_s = num(f.suspendAfter);
   if (f.sleepAfter !== before.sleepAfter) run.sleep_after_s = num(f.sleepAfter);
   if (f.volumeMount !== before.volumeMount || f.volumeSize !== before.volumeSize)
@@ -142,7 +200,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["port", "timeout", "min", "max", "concurrency", "healthTimeout", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "rolloutStep", "rolloutErrors"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -183,162 +241,321 @@ export function SettingsTab({
     <input value={form[k] as string} onChange={(e) => set(k, e.target.value)} placeholder={placeholder} className={`${input} w-full ${mono ? "font-mono text-[12px]" : ""}`} spellCheck={false} />
   );
   const web = form.type === "web";
+  // A worker can follow a stream of its own project.
+  const ws = useWorkspace();
+  const streams = (ws.projects.find((p) => p.id === service.project)?.resources ?? [])
+    .filter((r) => r.kind === "stream")
+    .map((r) => ({ ref: r.ref, name: ws.inventory.get(resourceKey(r))?.name ?? r.ref }));
+
+  const sections: [string, string][] = [
+    ["service", "Service"],
+    ...(form.sourceKind !== "image" ? ([["build", "Build"]] as [string, string][]) : []),
+    ["run", "Run"],
+    ...(form.type !== "cron" ? ([["scaling", "Scaling"]] as [string, string][]) : []),
+    ["health", "Health and alerts"],
+    ...(web ? ([["networking", "Networking"], ["rollout", "Rollout"]] as [string, string][]) : []),
+    ...(env ? ([["environment", "Environment"]] as [string, string][]) : []),
+  ];
+  const project: [string, string][] = [
+    ["notifications", "Notifications"],
+    ["drains", "Log drains"],
+    ["spend", "Spend limits"],
+  ];
 
   return (
-    <div className="space-y-6">
-      <Panel title="Service">
-        <Grid>
-          <Field label="Name" hint={SERVICE_NAME.test(form.name) ? "part of its URL" : "1–32 of a–z, 0–9 and -"}>
-            {t("name")}
-          </Field>
-          <Field label="Source">
-            <Segmented
-              value={form.sourceKind}
-              options={[
-                { label: "repo", value: "repo" },
-                { label: "image", value: "image" },
-                { label: "upload", value: "upload" },
-              ]}
-              onChange={(v) => set("sourceKind", v)}
-            />
-          </Field>
-          {form.sourceKind === "repo" && (
-            <>
-              <Field label="Repository" hint="owner/name in roll code">
-                {t("repo", "acme/site")}
-              </Field>
-              <Field label="Root directory" hint="optional">
-                {t("root", "apps/web")}
-              </Field>
-            </>
-          )}
-          {form.sourceKind === "image" && (
-            <Field label="Image" hint="its digest is pinned per deploy">
-              {t("image", "docker.io/library/nginx:1.27")}
-            </Field>
-          )}
-          {form.sourceKind === "upload" && <p className="self-end text-[12px] text-subtle">Deploys come from `roll up`.</p>}
-        </Grid>
-        {service.source.kind === "image" && <RegistryLogin service={service} runner={runner} />}
-      </Panel>
-
-      {form.sourceKind !== "image" && (
-        <Panel title="Build">
+    <div className="lg:grid lg:grid-cols-[9.5rem_minmax(0,1fr)] lg:gap-8">
+      <SectionNav sections={sections} project={project} />
+      <div className="min-w-0 space-y-6">
+        <Section id="service" title="Service">
           <Grid>
-            <Field label="Builder" hint={form.builder === "auto" ? "detect; a Dockerfile wins" : "use the Dockerfile below"}>
+            <Field label="Name" hint={SERVICE_NAME.test(form.name) ? "part of its URL" : "1–32 of a–z, 0–9 and -"}>
+              {t("name")}
+            </Field>
+            <Field label="Source">
               <Segmented
-                value={form.builder}
+                value={form.sourceKind}
                 options={[
-                  { label: "auto", value: "auto" },
-                  { label: "dockerfile", value: "dockerfile" },
+                  { label: "repo", value: "repo" },
+                  { label: "image", value: "image" },
+                  { label: "upload", value: "upload" },
                 ]}
-                onChange={(v) => set("builder", v)}
+                onChange={(v) => set("sourceKind", v)}
               />
             </Field>
-            {form.builder === "dockerfile" && <Field label="Dockerfile">{t("dockerfile", "Dockerfile")}</Field>}
-            <Field label="Install command" hint="overrides the detected one">
-              {t("install", "detected")}
-            </Field>
-            <Field label="Build command">{t("build", "detected")}</Field>
-            <Field label="Start command" hint="baked into the image">
-              {t("buildStart", "detected")}
-            </Field>
             {form.sourceKind === "repo" && (
-              <Field label="Watch paths" hint="a push deploys only when it changes one">
-                {t("watch", "apps/web/**, packages/ui/**")}
+              <>
+                <Field label="Repository" hint="owner/name in roll code">
+                  {t("repo", "acme/site")}
+                </Field>
+                <Field label="Root directory" hint="optional">
+                  {t("root", "apps/web")}
+                </Field>
+              </>
+            )}
+            {form.sourceKind === "image" && (
+              <Field label="Image" hint="its digest is pinned per deploy">
+                {t("image", "docker.io/library/nginx:1.27")}
+              </Field>
+            )}
+            {form.sourceKind === "upload" && <p className="self-end text-[12px] text-subtle">Deploys come from `roll up`.</p>}
+          </Grid>
+          {service.source.kind === "image" && <RegistryLogin service={service} runner={runner} />}
+        </Section>
+
+        {form.sourceKind !== "image" && (
+          <Section id="build" title="Build">
+            <Grid>
+              <Field label="Builder" hint={form.builder === "auto" ? "detect; a Dockerfile wins" : "use the Dockerfile below"}>
+                <Segmented
+                  value={form.builder}
+                  options={[
+                    { label: "auto", value: "auto" },
+                    { label: "dockerfile", value: "dockerfile" },
+                  ]}
+                  onChange={(v) => set("builder", v)}
+                />
+              </Field>
+              {form.builder === "dockerfile" && <Field label="Dockerfile">{t("dockerfile", "Dockerfile")}</Field>}
+              {form.builder === "dockerfile" && (
+                <Field label="Stage" hint="a multi-stage Dockerfile's stage to build (--target); empty: its last">
+                  {t("target", "its last stage")}
+                </Field>
+              )}
+              <Field label="Install command" hint="overrides the detected one">
+                {t("install", "detected")}
+              </Field>
+              <Field label="Build command">{t("build", "detected")}</Field>
+              <Field label="Image's start command" hint="baked into the image at the build">
+                {t("buildStart", "detected")}
+              </Field>
+              {form.sourceKind === "repo" && (
+                <Field label="Watch paths" hint="a push deploys only when it changes one">
+                  {t("watch", "apps/web/**, packages/ui/**")}
+                </Field>
+              )}
+            </Grid>
+            {service.source.kind === "repo" && env && (
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-5 py-4">
+                <p className="text-[13px] text-muted">For a build a stale cached layer keeps breaking: no cached layers, base images pulled again, the dependency caches empty.</p>
+                <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("deploy", () => appsApi.deploy(service.id, env.name, { no_cache: true }))}>
+                  Deploy without the cache
+                </button>
+              </div>
+            )}
+          </Section>
+        )}
+
+        <Section id="run" title="Run">
+          <Grid>
+            <Field label="Type" hint={web ? "serves HTTP, scales to zero" : form.type === "worker" ? "always running" : "runs on a schedule"}>
+              <Segmented
+                value={form.type}
+                options={[
+                  { label: "web", value: "web" },
+                  { label: "worker", value: "worker" },
+                  { label: "cron", value: "cron" },
+                ]}
+                onChange={(v) => set("type", v)}
+              />
+            </Field>
+            {web && (
+              <Field label="Port" hint="PORT is set to it">
+                {t("port", "from the plan, else 8080")}
+              </Field>
+            )}
+            <Field label="Run command" hint="what runs, over the image's own (no rebuild)">
+              {t("start", "the image's")}
+            </Field>
+            {form.type !== "cron" && (
+              <Field label="Pre-deploy command" hint="runs before each switch: a failure stops the deploy">
+                {t("preDeploy", "npx prisma migrate deploy")}
+              </Field>
+            )}
+            {form.type === "cron" && (
+              <>
+                <Field label="Schedule" hint="five fields, in its time zone">
+                  {t("schedule", "*/15 * * * *")}
+                </Field>
+                <Field label="Time zone" hint="IANA, its daylight saving kept; empty: UTC">
+                  {t("timezone", "Europe/Budapest")}
+                </Field>
+                <Field label="Timeout (s)" hint="a run's limit">
+                  {t("timeout", "3600")}
+                </Field>
+              </>
+            )}
+            <Field label="CPU" hint="vCPU per instance">
+              <select value={form.cpu} onChange={(e) => set("cpu", Number(e.target.value))} className={`${input} w-full`}>
+                {(CPU.includes(form.cpu) ? CPU : [...CPU, form.cpu].sort((a, b) => a - b)).map((c) => (
+                  <option key={c} value={c}>
+                    {c} vCPU
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Memory" hint="per instance">
+              <select value={form.memory} onChange={(e) => set("memory", Number(e.target.value))} className={`${input} w-full`}>
+                {(MEMORY.includes(form.memory) ? MEMORY : [...MEMORY, form.memory].sort((a, b) => a - b)).map((m) => (
+                  <option key={m} value={m}>
+                    {mb(m)}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {prices && <Estimate prices={prices} cpu={form.cpu} memoryMb={form.memory} min={form.type === "cron" ? 0 : Number(form.min) || 0} />}
+            {form.type === "worker" && (
+              <>
+                <Field label="Restart" hint="when it stops; a deploy or a restart starts fresh ones whatever it says">
+                  <select value={form.restart} onChange={(e) => set("restart", e.target.value as Form["restart"])} className={`${input} w-full`}>
+                    <option value="always">Always</option>
+                    <option value="on_failure">On failure</option>
+                    <option value="never">Never</option>
+                  </select>
+                </Field>
+                {form.restart === "on_failure" && (
+                  <Field label="Tries" hint="failures in a row before it's left stopped">
+                    {t("restartTries", "10")}
+                  </Field>
+                )}
+              </>
+            )}
+            <Field label="Volume mount" hint="optional; one instance at most">
+              {t("volumeMount", "/data")}
+            </Field>
+            {form.volumeMount.trim() && (
+              <Field label="Volume size (GB)" hint="what it's billed and planned at; a host without disk quotas doesn't stop it growing past">
+                {t("volumeSize", "1")}
               </Field>
             )}
           </Grid>
-        </Panel>
-      )}
+        </Section>
 
-      <Panel title="Run">
-        <Grid>
-          <Field label="Type" hint={web ? "serves HTTP, scales to zero" : form.type === "worker" ? "always running" : "runs on a schedule"}>
-            <Segmented
-              value={form.type}
-              options={[
-                { label: "web", value: "web" },
-                { label: "worker", value: "worker" },
-                { label: "cron", value: "cron" },
-              ]}
-              onChange={(v) => set("type", v)}
-            />
-          </Field>
-          {web && (
-            <Field label="Port" hint="PORT is set to it">
-              {t("port", "from the plan, else 8080")}
-            </Field>
-          )}
-          <Field label="Start command" hint="overrides the image's command">
-            {t("start", "the image's")}
-          </Field>
-          {form.type !== "cron" && (
-            <Field label="Pre-deploy command" hint="runs before each switch: a failure stops the deploy">
-              {t("preDeploy", "npx prisma migrate deploy")}
-            </Field>
-          )}
-          {form.type === "cron" && (
-            <>
-              <Field label="Schedule" hint="five fields, UTC">
-                {t("schedule", "*/15 * * * *")}
-              </Field>
-              <Field label="Timeout (s)" hint="a run's limit">
-                {t("timeout", "3600")}
-              </Field>
-            </>
-          )}
-          {form.type !== "cron" && (
-            <>
+        {form.type !== "cron" && (
+          <Section id="scaling" title="Scaling">
+            <Grid>
               <Field label="Min instances" hint={web ? "0 scales to zero" : "at least 1"}>
                 {t("min", "0")}
               </Field>
               <Field label="Max instances" hint={form.volumeMount ? "1 with a volume" : undefined}>
                 {t("max", "3")}
               </Field>
-            </>
-          )}
-          {web && (
-            <Field label="Concurrency" hint="requests in flight per instance">
-              {t("concurrency", "50")}
+              {web && (
+                <>
+                  <Field label="Concurrency" hint="requests in flight per instance">
+                    {t("concurrency", "50")}
+                  </Field>
+                  <Field label="CPU target (%)" hint="another instance while they average over it for a minute; empty: requests only">
+                    {t("cpuTarget", "70")}
+                  </Field>
+                  <Field label="Suspend after (s)" hint="idle; 0 never suspends">
+                    {t("suspendAfter", "30")}
+                  </Field>
+                  <Field label="Sleep after (s)" hint="idle; stopped costs nothing">
+                    {t("sleepAfter", "600")}
+                  </Field>
+                </>
+              )}
+              {form.type === "worker" && (
+                <>
+                  <Field label="Follow a stream" hint={streams.length ? "instances follow a consumer group's lag" : "a stream on this project can drive it"}>
+                    <select value={form.scaleStream} onChange={(e) => set("scaleStream", e.target.value)} className={`${input} w-full`} disabled={!streams.length && !form.scaleStream}>
+                      <option value="">No: run min instances</option>
+                      {streams.map((s) => (
+                        <option key={s.ref} value={s.ref}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  {form.scaleStream && (
+                    <>
+                      <Field label="Consumer group">{t("scaleGroup", "billing")}</Field>
+                      <Field label="Messages per instance" hint="behind, before another starts">
+                        {t("scalePer", "1000")}
+                      </Field>
+                    </>
+                  )}
+                </>
+              )}
+            </Grid>
+          </Section>
+        )}
+
+        <Section id="health" title="Health and alerts">
+          <Grid>
+            {web && (
+              <>
+                <Field label="Health check path" hint="checked at each deploy and every 10 s while running; none: the port accepting">
+                  {t("healthPath", "/healthz")}
+                </Field>
+                <Field label="Health timeout (s)">{t("healthTimeout", "60")}</Field>
+                <Field label="Alert: 5xx share (%)" hint="of five minutes' requests; 0 off">
+                  {t("alertErrors", "5")}
+                </Field>
+                <Field label="Alert: p95 latency (ms)" hint="in three of five minutes; 0 off">
+                  {t("alertP95", "0")}
+                </Field>
+              </>
+            )}
+            <Field label="Alert: memory (%)" hint="of its limit, five minutes; 0 off">
+              {t("alertMemory", "90")}
             </Field>
-          )}
-          <Field label="CPU" hint="vCPU per instance">
-            <select value={form.cpu} onChange={(e) => set("cpu", Number(e.target.value))} className={`${input} w-full`}>
-              {(CPU.includes(form.cpu) ? CPU : [...CPU, form.cpu].sort((a, b) => a - b)).map((c) => (
-                <option key={c} value={c}>
-                  {c} vCPU
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Memory" hint="per instance">
-            <select value={form.memory} onChange={(e) => set("memory", Number(e.target.value))} className={`${input} w-full`}>
-              {(MEMORY.includes(form.memory) ? MEMORY : [...MEMORY, form.memory].sort((a, b) => a - b)).map((m) => (
-                <option key={m} value={m}>
-                  {mb(m)}
-                </option>
-              ))}
-            </select>
-          </Field>
-          {prices && <Estimate prices={prices} cpu={form.cpu} memoryMb={form.memory} min={form.type === "cron" ? 0 : Number(form.min) || 0} />}
-          {web && (
-            <>
-              <Field label="Health check path" hint="checked at each deploy and every 10 s while running; none: the port accepting">
-                {t("healthPath", "/healthz")}
+            <Field label="A crash loop after a deploy" hint="within ten minutes of going live">
+              <select value={form.rollbackOnCrash ? "back" : "stay"} onChange={(e) => set("rollbackOnCrash", e.target.value === "back")} className={`${input} w-full`}>
+                <option value="stay">Stays (an alert)</option>
+                <option value="back">Rolls back to the one before</option>
+              </select>
+            </Field>
+            <Field label="Alert: its log says" hint="text in its output (any case); empty: off">
+              {t("alertLog", "panic")}
+            </Field>
+            {form.alertLog.trim() && (
+              <Field label="Times in five minutes" hint="how often before it's an alert">
+                {t("alertLogCount", "10")}
               </Field>
-              <Field label="Health timeout (s)">{t("healthTimeout", "60")}</Field>
-              <Field label="Suspend after (s)" hint="idle; 0 never suspends">
-                {t("suspendAfter", "30")}
+            )}
+          </Grid>
+        </Section>
+
+        {web && (
+          <Section id="networking" title="Networking">
+            <Grid>
+              <Field label="Reachable" hint={form.public ? "its URL and custom domains answer anyone" : "no public URL: only this project's services reach it"}>
+                <select value={form.public ? "public" : "private"} onChange={(e) => set("public", e.target.value === "public")} className={`${input} w-full`}>
+                  <option value="public">Public URL</option>
+                  <option value="private">Private network only</option>
+                </select>
               </Field>
-              <Field label="Sleep after (s)" hint="idle; stopped costs nothing">
-                {t("sleepAfter", "600")}
+              <Field label="HTTP version to the app" hint="h2c: HTTP/2 without TLS, as a gRPC server speaks">
+                <select value={form.h2c ? "h2c" : "http1"} onChange={(e) => set("h2c", e.target.value === "h2c")} className={`${input} w-full`}>
+                  <option value="http1">HTTP/1.1</option>
+                  <option value="h2c">HTTP/2 (h2c)</option>
+                </select>
               </Field>
-              <Field label="Alert: 5xx share (%)" hint="of five minutes' requests; 0 off">
-                {t("alertErrors", "5")}
+              <Field label="HTTP or TCP" hint="TCP: a port of its own per environment, no HTTP names (a game server, MQTT)">
+                <select value={form.tcp ? "tcp" : "http"} onChange={(e) => set("tcp", e.target.value === "tcp")} className={`${input} w-full`}>
+                  <option value="http">HTTP</option>
+                  <option value="tcp">TCP</option>
+                </select>
               </Field>
-              <Field label="Alert: p95 latency (ms)" hint="in three of five minutes; 0 off">
-                {t("alertP95", "0")}
+              <Field label="Session affinity" hint="each visitor stays on one instance while it's up (a cookie)">
+                <select value={form.affinity ? "on" : "off"} onChange={(e) => set("affinity", e.target.value === "on")} className={`${input} w-full`}>
+                  <option value="off">Off</option>
+                  <option value="on">On</option>
+                </select>
+              </Field>
+              <Field label="Request timeout (s)" hint="a request unanswered by then is a 504; empty: no limit">
+                {t("timeout", "300")}
+              </Field>
+            </Grid>
+          </Section>
+        )}
+
+        {web && (
+          <Section id="rollout" title="Rollout">
+            <Grid>
+              <Field label="Drain (s)" hint="a replaced instance finishes its requests, then gets SIGTERM; killed when it's up">
+                {t("drain", "30")}
               </Field>
               {!form.volumeMount.trim() && (
                 <Field label="Gradual rollout (%)" hint={rolloutSteps(form.rolloutSteps) ? "shares of requests a new deployment takes in turn; empty: at once" : "increasing percents, 1–99, up to five"}>
@@ -353,71 +570,178 @@ export function SettingsTab({
                   </Field>
                 </>
               )}
-            </>
-          )}
-          <Field label="Alert: memory (%)" hint="of its limit, five minutes; 0 off">
-            {t("alertMemory", "90")}
-          </Field>
-          <Field label="Volume mount" hint="optional; one instance at most">
-            {t("volumeMount", "/data")}
-          </Field>
-          {form.volumeMount.trim() && (
-            <Field label="Volume size (GB)" hint="what it's billed and planned at; a host without disk quotas doesn't stop it growing past">
-              {t("volumeSize", "1")}
-            </Field>
-          )}
-        </Grid>
-      </Panel>
+            </Grid>
+          </Section>
+        )}
 
-      <div className={`sticky bottom-4 z-10 flex items-center justify-end gap-2 transition-opacity duration-150 ${dirty ? "opacity-100" : "pointer-events-none opacity-0"}`}>
-        <span className="mr-auto text-[12px] text-muted">Changes apply with the next deploy.</span>
-        <button className={btn} onClick={() => setForm(formOf(service))}>
-          Discard
-        </button>
-        <button
-          className={primary}
-          disabled={!dirty || !SERVICE_NAME.test(form.name) || rolloutSteps(form.rolloutSteps) === null || runner.busy !== null}
-          onClick={() => runner.run("settings", () => appsApi.update(service.id, patch))}
-        >
-          {runner.busy === "settings" ? <span className="shimmer">Saving…</span> : "Save"}
-        </button>
-      </div>
-
-      {env && <EnvironmentPanel key={env.name} service={service} env={env} runner={runner} onDeleted={onEnvDeleted} />}
-
-      <NotificationsPanel project={service.project} projectName={projectName} runner={runner} />
-
-      <DrainsPanel project={service.project} projectName={projectName} runner={runner} />
-
-      <SpendPanel project={service.project} projectName={projectName} runner={runner} />
-
-      <ActivityPanel service={service.id} />
-
-      <Panel title="Danger zone">
-        <div className="p-5">
-          {deleting ? (
-            <Confirm
-              word={service.name}
-              action="Delete service"
-              busy={runner.busy === "delete"}
-              onCancel={() => setDeleting(false)}
-              onConfirm={async () => {
-                if (await runner.run("delete", () => appsApi.remove(service.id).then(() => true))) onDeleted();
-              }}
+        <div className={`sticky bottom-4 z-10 flex items-center justify-end gap-2 transition-opacity duration-150 ${dirty ? "opacity-100" : "pointer-events-none opacity-0"}`}>
+          <span className="mr-auto text-[12px] text-muted">Changes apply with the next deploy.</span>
+          <button className={btn} onClick={() => setForm(formOf(service))}>
+            Discard
+          </button>
+          {env?.active && (
+            <button
+              className={btn}
+              disabled={!dirty || !SERVICE_NAME.test(form.name) || rolloutSteps(form.rolloutSteps) === null || runner.busy !== null}
+              onClick={() =>
+                runner.run("settings", async () => {
+                  await appsApi.update(service.id, patch);
+                  return appsApi.redeploy(service.id, env.name);
+                })
+              }
+              title="Save, then run the live image again with them (no build)"
             >
-              Deletes every environment, instance, deployment and image of <span className="font-mono text-fg">{service.name}</span>. Its URLs stop answering.
-            </Confirm>
-          ) : (
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-[13px] text-muted">Delete the service, its environments, deployments and images.</p>
-              <button className={danger} onClick={() => setDeleting(true)}>
-                <Trash2 className="size-3.5" /> Delete
-              </button>
-            </div>
+              Save and redeploy
+            </button>
           )}
+          <button
+            className={primary}
+            disabled={!dirty || !SERVICE_NAME.test(form.name) || rolloutSteps(form.rolloutSteps) === null || runner.busy !== null}
+            onClick={() => runner.run("settings", () => appsApi.update(service.id, patch))}
+          >
+            {runner.busy === "settings" ? <span className="shimmer">Saving…</span> : "Save"}
+          </button>
         </div>
-      </Panel>
+
+        {env && (
+          <Anchor id="environment" className="space-y-6">
+            <InstancesPanel service={service} env={env} runner={runner} />
+            <EnvironmentPanel key={env.name} service={service} env={env} runner={runner} onDeleted={onEnvDeleted} />
+          </Anchor>
+        )}
+
+        <Anchor id="notifications">
+          <NotificationsPanel project={service.project} projectName={projectName} runner={runner} />
+        </Anchor>
+
+        <Anchor id="drains">
+          <DrainsPanel project={service.project} projectName={projectName} runner={runner} />
+        </Anchor>
+
+        <Anchor id="spend">
+          <SpendPanel project={service.project} projectName={projectName} runner={runner} />
+        </Anchor>
+
+        <Anchor id="activity">
+          <ActivityPanel service={service.id} />
+        </Anchor>
+
+        <Anchor id="duplicate">
+          <DuplicatePanel service={service} runner={runner} />
+        </Anchor>
+
+        <Section id="danger" title="Danger zone">
+          <div className="p-5">
+            {deleting ? (
+              <Confirm
+                word={service.name}
+                action="Delete service"
+                busy={runner.busy === "delete"}
+                onCancel={() => setDeleting(false)}
+                onConfirm={async () => {
+                  if (await runner.run("delete", () => appsApi.remove(service.id).then(() => true))) onDeleted();
+                }}
+              >
+                Deletes every environment, instance, deployment and image of <span className="font-mono text-fg">{service.name}</span>. Its URLs stop answering.
+              </Confirm>
+            ) : (
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-[13px] text-muted">Delete the service, its environments, deployments and images.</p>
+                <button className={danger} onClick={() => setDeleting(true)}>
+                  <Trash2 className="size-3.5" /> Delete
+                </button>
+              </div>
+            )}
+          </div>
+        </Section>
+      </div>
     </div>
+  );
+}
+
+/** A settings section the nav can scroll to. */
+function Anchor({ id, className, children }: { id: string; className?: string; children: ReactNode }) {
+  return (
+    <div id={`settings-${id}`} className={`scroll-mt-16 ${className ?? ""}`}>
+      {children}
+    </div>
+  );
+}
+
+function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+  return (
+    <Anchor id={id}>
+      <Panel title={title}>{children}</Panel>
+    </Anchor>
+  );
+}
+
+/** The sections, beside them on a wide screen (the one in view marked) and above them on a
+ *  narrow one; the project's own panels apart, under its name. */
+function SectionNav({ sections, project }: { sections: [string, string][]; project: [string, string][] }) {
+  const reduced = useReducedMotion();
+  const all = [...sections, ...project, ["activity", "Activity"], ["duplicate", "Duplicate"], ["danger", "Danger zone"]] as [string, string][];
+  const ids = all.map(([id]) => id).join(" ");
+  const [current, setCurrent] = useState(all[0][0]);
+  // Until then, the observer doesn't move the mark off a section just clicked.
+  const hold = useRef(0);
+  useEffect(() => {
+    if (typeof IntersectionObserver === "undefined") return;
+    const shown = new Set<string>();
+    const order = ids.split(" ");
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          const id = e.target.id.slice("settings-".length);
+          if (e.isIntersecting) shown.add(id);
+          else shown.delete(id);
+        }
+        const first = order.find((id) => shown.has(id));
+        if (first && Date.now() > hold.current) setCurrent(first);
+      },
+      // The band a reader's eye is on: the top third of the screen.
+      { rootMargin: "-64px 0px -60% 0px" },
+    );
+    for (const id of order) {
+      const el = document.getElementById(`settings-${id}`);
+      if (el) io.observe(el);
+    }
+    return () => io.disconnect();
+  }, [ids]);
+  const go = (id: string) => {
+    document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
+    hold.current = Date.now() + 1000;
+    setCurrent(id);
+  };
+  // A section the form no longer has (the type changed) hands the mark to the first.
+  const marked = all.some(([id]) => id === current) ? current : all[0][0];
+  const link = ([id, label]: [string, string]) => (
+    <li key={id} className="shrink-0">
+      <a
+        href={`#settings-${id}`}
+        aria-current={marked === id ? "location" : undefined}
+        onClick={(e) => {
+          e.preventDefault();
+          go(id);
+        }}
+        className={`block whitespace-nowrap rounded-md px-2 py-1 text-[13px] transition-colors duration-150 ${marked === id ? "bg-white/[0.05] text-fg" : "text-muted hover:text-fg"}`}
+      >
+        {label}
+      </a>
+    </li>
+  );
+  return (
+    // One row that scrolls sideways on a phone; a column beside the sections on a wide screen.
+    <nav aria-label="Settings sections" className="-mx-4 mb-6 flex gap-1 overflow-x-auto px-4 pb-1 lg:sticky lg:top-16 lg:mx-0 lg:mb-0 lg:block lg:self-start lg:overflow-visible lg:p-0">
+      <ul className="contents lg:flex lg:flex-col lg:gap-0.5">{sections.map(link)}</ul>
+      <p className="mt-3 hidden px-2 text-[11px] text-subtle lg:block">The project</p>
+      <ul className="contents lg:mt-0.5 lg:flex lg:flex-col lg:gap-0.5">{project.map(link)}</ul>
+      <ul className="contents lg:mt-3 lg:flex lg:flex-col lg:gap-0.5">
+        {link(["activity", "Activity"])}
+        {link(["duplicate", "Duplicate"])}
+        {link(["danger", "Danger zone"])}
+      </ul>
+    </nav>
   );
 }
 

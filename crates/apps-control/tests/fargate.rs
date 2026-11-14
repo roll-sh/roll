@@ -48,7 +48,13 @@ struct Aws {
     build_envs: HashMap<String, BTreeMap<String, String>>,
     repos: HashMap<String, Value>,
     secrets: HashMap<String, String>,
+    /// Each secret's ARN (a new random suffix each time one is made, as AWS gives) and when it
+    /// was made (s).
+    arns: HashMap<String, String>,
+    made: HashMap<String, f64>,
     logs: HashMap<String, Vec<String>>,
+    /// When each log stream was written (ms): `startTime` after it reads nothing.
+    log_at: HashMap<String, i64>,
     next: u32,
 }
 
@@ -211,21 +217,57 @@ async fn aws(State(f): State<Fake>, method: Method, uri: axum::http::Uri, header
         "BatchDeleteImage" => ok(json!({ "imageIds": req["imageIds"], "failures": [] })),
         // Secrets Manager
         "CreateSecret" => {
-            f.aws.lock().secrets.insert(s("Name"), s("SecretString"));
-            ok(json!({ "ARN": format!("arn:aws:secretsmanager:us-east-1:1:secret:{}-AbCdEf", s("Name")), "Name": s("Name") }))
+            let mut a = f.aws.lock();
+            if a.secrets.contains_key(&s("Name")) {
+                return err("ResourceExistsException", "the secret already exists");
+            }
+            a.next += 1;
+            let arn = format!("arn:aws:secretsmanager:us-east-1:1:secret:{}-{:06x}", s("Name"), 0xa0000 + a.next);
+            a.secrets.insert(s("Name"), s("SecretString"));
+            a.arns.insert(s("Name"), arn.clone());
+            a.made.insert(s("Name"), (code_sql::now_ms() / 1000) as f64);
+            ok(json!({ "ARN": arn, "Name": s("Name") }))
         }
-        // One left by a node that stopped mid-build three days ago, one of a build going now.
-        "ListSecrets" => ok(json!({ "SecretList": [
-            { "Name": "roll-apps/builds/left-by-a-crash", "CreatedDate": 1_000_000_000.0 },
-            { "Name": "roll-apps/builds/going-now", "CreatedDate": (code_sql::now_ms() / 1000) as f64 },
-        ] })),
+        "GetSecretValue" => {
+            let a = f.aws.lock();
+            match (a.secrets.get(&s("SecretId")), a.arns.get(&s("SecretId"))) {
+                (Some(v), Some(arn)) => ok(json!({ "ARN": arn, "Name": s("SecretId"), "SecretString": v })),
+                _ => err("ResourceNotFoundException", "no such secret"),
+            }
+        }
+        // One left by a node that stopped mid-build three days ago, one of a build going now,
+        // and those made here.
+        "ListSecrets" => {
+            let mut list = vec![
+                json!({ "Name": "roll-apps/builds/left-by-a-crash", "CreatedDate": 1_000_000_000.0 }),
+                json!({ "Name": "roll-apps/builds/going-now", "CreatedDate": (code_sql::now_ms() / 1000) as f64 }),
+            ];
+            let a = f.aws.lock();
+            list.extend(a.secrets.keys().filter(|k| !k.starts_with("roll-apps/builds/")).map(|k| json!({ "Name": k, "CreatedDate": a.made.get(k).copied().unwrap_or((code_sql::now_ms() / 1000) as f64) })));
+            ok(json!({ "SecretList": list }))
+        }
+        "PutSecretValue" => {
+            let mut a = f.aws.lock();
+            let Some(arn) = a.arns.get(&s("SecretId")).cloned() else { return err("ResourceNotFoundException", "no such secret") };
+            a.secrets.insert(s("SecretId"), s("SecretString"));
+            ok(json!({ "ARN": arn, "Name": s("SecretId") }))
+        }
         "DeleteSecret" => {
-            f.aws.lock().secrets.remove(&s("SecretId"));
+            let mut a = f.aws.lock();
+            a.secrets.remove(&s("SecretId"));
+            a.arns.remove(&s("SecretId"));
+            a.made.remove(&s("SecretId"));
             ok(json!({ "Name": s("SecretId"), "DeletionDate": 1.0 }))
         }
         // CloudWatch Logs: the token is how many events were read.
         "GetLogEvents" => {
-            let lines = f.aws.lock().logs.get(&s("logStreamName")).cloned().unwrap_or_default();
+            let a = f.aws.lock();
+            let written = a.log_at.get(&s("logStreamName")).copied().unwrap_or(0);
+            let lines = match req["startTime"].as_i64() {
+                Some(t) if t > written => Vec::new(),
+                _ => a.logs.get(&s("logStreamName")).cloned().unwrap_or_default(),
+            };
+            drop(a);
             let from: usize = s("nextToken").strip_prefix("f/").and_then(|n| n.parse().ok()).unwrap_or(0).min(lines.len());
             let events: Vec<Value> = lines[from..].iter().map(|m| json!({ "timestamp": 1, "message": m, "ingestionTime": 1 })).collect();
             ok(json!({ "events": events, "nextForwardToken": format!("f/{}", lines.len()), "nextBackwardToken": "b/0" }))
@@ -288,12 +330,32 @@ async fn execute(f: Fake, arn: String, n: u32, req: Value) {
             env.insert(k.to_string(), v.to_string());
         }
     }
+    // `secrets` (a deployment's multi-line values): `<secret arn>:<key>::`, read as ECS does.
+    for s in def["containerDefinitions"][0]["secrets"].as_array().cloned().unwrap_or_default() {
+        let from = s["valueFrom"].as_str().unwrap().strip_suffix("::").unwrap();
+        let (secret, key) = from.rsplit_once(':').unwrap();
+        // By ARN, as ECS reads it: one deleted and made again is another secret.
+        let held = {
+            let a = f.aws.lock();
+            a.arns.iter().find(|(_, arn)| *arn == secret).and_then(|(name, _)| a.secrets.get(name).cloned())
+        };
+        let Some(json) = held else {
+            set(&f, &arn, |t| stop(t, "TaskFailedToStart", "ResourceInitializationError: unable to pull secrets"));
+            return;
+        };
+        let v: Value = serde_json::from_str(&json).unwrap();
+        env.insert(s["name"].as_str().unwrap().to_string(), v[key].as_str().unwrap().to_string());
+    }
     f.aws.lock().envs.insert(arn.clone(), env.clone());
     let id = arn.rsplit('/').next().unwrap().to_string();
     let stream = format!("apps/app/{id}");
     // The port nodes reach: the one mapped (the guard's, which forwards to the app; this fake
     // serves it directly).
     let port = def["containerDefinitions"].as_array().unwrap().iter().find_map(|c| c["portMappings"][0]["containerPort"].as_u64());
+    // Unique in the process (worlds run at once, each counting its own tasks from 1).
+    static ADDRS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let _ = n;
+    let n = ADDRS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let ip = format!("127.{}.{}.{}", 64 + (std::process::id() % 60), n / 250, 1 + n % 250);
     set(&f, &arn, |t| {
         t["lastStatus"] = json!("RUNNING");
@@ -303,7 +365,11 @@ async fn execute(f: Fake, arn: String, n: u32, req: Value) {
     match port {
         Some(p) => {
             let l = tokio::net::TcpListener::bind((ip.as_str(), p as u16)).await.unwrap();
-            f.aws.lock().logs.insert(stream, vec![format!("listening on {p}")]);
+            {
+                let mut a = f.aws.lock();
+                a.log_at.insert(stream.clone(), code_sql::now_ms());
+                a.logs.insert(stream, vec![format!("listening on {p}")]);
+            }
             let task = arn.clone();
             let service = axum::Router::new().fallback(move || {
                 let (task, env) = (task.clone(), env.clone());
@@ -330,6 +396,7 @@ type Objects = Arc<Mutex<BTreeMap<String, Vec<u8>>>>;
 
 async fn s3(State(o): State<Objects>, req: Request<Body>) -> Response {
     let key = req.uri().path().trim_start_matches('/').to_string();
+    let uri_query = req.uri().query().unwrap_or("").to_string();
     let bulk_delete = req.uri().query().is_some_and(|q| q.split('&').any(|p| p == "delete" || p == "delete="));
     let method = req.method().clone();
     let body = axum::body::to_bytes(req.into_body(), 1 << 30).await.unwrap();
@@ -353,6 +420,13 @@ async fn s3(State(o): State<Objects>, req: Request<Body>) -> Response {
             o.lock().remove(&key);
             StatusCode::NO_CONTENT.into_response()
         }
+        // ListObjectsV2 (`?list-type=2&prefix=…`): every object written long ago.
+        Method::GET if uri_query.contains("list-type=2") => {
+            let prefix = uri_query.split('&').find_map(|p| p.strip_prefix("prefix=")).map(|p| percent_encoding::percent_decode_str(p).decode_utf8_lossy().into_owned()).unwrap_or_default();
+            let keys: Vec<String> = o.lock().keys().filter_map(|k| k.strip_prefix(&format!("{key}/")).map(str::to_string)).filter(|k| k.starts_with(&prefix)).collect();
+            let contents: String = keys.iter().map(|k| format!("<Contents><Key>{k}</Key><LastModified>2020-01-01T00:00:00.000Z</LastModified><ETag>\"e\"</ETag><Size>1</Size></Contents>")).collect();
+            (StatusCode::OK, format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult><Name>{key}</Name><Prefix>{prefix}</Prefix><KeyCount>{}</KeyCount><IsTruncated>false</IsTruncated>{contents}</ListBucketResult>", keys.len())).into_response()
+        }
         _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
     }
 }
@@ -372,7 +446,44 @@ struct World {
     public: axum::Router,
     fake: Fake,
     project: String,
+    cfg: FleetConfig,
+    db: code_sql::Db,
+    ws: Arc<roll_workspace::Workspace>,
     _dir: tempfile::TempDir,
+}
+
+/// roll apps on the fake AWS, as one rolld process.
+async fn apps_on(cfg: &FleetConfig, db: &code_sql::Db, ws: &Arc<roll_workspace::Workspace>, home: &std::path::Path) -> Arc<Apps> {
+    let store = Store::new(db.clone(), Sealer::new("0123456789abcdef0123456789abcdef").unwrap()).unwrap();
+    let cluster = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::solo()), roll_cluster::ClusterConfig::new("n1", "http://127.0.0.1:1", b"0123456789abcdef".to_vec())).unwrap();
+    let mut acfg = AppsConfig::new(home.to_path_buf());
+    acfg.live.worker_grace = Duration::from_millis(20);
+    acfg.live.probe_every = Duration::from_millis(5);
+    acfg.live.drain = Duration::from_millis(50);
+    let deps = Deps {
+        runtime: Fargate::new(cfg.clone()).await.unwrap(),
+        builder: CodeBuild::new(cfg.clone()).await.unwrap(),
+        sources: None,
+        secrets: Arc::new(NoSecrets),
+        resources: Arc::new(NoResources),
+        resolver: Arc::new(StaticDns::default()),
+        tls: Arc::new(apps_control::integrations::NoTls),
+        objects: None,
+        cluster,
+        workspace: Some(ws.clone()),
+    };
+    let apps = Apps::new(acfg, store, deps);
+    apps.start();
+    apps
+}
+
+impl World {
+    /// rolld again, a new process (nothing in memory): the old one's loops stop, its tasks don't.
+    async fn restart(&mut self) {
+        self.apps.shutdown().await;
+        let apps = apps_on(&self.cfg, &self.db, &self.ws, self._dir.path()).await;
+        (self.api, self.public, self.apps) = (apps_control::api::router(apps.clone()), apps_control::public::router(apps.clone()), apps);
+    }
 }
 
 async fn world() -> World {
@@ -408,27 +519,8 @@ async fn world() -> World {
     let ws = Arc::new(roll_workspace::Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
     let project = ws.create("", "acme", "", None).unwrap().id;
     let db = code_sql::Db::open_sqlite(&dir.path().join("apps.db"), code_sql::SqliteOptions { readers: 2, cache_kib: 1024 }).unwrap();
-    let store = Store::new(db, Sealer::new("0123456789abcdef0123456789abcdef").unwrap()).unwrap();
-    let cluster = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::solo()), roll_cluster::ClusterConfig::new("n1", "http://127.0.0.1:1", b"0123456789abcdef".to_vec())).unwrap();
-    let mut acfg = AppsConfig::new(dir.path().to_path_buf());
-    acfg.live.worker_grace = Duration::from_millis(20);
-    acfg.live.probe_every = Duration::from_millis(5);
-    acfg.live.drain = Duration::from_millis(50);
-    let deps = Deps {
-        runtime: Fargate::new(cfg.clone()).await.unwrap(),
-        builder: CodeBuild::new(cfg).await.unwrap(),
-        sources: None,
-        secrets: Arc::new(NoSecrets),
-        resources: Arc::new(NoResources),
-        resolver: Arc::new(StaticDns::default()),
-        tls: Arc::new(apps_control::integrations::NoTls),
-        objects: None,
-        cluster,
-        workspace: Some(ws),
-    };
-    let apps = Apps::new(acfg, store, deps);
-    apps.start();
-    World { api: apps_control::api::router(apps.clone()), public: apps_control::public::router(apps.clone()), apps, fake, project, _dir: dir }
+    let apps = apps_on(&cfg, &db, &ws, dir.path()).await;
+    World { api: apps_control::api::router(apps.clone()), public: apps_control::public::router(apps.clone()), apps, fake, project, cfg, db, ws, _dir: dir }
 }
 
 async fn call(r: &axum::Router, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -628,6 +720,25 @@ async fn a_private_image_pulls_with_its_registry_secret() {
     for op in ["RegisterTaskDefinition", "RunTask"] {
         assert!(!w.fake.calls(op).iter().any(|c| c.to_string().contains("ghp-registry-s3cr3t")), "the password is in {op}");
     }
+    // A new login: the next start pulls with it (not only the next deploy's).
+    assert_eq!(call(&w.api, "PUT", &format!("/v1/apps/services/{id}/registry"), Some(json!({"username": "ci", "password": "ghp-rotated-s3cr3t"}))).await.0, StatusCode::OK);
+    let live = w.apps.live(&id, "production");
+    live.sleep().await;
+    live.tick().await;
+    let stored = w.fake.aws.lock().secrets.get(&format!("roll-apps/registry/{short}")).cloned().unwrap_or_default();
+    assert!(stored.contains("ghp-rotated-s3cr3t"), "the secret holds the new login");
+    // The login removed: its secret goes and isn't written back by the next start, which runs
+    // a task definition without it (the old one names a secret that's gone).
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}/registry"), None).await.0, StatusCode::OK);
+    assert!(!w.fake.aws.lock().secrets.contains_key(&format!("roll-apps/registry/{short}")), "the login's secret is deleted");
+    live.sleep().await;
+    live.tick().await;
+    let runs = w.fake.calls("RunTask");
+    let last = runs.last().unwrap()["taskDefinition"].as_str().unwrap().to_string();
+    let def = w.fake.calls("RegisterTaskDefinition").into_iter().find(|d| last.contains(d["family"].as_str().unwrap())).unwrap();
+    assert!(def["containerDefinitions"][0].get("repositoryCredentials").is_none(), "{def}");
+    assert!(!w.fake.aws.lock().secrets.contains_key(&format!("roll-apps/registry/{short}")), "not written back");
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -669,4 +780,121 @@ async fn a_cron_run_is_a_task_and_reports_its_exit_code() {
     let (lines, _) = w.apps.logs.follow(&format!("env:{id}/production"), 100);
     assert!(lines.iter().any(|l| l.text == "the job ran"), "{lines:?}");
     assert_eq!(w.fake.keys("apps/env/"), Vec::<String>::new());
+}
+
+/// rolld starting again (a new process, or the node that takes a dead one's service over) keeps
+/// the task the last one ran: the next visitor gets the same task, nothing run or stopped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_keeps_the_running_task() {
+    let mut w = world().await;
+    let id = upload_service(&w, "web").await;
+    let d = upload(&w, &id, &[("index.html", "<h1>hi</h1>")]).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
+    let host = env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
+    let visit = |w: &World| {
+        let (public, host) = (w.public.clone(), host.clone());
+        async move {
+            let resp = public.oneshot(Request::builder().uri("/").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
+            (resp.status(), serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+        }
+    };
+    let (st, before) = visit(&w).await;
+    assert_eq!(st, StatusCode::OK, "{before}");
+    let (runs, stops) = (w.fake.calls("RunTask").len(), w.fake.calls("StopTask").len());
+    w.restart().await;
+    let logs_read = w.fake.calls("GetLogEvents").len();
+    let (st, after) = visit(&w).await;
+    assert_eq!(st, StatusCode::OK, "{after}");
+    assert_eq!(after["task"], before["task"], "the same task answers");
+    assert_eq!((w.fake.calls("RunTask").len(), w.fake.calls("StopTask").len()), (runs, stops), "nothing run or stopped");
+    // This process reads its log from the adoption on: the last one kept what came before.
+    let from_now = || w.fake.calls("GetLogEvents").iter().skip(logs_read).any(|r| r["logStreamName"].as_str().is_some_and(|s| s.starts_with("apps/app/")) && r["startTime"].is_i64());
+    for _ in 0..200 {
+        if from_now() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(from_now(), "{:?}", w.fake.calls("GetLogEvents"));
+    // It's this process's own now: a sleep stops it.
+    w.apps.live(&id, "production").sleep().await;
+    assert_eq!(w.fake.calls("StopTask").len(), stops + 1);
+}
+
+/// An environment file a node wrote and died before deleting (its variables, secrets among
+/// them) is swept: nothing waits on it any more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environment_file_a_dead_node_left_is_swept() {
+    let w = world().await;
+    w.fake.objects.lock().insert(format!("{BUCKET}/apps/env/roll-apps-x-production-abcdef-0-zz.env"), b"SECRET=left-behind".to_vec());
+    w.fake.objects.lock().insert(format!("{BUCKET}/apps/other/keep.txt"), b"not an env file".to_vec());
+    w.apps.deps.runtime.sweep(&Default::default()).await;
+    assert_eq!(w.fake.keys("apps/env/"), Vec::<String>::new());
+    assert_eq!(w.fake.keys("apps/other/"), vec!["apps/other/keep.txt".to_string()], "only environment files");
+}
+
+/// A value over several lines (a PEM key) reaches the task through its deployment's secret (an
+/// ECS environment file holds one line each), never in a request. The secret is made once and
+/// lasts as long as the deployment may run: runs one after another (no instance in between)
+/// share it and one task definition. Then it's swept, and the rest go with the service.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_multi_line_value_reaches_the_task_through_its_deployments_secret() {
+    let w = world().await;
+    let pem = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----";
+    let (st, svc) = call(
+        &w.api,
+        "POST",
+        "/v1/apps/services",
+        Some(json!({ "project": w.project, "name": "signer", "source": {"kind": "image", "image": "public/api:1"}, "run": {"type": "cron", "schedule": "0 3 * * *"}, "variables": {"SIGNING_KEY": pem, "MODE": "live"} })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let dep = svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &id, &dep).await["status"], "active");
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    // A run: how many tasks have seen the values so far.
+    let run = || async {
+        assert_eq!(call(&w.api, "POST", &format!("{base}/runs"), None).await.0, StatusCode::ACCEPTED);
+        for _ in 0..500 {
+            if call(&w.api, "GET", &format!("{base}/runs"), None).await.1[0]["status"] != "running" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        w.fake.aws.lock().envs.values().filter(|e| e.get("SIGNING_KEY").map(String::as_str) == Some(pem) && e.get("MODE").map(String::as_str) == Some("live")).count()
+    };
+    assert_eq!((run().await, run().await), (1, 2));
+    let defs = || w.fake.calls("RegisterTaskDefinition").len();
+    assert_eq!((w.fake.calls("PutSecretValue").len(), defs()), (0, 1), "no new version, one task definition");
+    for op in ["RegisterTaskDefinition", "RunTask"] {
+        assert!(!w.fake.calls(op).iter().any(|c| c.to_string().contains("MIIEvQIBADANBg")), "the value is in {op}");
+    }
+    let short = id.trim_start_matches("svc_");
+    let name = format!("roll-apps/vars/roll-cloud/{short}-{}", dep.trim_start_matches("dep_"));
+    assert!(w.fake.aws.lock().secrets.contains_key(&name), "under the fleet's stack");
+    // The sweep keeps it while the store says the deployment may run, or it was made in the
+    // last hour; never another fleet's (another stack in the account).
+    let in_use: std::collections::HashSet<String> = w.apps.db(|s| s.deployments_in_use(i64::MAX)).await.unwrap().into_iter().collect();
+    assert!(in_use.contains(&dep), "{in_use:?}");
+    let other = format!("roll-apps/vars/other-stack/{short}-elsewhere");
+    {
+        let mut a = w.fake.aws.lock();
+        a.made.insert(name.clone(), 1_000_000_000.0);
+        a.secrets.insert(other.clone(), "{}".into());
+        a.made.insert(other.clone(), 1_000_000_000.0);
+    }
+    w.apps.deps.runtime.sweep(&in_use).await;
+    assert!(w.fake.aws.lock().secrets.contains_key(&name));
+    w.apps.deps.runtime.sweep(&Default::default()).await;
+    assert!(!w.fake.aws.lock().secrets.contains_key(&name), "swept");
+    assert!(w.fake.aws.lock().secrets.contains_key(&other), "another fleet's is never swept");
+    // Deleted under this node (another node's sweep): the next run makes it again and runs.
+    assert_eq!(run().await, 3);
+    assert_eq!(defs(), 2, "a task definition naming the new secret");
+    // Another deployment's goes with the service.
+    w.fake.aws.lock().secrets.insert(format!("roll-apps/vars/roll-cloud/{short}-older"), "{}".into());
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
+    assert!(!w.fake.aws.lock().secrets.keys().any(|k| k.starts_with(&format!("roll-apps/vars/roll-cloud/{short}-"))), "it goes with the service");
 }

@@ -9,7 +9,8 @@
 
 use crate::logs::{LogSink, Stream};
 use crate::metrics::Meter;
-use crate::model::{InstanceState, Run, RunType};
+use crate::model::{InstanceState, Restart, Run, RunType};
+use crate::runtime::Adopted;
 use crate::runtime::{InstanceSpec, Runtime};
 use parking_lot::Mutex;
 use std::net::SocketAddr;
@@ -17,6 +18,20 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+/// The names of a deployment's instances in an environment, but their number:
+/// `roll-apps-<service>-<env>-<deployment, 6>-`.
+/// A cron run's container: its own id in its name, so its lines in the environment's log are its
+/// alone (a counter would start again with the next process).
+pub fn run_name(service: &str, env: &str, deployment: &str, run: &str) -> String {
+    format!("{}run-{}", instance_prefix(service, env, deployment), run.strip_prefix("run_").unwrap_or(run))
+}
+
+pub fn instance_prefix(service: &str, env: &str, deployment: &str) -> String {
+    let short = deployment.strip_prefix("dep_").unwrap_or(deployment);
+    let svc = service.strip_prefix("svc_").unwrap_or(service);
+    format!("roll-apps-{svc}-{env}-{}-", &short[..short.len().min(6)])
+}
 
 /// How far back crashes count toward a crash loop.
 const CRASH_WINDOW: Duration = Duration::from_secs(600);
@@ -57,6 +72,10 @@ pub struct Inst {
     cpu_seen: Mutex<Option<u64>>,
     /// Consecutive crashes (a worker's restart backoff).
     crashes: AtomicU32,
+    /// A worker its restart policy leaves stopped: it isn't started again or replaced.
+    done: AtomicBool,
+    /// When its private connections were last counted (a dear read, at most every 5 s).
+    private_checked: Mutex<Option<Instant>>,
     /// Failed health checks in a row while running.
     health_fails: AtomicU32,
     /// The stop a crash started: a start of the same instance waits for it, so it never stops
@@ -75,6 +94,8 @@ impl Inst {
             started_at: Mutex::new(None),
             cpu_seen: Mutex::new(None),
             crashes: AtomicU32::new(0),
+            done: AtomicBool::new(false),
+            private_checked: Mutex::new(None),
             health_fails: AtomicU32::new(0),
             stopping: Mutex::new(None),
         })
@@ -118,6 +139,16 @@ pub struct Lease {
     pub cold: bool,
     /// Its deployment speaks HTTP/2 without TLS ([`crate::model::Run::h2c`]).
     pub h2c: bool,
+    /// How long the app has to answer (a web service's `timeout_s`); None: as long as it takes.
+    pub timeout: Option<Duration>,
+    /// Its deployment keeps visitors on one instance ([`crate::model::Run::affinity`]).
+    pub affinity: bool,
+}
+
+/// What a visitor's affinity cookie holds for an instance: a short digest of its name (the name
+/// itself stays roll's).
+pub fn affinity_key(instance: &str) -> String {
+    crate::public::token_hash(instance)[..12].to_string()
 }
 
 impl Drop for Lease {
@@ -150,6 +181,8 @@ pub enum WakeError {
     Busy,
     #[error("this project reached its spending limit for the month")]
     Capped,
+    #[error("this environment is paused")]
+    Paused,
 }
 
 /// [`EnvLive::hold_asleep`]'s hold: let go when dropped, whatever happened.
@@ -179,11 +212,76 @@ impl Served {
     }
 }
 
+/// What an environment's public names let through, kept with its live state on the owner so a
+/// request reads no row for it.
+#[derive(Debug, Default)]
+pub struct Gate {
+    /// In maintenance, with this message (empty: roll's words).
+    pub maintenance: Option<String>,
+    /// Only these networks get in (empty: anyone).
+    pub allow: Vec<ipnet::IpNet>,
+    /// Each client's requests a minute.
+    pub rate: Option<crate::model::RateLimit>,
+    /// Its firewall rules, in order.
+    pub firewall: Vec<crate::model::FirewallRule>,
+    /// Its own error and maintenance pages.
+    pub pages: crate::model::Pages,
+    /// A preview's (ephemeral): never indexed.
+    pub preview: bool,
+    /// Headers its answers carry.
+    pub headers: Vec<crate::model::HeaderRule>,
+}
+
+/// Clients a rate limit remembers at most (a full bucket is the same as none, so those go first).
+const MAX_BUCKETS: usize = 100_000;
+
+impl Gate {
+    /// Whether its firewall lets the request in: the first rule that matches decides; none
+    /// matching, it does.
+    pub fn firewall_allows(&self, method: &str, path: &str, user_agent: &str) -> bool {
+        self.firewall.iter().find(|r| r.matches(method, path, user_agent)).is_none_or(|r| r.action == crate::model::FirewallAction::Allow)
+    }
+
+    /// Whether `client` (the address the fleet vouches for) gets in. None, with a list: no.
+    pub fn admits(&self, client: Option<&str>) -> bool {
+        if self.allow.is_empty() {
+            return true;
+        }
+        let Some(ip) = client_ip(client) else { return false };
+        self.allow.iter().any(|n| n.contains(&ip))
+    }
+}
+
+/// A client's address as the fleet gives it, an IPv4 one over IPv6 (`::ffff:a.b.c.d`) as IPv4.
+pub fn client_ip(client: Option<&str>) -> Option<std::net::IpAddr> {
+    let ip = client?.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().ok()?;
+    Some(match ip {
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, std::net::IpAddr::V4),
+        v4 => v4,
+    })
+}
+
+/// Whether a TCP app listens behind `addr`: Docker's proxy on a published port accepts the
+/// connection whatever the app does, and closes it at once when nothing listens inside, so a
+/// connection still open a moment later (or one that already said something) is the app.
+async fn tcp_answers(addr: SocketAddr) -> bool {
+    use tokio::io::AsyncReadExt;
+    let Ok(Ok(mut c)) = tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr)).await else { return false };
+    let mut b = [0u8; 1];
+    match tokio::time::timeout(Duration::from_millis(100), c.read(&mut b)).await {
+        Err(_) => true,
+        Ok(Ok(n)) => n > 0,
+        Ok(Err(_)) => false,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LiveConfig {
     pub wake_timeout: Duration,
     /// How long a worker must keep running after a start to count as up.
     pub worker_grace: Duration,
+    /// A crashed worker's first restart wait, doubling with each crash in a row to 60 times it.
+    pub restart_backoff: Duration,
     /// How long old instances may finish their requests after a switch.
     pub drain: Duration,
     /// How long more instances than needed may stay up before one is stopped.
@@ -196,6 +294,8 @@ pub struct LiveConfig {
     pub health_every: Duration,
     /// Failed health checks in a row that replace an instance.
     pub health_failures: u32,
+    /// How long CPU is averaged over before `run.cpu_target` scales.
+    pub cpu_window: Duration,
 }
 
 impl Default for LiveConfig {
@@ -203,12 +303,14 @@ impl Default for LiveConfig {
         LiveConfig {
             wake_timeout: Duration::from_secs(60),
             worker_grace: Duration::from_secs(2),
+            restart_backoff: Duration::from_secs(1),
             drain: Duration::from_secs(30),
             scale_down_after: Duration::from_secs(60),
             probe_every: Duration::from_millis(10),
             max_waiters: 1000,
             health_every: Duration::from_secs(10),
             health_failures: 3,
+            cpu_window: Duration::from_secs(60),
         }
     }
 }
@@ -225,10 +327,23 @@ pub struct EnvLive {
     /// Torn down: nothing is made or adopted any more (a request or a tick that held this
     /// environment from before can't bring it back).
     closed: AtomicBool,
+    /// Let go to another node ([`Self::let_go`]): stops and removes spawned before don't run (on
+    /// a shared runtime the next owner may have kept the instance; it removes what it didn't).
+    released: Arc<AtomicBool>,
     /// Its project reached its spend limit: nothing starts, and the tick stops what runs.
     capped: AtomicBool,
+    /// Paused by its owner: the same, until it's resumed.
+    paused: AtomicBool,
     /// Its volume is being restored: nothing starts until it's done.
     held: AtomicBool,
+    /// A scaling worker's instances for its backlog ([`crate::model::Scale`]); 0: its floor.
+    wanted: AtomicU32,
+    /// The backlog it last read (`u64::MAX`: not read yet).
+    backlog: AtomicU64,
+    /// What scaling last said in the log (said again only when it changes).
+    scale_note: Mutex<String>,
+    /// Since when it has wanted fewer than run (a scale-in waits `scale_down_after`).
+    fewer_since: Mutex<Option<Instant>>,
     /// A gradual rollout's new deployment and the percent of requests it takes.
     canary: Mutex<Option<(Arc<Template>, u8)>>,
     /// Requests routed so far (the canary's share is taken by turns).
@@ -245,13 +360,31 @@ pub struct EnvLive {
     /// 30 s. A canary's failures don't hold back the active deployment's wakes.
     failed: Mutex<Option<(String, Instant, String, u32)>>,
     /// Crashes of the last ten minutes: when, when in unix ms, why.
-    crashes: Mutex<std::collections::VecDeque<(Instant, i64, String)>>,
+    /// Recent crashes: when, unix ms, why, and the deployment the instance ran.
+    crashes: Mutex<std::collections::VecDeque<(Instant, i64, String, String)>>,
     seq: AtomicU64,
+    /// Every instance this process made here (a deploy's being checked isn't in `insts` until
+    /// its commit): [`Self::adopt`] never takes one for a previous owner's.
+    mine: Mutex<std::collections::HashSet<String>>,
     pub log: LogSink,
     pub meter: Mutex<Meter>,
     over_since: Mutex<Option<Instant>>,
     /// A tick is running (the reaper never runs two of one environment at once).
     pub ticking: std::sync::atomic::AtomicBool,
+    /// A private caller's wake is under way (the next look waits for it).
+    answering: std::sync::atomic::AtomicBool,
+    /// What its public names let through, as last read (None: read it again), and how many
+    /// times it was forgotten (a read that began before a change isn't kept).
+    gate: Mutex<Option<Arc<Gate>>>,
+    gate_gen: AtomicU64,
+    /// Each client's tokens and when they were counted (its rate limit; None: no address).
+    buckets: Mutex<HashMap<Option<std::net::IpAddr>, (f64, Instant)>>,
+    /// CPU its awake instances used and could have used, per tick, for `cpu_window` (only what
+    /// the runtime measures).
+    cpu_samples: Mutex<std::collections::VecDeque<(Instant, f64, f64)>>,
+    /// The instances CPU last asked for: kept while the window fills again after a scale-out,
+    /// so the new instance isn't taken straight back in.
+    cpu_need: AtomicU32,
     last_tick: Mutex<Option<Instant>>,
     last_health: Mutex<Option<Instant>>,
     client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
@@ -274,8 +407,14 @@ impl EnvLive {
             insts: Mutex::new(Vec::new()),
             wake: Arc::new(tokio::sync::Mutex::new(())),
             closed: AtomicBool::new(false),
+            released: Arc::default(),
             capped: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
             held: AtomicBool::new(false),
+            wanted: AtomicU32::new(0),
+            backlog: AtomicU64::new(u64::MAX),
+            scale_note: Mutex::new(String::new()),
+            fewer_since: Mutex::new(None),
             canary: Mutex::new(None),
             routed: AtomicU64::new(0),
             served: Mutex::new(HashMap::new()),
@@ -284,10 +423,17 @@ impl EnvLive {
             failed: Mutex::new(None),
             crashes: Mutex::new(std::collections::VecDeque::new()),
             seq: AtomicU64::new(0),
+            mine: Mutex::default(),
             log,
             meter: Mutex::new(Meter::default()),
             over_since: Mutex::new(None),
             ticking: std::sync::atomic::AtomicBool::new(false),
+            answering: std::sync::atomic::AtomicBool::new(false),
+            gate: Mutex::new(None),
+            gate_gen: AtomicU64::new(0),
+            buckets: Mutex::new(HashMap::new()),
+            cpu_samples: Mutex::new(std::collections::VecDeque::new()),
+            cpu_need: AtomicU32::new(0),
             last_tick: Mutex::new(None),
             last_health: Mutex::new(None),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http(),
@@ -384,15 +530,30 @@ impl EnvLive {
 
     fn name_for(&self, tpl: &Template) -> String {
         let n = self.seq.fetch_add(1, Ordering::SeqCst);
-        let short = tpl.deployment.strip_prefix("dep_").unwrap_or(&tpl.deployment);
-        let svc = self.service.strip_prefix("svc_").unwrap_or(&self.service);
-        format!("roll-apps-{svc}-{}-{}-{n}", self.env, &short[..short.len().min(6)])
+        format!("{}{n}", instance_prefix(&self.service, &self.env, &tpl.deployment))
+    }
+
+    /// A cron run's or a job's container: `…-run<n>`, never one of the service's instances (a
+    /// takeover never keeps it as one).
+    async fn make_run(&self, tpl: &Template, name: Option<String>) -> anyhow::Result<Arc<Inst>> {
+        anyhow::ensure!(!self.closed.load(Ordering::SeqCst), "this environment was torn down");
+        let mut spec = tpl.spec.clone();
+        spec.name = match name {
+            Some(n) => n,
+            None => {
+                let n = self.seq.fetch_add(1, Ordering::SeqCst);
+                format!("{}run{n}", instance_prefix(&self.service, &self.env, &tpl.deployment))
+            }
+        };
+        self.runtime.create(&spec).await?;
+        Ok(Inst::new(spec.name, tpl.deployment.clone()))
     }
 
     async fn make(&self, tpl: &Template) -> anyhow::Result<Arc<Inst>> {
         anyhow::ensure!(!self.closed.load(Ordering::SeqCst), "this environment was torn down");
         let mut spec = tpl.spec.clone();
         spec.name = self.name_for(tpl);
+        self.mine.lock().insert(spec.name.clone());
         self.runtime.create(&spec).await?;
         Ok(Inst::new(spec.name, tpl.deployment.clone()))
     }
@@ -428,14 +589,37 @@ impl EnvLive {
         *inst.started_at.lock() = Some(now_ms());
         inst.health_fails.store(0, Ordering::SeqCst);
         *inst.cpu_seen.lock() = None;
+        let (mut looked, mut hint) = (Instant::now(), None);
         match (run.kind, addr) {
             (RunType::Web, Some(a)) => loop {
-                if self.answers(a, health, run.h2c).await {
+                // A TCP service is up when its port accepts; anything else answers HTTP.
+                let up = if run.tcp {
+                    tcp_answers(a).await
+                } else {
+                    self.answers(a, health, run.h2c).await
+                };
+                if up {
                     break;
+                }
+                // Not answering for a while: where it listens instead, if anywhere (the most common
+                // first-deploy mistake). On its port but only on loopback can never be reached.
+                if looked.elapsed() >= Duration::from_secs(2) {
+                    looked = Instant::now();
+                    match self.port_hint(&inst.name, run).await {
+                        Some((why, true)) => {
+                            self.crashed(inst, &why);
+                            return Err(WakeError::Failed(why));
+                        }
+                        Some((why, false)) => hint = Some(why),
+                        None => {}
+                    }
                 }
                 if Instant::now() >= deadline {
                     self.crashed(inst, "it didn't answer in time");
-                    return Err(WakeError::Timeout(self.cfg.wake_timeout));
+                    return Err(match hint {
+                        Some(h) => WakeError::Failed(format!("it didn't answer in time: {h}")),
+                        None => WakeError::Timeout(self.cfg.wake_timeout),
+                    });
                 }
                 if !self.runtime.running(&inst.name).await {
                     let why = format!("the process exited before it answered: {}", self.exit_reason(&inst.name, run).await);
@@ -461,6 +645,21 @@ impl EnvLive {
         Ok(addr)
     }
 
+    /// Why `name` may not answer, from where it listens: (what to tell, whether it never can).
+    async fn port_hint(&self, name: &str, run: &Run) -> Option<(String, bool)> {
+        let port = run.port.unwrap_or(8080);
+        // Docker's embedded DNS listens in every user-defined network: never the app's.
+        let at: Vec<SocketAddr> = self.runtime.listeners(name).await?.into_iter().filter(|a| a.ip() != std::net::IpAddr::from([127, 0, 0, 11])).collect();
+        if at.is_empty() || at.iter().any(|a| a.port() == port && !a.ip().is_loopback()) {
+            return None;
+        }
+        if at.iter().any(|a| a.port() == port) {
+            return Some((format!("the app listens on {} only, which nothing outside its container reaches: listen on 0.0.0.0:{port} (or [::]:{port})", at.iter().filter(|a| a.port() == port).map(|a| a.to_string()).collect::<Vec<_>>().join(", ")), true));
+        }
+        let list = at.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
+        Some((format!("the app listens on {list}, not on port {port}: listen on $PORT ({port}), or set the service's port"), false))
+    }
+
     /// A running instance of `deployment` with room under `concurrency` (the least busy), leased.
     fn pick(&self, deployment: &str, concurrency: u32, over: bool) -> Option<Lease> {
         let insts = self.insts.lock();
@@ -474,7 +673,18 @@ impl EnvLive {
             .filter(|(i, _)| over || i.in_flight() < concurrency)
             .min_by_key(|(i, _)| i.in_flight())?;
         best.0.in_flight.fetch_add(1, Ordering::SeqCst);
-        Some(Lease { addr: best.1, inst: best.0.clone(), waited: Duration::ZERO, cold: false, h2c: false })
+        Some(Lease { addr: best.1, inst: best.0.clone(), waited: Duration::ZERO, cold: false, h2c: false, timeout: None, affinity: false })
+    }
+
+    /// The instance a visitor's affinity cookie names, if it's up with room.
+    fn pick_affine(&self, deployment: &str, concurrency: u32, key: &str) -> Option<Lease> {
+        let insts = self.insts.lock();
+        let (i, a) = insts.iter().filter(|i| i.deployment == deployment && i.in_flight() < concurrency && affinity_key(&i.name) == key).find_map(|i| match i.phase() {
+            Phase::Running(Some(a)) => Some((i, a)),
+            _ => None,
+        })?;
+        i.in_flight.fetch_add(1, Ordering::SeqCst);
+        Some(Lease { addr: a, inst: i.clone(), waited: Duration::ZERO, cold: false, h2c: false, timeout: None, affinity: false })
     }
 
     /// Take an idle instance out of rotation before stopping or suspending it: under the lock
@@ -548,6 +758,9 @@ impl EnvLive {
         if self.capped.load(Ordering::SeqCst) {
             return Err(WakeError::Capped);
         }
+        if self.paused.load(Ordering::SeqCst) {
+            return Err(WakeError::Paused);
+        }
         if self.held.load(Ordering::SeqCst) {
             return Err(WakeError::Busy);
         }
@@ -558,11 +771,22 @@ impl EnvLive {
         self.acquire_pinned(tpl, false).await
     }
 
+    /// [`Self::acquire_tpl`], to the instance `prefer` (an affinity cookie) names when it can.
+    pub async fn acquire_preferring(self: &Arc<Self>, tpl: Arc<Template>, prefer: Option<&str>) -> Result<Lease, WakeError> {
+        if let Some(k) = prefer.filter(|_| tpl.run.affinity)
+            && let Some(mut l) = self.pick_affine(&tpl.deployment, tpl.run.concurrency, k)
+        {
+            (l.h2c, l.timeout, l.affinity) = (tpl.run.h2c, tpl.run.timeout_s.map(|s| Duration::from_secs(s as u64)), true);
+            return Ok(l);
+        }
+        self.acquire_pinned(tpl, false).await
+    }
+
     /// `pinned`: the request asked for this deployment (its own URL), and gets it or nothing.
     async fn acquire_pinned(self: &Arc<Self>, tpl: Arc<Template>, pinned: bool) -> Result<Lease, WakeError> {
-        let h2c = tpl.run.h2c;
+        let (h2c, timeout, affinity) = (tpl.run.h2c, tpl.run.timeout_s.map(|s| Duration::from_secs(s as u64)), tpl.run.affinity);
         self.acquire_inner(tpl, pinned).await.map(|mut l| {
-            l.h2c = h2c;
+            (l.h2c, l.timeout, l.affinity) = (h2c, timeout, affinity);
             l
         })
     }
@@ -677,6 +901,147 @@ impl EnvLive {
         Ok(l)
     }
 
+    pub fn gate(&self) -> Option<Arc<Gate>> {
+        self.gate.lock().clone()
+    }
+
+    pub fn gate_gen(&self) -> u64 {
+        self.gate_gen.load(Ordering::SeqCst)
+    }
+
+    /// Keep what was read, unless its settings changed since the read began (`seen`).
+    pub fn set_gate(&self, g: Arc<Gate>, seen: u64) {
+        let mut cur = self.gate.lock();
+        if self.gate_gen.load(Ordering::SeqCst) == seen {
+            *cur = Some(g);
+        }
+    }
+
+    /// Its settings changed: the next request reads them again.
+    pub fn forget_gate(&self) {
+        let mut cur = self.gate.lock();
+        self.gate_gen.fetch_add(1, Ordering::SeqCst);
+        *cur = None;
+        self.buckets.lock().clear();
+    }
+
+    /// One request from `client` under `limit`: let through (a token taken), or how long until
+    /// the next token.
+    pub fn take_token(&self, client: Option<std::net::IpAddr>, limit: &crate::model::RateLimit) -> Result<(), Duration> {
+        let (rate, burst) = (limit.per_minute as f64 / 60.0, limit.burst() as f64);
+        // An IPv6 client counts by its /64: one host has the whole of it to rotate through.
+        let client = client.map(|ip| match ip {
+            std::net::IpAddr::V6(v6) => std::net::IpAddr::V6(std::net::Ipv6Addr::from(u128::from(v6) & !((1u128 << 64) - 1))),
+            v4 => v4,
+        });
+        let now = Instant::now();
+        let mut b = self.buckets.lock();
+        if b.len() >= MAX_BUCKETS && !b.contains_key(&client) {
+            // Full ones first: they're the same as no entry. Then the longest unseen, never
+            // everyone's (a flood of new addresses mustn't reset the limited ones).
+            b.retain(|_, (tokens, at)| *tokens + now.duration_since(*at).as_secs_f64() * rate < burst);
+            // Still full: the longest unseen tenth goes at once (one pass, not one per client).
+            if b.len() >= MAX_BUCKETS {
+                let mut ats: Vec<Instant> = b.values().map(|(_, at)| *at).collect();
+                let cut = ats.len() / 10;
+                let (_, nth, _) = ats.select_nth_unstable(cut);
+                let nth = *nth;
+                b.retain(|_, (_, at)| *at > nth);
+            }
+        }
+        let (tokens, at) = b.entry(client).or_insert((burst, now));
+        *tokens = (*tokens + now.duration_since(*at).as_secs_f64() * rate).min(burst);
+        *at = now;
+        if *tokens >= 1.0 {
+            *tokens -= 1.0;
+            Ok(())
+        } else {
+            Err(Duration::from_secs_f64((1.0 - *tokens) / rate))
+        }
+    }
+
+    /// Private callers ([`crate::runtime::Callers`]), which rolld never sees: a sleeping instance
+    /// someone waits at wakes (a frozen one resumes; a stopped one starts, and its waker hands
+    /// it the caller), and with `running` a running one with connections from the project's
+    /// other services counts as in use (Railway's private network keeps a service awake too).
+    pub async fn answer_private(self: &Arc<Self>, running: bool) {
+        let Some(tpl) = self.template() else { return };
+        if tpl.run.kind != RunType::Web || self.answering.load(Ordering::SeqCst) {
+            return;
+        }
+        // A running instance's private connections are counted only near its sleep (5.6 ms a
+        // read on a busy host, see `runtime::netns`): idle for all but its last two seconds.
+        let run = &tpl.run;
+        let rest = [run.suspend_after_s, run.sleep_after_s].into_iter().filter(|s| *s > 0).min().unwrap_or(run.sleep_after_s);
+        let near_sleep = Duration::from_secs(rest as u64).saturating_sub(Duration::from_secs(2));
+        let mut asked = Vec::new();
+        for i in self.instances().into_iter().filter(|i| i.deployment == tpl.deployment) {
+            match i.phase() {
+                // Asleep (or stopped by a crash, its waker armed again): a connection its
+                // network accepted since is a caller.
+                Phase::Suspended(_) | Phase::Created | Phase::Crashed => {
+                    if self.runtime.take_callers(&i.name).await {
+                        asked.push(i);
+                    }
+                }
+                Phase::Running(_) => {
+                    let idle = i.last_used.lock().elapsed();
+                    let due = i.private_checked.lock().is_none_or(|t| t.elapsed() >= Duration::from_secs(5));
+                    if running && idle >= near_sleep && due {
+                        *i.private_checked.lock() = Some(Instant::now());
+                        if self.runtime.private_peers(&i.name).await.is_some_and(|n| n > 0) {
+                            *i.last_used.lock() = Instant::now();
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if asked.is_empty() || self.answering.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // Its own task: a slow start here holds up no other environment's callers.
+        let this = self.clone();
+        tokio::spawn(async move {
+            this.wake_for_callers(&tpl, asked).await;
+            this.answering.store(false, Ordering::SeqCst);
+        });
+    }
+
+    async fn wake_for_callers(self: &Arc<Self>, tpl: &Template, asked: Vec<Arc<Inst>>) {
+        let _g = self.wake.lock().await;
+        // Torn down, over its spending limit or restoring its volume: nothing wakes.
+        if self.may_wake().is_err() {
+            return;
+        }
+        for i in asked {
+            let woke = Instant::now();
+            match i.phase() {
+                Phase::Suspended(addr) => match self.runtime.resume(&i.name).await {
+                    Ok(()) => {
+                        *i.phase.lock() = Phase::Running(addr);
+                        *i.last_used.lock() = Instant::now();
+                    }
+                    Err(_) => self.crashed(&i, "it couldn't be resumed"),
+                },
+                // The same container (a crashed one too): its waker holds the caller for it.
+                Phase::Created | Phase::Crashed => {
+                    let deadline = Instant::now() + self.cfg.wake_timeout;
+                    match self.start(&i, &tpl.run, None, deadline).await {
+                        Ok(_) => {
+                            *i.last_used.lock() = Instant::now();
+                            let ms = woke.elapsed().as_secs_f64() * 1000.0;
+                            self.meter.lock().cold_start(now_ms(), ms);
+                            self.log.stream(Stream::System).line(format!("cold start: {} answered a private caller in {ms:.0} ms", i.name));
+                        }
+                        Err(e) => self.log.stream(Stream::System).line(format!("a private caller couldn't wake {}: {e}", i.name)),
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// The proxy couldn't connect to a running instance: it's gone (killed, out of memory), and
     /// the next request starts a fresh one instead of trying it again.
     pub fn connect_failed(&self, inst: &Inst) {
@@ -706,15 +1071,17 @@ impl EnvLive {
     fn crashed_with(&self, inst: &Inst, why: &str, grace: Duration) {
         *inst.phase.lock() = Phase::Crashed;
         self.count(&inst.deployment, |s| s.crashes += 1);
-        let (runtime, name) = (self.runtime.clone(), inst.name.clone());
+        let (runtime, name, released) = (self.runtime.clone(), inst.name.clone(), self.released.clone());
         *inst.stopping.lock() = Some(tokio::spawn(async move {
-            let _ = runtime.stop(&name, grace).await;
+            if !released.load(Ordering::SeqCst) {
+                let _ = runtime.stop(&name, grace).await;
+            }
         }));
         let entered = {
             let mut c = self.crashes.lock();
             let was = Self::looping(&c);
-            c.push_back((Instant::now(), now_ms(), why.to_string()));
-            while c.len() > 20 || c.front().is_some_and(|(at, _, _)| at.elapsed() > CRASH_WINDOW) {
+            c.push_back((Instant::now(), now_ms(), why.to_string(), inst.deployment.clone()));
+            while c.len() > 20 || c.front().is_some_and(|(at, ..)| at.elapsed() > CRASH_WINDOW) {
                 c.pop_front();
             }
             !was && Self::looping(&c)
@@ -724,8 +1091,13 @@ impl EnvLive {
         }
     }
 
-    fn looping(c: &std::collections::VecDeque<(Instant, i64, String)>) -> bool {
-        c.iter().filter(|(at, _, _)| at.elapsed() <= CRASH_WINDOW).count() >= 3
+    fn looping(c: &std::collections::VecDeque<(Instant, i64, String, String)>) -> bool {
+        c.iter().filter(|(at, ..)| at.elapsed() <= CRASH_WINDOW).count() >= 3
+    }
+
+    /// How many of `deployment`'s instances crashed at or after `since` (unix ms).
+    pub fn crashes_of(&self, deployment: &str, since: i64) -> usize {
+        self.crashes.lock().iter().filter(|(_, at, _, d)| d == deployment && *at >= since).count()
     }
 
     /// The environment's crashes of the last ten minutes when they're a loop (three or more).
@@ -734,8 +1106,8 @@ impl EnvLive {
         if !Self::looping(&c) {
             return None;
         }
-        let recent: Vec<_> = c.iter().filter(|(at, _, _)| at.elapsed() <= CRASH_WINDOW).collect();
-        let (_, at, why) = recent.last()?;
+        let recent: Vec<_> = c.iter().filter(|(at, ..)| at.elapsed() <= CRASH_WINDOW).collect();
+        let (_, at, why, _) = recent.last()?;
         Some(crate::model::CrashLoop { crashes: recent.len() as u32, last_at: *at, last_error: why.clone() })
     }
 
@@ -781,7 +1153,8 @@ impl EnvLive {
         let was_awake = self.awake_count() as u32;
         let n = match run.kind {
             RunType::Cron => 0,
-            RunType::Worker => run.min_instances.max(1),
+            // A worker following a backlog starts at what it wants, not back at its floor.
+            RunType::Worker => run.min_instances.max(1).max(if run.scale.is_some() { self.wanted.load(Ordering::SeqCst) } else { 0 }),
             RunType::Web => was_awake.max(run.min_instances).max(1),
         }
         .min(run.max_instances);
@@ -885,23 +1258,35 @@ impl EnvLive {
                 self.insts.lock().push(i);
             }
         }
-        self.drain(old);
+        self.drain(old, self.drain_of(&tpl.run));
     }
 
-    /// Instances out of rotation finish their requests (up to `drain`), then go.
-    fn drain(&self, old: Vec<Arc<Inst>>) {
-        let runtime = self.runtime.clone();
-        let drain = self.cfg.drain;
-        tokio::spawn(async move {
-            let until = Instant::now() + drain;
-            for i in old {
+    /// How long an instance being replaced gets: `run.drain_s`, else the node's default.
+    fn drain_of(&self, run: &Run) -> Duration {
+        run.drain_s.map_or(self.cfg.drain, |s| Duration::from_secs(s as u64))
+    }
+
+    /// Instances out of rotation finish their requests, then get SIGTERM, and SIGKILL once
+    /// `window` is up (a second after SIGTERM at least). Each on its own: one slow to finish
+    /// doesn't use up another's time.
+    fn drain(&self, old: Vec<Arc<Inst>>, window: Duration) {
+        for i in old {
+            let (runtime, released) = (self.runtime.clone(), self.released.clone());
+            tokio::spawn(async move {
+                let until = Instant::now() + window;
                 while i.in_flight() > 0 && Instant::now() < until {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
-                let _ = runtime.stop(&i.name, Duration::from_secs(10)).await;
+                if released.load(Ordering::SeqCst) {
+                    // The next owner's to stop: this node only forgets it.
+                    runtime.release(&i.name).await;
+                    return;
+                }
+                let grace = until.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
+                let _ = runtime.stop(&i.name, grace).await;
                 runtime.remove(&i.name).await;
-            }
-        });
+            });
+        }
     }
 
     /// A gradual rollout begins: the new deployment's healthy instances join the active one's,
@@ -937,7 +1322,7 @@ impl EnvLive {
             old
         };
         self.served.lock().clear();
-        self.drain(old);
+        self.drain(old, self.drain_of(&tpl.run));
     }
 
     /// The canary is rolled back: every request goes to the active deployment again, and the
@@ -952,7 +1337,7 @@ impl EnvLive {
             gone
         };
         self.served.lock().clear();
-        self.drain(gone);
+        self.drain(gone, self.drain_of(&tpl.run));
     }
 
     /// Set the active deployment without starting anything (a new owner taking the service).
@@ -962,8 +1347,15 @@ impl EnvLive {
             return;
         }
         *self.template.lock() = Some(tpl.clone());
-        if tpl.run.kind == RunType::Web
-            && tpl.site.is_none()
+        if tpl.site.is_some() {
+            return;
+        }
+        // The live deployment's instances the previous owner ran, still running on the shared
+        // runtime (a node died, its containers or tasks didn't): kept, so its death costs
+        // visitors no cold start; one that can't be kept goes.
+        let kept = self.keep_running(&tpl).await;
+        if kept == 0
+            && tpl.run.kind == RunType::Web
             && self.insts.lock().is_empty()
             && let Ok(i) = self.make(&tpl).await
         {
@@ -971,8 +1363,95 @@ impl EnvLive {
         }
     }
 
+    /// [`Self::adopt`]'s instances still running: how many it kept. Only a web service's or a
+    /// worker's (a cron run or a job is named `…-run<n>` and never kept); those already here
+    /// stay as they are; the rest of the deployment's go.
+    async fn keep_running(&self, tpl: &Template) -> usize {
+        let prefix = instance_prefix(&self.service, &self.env, &tpl.deployment);
+        let here: Vec<String> = self.insts.lock().iter().map(|i| i.name.clone()).collect();
+        let mut kept = 0;
+        let listed = self.runtime.list(Some(&self.service)).await;
+        // Only names that still exist need remembering.
+        self.mine.lock().retain(|n| listed.contains(n));
+        for name in listed {
+            let Some(n) = name.strip_prefix(&prefix).and_then(|n| n.parse::<u64>().ok()) else { continue };
+            // New names after every one seen, kept or not (the old owner may still be removing it).
+            self.seq.fetch_max(n + 1, Ordering::SeqCst);
+            if here.contains(&name) || self.mine.lock().contains(&name) {
+                continue;
+            }
+            if !matches!(tpl.run.kind, RunType::Web | RunType::Worker) {
+                self.runtime.remove(&name).await;
+                continue;
+            }
+            let mut spec = tpl.spec.clone();
+            spec.name = name.clone();
+            let found = self.runtime.adopt(&spec, self.log.instance(&name, &tpl.deployment)).await;
+            let phase = match (tpl.run.kind, found) {
+                (_, None) => None,
+                // Asleep and frozen: kept so, nothing asked of it (a frozen process answers nothing).
+                (_, Some(a)) if a.paused => Some(Phase::Suspended(a.addr)),
+                (RunType::Web, Some(Adopted { addr: Some(a), .. })) => {
+                    let up = if tpl.run.tcp { tcp_answers(a).await } else { self.answers(a, None, tpl.run.h2c).await };
+                    up.then_some(Phase::Running(Some(a)))
+                }
+                (RunType::Web, Some(_)) => None,
+                (_, Some(a)) => Some(Phase::Running(a.addr)),
+            };
+            let Some(phase) = phase else {
+                // Not one to keep (stopped, or it doesn't answer): it goes, as the rest did.
+                self.runtime.remove(&name).await;
+                continue;
+            };
+            let i = Inst::new(name.clone(), tpl.deployment.clone());
+            *i.phase.lock() = phase;
+            *i.started_at.lock() = Some(now_ms());
+            self.insts.lock().push(i);
+            kept += 1;
+        }
+        if kept > 0 {
+            self.log.stream(Stream::System).line(format!("kept {kept} instance{} the previous owner ran", if kept == 1 { "" } else { "s" }));
+        }
+        kept
+    }
+
     pub fn set_capped(&self, on: bool) {
         self.capped.store(on, Ordering::SeqCst);
+    }
+
+    pub fn set_paused(&self, on: bool) {
+        self.paused.store(on, Ordering::SeqCst);
+    }
+
+    pub fn paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+
+    /// A scaling worker's instances for its backlog now.
+    pub fn set_wanted(&self, n: u32, backlog: Option<u64>) {
+        self.wanted.store(n, Ordering::SeqCst);
+        self.backlog.store(backlog.unwrap_or(u64::MAX), Ordering::SeqCst);
+    }
+
+    /// A line about scaling in the environment's log, once per change (every ten seconds would
+    /// be thousands a day); empty clears it.
+    pub fn note_scale(&self, line: &str) {
+        let mut n = self.scale_note.lock();
+        if *n != line {
+            *n = line.to_string();
+            if !line.is_empty() {
+                self.log.stream(Stream::System).line(line);
+            }
+        }
+    }
+
+    /// What a scaling worker follows now: its backlog as last read, and the instances it wants.
+    pub fn scaling(&self) -> Option<(Option<u64>, u32)> {
+        let tpl = self.template()?;
+        let run = &tpl.run;
+        run.scale.as_ref()?;
+        let b = self.backlog.load(Ordering::SeqCst);
+        Some(((b != u64::MAX).then_some(b), self.wanted.load(Ordering::SeqCst).clamp(run.min_instances, run.max_instances.max(run.min_instances))))
     }
 
     /// Hold it asleep (a restore of its volume) until the guard drops: what runs stops, and no
@@ -1004,7 +1483,69 @@ impl EnvLive {
     /// Restart: stop everything and start what `min_instances` asks for again.
     pub async fn restart(self: &Arc<Self>) {
         self.sleep().await;
+        // What a restart policy left stopped goes: fresh ones take its place.
+        let done: Vec<Arc<Inst>> = self.insts.lock().iter().filter(|i| i.done.load(Ordering::SeqCst)).cloned().collect();
+        self.insts.lock().retain(|i| !i.done.load(Ordering::SeqCst));
+        for i in done {
+            self.runtime.remove(&i.name).await;
+        }
         self.tick().await;
+    }
+
+    /// Replace one instance (a stuck one, its pool leaked). A web service's, of the live
+    /// deployment, without a volume and below `max_instances`: a fresh one is started (outside
+    /// the wake lock, as a deploy's are) and answering first, then the two swap under the lock and
+    /// this one drains. Otherwise (a volume, a worker, an old deployment's or a canary's, at its
+    /// most) it stops first, as a volume rollout does, and the reaper or the next request starts
+    /// what's wanted. If the fresh one doesn't start, this one stays.
+    pub async fn restart_instance(self: &Arc<Self>, name: &str) -> Result<(), String> {
+        self.may_wake().map_err(|e| e.to_string())?;
+        let (tpl, inst, replace) = {
+            let _g = self.wake.lock().await;
+            let tpl = self.template().ok_or("nothing is deployed here")?;
+            let inst = self.instances().into_iter().find(|i| i.name == name).ok_or_else(|| format!("no instance {name} here"))?;
+            let replace = tpl.run.kind == RunType::Web
+                && tpl.run.volume.is_none()
+                && inst.awake()
+                && inst.deployment == tpl.deployment
+                && self.canary.lock().is_none()
+                && (self.awake_of(&tpl.deployment) as u32) < tpl.run.max_instances;
+            if !replace {
+                self.insts.lock().retain(|i| !Arc::ptr_eq(i, &inst));
+                *inst.phase.lock() = Phase::Stopping;
+            }
+            (tpl, inst, replace)
+        };
+        if !replace {
+            self.log.stream(Stream::System).line(format!("restarting {name}: it stops first"));
+            let _ = self.runtime.stop(&inst.name, self.drain_of(&tpl.run)).await;
+            self.runtime.remove(&inst.name).await;
+            self.tick().await;
+            return Ok(());
+        }
+        let fresh = self.make(&tpl).await.map_err(|e| format!("a fresh instance couldn't be made: {e:#}"))?;
+        let deadline = Instant::now() + Duration::from_secs(tpl.run.health_timeout_s as u64);
+        if let Err(e) = self.start(&fresh, &tpl.run, tpl.run.health_path.as_deref(), deadline).await {
+            self.discard(&[fresh]).await;
+            return Err(format!("the fresh instance didn't start ({e}); {name} keeps serving"));
+        }
+        {
+            let _g = self.wake.lock().await;
+            // A deploy, a scale-in or a teardown meanwhile: the fresh one isn't wanted.
+            let still = !self.closed.load(Ordering::SeqCst) && self.template().is_some_and(|t| t.deployment == tpl.deployment) && self.insts.lock().iter().any(|i| Arc::ptr_eq(i, &inst));
+            if !still {
+                drop(_g);
+                self.discard(&[fresh]).await;
+                return Err(format!("{name} changed meanwhile (a deploy, a scale-in): nothing was restarted"));
+            }
+            let mut insts = self.insts.lock();
+            insts.retain(|i| !Arc::ptr_eq(i, &inst));
+            insts.push(fresh);
+            *inst.phase.lock() = Phase::Stopping;
+        }
+        self.log.stream(Stream::System).line(format!("restarting {name}: a fresh instance answers in its place"));
+        self.drain(vec![inst], self.drain_of(&tpl.run));
+        Ok(())
     }
 
     /// Make every instance look idle for `d` longer than it is (tests drive the reaper with
@@ -1020,6 +1561,56 @@ impl EnvLive {
     }
 
     /// Remove every instance (an environment's teardown, or the service leaving this node).
+    /// Give the environment up without touching what runs (a runtime the nodes share: the next
+    /// owner keeps the live deployment's instances, [`Self::adopt`], and removes the rest):
+    /// nothing here sends to, wakes or stops them any more.
+    pub async fn let_go(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        let _g = self.wake.lock().await;
+        self.closed.store(true, Ordering::SeqCst);
+        *self.canary.lock() = None;
+        self.viewed.lock().clear();
+        let all: Vec<Arc<Inst>> = self.insts.lock().drain(..).collect();
+        for i in all {
+            self.runtime.release(&i.name).await;
+        }
+        *self.template.lock() = None;
+    }
+
+    /// The service's registry login changed (None: it went): instances made from now on use it.
+    pub fn set_registry(&self, login: Option<&crate::runtime::RegistryLogin>) {
+        let strip = |t: &Arc<Template>| {
+            let mut t = (**t).clone();
+            t.spec.registry = login.cloned();
+            Arc::new(t)
+        };
+        let mut tpl = self.template.lock();
+        if let Some(t) = tpl.as_ref() {
+            *tpl = Some(strip(t));
+        }
+        if let Some((t, _)) = self.canary.lock().as_mut() {
+            *t = strip(t);
+        }
+    }
+
+    /// Give the environment up on a runtime this node alone runs (its service moved): nothing new
+    /// comes here, and its instances stop once their requests in flight end (the drain window),
+    /// not under them.
+    pub async fn retire(&self) {
+        let all = {
+            let _g = self.wake.lock().await;
+            self.closed.store(true, Ordering::SeqCst);
+            *self.canary.lock() = None;
+            self.viewed.lock().clear();
+            let all: Vec<Arc<Inst>> = self.insts.lock().drain(..).collect();
+            let run = self.template.lock().take().map(|t| t.run.clone());
+            (all, run)
+        };
+        let (insts, run) = all;
+        let window = run.as_ref().map_or(self.cfg.drain, |r| self.drain_of(r));
+        self.drain(insts, window);
+    }
+
     pub async fn shutdown(&self) {
         let _g = self.wake.lock().await;
         self.closed.store(true, Ordering::SeqCst);
@@ -1065,10 +1656,10 @@ impl EnvLive {
         if self.held.load(Ordering::SeqCst) {
             return;
         }
-        if self.capped.load(Ordering::SeqCst) {
-            // Capped: stop what still runs, keep no floor.
+        if self.capped.load(Ordering::SeqCst) || self.paused.load(Ordering::SeqCst) {
+            // Capped or paused: stop what still runs, keep no floor.
             if insts.iter().any(|i| i.awake()) {
-                self.log.stream(Stream::System).line("the project reached its spending limit: stopped");
+                self.log.stream(Stream::System).line(if self.capped.load(Ordering::SeqCst) { "the project reached its spending limit: stopped" } else { "paused: stopped" });
                 self.sleep().await;
             }
             return;
@@ -1097,6 +1688,8 @@ impl EnvLive {
         };
         let insts = self.instances();
         let (mut cpu, mut mem, mut up) = (0.0, 0u64, 0usize);
+        // What was measured, and what those instances could have used (`run.cpu` each).
+        let (mut used, mut capacity) = (0.0, 0.0);
         for i in &insts {
             if !matches!(i.phase(), Phase::Running(_)) {
                 continue;
@@ -1106,7 +1699,12 @@ impl EnvLive {
                 Some(u) => {
                     let mut seen = i.cpu_seen.lock();
                     if let Some(prev) = *seen {
-                        cpu += u.cpu_ns.saturating_sub(prev) as f64 / 1e9;
+                        let d = u.cpu_ns.saturating_sub(prev) as f64 / 1e9;
+                        cpu += d;
+                        if let Some(tpl) = self.serving(&i.deployment) {
+                            used += d;
+                            capacity += tpl.run.cpu * elapsed;
+                        }
                     }
                     *seen = Some(u.cpu_ns);
                     mem += u.memory_bytes;
@@ -1124,7 +1722,26 @@ impl EnvLive {
         if up > 0 || elapsed > 0.0 {
             self.meter.lock().sample(now_ms(), cpu, mem, elapsed, up);
         }
+        let mut s = self.cpu_samples.lock();
+        if capacity > 0.0 {
+            s.push_back((now, used, capacity));
+        }
+        while s.front().is_some_and(|(at, ..)| now.duration_since(*at) > self.cfg.cpu_window) {
+            s.pop_front();
+        }
         insts
+    }
+
+    /// Its awake instances' CPU over the last `cpu_window`, in percent of what they could use;
+    /// None until the window is nearly full of measurements.
+    fn cpu_load(&self) -> Option<f64> {
+        let s = self.cpu_samples.lock();
+        let span = s.back()?.0.duration_since(s.front()?.0);
+        if span < self.cfg.cpu_window.mul_f64(0.8) {
+            return None;
+        }
+        let (used, cap) = s.iter().fold((0.0, 0.0), |(u, c), (_, du, dc)| (u + du, c + dc));
+        (cap > 0.0).then(|| used / cap * 100.0)
     }
 
     /// Instances of deployments asked for by their own URL go a minute after their last
@@ -1189,7 +1806,28 @@ impl EnvLive {
         let mut awake = insts.iter().filter(|i| i.awake()).count() as u32;
         // Fewer than needed by the requests in flight for a while → one goes.
         let in_flight: u32 = insts.iter().map(|i| i.in_flight()).sum();
-        let needed = in_flight.div_ceil(run.concurrency).max(run.min_instances).max(1);
+        let mut needed = in_flight.div_ceil(run.concurrency).max(run.min_instances).max(1);
+        // On CPU too: as many as would bring the average under the target.
+        if let (Some(target), Some(load)) = (run.cpu_target, self.cpu_load().filter(|_| awake > 0)) {
+            let by_cpu = ((awake as f64 * load / target as f64).ceil() as u32).min(run.max_instances.max(1));
+            self.cpu_need.store(by_cpu, Ordering::SeqCst);
+            if by_cpu > awake && awake < run.max_instances {
+                // One more at a time, then a fresh window to judge it by.
+                if let Ok(inst) = self.make(tpl).await {
+                    self.insts.lock().push(inst.clone());
+                    let deadline = Instant::now() + self.cfg.wake_timeout;
+                    if self.start(&inst, run, None, deadline).await.is_ok() {
+                        awake += 1;
+                        self.cpu_samples.lock().clear();
+                        self.cpu_need.store(awake, Ordering::SeqCst);
+                        self.log.stream(Stream::System).line(format!("scaled out: CPU at {load:.0}% of the {target}% target, {awake} instances"));
+                    }
+                }
+            }
+            needed = needed.max(by_cpu);
+        } else if run.cpu_target.is_some() {
+            needed = needed.max(self.cpu_need.load(Ordering::SeqCst));
+        }
         let over = awake > needed;
         let scale_down = {
             let mut s = self.over_since.lock();
@@ -1260,30 +1898,74 @@ impl EnvLive {
         }
     }
 
+    /// Whether a stopped instance's process ended by itself with 0 (its work done).
+    async fn exited_cleanly(&self, name: &str) -> bool {
+        self.runtime.exited(name).await.is_some_and(|e| e.code == Some(0) && !e.oom)
+    }
+
+    /// A worker stopped (`clean`: exit 0): counted, and by its restart policy started again on
+    /// a later pass or left stopped (`done`) until a deploy or a restart.
+    fn after_stop(&self, i: &Inst, run: &Run, clean: bool, why: &str) {
+        let in_a_row = if clean && run.restart != Restart::Always { i.crashes.load(Ordering::SeqCst) } else { i.crashes.fetch_add(1, Ordering::SeqCst) + 1 };
+        let again = match run.restart {
+            Restart::Always => true,
+            Restart::OnFailure => !clean && in_a_row < run.restart_tries.unwrap_or(10),
+            Restart::Never => false,
+        };
+        if again {
+            self.log.stream(Stream::System).line(format!("{} stopped: {why}; restarting", i.name));
+        } else {
+            i.done.store(true, Ordering::SeqCst);
+            self.log.stream(Stream::System).line(format!("{} stopped: {why}; its restart policy ({}) leaves it stopped until a deploy or a restart", i.name, run.restart.as_str()));
+        }
+    }
+
     async fn keep_workers(self: &Arc<Self>, tpl: &Arc<Template>) {
         let run = &tpl.run;
+        // A worker that follows its work runs what its backlog wants; else its floor.
+        let target = match &run.scale {
+            Some(_) => self.wanted.load(Ordering::SeqCst).clamp(run.min_instances, run.max_instances.max(run.min_instances)),
+            None => run.min_instances,
+        };
         let insts = self.instances();
         let mut up = 0;
         for i in &insts {
             match i.phase() {
-                Phase::Running(_) if self.runtime.running(&i.name).await => up += 1,
+                Phase::Running(_) if self.runtime.running(&i.name).await => {
+                    up += 1;
+                    // A minute up: its crashes are no longer in a row.
+                    if i.started_at().is_some_and(|t| now_ms() - t > 60_000) {
+                        i.crashes.store(0, Ordering::SeqCst);
+                    }
+                }
                 Phase::Running(_) => {
                     let why = self.exit_reason(&i.name, run).await;
-                    self.crashed(i, &why);
-                    i.crashes.fetch_add(1, Ordering::SeqCst);
-                    self.log.stream(Stream::System).line(format!("{} stopped: {why}; restarting", i.name));
+                    let clean = self.exited_cleanly(&i.name).await;
+                    if clean && run.restart != Restart::Always {
+                        // Done with its work, not a crash.
+                        *i.phase.lock() = Phase::Created;
+                    } else {
+                        self.crashed(i, &why);
+                    }
+                    self.after_stop(i, run, clean, &why);
                 }
                 _ => {}
             }
         }
-        for i in insts.iter().filter(|i| i.phase() == Phase::Crashed) {
-            if up >= run.min_instances {
+        // Left stopped by the policy: they count, so nothing replaces them. So do crashed ones
+        // waiting out their backoff: a new instance in their place would skip it (and run beside
+        // the crashed one once it starts again).
+        let finished = insts.iter().filter(|i| i.done.load(Ordering::SeqCst)).count() as u32;
+        let mut waiting = 0;
+        for i in insts.iter().filter(|i| i.phase() == Phase::Crashed && !i.done.load(Ordering::SeqCst)) {
+            if up + finished >= target {
                 break;
             }
-            // Back off: 1 s doubling to 60 s since it last ran.
+            // Back off: `restart_backoff` (1 s) doubling to 60 times it since it last ran.
             let crashes = i.crashes.load(Ordering::SeqCst).min(6);
-            let wait = Duration::from_secs((1u64 << crashes).min(60));
+            let wait = (self.cfg.restart_backoff * (1u32 << crashes)).min(self.cfg.restart_backoff * 60);
             if i.last_used.lock().elapsed() < wait {
+                waiting += 1;
                 continue;
             }
             *i.last_used.lock() = Instant::now();
@@ -1291,10 +1973,15 @@ impl EnvLive {
             if self.start(i, run, None, deadline).await.is_ok() {
                 up += 1;
             } else {
-                i.crashes.fetch_add(1, Ordering::SeqCst);
+                // Ended within its grace: the policy decides as for any stop.
+                let clean = self.exited_cleanly(&i.name).await;
+                if clean && run.restart != Restart::Always {
+                    *i.phase.lock() = Phase::Created;
+                }
+                self.after_stop(i, run, clean, "it ended right after it started");
             }
         }
-        while up < run.min_instances {
+        while up + finished + waiting < target {
             let Ok(inst) = self.make(tpl).await else { break };
             self.insts.lock().push(inst.clone());
             let deadline = Instant::now() + self.cfg.wake_timeout;
@@ -1302,12 +1989,65 @@ impl EnvLive {
                 break;
             }
             up += 1;
+            self.log.stream(Stream::System).line(format!("scaled out: {up} instances for the backlog"));
+        }
+        // Crashed ones past what's wanted (its backlog fell while they waited): they go, their
+        // crash kept in the crash list; none is started again to be scaled in.
+        if up + finished >= target {
+            let extra: Vec<Arc<Inst>> = self.instances().into_iter().filter(|i| i.phase() == Phase::Crashed && !i.done.load(Ordering::SeqCst)).collect();
+            for i in extra {
+                self.insts.lock().retain(|x| !Arc::ptr_eq(x, &i));
+                let (runtime, name, stopping, released) = (self.runtime.clone(), i.name.clone(), i.stopping.lock().take(), self.released.clone());
+                tokio::spawn(async move {
+                    if let Some(s) = stopping {
+                        let _ = s.await;
+                    }
+                    if !released.load(Ordering::SeqCst) {
+                        runtime.remove(&name).await;
+                    }
+                });
+            }
+        }
+        // Fewer wanted for `scale_down_after`: one goes (the newest), its work given the drain
+        // to finish; the rest follow on later ticks.
+        let fewer = up > target;
+        let scale_in = {
+            let mut s = self.fewer_since.lock();
+            match (fewer, *s) {
+                (false, _) => {
+                    *s = None;
+                    false
+                }
+                (true, None) => {
+                    *s = Some(Instant::now());
+                    false
+                }
+                (true, Some(t)) => t.elapsed() >= self.cfg.scale_down_after,
+            }
+        };
+        if scale_in
+            && let Some(i) = self.instances().into_iter().filter(|i| matches!(i.phase(), Phase::Running(_))).max_by_key(|i| i.started_at())
+        {
+            // Out of the set now; its stop (the drain to finish its work) runs off the wake lock,
+            // so a deploy's commit doesn't wait for it.
+            *i.phase.lock() = Phase::Stopping;
+            self.insts.lock().retain(|x| !Arc::ptr_eq(x, &i));
+            *self.fewer_since.lock() = None;
+            self.log.stream(Stream::System).line(format!("scaled in: {} instances for the backlog", up - 1));
+            let (runtime, name, grace, released) = (self.runtime.clone(), i.name.clone(), self.drain_of(run), self.released.clone());
+            tokio::spawn(async move {
+                if released.load(Ordering::SeqCst) {
+                    return;
+                }
+                let _ = runtime.stop(&name, grace).await;
+                runtime.remove(&name).await;
+            });
         }
     }
 
     /// One cron run: a fresh instance of the active deployment, to its exit or `timeout`.
     pub async fn run_once(self: &Arc<Self>, timeout: Duration) -> anyhow::Result<(String, Option<i32>, bool)> {
-        let e = self.run_to_exit(None, timeout, None, tokio_util::sync::CancellationToken::new(), |_| {}).await?;
+        let e = self.run_to_exit(None, &[], timeout, None, tokio_util::sync::CancellationToken::new(), None).await?;
         Ok((e.deployment, e.code, e.timed_out))
     }
 
@@ -1318,10 +2058,11 @@ impl EnvLive {
     pub async fn run_to_exit(
         self: &Arc<Self>,
         command: Option<&str>,
+        vars: &[(String, String)],
         timeout: Duration,
         log: Option<LogSink>,
         cancel: tokio_util::sync::CancellationToken,
-        made: impl FnOnce(&str),
+        name: Option<String>,
     ) -> anyhow::Result<Exit> {
         let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
         anyhow::ensure!(command.is_some() || tpl.spec.volume.is_none() || !self.held.load(Ordering::SeqCst), "its volume is being restored");
@@ -1331,8 +2072,8 @@ impl EnvLive {
             tpl.spec.volume = None;
             tpl.spec.aliases.clear();
         }
-        let inst = self.make(&tpl).await?;
-        made(&inst.name);
+        tpl.spec.vars.extend(vars.iter().cloned());
+        let inst = self.make_run(&tpl, name).await?;
         let log = log.unwrap_or_else(|| self.log.instance(&inst.name, &inst.deployment));
         let began = Instant::now();
         let ran = async {

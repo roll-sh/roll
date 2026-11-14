@@ -1,7 +1,7 @@
 import { HorizonMark } from "@roll/brand";
 import { useNavigate } from "@tanstack/react-router";
-import { ArrowLeft, ExternalLink, Moon, Play, RotateCw, Rocket, Sun } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { ArrowLeft, ChevronDown, ExternalLink, Moon, Pause, Play, Rocket, RotateCw, Sun } from "lucide-react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import {
   appsApi,
@@ -13,12 +13,14 @@ import {
   sourceLabel,
   type Deployment,
   type Environment,
+  type NewDeploy,
   type Overview,
   type Service,
 } from "@/lib/apps-api";
+import { titled } from "@/lib/head";
 import { workspace, useWorkspace } from "@/lib/workspace-store";
 import { AppShell } from "../app-shell";
-import { btn, Connecting, EmptyPanel, ErrorNote, input, Offline, primary } from "../ui";
+import { btn, Connecting, EmptyPanel, input, Offline, primary } from "../ui";
 import { Deployments } from "./deployments";
 import { DomainsTab } from "./domains";
 import { JobsTab } from "./jobs";
@@ -27,11 +29,12 @@ import { anyPending, POLL_BUSY_MS, POLL_IDLE_MS, POLL_STREAMED_MS, useDeployMark
 import { RuntimeLogs } from "./logs";
 import { MetricsTab } from "./metrics";
 import { SettingsTab } from "./settings";
-import { clock, StateBadge, SureButton, until, useRunner } from "./shared";
+import { clock, RunnerError, StateBadge, SureButton, until, useRunner, type Runner } from "./shared";
 import { UsageTab } from "./usage";
-import { VariablesTab } from "./variables";
+import { RedeployBanner, VariablesTab } from "./variables";
+import { EventsTab } from "./activity";
 
-export const SERVICE_TABS = ["deployments", "logs", "metrics", "variables", "jobs", "shell", "domains", "usage", "settings"] as const;
+export const SERVICE_TABS = ["deployments", "logs", "metrics", "events", "variables", "jobs", "shell", "domains", "usage", "settings"] as const;
 export type ServiceTab = (typeof SERVICE_TABS)[number];
 
 const TAB_LABEL: Record<ServiceTab, string> = {
@@ -43,6 +46,7 @@ const TAB_LABEL: Record<ServiceTab, string> = {
   shell: "Shell",
   domains: "Domains",
   usage: "Usage",
+  events: "Events",
   settings: "Settings",
 };
 
@@ -136,10 +140,11 @@ function NewEnvironment({
   envs: string[];
   busy: boolean;
   onCancel: () => void;
-  onCreate: (name: string, branch: string | null, variablesFrom: string | null) => void;
+  onCreate: (name: string, branch: string | null, variablesFrom: string | null, everyService: boolean) => void;
 }) {
   const [name, setName] = useState("");
   const [branch, setBranch] = useState("");
+  const [every, setEvery] = useState(false);
   const [from, setFrom] = useState(envs.includes(PRODUCTION) ? PRODUCTION : "");
   const ok = SERVICE_NAME.test(name);
   return (
@@ -147,7 +152,7 @@ function NewEnvironment({
       className="rise mt-3 flex flex-wrap items-end gap-2 rounded-xl border border-line bg-panel px-4 py-3"
       onSubmit={(e) => {
         e.preventDefault();
-        if (ok) onCreate(name, branch.trim() || null, from || null);
+        if (ok) onCreate(name, branch.trim() || null, from || null, every);
       }}
     >
       <label className="flex flex-col gap-1 text-[12px] text-muted">
@@ -173,6 +178,10 @@ function NewEnvironment({
           </select>
         </label>
       )}
+      <label className="inline-flex items-center gap-1.5 pb-2 text-[12px] text-muted" title="One environment for the whole project: each of its services gets it">
+        <input type="checkbox" checked={every} onChange={(e) => setEvery(e.target.checked)} />
+        Every service in the project
+      </label>
       <button type="submit" className={primary} disabled={!ok || busy}>
         Create
       </button>
@@ -180,6 +189,93 @@ function NewEnvironment({
         Cancel
       </button>
     </form>
+  );
+}
+
+/**
+ * Why the environment isn't serving as usual, one line each with its fix: paused by the
+ * project's spending limit, in maintenance, private, waiting for a commit's checks, a domain or
+ * its certificate failing (Render's and Railway's banners on the service itself).
+ */
+function Conditions({ service, env, runner, go }: { service: Service; env: Environment; runner: Runner; go: (next: { env?: string; tab?: ServiceTab }) => void }) {
+  const [capped, setCapped] = useState(false);
+  useEffect(() => {
+    let live = true;
+    appsApi.limits(service.project).then((l) => live && setCapped(l.capped), () => {});
+    return () => {
+      live = false;
+    };
+  }, [service.project, env.state]);
+  const lines: { key: string; danger?: boolean; text: ReactNode; action?: ReactNode }[] = [];
+  if (capped)
+    lines.push({
+      key: "capped",
+      danger: true,
+      text: "Paused: the project reached its spending limit for the month, so its services are stopped and nothing deploys.",
+      action: (
+        <button type="button" className={btn} onClick={() => go({ tab: "settings" })}>
+          Raise the limit
+        </button>
+      ),
+    });
+  if (env.paused)
+    lines.push({
+      key: "paused",
+      text: "Paused: nothing runs, wakes, deploys or is scheduled here until it's resumed.",
+      action: (
+        <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => runner.run("resume", () => appsApi.putEnvironment(service.id, env.name, { paused: false }))}>
+          Resume
+        </button>
+      ),
+    });
+  if (env.maintenance)
+    lines.push({
+      key: "maintenance",
+      text: "In maintenance: visitors get the maintenance page (its own URLs still answer).",
+      action: (
+        <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => runner.run("maintenance", () => appsApi.putEnvironment(service.id, env.name, { maintenance: false }))}>
+          End maintenance
+        </button>
+      ),
+    });
+  if (env.private)
+    lines.push({
+      key: "private",
+      text: "Private: only visitors who bring its link get in.",
+      action: (
+        <button type="button" className={btn} onClick={() => go({ tab: "settings" })}>
+          Access settings
+        </button>
+      ),
+    });
+  if (env.waiting_for_ci)
+    lines.push({ key: "ci", text: <>Waiting for the checks on <span className="font-mono">{env.waiting_for_ci.slice(0, 8)}</span> before it deploys.</> });
+  for (const d of env.domains.filter((d) => d.kind === "custom" && (d.status === "failed" || d.tls === "failed")))
+    lines.push({
+      key: `domain:${d.hostname}`,
+      danger: true,
+      text: (
+        <>
+          <span className="font-mono">{d.hostname}</span>: {d.tls === "failed" ? `its certificate failed${d.tls_error ? `: ${d.tls_error}` : ""}` : (d.error ?? "it doesn't verify")}
+        </>
+      ),
+      action: (
+        <button type="button" className={btn} onClick={() => go({ tab: "domains" })}>
+          Open Domains
+        </button>
+      ),
+    });
+  if (lines.length === 0) return null;
+  return (
+    <ul className="rise mt-4 divide-y divide-line overflow-hidden rounded-xl border border-line bg-panel" aria-label="Why it isn't serving as usual">
+      {lines.map((l) => (
+        <li key={l.key} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 text-[13px]">
+          <i className={`size-1.5 shrink-0 rounded-full ${l.danger ? "bg-danger" : "bg-accent"}`} />
+          <span className={`min-w-0 flex-1 ${l.danger ? "text-fg" : "text-muted"}`}>{l.text}</span>
+          {l.action}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -192,10 +288,23 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
   const runner = useRunner(refresh);
   const [overview, setOverview] = useState<Overview | null>(null);
   const [adding, setAdding] = useState(false);
+  // Deploy's options: a revision (Render's deploy a specific commit), no traffic (Vercel's
+  // preview, then promote), without the cache.
+  const [opts, setOpts] = useState(false);
+  const [rev, setRev] = useState("");
+  const [noTraffic, setNoTraffic] = useState(false);
+  const [noCache, setNoCache] = useState(false);
+  const [image, setImage] = useState("");
+  const [note, setNote] = useState("");
   useEffect(() => {
     appsApi.overview().then(setOverview, () => {});
   }, []);
   useDeployMark(data ? [data.service] : null);
+  // Its name in the tab (the route's head only knows "Service" before the service is read).
+  const named = data?.service.name;
+  useEffect(() => {
+    if (named) document.title = titled(named);
+  }, [named]);
 
   const go = (next: { env?: string; tab?: ServiceTab }) => {
     const e = next.env ?? envParam;
@@ -254,11 +363,12 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
   const st = env?.state ?? "none";
   const asleep = st === "stopped" || st === "suspended";
   const localUrl = env?.port && typeof window !== "undefined" ? `http://${window.location.hostname}:${env.port}` : null;
-  const deploy = () => runner.run("deploy", () => appsApi.deploy(service.id, envName));
+  const deploy = (body: NewDeploy = {}) => runner.run("deploy", () => appsApi.deploy(service.id, envName, body));
+
   const redeploy = () => runner.run("redeploy", () => appsApi.redeploy(service.id, envName));
   const upload = service.source.kind === "upload";
   // What a crash's "Roll back" goes to: the newest deployment that was live before this one.
-  const previous = data.deploys?.find((d) => d.status === "inactive" && d.id !== env?.active?.id && d.image) ?? null;
+  const previous = data.deploys?.find((d) => d.status === "inactive" && d.id !== env?.active?.id && d.image && !d.pruned_at) ?? null;
   const busy = runner.busy !== null;
 
   return (
@@ -271,12 +381,21 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
               <Play className="size-3.5" /> Run now
             </button>
           )}
-          {asleep ? (
+          {env?.paused ? (
+            <button className={`${btn} shrink-0`} disabled={busy} onClick={() => runner.run("resume", () => appsApi.putEnvironment(service.id, envName, { paused: false }))} title="Run, wake, deploy and schedule again">
+              <Play className="size-3.5" /> Resume
+            </button>
+          ) : service.run.type !== "web" ? (
+            // A worker's floor (and a schedule) would start it again: sleeping isn't stopping.
+            <SureButton className={`${btn} shrink-0`} disabled={busy || !env} sure="Sure? Pause it" onSure={() => runner.run("pause", () => appsApi.putEnvironment(service.id, envName, { paused: true }))} title="Stop its instances; nothing runs, deploys or is scheduled until it's resumed">
+              <Pause className="size-3.5" /> Pause
+            </SureButton>
+          ) : asleep ? (
             <button className={`${btn} shrink-0`} disabled={busy || !env?.active} onClick={() => runner.run("wake", () => appsApi.wake(service.id, envName))} title="Start an instance now">
               <Sun className="size-3.5" /> Wake
             </button>
           ) : (
-            <SureButton className={`${btn} shrink-0`} disabled={busy || st !== "running"} sure="Sure? Stop it now" onSure={() => runner.run("sleep", () => appsApi.sleep(service.id, envName))} title="Scale to zero now">
+            <SureButton className={`${btn} shrink-0`} disabled={busy || st !== "running"} sure="Sure? Stop it now" onSure={() => runner.run("sleep", () => appsApi.sleep(service.id, envName))} title="Scale to zero now (the next request wakes it)">
               <Moon className="size-3.5" /> Sleep
             </SureButton>
           )}
@@ -288,9 +407,14 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
               <Rocket className="size-3.5" /> Redeploy
             </button>
           ) : (
-            <button className={`${primary} !py-1 !text-[12px]`} disabled={busy} onClick={deploy} title="Build the source and roll it out">
-              <Rocket className="size-3.5" /> Deploy
-            </button>
+            <span className="inline-flex">
+              <button className={`${primary} !rounded-r-none !py-1 !text-[12px]`} disabled={busy} onClick={() => deploy()} title="Build the source and roll it out">
+                <Rocket className="size-3.5" /> Deploy
+              </button>
+              <button className={`${primary} !rounded-l-none border-l border-bg/20 !px-1.5 !py-1 !text-[12px]`} disabled={busy} aria-expanded={opts} aria-label="Deploy options" title={service.source.kind === "image" ? "Another tag, a message, no traffic" : "A revision, a message, no traffic, without the cache"} onClick={() => setOpts((o) => !o)}>
+                <ChevronDown className="size-3.5" />
+              </button>
+            </span>
           )}
         </>
       }
@@ -350,14 +474,78 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           </select>
         </label>
       </div>
+      {opts && !upload && (
+        <form
+          className="rise mt-3 flex flex-wrap items-end gap-3 rounded-xl border border-line bg-panel px-4 py-3"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            const built = service.source.kind === "repo";
+            const body: NewDeploy = {
+              ...(built && rev.trim() ? { revision: rev.trim() } : {}),
+              ...(!built && image.trim() ? { image: image.trim() } : {}),
+              ...(note.trim() ? { message: note.trim() } : {}),
+              ...(noTraffic ? { no_traffic: true } : {}),
+              ...(built && noCache ? { no_cache: true } : {}),
+            };
+            if (await deploy(body)) {
+              setOpts(false);
+              setRev("");
+              setImage("");
+              setNote("");
+            }
+          }}
+        >
+          {service.source.kind === "repo" && (
+            <label className="flex flex-col gap-1 text-[12px] text-muted">
+              Revision
+              <input value={rev} onChange={(e) => setRev(e.target.value)} placeholder="the branch's head" spellCheck={false} className={`${input} w-56 font-mono text-[12px]`} />
+            </label>
+          )}
+          {service.source.kind === "image" && (
+            <label className="flex flex-col gap-1 text-[12px] text-muted" title="This deploy only: the service's image stays as Settings has it">
+              Image
+              <input value={image} onChange={(e) => setImage(e.target.value)} placeholder={service.source.image} spellCheck={false} className={`${input} w-72 font-mono text-[12px]`} />
+            </label>
+          )}
+          <label className="flex flex-col gap-1 text-[12px] text-muted">
+            Message
+            <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={service.source.kind === "repo" ? "the commit's subject" : "what this deploy is"} maxLength={500} className={`${input} w-64 text-[12px]`} />
+          </label>
+          <label className="inline-flex items-center gap-1.5 pb-2 text-[12px] text-muted" title="Built and health-checked at its own URL; put it live from the deployments list">
+            <input type="checkbox" checked={noTraffic} onChange={(e) => setNoTraffic(e.target.checked)} />
+            No traffic (try it first)
+          </label>
+          {service.source.kind === "repo" && (
+            <label className="inline-flex items-center gap-1.5 pb-2 text-[12px] text-muted" title="No cached layer; base images pulled again">
+              <input type="checkbox" checked={noCache} onChange={(e) => setNoCache(e.target.checked)} />
+              Without the cache
+            </label>
+          )}
+          <button type="submit" className={primary} disabled={busy}>
+            Deploy
+          </button>
+          <button type="button" className={btn} onClick={() => setOpts(false)}>
+            Cancel
+          </button>
+        </form>
+      )}
       {adding && (
         <NewEnvironment
           repo={service.source.kind === "repo"}
           envs={service.environments.map((e) => e.name)}
           busy={busy}
           onCancel={() => setAdding(false)}
-          onCreate={async (name, branch, variablesFrom) => {
-            const made = await runner.run("environment", () => appsApi.putEnvironment(service.id, name, { branch, ...(variablesFrom ? { variables_from: variablesFrom } : {}) }));
+          onCreate={async (name, branch, variablesFrom, everyService) => {
+            const body = { branch, ...(variablesFrom ? { variables_from: variablesFrom } : {}) };
+            const made = await runner.run("environment", async () => {
+              if (!everyService) return appsApi.putEnvironment(service.id, name, body);
+              // Each service's own call (each allowed or refused on its own): what didn't get it is said.
+              const all = await appsApi.services(service.project);
+              const done = await Promise.allSettled(all.map((s) => appsApi.putEnvironment(s.id, name, body)));
+              const failed = done.flatMap((r, i) => (r.status === "rejected" ? [`${all[i].name}: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`] : []));
+              if (failed.length) throw new Error(`${failed.length} of ${all.length} services didn't get ${name}: ${failed.join("; ")}`);
+              return done;
+            });
             if (made) {
               setAdding(false);
               go({ env: name });
@@ -366,7 +554,9 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         />
       )}
 
-      <ErrorNote error={runner.error} />
+      <RunnerError runner={runner} />
+      {env && <Conditions service={service} env={env} runner={runner} go={go} />}
+      {env && <RedeployBanner service={service.id} env={env} runner={runner} onRedeploy={redeploy} />}
       {env?.crash_loop && (
         <div role="alert" className="rise mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-danger/40 bg-danger/[0.06] px-4 py-3 text-[13px]">
           <span className="font-medium text-danger">Crashing</span>
@@ -381,10 +571,10 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
               type="button"
               className={btn}
               disabled={busy}
-              title={`Run ${previous.id} again (its image: no build)`}
-              onClick={() => runner.run("rollback", () => appsApi.rollback(service.id, envName, previous.id))}
+              title="Run the deployment live before this one again (its image: no build, its variables)"
+              onClick={() => runner.run("rollback", () => appsApi.rollbackPrevious(service.id, envName))}
             >
-              <RotateCw className="size-3.5" /> Roll back to {previous.revision ? previous.revision.slice(0, 7) : previous.id.slice(-6)}
+              <RotateCw className="size-3.5" /> Roll back
             </button>
           )}
         </div>
@@ -442,11 +632,13 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         ) : tab === "jobs" ? (
           <JobsTab service={service.id} env={envName} runner={runner} cron={service.run.type === "cron"} />
         ) : tab === "shell" ? (
-          <ShellTab service={service.id} env={envName} />
+          <ShellTab service={service.id} env={envName} instances={env?.instances} />
         ) : tab === "domains" ? (
           <DomainsTab service={service.id} env={env!} runner={runner} />
         ) : tab === "usage" ? (
           <UsageTab service={service.id} env={envName} prices={overview?.prices ?? null} />
+        ) : tab === "events" ? (
+          <EventsTab service={service.id} changed={`${data.deploys?.[0]?.id ?? ""}:${data.deploys?.[0]?.status ?? ""}:${env?.state ?? ""}`} />
         ) : (
           <SettingsTab
             service={service}

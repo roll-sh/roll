@@ -76,6 +76,15 @@ impl Apps {
     }
 
     /// A 409 for anything that would spend more in a capped project (deploys of every kind).
+    /// A paused environment deploys nothing until it's resumed.
+    pub(crate) async fn refuse_paused(self: &Arc<Self>, service: &str, env: &str) -> Result<()> {
+        let (sid, e) = (service.to_string(), env.to_string());
+        if self.db(move |s| Ok(s.environment(&sid, &e).map(|r| r.paused).unwrap_or(false))).await? {
+            return Err(Error::Conflict("this environment is paused: resume it to deploy".into()));
+        }
+        Ok(())
+    }
+
     pub(crate) fn refuse_capped(&self, service: &str) -> Result<()> {
         if self.capped(service) {
             return Err(Error::Conflict("this project reached its spending limit for the month: raise the limit to deploy".into()));
@@ -131,6 +140,9 @@ impl Apps {
 
     /// Read the capped services and tell every environment loaded here.
     pub(crate) async fn refresh_capped(self: &Arc<Self>) {
+        // One at a time, read to apply: a pass that read before a raised limit cleared the cap
+        // can't apply its stale list after the raise applied the fresh one.
+        let _one = self.capped_refresh.lock().await;
         let (month, _) = month_of(code_sql::now_ms());
         let Ok(ids) = self.db(move |s| s.capped_services(month)).await else { return };
         let ids: HashSet<String> = ids.into_iter().collect();
