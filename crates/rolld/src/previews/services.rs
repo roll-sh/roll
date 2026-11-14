@@ -284,6 +284,16 @@ pub trait Reach: Send + Sync {
     async fn reach(&self, service: &str, env: &str) -> anyhow::Result<Option<Reached>>;
 }
 
+/// roll apps' own (`Apps::reachable`): the instance's container and port, its lease held.
+pub struct AppsReach(pub Arc<apps_control::Apps>);
+
+#[async_trait]
+impl Reach for AppsReach {
+    async fn reach(&self, service: &str, env: &str) -> anyhow::Result<Option<Reached>> {
+        Ok(self.0.reachable(service, env).await?.map(|r| Reached { container: r.container.clone(), port: r.port, hold: Box::new(r) }))
+    }
+}
+
 pub struct Reached {
     pub container: String,
     pub port: u16,
