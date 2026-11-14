@@ -188,6 +188,10 @@ pub struct Memtable {
     map: SkipMap<MemKey, Option<Bytes>>,
     size: AtomicUsize,
     max_ts: AtomicU64,
+    /// The relations it holds keys of (`hot::PrefixBits`): a read of another relation's
+    /// keys leaves the skip list alone (an index join's lookups of the tables a load or
+    /// ANALYZE wrote nothing to, with the catalog's writes in the memtable).
+    prefixes: hot::PrefixBits,
     /// WAL file holding this memtable's commits.
     wal_seq: u64,
 }
@@ -198,6 +202,7 @@ impl Memtable {
             map: SkipMap::new(),
             size: AtomicUsize::new(0),
             max_ts: AtomicU64::new(0),
+            prefixes: hot::PrefixBits::default(),
             wal_seq,
         }
     }
@@ -208,6 +213,8 @@ impl Memtable {
         key.extend_from_slice(user);
         key.extend_from_slice(&(!ts).to_be_bytes());
         let n = key.len() + value.as_ref().map(|v| v.len()).unwrap_or(0) + 48;
+        // (Before the entry: a reader whose snapshot sees the commit sees its relation.)
+        self.prefixes.add(user);
         self.map.insert(key, value);
         self.size.fetch_add(n, Ordering::Relaxed);
         self.max_ts.fetch_max(ts, Ordering::Relaxed);
@@ -219,6 +226,18 @@ impl Memtable {
 
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+
+    /// Whether it may hold a version of `key` (of its relation, `prefixes`).
+    #[inline]
+    pub(super) fn may_hold(&self, key: &[u8]) -> bool {
+        self.prefixes.may_hold(key)
+    }
+
+    /// Whether it may hold a key in [start, end): false when the range lies in one relation
+    /// it holds no key of.
+    pub(super) fn may_hold_range(&self, start: &[u8], end: &[u8]) -> bool {
+        end.is_empty() || hot::covering(start, end).is_none() || self.prefixes.may_hold(start)
     }
 }
 
@@ -2377,6 +2396,14 @@ impl Cursor {
                 done,
                 batch,
             } => {
+                if buf.is_empty()
+                    && !*done
+                    && let Bound::Included(k) | Bound::Excluded(k) = &*from
+                    && !mem.may_hold_range(k, end)
+                {
+                    // (No key of the range's relation: the skip list isn't read.)
+                    *done = true;
+                }
                 if buf.is_empty() && !*done {
                     let upper = if end.is_empty() {
                         Bound::Unbounded
