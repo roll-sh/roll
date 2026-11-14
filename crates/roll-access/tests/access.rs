@@ -290,6 +290,15 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     assert_eq!(d.call(&token, Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED);
     let token = rotated["token"].as_str().unwrap().to_string();
     assert_eq!(d.call(&token, Method::GET, "/v1/projects", None).await.0, StatusCode::OK);
+    // Rotated with a grace (Stripe's roll key): both work until it ends; rotated again without one,
+    // the old ones stop at once. At most a week.
+    let (_, graced) = d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{grant}/rotate"), Some(json!({ "keep_old_for_s": 3600 }))).await;
+    let newer = graced["token"].as_str().unwrap().to_string();
+    assert_eq!((d.call(&token, Method::GET, "/v1/projects", None).await.0, d.call(&newer, Method::GET, "/v1/projects", None).await.0), (StatusCode::OK, StatusCode::OK));
+    let (_, plain) = d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{grant}/rotate"), None).await;
+    assert_eq!((d.call(&token, Method::GET, "/v1/projects", None).await.0, d.call(&newer, Method::GET, "/v1/projects", None).await.0), (StatusCode::UNAUTHORIZED, StatusCode::UNAUTHORIZED));
+    let token = plain["token"].as_str().unwrap().to_string();
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{grant}/rotate"), Some(json!({ "keep_old_for_s": 604_801 }))).await.0, StatusCode::BAD_REQUEST);
 
     // Revoked: dead on the next request; the audit log has every decision.
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{grant}"), None).await.0, StatusCode::OK);

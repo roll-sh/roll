@@ -236,6 +236,14 @@ export interface Catalog {
 
 export type Me = { kind: "operator"; locked: boolean } | { kind: "token" | "oauth"; grant: Grant; locked: boolean };
 
+/** How long a rotated token's old secret may keep working, in seconds (0: it stops at once). */
+export const KEEP_OLD: { label: string; s: number }[] = [
+  { label: "stops now", s: 0 },
+  { label: "works 1 hour", s: 3600 },
+  { label: "works 1 day", s: 86_400 },
+  { label: "works 7 days", s: 604_800 },
+];
+
 export interface Policy {
   max_days?: number | null;
   require_expiry?: boolean;
@@ -322,7 +330,8 @@ export const accessApi = {
   /** Apply it, made again now, if its rules are still `from` (else 409: look again). */
   applyTighten: (id: string, from: Rule[], days?: number) => call<Grant>("POST", `${token(id)}/tighten`, { from, days }),
   /** A new secret, the same rules; the old one stops at once. Shown this once. */
-  rotate: (id: string) => call<{ grant: Grant; token: string }>("POST", `${token(id)}/rotate`),
+  /** A new secret; `keepOldS`: the old one keeps working that long (at most a week), as Stripe's roll key. */
+  rotate: (id: string, keepOldS?: number) => call<{ grant: Grant; token: string }>("POST", `${token(id)}/rotate`, keepOldS ? { keep_old_for_s: keepOldS } : {}),
   /** What the evaluator would decide for a request, without running it (`token`: the operator asks for one). */
   check: (method: string, path: string, opts: { body?: unknown; token?: string } = {}) =>
     call<{ decision: "allow" | "ask" | "deny"; product?: string; action?: Action; resource?: string | null; route?: string; why?: string }>(

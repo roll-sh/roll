@@ -14,6 +14,7 @@ import {
   type Checkup,
   productName,
   withToolsets,
+  KEEP_OLD,
   startsLater,
   toolsetCost,
   type ToolsetCost,
@@ -304,11 +305,15 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
   const { copied, copy } = useCopy();
   const status = statusOf(g);
   const r = reach(g);
+  // A rotation can leave the old secret working for a while, so deployments switch first.
+  const [keepOld, setKeepOld] = useState(0);
+  const [kept, setKept] = useState(0);
   const rotate = async () => {
     setBusy(true);
     setError(null);
     try {
-      setSecret((await accessApi.rotate(g.id)).token);
+      setSecret((await accessApi.rotate(g.id, keepOld)).token);
+      setKept(keepOld);
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -373,9 +378,18 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
               Edit
             </button>
             {g.kind === "token" && (
-              <button onClick={rotate} disabled={busy} className={btn} title="A new secret with the same rules; the old one stops at once">
-                Rotate
-              </button>
+              <span className="flex items-center gap-1">
+                <button onClick={rotate} disabled={busy} className={btn} title="A new secret with the same rules">
+                  Rotate
+                </button>
+                <select value={keepOld} onChange={(e) => setKeepOld(Number(e.target.value))} className={`${input} h-7 text-[11px]`} aria-label="The old secret after rotating">
+                  {KEEP_OLD.map((k) => (
+                    <option key={k.s} value={k.s}>
+                      old one {k.label}
+                    </option>
+                  ))}
+                </select>
+              </span>
             )}
             <button onClick={() => setConfirm(true)} className={btn}>
               Revoke
@@ -399,7 +413,9 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
             <code className="min-w-0 flex-1 truncate font-mono text-[12px]">{secret}</code>
             <CopyButton id={`rotated-${g.id}`} text={secret} copied={copied} onCopy={copy} />
           </div>
-          <p className="text-[12px] text-subtle">The new secret: copy it now. The old one stopped working.</p>
+          <p className="text-[12px] text-subtle">
+            The new secret: copy it now. {kept ? `The old one keeps working for ${KEEP_OLD.find((k) => k.s === kept)?.label.replace("works ", "")}.` : "The old one stopped working."}
+          </p>
         </div>
       )}
       {editing && (

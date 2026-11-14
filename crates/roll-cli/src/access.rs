@@ -26,7 +26,12 @@ pub enum Token {
     /// Revoke a token or connection: every request with it fails from now on.
     Revoke { id: String },
     /// A new secret for a token, with the same rules; the old one stops working at once.
-    Rotate { id: String },
+    Rotate {
+        id: String,
+        /// The old secret keeps working this long (1h, 2d; at most 7d) while deployments switch.
+        #[arg(long)]
+        keep_old: Option<String>,
+    },
     /// Change a token: its name, expiry, addresses, or (with --preset/--allow/--ask) its rules.
     Edit(Box<Edit>),
     /// Its rules narrowed to the actions and resources its requests used (never wider); `--apply`
@@ -511,8 +516,9 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 print_grant(&g);
             }
         }
-        Token::Rotate { id } => {
-            let made = api.post(&format!("/v1/access/tokens/{id}/rotate"), json!({})).await?;
+        Token::Rotate { id, keep_old } => {
+            let keep = keep_old.as_deref().map(|k| span(k, "--keep-old")).transpose()?.flatten().map(|ms| ms / 1000);
+            let made = api.post(&format!("/v1/access/tokens/{id}/rotate"), json!({ "keep_old_for_s": keep })).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&made)?);
                 return Ok(());

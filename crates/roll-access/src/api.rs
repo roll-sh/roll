@@ -470,7 +470,19 @@ async fn forget(State(a): S, ext: Extensions, Path((id, approval)): Path<(String
 }
 
 /// A new secret, the same rules: shown once. A grant may rotate itself, or tokens it covers.
-async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+/// `POST /v1/access/tokens/{id}/rotate`, `{keep_old_for_s?}`: the old secret stops now, or works
+/// that much longer (at most a week) while deployments move to the new one.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RotateBody {
+    keep_old_for_s: Option<i64>,
+}
+
+async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
+    let body: RotateBody = if body.iter().all(u8::is_ascii_whitespace) { RotateBody::default() } else { serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))? };
+    if body.keep_old_for_s.is_some_and(|s| s < 0 || s * 1000 > crate::store::MAX_KEEP_OLD_MS) {
+        return Err(Error::BadRequest("keep_old_for_s is 0 to 604800 (a week)".into()));
+    }
     let (target_id, a2) = (id.clone(), a.clone());
     let target = blocking(a2, move |a| a.store.get(&target_id)).await?;
     if let Who::Grant(g) = who(&a, &ext)? {
@@ -478,7 +490,8 @@ async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
     }
     // A new secret is a new token: it meets the policy (set an expiry first if it must expire).
     a.check_policy(target.expires_at)?;
-    let (grant, token) = blocking(a, move |a| a.store.rotate(&id)).await?;
+    let keep = body.keep_old_for_s.map(|s| s * 1000);
+    let (grant, token) = blocking(a, move |a| a.store.rotate(&id, keep)).await?;
     Ok(Json(json!({ "grant": grant, "token": token })))
 }
 

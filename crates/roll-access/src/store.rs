@@ -471,6 +471,9 @@ fn write_audit(db: &Db, events: &[AuditEvent]) {
     }
 }
 
+/// The longest an old secret keeps working after a rotation (Stripe's limit too).
+pub const MAX_KEEP_OLD_MS: i64 = 7 * 86_400_000;
+
 /// A grant's columns, as `grant_row` reads them (22 of them: a query may add its own after).
 const GRANT_COLUMNS: &str = "g.id, g.name, g.kind, g.rules, g.expires_at, g.ip_allow, g.created_by, g.created_at, g.last_used_at, g.last_used_ip, g.revoked_at, \
      c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.revoked_why, g.temp_rules, g.ask_otherwise, g.not_before";
@@ -928,7 +931,9 @@ impl Store {
 
     /// A new secret for a token, the same rules (the old secret stops working at once). OAuth
     /// connections rotate through their refresh tokens instead.
-    pub fn rotate(&self, id: &str) -> Result<(Grant, String)> {
+    /// A new secret for a token; the old ones stop now, or keep working for `keep_old_ms` (at most
+    /// a week) so deployments can switch over first (Stripe's "roll key").
+    pub fn rotate(&self, id: &str, keep_old_ms: Option<i64>) -> Result<(Grant, String)> {
         let grant = self.get(id)?;
         if grant.kind() != GrantKind::Token {
             return Err(Error::Conflict("an OAuth connection rotates its own tokens: revoke it and connect again".into()));
@@ -938,8 +943,18 @@ impl Store {
         }
         let token = new_secret(TOKEN_PREFIX);
         let now = code_sql::now_ms();
+        let keep = keep_old_ms.filter(|ms| *ms > 0).map(|ms| ms.min(MAX_KEEP_OLD_MS));
         self.db.write(|c| {
-            c.execute("DELETE FROM grant_secrets WHERE grant_id = ?", [id])?;
+            match keep {
+                // The old secrets end then (sooner if they already did), and the spent ones go.
+                Some(ms) => {
+                    c.execute("UPDATE grant_secrets SET expires_at = ? WHERE grant_id = ? AND (expires_at IS NULL OR expires_at > ?)", params![now + ms, id, now + ms])?;
+                    c.execute("DELETE FROM grant_secrets WHERE grant_id = ? AND expires_at IS NOT NULL AND expires_at <= ?", params![id, now])?;
+                }
+                None => {
+                    c.execute("DELETE FROM grant_secrets WHERE grant_id = ?", [id])?;
+                }
+            }
             c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'token', NULL, ?)", params![hash(&token), id, now])?;
             Ok::<_, Error>(())
         })?;
