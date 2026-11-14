@@ -175,7 +175,7 @@ impl Secrets {
                 Some(u) => Arc::new(crate::access::Within(grant, self.own_projects(&u.user)?)),
                 None => Arc::new(grant),
             };
-            return Ok(Caller { principal: format!("token:{}", g.id), grants, ip: None });
+            return Ok(Caller { principal: format!("token:{}", g.id), grants, ip: None, runtime: false });
         }
         // A signed-in person (the gate resolved the session on this request): their own projects.
         // An admin's session is the operator, as their token would be.
@@ -203,7 +203,7 @@ impl Secrets {
         if admin {
             return Ok(Caller::operator());
         }
-        Ok(Caller { principal: user.to_string(), grants: Arc::new(self.own_projects(user)?), ip: None })
+        Ok(Caller { principal: user.to_string(), grants: Arc::new(self.own_projects(user)?), ip: None, runtime: false })
     }
 
     /// The projects `user` owns, as the workspace has them now, and their roll code owner.
@@ -284,7 +284,7 @@ impl Secrets {
             Some(i) => format!("identity:{i}"),
             None => format!("token:{}", t.id),
         };
-        Ok(Caller { principal, grants: Arc::new(scope), ip: None })
+        Ok(Caller { principal, grants: Arc::new(scope), ip: None, runtime: false })
     }
 
     pub fn tokens(&self, project: &str, caller: &Caller) -> Result<Vec<Token>> {

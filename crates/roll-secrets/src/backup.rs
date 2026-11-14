@@ -106,7 +106,11 @@ impl Secrets {
                 let mut out = vec![];
                 for (id, path, version, ct, key, comment, tags, link, expires_at) in secrets {
                     let link: Option<Link> = link.and_then(|l| serde_json::from_str(&l).ok());
+                    // A sensitive key's value never leaves roll for a person, a backup included:
+                    // it's restored by name, to be set again.
+                    let sensitive = crate::names::sensitive(&from_json::<Vec<String>>(&tags));
                     let value = match (&link, ct) {
+                        _ if sensitive => None,
                         (None, Some(ct)) => Some(dek.open(&crate::crypto::value_aad(project, &id, version), &ct)?),
                         _ => None,
                     };

@@ -2886,6 +2886,10 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(Strin
     }
     let env = env_of(v["values"].as_object().cloned().unwrap_or_default().into_iter(), r);
     let leases = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)).collect();
+    let withheld: Vec<&str> = v["withheld"].as_array().into_iter().flatten().filter_map(|k| k.as_str()).collect();
+    if !withheld.is_empty() {
+        eprintln!("roll run: left out {} (sensitive: only roll's runtimes read them)", withheld.join(", "));
+    }
     Ok((env, leases))
 }
 

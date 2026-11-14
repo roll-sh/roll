@@ -308,6 +308,10 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
                 };
                 let comment_now = comment.clone().or_else(|| cur.as_ref().map(|c| c.comment.clone())).unwrap_or_default();
                 let tags_now = tags.clone().or_else(|| cur.as_ref().map(|c| c.tags.clone())).unwrap_or_default();
+                // Sensitive is for good: taking the tag off would hand the value back to people.
+                if cur.as_ref().is_some_and(|c| names::sensitive(&c.tags)) && !names::sensitive(&tags_now) {
+                    return Err(Error::BadRequest(format!("{} is sensitive for good: delete it and set it again to have a value people can read", item.key)));
+                }
                 let weak = stored_value.as_ref().and_then(|v| crate::strength::weakness(&item.key, v.expose()));
                 // Unless the writer said: a new certificate's own date, else the date it had.
                 let expires_now = expires_at.unwrap_or_else(|| value.as_ref().and_then(|v| certificate_expiry(v.expose())).or_else(|| cur.as_ref().and_then(|c| c.expires_at)));
