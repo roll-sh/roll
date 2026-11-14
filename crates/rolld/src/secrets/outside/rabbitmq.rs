@@ -13,6 +13,8 @@ use sha2::{Digest, Sha256};
 
 /// The most of one answer read.
 const ANSWER_MAX: usize = 256 * 1024;
+/// The most topic permissions a template may have (all are copied, or the login isn't made).
+const TOPICS_MAX: usize = 100;
 
 /// The URL's settings: `rabbitmq://admin:password@host:15671/vhost` (no vhost: `/`).
 pub(super) struct Url {
@@ -90,6 +92,7 @@ fn path(segments: &[&str]) -> String {
 async fn call(c: &Conn, method: reqwest::Method, segments: &[&str], body: Option<Json>) -> Result<Option<Json>, String> {
     let url = c.base.join(&path(segments)).map_err(|_| "a bad path".to_string())?;
     let host = c.base.host_str().unwrap_or_default().to_string();
+    let method_is_read = method == reqwest::Method::GET;
     let mut req = c.client.request(method, url).basic_auth(&c.user, Some(&c.password));
     if let Some(b) = body {
         req = req.json(&b);
@@ -103,7 +106,8 @@ async fn call(c: &Conn, method: reqwest::Method, segments: &[&str], body: Option
         }
         bytes.extend_from_slice(&chunk);
     }
-    if status == reqwest::StatusCode::NOT_FOUND {
+    // A 404 is "there's none" only for a read; a write that finds nothing failed.
+    if status == reqwest::StatusCode::NOT_FOUND && method_is_read {
         return Ok(None);
     }
     if !status.is_success() {
@@ -176,11 +180,18 @@ pub(super) async fn set_password(c: &Conn, role: &str, password: &str) -> Result
 
 pub(super) async fn create_login(c: &Conn, name: &str, password: &str, group: &str) -> Result<(), String> {
     let perms = call(c, reqwest::Method::GET, &["permissions", &c.vhost, group], None).await?.ok_or_else(|| format!("the template user {group} has no permissions on {}", c.vhost))?;
-    let topics = call(c, reqwest::Method::GET, &["topic-permissions", &c.vhost, group], None).await?.unwrap_or(Json::Null);
+    // Every topic permission or none at all: an exchange without one is open to every routing
+    // key, so a copy that stopped short would give more than the template has.
+    let topics = match call(c, reqwest::Method::GET, &["topic-permissions", &c.vhost, group], None).await? {
+        None => vec![],
+        Some(Json::Array(t)) if t.len() <= TOPICS_MAX => t,
+        Some(Json::Array(_)) => return Err(format!("the template user {group} has more than {TOPICS_MAX} topic permissions: roll copies them all or none")),
+        Some(_) => return Err("the broker's topic permissions aren't a list".into()),
+    };
     call(c, reqwest::Method::PUT, &["users", name], Some(json!({ "password_hash": password_hash(password), "hashing_algorithm": "rabbit_password_hashing_sha256", "tags": "" }))).await?;
     let granted = async {
         call(c, reqwest::Method::PUT, &["permissions", &c.vhost, name], Some(json!({ "configure": perms["configure"], "write": perms["write"], "read": perms["read"] }))).await?;
-        for t in topics.as_array().into_iter().flatten().take(100) {
+        for t in &topics {
             call(c, reqwest::Method::PUT, &["topic-permissions", &c.vhost, name], Some(json!({ "exchange": t["exchange"], "write": t["write"], "read": t["read"] }))).await?;
         }
         Ok::<_, String>(())
@@ -194,8 +205,12 @@ pub(super) async fn create_login(c: &Conn, name: &str, password: &str, group: &s
 
 pub(super) async fn drop_login(c: &Conn, name: &str) -> Result<(), String> {
     // Deleted first, so it can open nothing new; then its connections close (where the broker
-    // has the route, 3.11 and later).
-    call(c, reqwest::Method::DELETE, &["users", name], None).await?;
+    // has the route, 3.11 and later). A user that's gone already is fine.
+    match call(c, reqwest::Method::DELETE, &["users", name], None).await {
+        Ok(_) => {}
+        Err(e) if call(c, reqwest::Method::GET, &["users", name], None).await?.is_none() => drop(e),
+        Err(e) => return Err(e),
+    }
     let _ = call(c, reqwest::Method::DELETE, &["connections", "username", name], None).await;
     Ok(())
 }

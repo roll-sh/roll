@@ -645,7 +645,9 @@ read up to 256 KiB). The admin needs the `administrator` tag (checked at registr
 vhost and the users). Passwords go as RabbitMQ's own salted SHA-256 (`password_hash`), so the
 broker never sees one. Rotation sets a new password on two users that take turns, keeping their
 tags; `group` names a template user whose permissions and topic permissions on the vhost a
-dynamic user copies (no tags). RabbitMQ has no expiry for a user: ending a lease deletes it, then
+dynamic user copies (no tags), all of them or none: an exchange without a topic permission is open
+to every routing key, so a template with more than 100 is refused rather than copied in part, and
+a grant that fails undoes the user. RabbitMQ has no expiry for a user: ending a lease deletes it, then
 closes its connections where the broker has that route (3.11 and later). Checked against RabbitMQ
 4: rotation (tags kept, the old password refused), a dynamic user with the template's permissions
 that's gone once dropped, and an untrusted certificate, a wrong password and a user without the
