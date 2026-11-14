@@ -1636,7 +1636,9 @@ stacked pull request is mergeable, and #20 is level with `main`.
 Then roll secrets for VS Code (#58): hovers and warnings where code reads a variable, names
 completed, and `.env` values moved into roll as `roll://` references (checked in code-server).
 Then `roll completions` and direnv documented (#59).
-Docker builds (BuildKit secrets) and Compose are documented and checked.
+Docker builds (BuildKit secrets) and Compose are documented and checked. Then a server's
+credential under a name frameworks put in the browser bundle (`NEXT_PUBLIC_`, `VITE_`…) is
+flagged on write and in health (#60).
 
 Then (2026-11-14, latest): `roll run` masks values in what the command prints when it isn't a
 terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kubernetes with External
@@ -1746,26 +1748,28 @@ user's call).
 
 1. **A tenth independent review** of ESO (#55), renewing identity logins (#56), pinned issuer keys
    (#57) and the ninth review's fixes, and its fixes.
-2. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
+2. **Measure health and resolve again** at the Performance table's scale (9,900 keys), now that
+   health judges links per row (#60) and values answers take a digest first (#49).
+3. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
    #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
-3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
+4. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
-4. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
+5. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
    tools are ready), a live check of OpenSearch links (#29 and #51 in one build), and splitting the
    CLI's `secrets.rs` (2,700 lines) by command once the stacked pull requests that touch it have
    landed.
-5. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
+6. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
-6. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
+7. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
    token; the trust policy pins `sub`, as GCP's and Azure's do).
-7. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
+8. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
    notice.
-8. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
+9. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
    installs list Slack user ids and act as the owner's automation; a review must count as the
    person who pressed the button (their permissions, the request's gates), never as the app.
-9. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+10. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
    project can link their own databases, buckets and streams.
-10. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+11. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
 
 Open pull requests after this one:
@@ -1792,6 +1796,8 @@ Open pull requests after this one:
   after its grace; a user with two keys already is refused, never pruned.
 - **#55, pulling into Kubernetes with External Secrets Operator** (after #20): its webhook
   provider (one store for whole environments and single keys) and `values?dynamic=false`.
+- **#60, server credentials under browser-bundle names** (after #20): `NEXT_PUBLIC_`, `VITE_`,
+  `PUBLIC_`… holding a server-only value; the write warns, health's `public` finding.
 - **#59, `roll completions` and direnv** (after #20): completion scripts for every command; a
   documented `.envrc`.
 - **#58, roll secrets for VS Code** (after #20): hovers, warnings and completion where code reads
