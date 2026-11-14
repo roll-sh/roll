@@ -234,20 +234,24 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-1. **Indexing CPU and benchmarks on a quiet host** (docs/benchmarks/search.md). Indexing leads
-   both engines with 8 clients (nyc_taxis 90k docs/s against Elasticsearch's 66k and
-   OpenSearch's 60k; an ECS log 74.5k against 59.0k and 41.3k), but with one client roll spends
-   more CPU per document than Elasticsearch (51.8 against 34.6 µs on the ECS log), about a quarter
-   of it BP reordering at merge. Landed: top-k numeric sorts collect by bands when documents arrive
-   against the sort (`@timestamp` desc on logs indexed oldest first, without BP: 84.9 → 1.4 ms;
-   with BP, nyc_taxis term + sort 14.7 → 1.4, http_logs range + sort 6.2 → 1.9; a BP index's `so`
-   range + sort +13%). BP over text fields only now costs no log sort (ECS indexing 61.0 → 41.5
-   µs/doc) but loses keyword-filtered and other sorts up to 60% (not adopted); next is applying it
-   only to time-series and log indices (`index.mode: logsdb`, data streams), measured. Then the
-   request path's allocations (malloc/free are ~10% of the bulk threads), a full rerun of every
-   Rally track with variance (after the vector lane's benchmarks: `autohisto_agg`, counted from the
-   points tree, 27.8 → 3.0 ms in an A/B), one allocator policy (rolld's against search-dev's purge
-   governor), `terms_enum`'s per-request overhead.
+1. **The Rally losses left by the full rerun** (docs/benchmarks/search.md, Round 8: every Rally
+   track against Elasticsearch 9.5.5 and OpenSearch 3.9 at `83fac5982`, three alternating rounds
+   each). Roll leads most tasks 1.3-4x and indexes 1.05-1.48x Elasticsearch's docs/s on
+   0.63-0.95x its server CPU. Where it still loses, ranked: nyc_taxis `distance_amount_agg` 1.27x
+   Elasticsearch (103 against 81 ms: roll runs a shard on one thread, Elasticsearch splits its
+   segments across threads at twice roll's CPU); nyc_taxis `autohisto_agg` 1.19x OpenSearch (tie),
+   with `date_histogram_agg`, because the points-tree counts don't apply to segments of 0.8M+
+   documents (Rally's merges make them; the A/Bs' script loads didn't): find why; http_logs
+   `sort-size-desc-after-force-merge-1-seg` 1.12x OpenSearch (tie); geonames `asc_sort_population`
+   1.11x and `desc_sort_population` 1.07x Elasticsearch (ties), +11-16% server CPU since
+   `5942eea08`'s sort bands; the bulk p50 on nyc_taxis and so 1.04x (ties, throughput leads);
+   http_logs `scroll` 1.03x OpenSearch (tie). Regressions to fix: http_logs indexing +8% CPU per
+   document since `dbe79f8f7` (every bulk item walks the mapping for `semantic_text` fields,
+   twice), and the bands' cost. Not a loss: `terms_enum` (OpenSearch has no such API; its
+   "0.57 ms" was an error). Still open from before: one-client indexing CPU (51.8 against 34.6
+   µs/doc on the ECS log), BP only for time-series and log indices, the request path's
+   allocations, one allocator policy. Round 6's other tracks (percolator, nested, noaa, pmc, the
+   vector tracks) are being rerun.
 2. **Language analysis: the plugins Elastic Cloud and Amazon OpenSearch Service ship** (in
    progress). Landed: `analysis-phonetic` (every encoder, Commons Codec's algorithms ported:
    identical codes to Java on 150,000 geonames names), `analysis-stempel` (Polish: Lucene's
