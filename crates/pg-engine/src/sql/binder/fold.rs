@@ -511,6 +511,45 @@ pub(crate) fn const_params(p: &Plan) -> bool {
     })
 }
 
+/// Whether a custom plan of `p` folds a parameter's value: an immutable call or cast over
+/// constants and parameters only, a parameter among them (the custom plan has the values in
+/// their place, and eval_const_expressions simplifies it, failing as it may).
+pub(crate) fn param_folds(p: &Plan) -> bool {
+    fn tree(e: &Expr, depth: usize, param: &mut bool) -> bool {
+        depth < 64
+            && match e {
+                Expr::Const(..) => true,
+                Expr::Param(..) => {
+                    *param = true;
+                    true
+                }
+                Expr::Call(d, args, _) => {
+                    d.volatility == 'i' && !d.is_srf() && args.iter().all(|a| tree(a, depth + 1, param))
+                }
+                Expr::Cast(a, ..) => e.is_immutable() && tree(a, depth + 1, param),
+                Expr::NullIf(a, b, d, _) => {
+                    d.volatility == 'i' && tree(a, depth + 1, param) && tree(b, depth + 1, param)
+                }
+                _ => false,
+            }
+    }
+    crate::stack::grow(|| {
+        let mut found = false;
+        for e in exprs(p) {
+            e.walk(&mut |x| {
+                if !found && matches!(x, Expr::Call(..) | Expr::Cast(..) | Expr::NullIf(..)) {
+                    let mut param = false;
+                    found = tree(x, 0, &mut param) && param;
+                }
+            });
+            if found {
+                return true;
+            }
+        }
+        crate::sql::explain::plan_inputs(p).into_iter().any(|c| param_folds(c))
+    })
+}
+
 /// The error a planned statement fails with: the first constant expression still in its
 /// plan that fails to fold, its error as recorded in `pending` when it was bound.
 pub(crate) fn first_error(plan: &Plan, pending: &[(Expr, Error)], ctx: &ExecCtx) -> Option<Error> {

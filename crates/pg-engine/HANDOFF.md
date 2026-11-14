@@ -3406,6 +3406,21 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     workers with its keys computed there (`compute_in_workers`, 204's path). q13 user
     instructions -1.6 to -3.0%, wall 1.200 -> 1.110 s (3 of 3 pairs), the executor thread's
     share of samples 11.4% -> 8.7%.
+  - **A parallel index scan's chunk reads dense keys' rows as a range** (`parscan::dense_rows`,
+    `IndexChunk`; after agent 226's round, on the coordinator's lead): q18's subquery reads
+    lineitem through lineitem_pkey in the workers, each chunk's rows fetched 256 at a time by
+    point lookups (`Store::get_versions`: 22% of q18's samples, each lookup through the hot
+    ranges' lock). When a batch's data keys are ascending integer keys close together
+    (`scan::dense_keys`, as the serial `fetch_dense` asks: a primary key's entries over a
+    bulk-loaded table), they are read as the range they span (`Store::scan`, a batch at a time
+    by reference) and matched to the keys. q18 user instructions -8.7 / -8.5 / -8.5%, own-run
+    wall 2.309 -> 2.156 s (3 of 3 pairs), CPU 7.48 -> 6.96 s; other queries within +-1.2% but
+    q09 +2.8% once, q03 -3.7% once; 22-query instructions -1.96 / -1.48 / -1.70%. Six
+    22-query rounds against its base (`5ae96d1e3`, host load 20-28): 14.37 against 13.62 s in
+    the first three (a busy stretch: PostgreSQL's own passes moved 7%), 12.55 against 13.47 s
+    in the next three; all hashes PostgreSQL's; peaks 1,693-1,712 against 1,690-1,710 MB.
+    Point, range and short-transaction smoke flat (45.7k / 45.4k, 341k / 345k instructions an
+    operation).
   - Dropped (`~/.cache/a227/patches/dropped-c002-kept-fetch-scan.*`): an index scan's row
     fetches through one store scan kept from call to call and sought on (`Scan::reseek`)
     instead of a new merging scan per call: q20 lost 1.7% of c001's gain, q02 / q11 flat
@@ -3432,7 +3447,12 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     crash rounds pass, the regression suite 51,148 / 51,150 units with none newly differing,
     isolation 1,647 / 1,648 permutations (intra-grant-inplace, as on the other trains), pg_dump
     TAP 14,609 passed (rerun alone: the first run's client container had made its mount
-    directory as root).
+    directory as root). Again on `da4c6aa34` (with the q18 change): the same, but the debug
+    crate tests stop at `crash_bulk::kill_during_compactions_after_deletes`, whose test thread
+    overflows its stack in the debug build every run; it does so on `e12edc326` too (this
+    round's head without the q18 change, built and run the same way), so it came with the
+    commits between the two trains (the test and compaction changes of `7c8da4c1b` /
+    `d23bfde2d`, bulk-write owners), not with this round's code.
   - Next steps (largest first): q02 (0.62 s against 0.25: the 158,720-row hash build of nested
     loop rows, concat and Value clones, 22% the partsupp fetches; its SubPlan's nested loops
     reopened per run: a nested loop and sequential scan rescan would keep them); q20 (0.35
@@ -9951,7 +9971,9 @@ analytic scans; point reads), bytes written, data-dir size, peak memory:
 1. **The file form is the cache form** (format 2, `sst.rs`'s module comment): entries as
    `Block` holds them (the version left out when it is the block's, an index entry's row key
    derived from its key, keys before values), the restart words and value offsets stored after
-   them, so a block read is decompressed and used: no decode, no copy. A block holds exactly the
+   them, so a block read is decompressed and used: no decode (its entries copied once into an
+   allocation of their size, as the decode's output was, so the cache holds what it held). A
+   block holds exactly the
    entries format 1's did (it ends where format 1's 16 kB would), so the cache holds the same
    bytes block for block and every read of a cached block runs the same code on the same bytes.
    Effects: (1) compaction compresses 31% fewer bytes (index files 63-78% fewer) and reads its
@@ -10016,6 +10038,67 @@ read, written, reopened; a kill -9 during the compactions that turn its files in
 
 **Steps**, by measured gain per risk: (1) items 1+2, gated as one; (2) block copy in compaction;
 (3) the in-memory column cache (with the executor agent); (4) deletion vectors.
+
+## Storage format v2, round 1 (agent 231)
+
+BENCH.md "Storage format v2, round 1" has the gates and the same-day tables. What landed (two
+commits, gated together as `s003`):
+
+- **Block format 2** (`storage/sst.rs`, module comment): `SstWriter::put2` writes an entry as
+  `Block` holds it (`shared | unshared << 2 | F_TS | F_DERIVED`, the value field, the key's bytes;
+  values after all the entries), `body2` appends the restart words and value offsets, the block's
+  version, entry and restart counts, `common` and flags (bit 0 derived values, bits 4-7 the
+  restart interval's log), and `Block::load` reads them back (no `decode_with` pass; the entries
+  and values copied into an allocation of their own size, as `decode_with`'s output is: a slice
+  kept the trailer and the read's frame, TPC-H's peak +12-20 MB). A block ends where format 1's
+  would (`raw1`, what format 1 would have written), so the cache holds the same bytes, block for
+  block (`format2_reads_as_format1` compares every block's cache form with format 1's).
+  The index gains each block's entry count (for count-only scans and deletion vectors later),
+  the footer the format; the bloom filter hashes a key 8 bytes at a time (`hash64_2`) and the
+  writer counts shared prefixes 8 bytes at a time (`common_prefix`: format 1's files are byte for
+  byte as before). Codec byte 2 is LZ4 (readers take it; nothing writes it: more bytes than zstd
+  everywhere measured).
+- **Versions**: `Manifest::format` and the footer's; a newer one is refused with an error naming
+  both (`newer_formats_are_refused`, `format_1_files_read_beside_format_2`). Builds before format 2
+  refuse its files at open ("bad footer"): no silent misread. `StoreOptions::format = 1` writes
+  format 1 as `248f9f8fa` did (the tests' pinned old encoder).
+- **Migration**: lazy. Flushes, ingests, compactions, range deletions' rewrites and the close's
+  rewrite of linked runs write format 2; format 1 files are read as before until one of those
+  rewrites them. A transaction's runs (`txn::spill`) stay format 1 (their values carry tags that
+  `Block::decode_linked` takes off): a linked run at L1 is format 1 until compaction or a clean
+  close. Making runs format 2 was estimated (the decode of linked runs: about 1% of the bulk
+  script, 11% of the compaction after its DELETE) and not done: their tags would have to move
+  into the entry header or a side array, and a transaction's own reads of its runs would then
+  rebuild tagged values.
+- **zstd level**: 1, as before (level -1 measured as `s001`: compaction -10%, VACUUM -16%, but
+  the OLTP accounts' rows take 28% more bytes stored).
+- Tests: `sst::tests::format2_reads_as_format1` (every codec, every block's cache form equal to
+  format 1's, another restart interval), `newer_formats_are_refused`, `common_prefix_and_hash64_2`;
+  `storage::tests::format_1_files_read_beside_format_2` (a store of format 1 read at every
+  snapshot by this build, then format 2 L0 over format 1 L1, then mixed L1, reopened, a newer
+  manifest refused); `tests/block_format.rs`: `format_1_store_reads_and_upgrades` (the fixture
+  `tests/data/storage_format1.tar.gz`, written by `248f9f8fa` from `storage_format1.sql`: read
+  as written, then writes, an index build, updates, deletes, VACUUM; mixed formats on disk; read
+  after a restart and after every row is rewritten), `kill_during_upgrade_compactions` (kill -9
+  while compactions turn the fixture's files into format 2, three rounds).
+- `storage::sst::study` (an ignored test) is the measuring tool of the design section; run it on
+  any store directory.
+
+**What the executor can take from format 2** (not wired; for the next executor agent): each
+block's entry count is in the file's index (`SstWriter::finish`, read and dropped by
+`SstReader::open` now): a count-only scan of a range whose L1 blocks have one version per key, no
+tombstone and no newer source in their range can count from the index without reading the
+blocks (count(*) is 2.7x PostgreSQL, 7.9x pgrust in the bulk script). A column-subset reader
+needs no format change: `cols::decode_cols` is the seam, and the measured lever is typed columns
+kept per cached block (design item 4).
+
+**Next**, by size: (1) deletion vectors (design item 5: DELETE 6.2 G and its compaction 6.4 G
+against PostgreSQL's 1.7 G for both); (2) the compaction's own work (`SstWriter::add` 12-16% of
+it, the merge's `Cursor::head` / `Merge::min` / `Block::read` 15%, format 1 inputs' decode 11%);
+(3) cold in-block seeks (agent 230's lead: restart words in their own allocation, then the
+entries; the format can now change the restart interval per block, but the study shows the
+misses, not the interval, are the cost); (4) the in-memory column cache (design item 4) against
+a cache sized to the data.
 
 ## Analytic path against pgrust (agent 220)
 
@@ -10223,6 +10306,92 @@ from `perf record` of c1; round 1's figures from agent 220's table):
   4. q04 / q22 on the row path; q16's count(distinct) compares `Value`s.
   5. Memory (lead 5 of the brief) not started: the engine 1,675 MB against PostgreSQL's 1,651
      and pgrust's 1,871 at 2 GB caches.
+
+## Point reads, round 5 (agent 230)
+
+BENCH.md "Point reads, round 5" has the measurements (lane A, two cores, plain dist: prepared point
+selects at 8 clients -6.1% user instructions and -7.5% cycles a read, CPU a read -3.3%; at 32
+clients ops/s +11.4%, CPU -10.2%) and the same-day table of roll (plain dist and PGO), PostgreSQL
+18.6 and pgrust: at 8 clients roll's PGO build 116,944 ops/s against pgrust's 109,653 (1.07x;
+13.7 µs user CPU a read against 16.2) and PostgreSQL's 65,462; at 32 clients level with pgrust
+(0.99x); the plain dist build 0.82x pgrust at 8. What changed, four commits:
+
+- *A point reader's buffers left to the thread's next reader* (`storage/point.rs`): a
+  `PointReader`'s per-source held blocks, its position, seek key and candidate key (`Bufs`) go
+  back to a thread-local spare when it drops (the blocks let go first: they are its view's) and
+  the next reader on the thread takes them, its slots resized to its view. `Held` keeps its block
+  as an `Option` and its buffers across reads (`Held::keep`, `BlockPos::clone_from` copying into
+  the buffers it has: the derived `Clone` allocated a new key each time a block was held). A
+  unique key's probe and its row's fetch made about a dozen allocations for these; each costs
+  about 144 instructions with its free and a cache miss besides (`_mi_page_malloc` ran at CPI 5).
+  A reader made while another is alive on the thread starts with empty buffers, as before.
+- *A unique key's row fetched by one snapshot read of its key*: `Txn::get_one_snap` (the
+  transaction's own write of the key, else the store's newest visible version, through a point
+  reader) and `ScanNode::fetch_stored_one`, which `point_probe` calls instead of
+  `fetch_stored(&[key])`: the same branches (a table with out-of-line values read as stored after
+  `toast_ready`, which `fetch_stored` now shares; `fetch_kept`'s first-call count; anything else
+  through `fetch_stored`), without `get_many_snap_with`'s and `get_versions_with`'s four vectors
+  for one key, and without copying the entry's value into a key before the fetch.
+- *A kept plan's index scan keeps its `Fetcher` across executions* while it has nothing to note
+  (`Fetcher::keeps`: every heap page still all-visible, its watch holding, and not a temporary
+  table's, whose horizon is its transaction's). `park` dropped it, and each execution's
+  `Fetcher::new` took the relation's model lock and cloned the database's, the id table's and the
+  model's `Arc`s, counts every session's scans write. A page that stops being all-visible is seen
+  at the next fetch, as within one execution (`fetch` drops the watch); rescans within a statement
+  already kept it.
+- *The command tag without `format!`* (`query_tag`: the word and an `itoa` count).
+
+Tests: `storage::tests::point_readers_one_after_another` (readers made one after another on a
+thread over two stores whose views have one and four file sources, alternating, and a second
+reader made while one is alive, each answering as a scan does); `tests/wire.rs`
+`point_lookups_go_out_as_decoded_ones` now also looks up rows the open transaction updated and
+inserted and a row with a value stored out of line (the table's rows then fetched as stored),
+each the same as the lookup under a LIMIT.
+
+Not kept (BENCH.md has the pairs; patches in `~/.cache/a230/patches/`): the hot-range bookkeeping
+without `Hot::note_scan`'s mutex (no measurable cost there); c4 (3 of 13 clock reads skipped, one
+reader for the probe and the fetch, the derived value's buffer reused as the row key, the block
+cache's CLOCK bit written only when unset: -3.0% instructions and -2.4% cycles at the median, two
+pairs under 2%). The wait spin needs no change at 8 clients on this lane (probe numbers in BENCH).
+
+**Where a read goes now** (c3 at 8 clients, 25.8 µs user in the profile's run): the probe and the
+row's fetch 5.2 µs (`Block::seek` 1.05 self, the block cache 0.56 at CPI 10); `run_query`
+around the executor about 5 (relation locks with `Txn::lock`'s key vectors 0.74 of allocation,
+which agent 218's lock bookkeeping, landed since, removes); Bind 2.3; the transaction's end 2.4;
+the executor restart 1.4. Across the read: 13 clock reads (about 4% of the instructions), libc's
+memcpy/memcmp (unresolved frames in the profile) 12% of user time, and about 20 allocations left.
+
+**Next**, by size: (1) re-profile on origin's head: agent 218's lock bookkeeping and
+transaction-start settings landed as this round ended (about 1 µs of this profile's allocation a
+read was theirs); (2) the clock: one statement-start reading
+(PostgreSQL's SetCurrentStatementStartTimestamp at Bind and Execute) shared by `start_activity`'s
+query_start, `statement_timestamp()`, an implicit transaction's start (`txn_time`, `now()`),
+`Database::touch` and `begin_in`. It is a behaviour fix as well: in PostgreSQL 18.6
+`statement_timestamp() = query_start` of the backend's own pg_stat_activity row is true, and
+`now() = query_start` in a one-statement transaction; in roll both are false (checked on this
+round's head; `now() = xact_start` is true in both); (3) the block cache's read path without a lock and a reference count per block
+(a per-file slot table read under an epoch guard, the CLOCK bit set only when unset): its lines
+move between cores at every lookup; (4) the probe's three remaining allocations and its second
+view reference (c4's parts, worth having inside a bigger change).
+
+Verification, on `1101220b1` (the four commits and their tests rebased onto origin's
+`7867694b9`): release build; release Clippy 19 warnings, none in a file changed here; release lib
+tests; golden (in-process, wire, shuffled); wire; kept_plans in release and debug; twophase; the
+storage tests (storage_format, storage_read_once, storage_linked_gc, storage_upgrade_batches,
+toast_storage); crash_random seeds 1-30; isolation against a private PostgreSQL 18.6 (a230-pgref,
+max_prepared_transactions 10): 142/143 specs, 1831/1832 permutations (intra-grant-inplace, as
+before), `roll-point-select` and `roll-point-update` matching; the regress files test_setup,
+select, prepare, plancache, portals, privileges, rowsecurity, transactions, btree_index, insert,
+update: 4530/4530 units. The verification train on `1101220b1` (`TRAIN_NO_CHECKOUT=1`): release
+crate tests; Clippy 20 warnings, none in a file changed here; crash_random seeds 1-30 x 4; the
+power stage (power_cut 4 passed; seeds 1-30 x 4 with CRASH_POWER=1, with and without
+CRASH_ASYNC=1); debug crate tests; the full regression suite (51148/51150 units, newly differing
+0); isolation 1647/1648 permutations; pg_dump_tap 14609 passed, 0 failed. Then rebased onto
+origin's `da4c6aa34` (agent 218's stack; a clean rebase, the tree measured in BENCH's last
+pairs), where the release build, lib tests, golden, wire, kept_plans (release and debug),
+twophase, the storage tests, crash_random seeds 1-30, isolation and the regress subset were run
+again: all passed (isolation 142/143 specs, intra-grant-inplace as before; regress subset
+4530/4530 units).
 
 ## Point reads, round 4 (agent 221)
 
@@ -12286,3 +12455,115 @@ none in these files; regress newly differing 0; isolation 1647/1648, intra-grant
 before; pg_dump 14609 passed). The first train found the bench example not building (Bind's
 and register_backend's new arguments: `877024ec3`) and wire_waits' safe-snapshot cases
 broken by opening the transaction at a leading SET (taken back: `24792655d`).
+
+## Behaviour gaps closed by agent 229 (2026-11-13)
+
+Recorded against a private PostgreSQL 18.6 (`select version()`: 18.6, Debian 18.6-1.pgdg13+2);
+every case is in the wire test `protocol_cases` (`tests/data/protocol_cases.out` recorded from
+it with `PROTOCOL_RECORD`). `PROTOCOL_SERVER=host:port` now runs the cases against a running
+server instead of the test's own: run against a build without a change, it shows the cases
+the change fixes (55 of 174 differ on `1d59e6856`'s roll-engine, none on these commits).
+
+- **Implicit transaction blocks** (`Session::guc_in_txn`, `Settings::abort_level`,
+  `Session::set_txn_options`). A multi-statement simple query is one transaction from its
+  first statement on, and the extended protocol's runs from an Execute to the Sync, even when
+  no statement needed the engine's transaction: a SET in it is stacked and undone when a later
+  statement fails, committed at the batch's end (`end_batch`, without opening a `Txn`). That
+  is what 222's change lacked: it opened the engine's transaction at the SET, so a following
+  BEGIN found one and dropped its isolation and DEFERRABLE (wire_waits). Now a BEGIN inside
+  the block takes over the implicit transaction: with none open yet its options apply as
+  before; with one open (a statement ran) they go through the check hooks in the order given,
+  as SET TRANSACTION's do (`Txn::first_snapshot` is FirstSnapshotSet): a changed isolation
+  after a snapshot is call_enum_check_hook's 25001, DEFERRABLE / NOT DEFERRABLE after one
+  call_bool_check_hook's, read-write after read-only too, each "within a subtransaction"
+  variant in a savepoint. SET TRANSACTION in the implicit block ends with it; LOCK TABLE is
+  allowed in it. An error in an explicit block undoes its (sub)transaction level's settings
+  at once (AbortTransaction's AtEOXact_GUC), so their ParameterStatus goes out with the error.
+  AND CHAIN saves the characteristics after that abort: a BEGIN's or SET TRANSACTION's options
+  in the failed transaction itself are back at the defaults, what a chain gave it (set
+  directly, `Session::chain_base`) or what an error in a savepoint left stands
+  (transactions.sql's chain units: the first train found them). Stack entries restore the parameter stacked last
+  first (guc_stack_list), which orders the reports. Transactional: every SET'able parameter,
+  client_encoding, role and session_authorization (is_superuser with them); LISTEN too (it
+  already was); PREPARE and DEALLOCATE are not (as in PostgreSQL). Locations: the
+  transaction-block warnings and errors (CheckTransactionBlock, DefineSavepoint,
+  EndTransactionBlock / UserAbortTransactionBlock, PreventInTransactionBlock), int4 / int2 /
+  int8-by-int4 division by zero (by routine: other types' division by zero keeps the
+  engine's location).
+- **Planning at Bind** (`bind_inner`, `fold::param_folds`, `Portal::planned`). PostgreSQL
+  plans a query statement at Bind (GetCachedPlan): what planning raises, constant folding's
+  errors above all, fails the Bind; utility statements (EXPLAIN, DECLARE, COPY, CTAS, DO) are
+  planned at Execute; literal coercions fail at Parse (analysis). The generic plan folds the
+  constants (`select 1/0` fails every Bind, named or not, as no plan is ever cached), a custom
+  plan the parameters' values too (`$1::int / 0` fails the Bind; a CASE arm a value makes
+  false isn't folded); a generic plan, by plan_cache_mode or after five custom plans, leaves
+  a value's error to the Execute. The engine plans at Bind only when planning can fail there:
+  the generic binding failed when Bind described the statement (Parse already accepted it),
+  or the statement has an immutable call or cast over parameters and constants and has values
+  (found once per statement); the portal keeps the plan and the Execute runs it, so the plan
+  cache's counts and choices are as before. Point reads and short transactions plan at
+  Execute as before. Still differing: an immutable PL/pgSQL (or other procedural) function
+  over constants isn't evaluated while planning (PostgreSQL's evaluate_function folds it, so
+  its error comes at Bind and its NOTICEs once); other folding errors' locations (int4pl,
+  dsqrt, float division) name the engine.
+- **Startup role, SET SESSION AUTHORIZATION** (`Session::apply_startup_role`,
+  `refresh_superuser`). The startup packet's `role` is checked as check_role does (a missing
+  role is a FATAL 22023 after AuthenticationOk, a role the user can't become 42501), and
+  is_superuser follows it; RESET ROLE returns to it. is_superuser is stacked with role /
+  session_authorization (undone with them), and marked for its report before
+  session_authorization, so the client hears session_authorization first, as from
+  PostgreSQL.
+- **Unknown parameter type oids** (`session/badparams.rs`). Which lookup of a parameter of a
+  type no oid has fails the Parse follows transformSelectStmt's order: a one-argument
+  undecorated function call's projection check (typeOrDomainTypeRelid), a sort, group or
+  DISTINCT key (lookup_type_cache's 42704), an ARRAY of it alone or a named argument
+  (format_type_extended), coercions, operators, boolean contexts, CASE, mixed COALESCE /
+  ARRAY / VALUES, LIMIT (getBaseTypeAndTypmod), then the result row (TupleDescInitEntry).
+  IS [NOT] NULL, ROW(), EXISTS's target list, an unread CTE and VARIADIC "any" functions
+  (concat, format, ...) don't look it up: the parameter keeps its oid and the Bind fails
+  (getTypeInputInfo). 48 shapes match PostgreSQL in a probe (`~/.cache/a229/probe/c4.py`);
+  INSERT / UPDATE / DELETE, set operations, window functions and column references into a
+  sub-select with such a parameter fall back to the earlier rule.
+- **GSSENCRequest**: answered 'N', as a PostgreSQL built without GSSAPI answers (libpq then
+  goes on unencrypted, or fails with gssencmode=require as it would against such a server).
+  The reference image is built with GSSAPI and answers 'G'; a drop-in server without Kerberos
+  has nothing to offer there, so the difference stays, by decision.
+- **Scroll cursors after page splits**: not built. 222's design costs ordinary index scans
+  and modelled inserts nothing but a scroll cursor's every FETCH a scan of the model's leaf
+  pages (FETCH 1 over a large index becomes quadratic); the per-page TID index that would
+  make it cheap adds work to every modelled insert. The design note above stands.
+- **MultiXact**: not done. The observable values need a per-tuple lock state the engine
+  doesn't keep: PostgreSQL leaves a lock-only xmax (the locker's xid, or a MultiXactId once a
+  second locker or an updater joins) in the tuple after the lockers end, until it is locked,
+  updated or frozen again, and `xmax`, pgrowlocks, relminmxid, VACUUM VERBOSE's "new
+  relminmxid" and mxid_age all read that. The engine's row locks live in the lock manager
+  only while held, and `xmax` reads 0 for every row. The way in: a lock-only xmax and infomask
+  bits on `heapsim::Tup` (set where `exec::scan::lock_row` takes a lock: the locker's xid, a
+  new multi (`MultiXactIdCreate`) when a live locker is there, an expanded one when a multi
+  is), a MultiXact table on the database (next id, members with their statuses, kept with
+  the xid state across restarts), `xmax` read from the model, then VACUUM's freezing of
+  multis (FreezeMultiXactId) to give relminmxid / datminmxid and the VERBOSE line. The
+  isolation specs that exercise multixacts' behaviour (multixact-no-deadlock,
+  multixact-no-forget, pgrowlocks' spec) already pass on the lock manager.
+
+Verification (agent 229): release wire (73, `protocol_cases` 174), wire_waits, golden
+(in-process, wire, shuffled), lib (218), kept_plans (11), twophase (4), clean `cargo check`
+of every target after the rebase. Lane A, plain dist builds, `290dba2a4` against it with these
+commits, 8 clients, five alternating pairs, user instructions per operation: point reads
++0.34% at the median (pairs -1.45% to +2.49%, one flagged at 1.03 cores of foreign load),
+again with flagged pairs rerun +0.14% (-0.60% to +1.08%); short transactions +10.1% (three
+of five pairs flagged, 1.28 to 2.41 cores), again after a CHECKPOINT with flagged pairs rerun
+-1.17% (-8.90% to +0.13%). Nothing on either path does more than a few stores and tests
+(the Bind's planning check reads a flag kept with the statement's plan counts). Clients,
+`1d59e6856` against these commits: psycopg 3 4924 / 9 failing both, node-postgres 146 / 3
+both, pgjdbc 8221 / 0 both, identical lists; psql 18 (`min_protocol_version=3.2`, a cancel,
+`\copy`), pgbench simple / extended / prepared without failures.
+Verification train on `7e293b844` (these commits on `da4c6aa34`): release, clippy (20
+warnings, none in these files), crash, power stages 0; regress newly differing 0; isolation
+1647/1648 (intra-grant-inplace as before); pg_dump 14609 passed. The debug step's one failure
+is crash_bulk's new kill_during_compactions_after_deletes overflowing its thread's stack in a
+debug build: `da4c6aa34` alone does the same (twice, a debug snapshot build), and it passes with
+RUST_MIN_STACK=16 MiB. The first train (on `65b3617ee`) found transactions.sql's chain units
+(AND CHAIN after an error in a chained transaction or a savepoint), fixed by `7fed6f2da`; its
+debug step's wire big_bytea_values_go_out_in_linear_time took 21 s against its 20 s limit
+under load (alone 14-15 s, as a debug build of the head without these commits: 15-16 s).

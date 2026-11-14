@@ -369,7 +369,14 @@ fn int_mul(a: &[Value], c: &FnCtx) -> Result<Value> {
 fn int_div(a: &[Value], c: &FnCtx) -> Result<Value> {
     let d = i(&a[1]);
     if d == 0 {
-        return Err(err!(DIVISION_BY_ZERO, "division by zero"));
+        let e = err!(DIVISION_BY_ZERO, "division by zero");
+        // (The routine of PostgreSQL's operator for the operands' types.)
+        return Err(match (&a[0], &a[1]) {
+            (Value::Int4(_), Value::Int4(_)) => e.routine("int4div"),
+            (Value::Int2(_), Value::Int2(_)) => e.routine("int2div"),
+            (Value::Int8(_), Value::Int4(_)) => e.routine("int84div"),
+            _ => e,
+        });
     }
     int_result(i(&a[0]) / d, c.ret)
 }

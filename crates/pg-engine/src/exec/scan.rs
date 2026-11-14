@@ -4155,18 +4155,47 @@ impl ScanNode {
             }
             return fetch_rows(keys, ctx);
         };
-        let txn = ctx.txn.borrow();
+        if !self.toast_ready(&snap, ctx) {
+            return fetch_rows(keys, ctx);
+        }
+        get_sorted(&ctx.txn.borrow(), keys, &snap, false)
+    }
+
+    /// The scan's reader of its rows' out-of-line values (`toast`), made as a scan of the
+    /// table's rows has it, for rows fetched as stored. False: there is none to make.
+    fn toast_ready(&mut self, snap: &crate::txn::Snap, ctx: &ExecCtx) -> bool {
         if self.toast.is_none() {
-            // (The source of the table's rows' values, as a scan of its rows has it.)
             let t = self.plan.table.oid;
             let (start, end) = (index_prefix(t, 0), index_prefix(t, 1));
-            let Some(src) = txn.scan_snap(&start, &end, &snap).source().cloned() else {
-                drop(txn);
-                return fetch_rows(keys, ctx);
+            let Some(src) = ctx.txn.borrow().scan_snap(&start, &end, snap).source().cloned() else {
+                return false;
             };
             self.toast = Some(std::cell::RefCell::new(crate::txn::toast::Reader::new(src)));
         }
-        get_sorted(&txn, keys, &snap, false)
+        true
+    }
+
+    /// `fetch_stored` of one key (a unique key's row): the same reads, without the vectors
+    /// a batch of keys takes.
+    fn fetch_stored_one(&mut self, key: &[u8], ctx: &ExecCtx) -> Result<Option<bytes::Bytes>> {
+        let Some(snap) = ctx.snapshot() else {
+            return Ok(self.fetch_stored(&[key.to_vec()], ctx)?.pop().flatten());
+        };
+        let raw = self.plan.mark.is_none() && !self.plan.sys && super::sizing::tracked(self.plan.table.oid);
+        if raw {
+            if !self.toast_ready(&snap, ctx) {
+                return Ok(fetch_rows(&[key.to_vec()], ctx)?.pop().flatten());
+            }
+        } else {
+            // (`fetch_kept` reads from its second call on through a scan it keeps: those as
+            // `fetch_stored` reads them. Its first is counted as it counts it; `fetch_dense`
+            // takes no single key.)
+            if self.fetch_calls > 0 {
+                return Ok(self.fetch_stored(&[key.to_vec()], ctx)?.pop().flatten());
+            }
+            self.fetch_calls += 1;
+        }
+        ctx.txn.borrow().get_one_snap(key, &snap, !raw)
     }
 
     /// `fetch_rows` of a few keys at the statement's snapshot through one scan kept from call
@@ -5739,7 +5768,12 @@ impl Node for ScanNode {
         blocks.clear();
         *prune_next = 0;
         *nblocks = None;
-        *fetcher = None;
+        // (A fetcher with nothing to note stays for the restart, `Fetcher::keeps`: a new one
+        // per execution took the heap model's lock and cloned the database's, the id table's
+        // and the model's references, counts every session's scans write.)
+        if !matches!(fetcher, Some(Some(f)) if f.keeps()) {
+            *fetcher = None;
+        }
         fetched.clear();
         *batch = first_batch(plan);
         *ios_cols = None;
@@ -6045,8 +6079,7 @@ impl ScanNode {
         let Some((ikey, dkey)) = found else {
             return Ok(None);
         };
-        let dkey = dkey.to_vec();
-        let row = self.fetch_stored(std::slice::from_ref(&dkey), ctx)?.pop().flatten();
+        let row = self.fetch_stored_one(&dkey, ctx)?;
         self.probe = Probe::Done;
         let Some(row) = row else {
             self.cur_range = 0;
@@ -6057,7 +6090,7 @@ impl ScanNode {
         if let Some(k) = &mut self.kills {
             k.passed(&ikey[..cut]);
         }
-        Ok(Some((dkey, row)))
+        Ok(Some((dkey.to_vec(), row)))
     }
 
     fn emit(&mut self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Option<Row>> {

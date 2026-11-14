@@ -3836,6 +3836,58 @@ mod tests {
         }
     }
 
+    /// Point readers made one after another on a thread take the buffers the last one left
+    /// (`point::PointReader`'s spare): over two stores whose views have other numbers of
+    /// sources, readers alternating between them, and a second reader made while one is alive,
+    /// each reads what a scan reads (no block another reader or view held answers it).
+    #[test]
+    fn point_readers_one_after_another() {
+        let key = |i: u32| format!("k{i:05}").into_bytes();
+        let open = |dir: &std::path::Path| {
+            Store::open(dir, StoreOptions { memtable_bytes: 64 << 10, sync: false, background: false, ..Default::default() }).unwrap()
+        };
+        let commit = |s: &Arc<Store>, keys: &mut dyn Iterator<Item = u32>, tag: &str| {
+            let w: Vec<_> = keys.map(|i| (key(i), (i % 13 != 5).then(|| Bytes::from(format!("{tag}{i}"))))).collect();
+            s.commit(w, |_| Ok(())).unwrap();
+        };
+        let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (a, b) = (open(da.path()), open(db.path()));
+        // (`a`: L1 and three L0 files; `b`: L1 alone.)
+        commit(&a, &mut (0..2000), "a-l1-");
+        a.flush_memtables().unwrap();
+        a.compact().unwrap();
+        for t in 0..3 {
+            commit(&a, &mut (t..2000).step_by(5), &format!("a-l0{t}-"));
+            a.flush_memtables().unwrap();
+        }
+        commit(&b, &mut (0..2000).step_by(3), "b-l1-");
+        b.flush_memtables().unwrap();
+        b.compact().unwrap();
+        assert_eq!(a.view().l0.len(), 3);
+        assert!(b.view().l0.is_empty() && !b.view().l1.is_empty());
+        let rows = |s: &Arc<Store>| -> Vec<(Vec<u8>, Bytes)> { s.scan(b"", b"", s.visible_ts()).map(|r| r.unwrap()).collect() };
+        let (ra, rb) = (rows(&a), rows(&b));
+        for i in (0..2000).step_by(7) {
+            let k = key(i);
+            let end = key(i + 3);
+            for (s, all) in [(&a, &ra), (&b, &rb)] {
+                let ts = s.visible_ts();
+                let mut r = s.point_reader(ts, false);
+                let want = all.iter().find(|(x, _)| *x == k).map(|e| e.1.clone());
+                assert_eq!(s.get_with(&mut r, &k, true).unwrap().and_then(|v| v.1), want, "get {i}");
+                let mut r2 = s.point_reader(ts, true);
+                let first = all.iter().find(|(x, _)| *x >= k && *x < end).cloned();
+                match s.first_with(&mut r2, &k, &end, true).unwrap() {
+                    point::First::Row(fk, fv) => assert_eq!(Some((fk, fv)), first, "first from {i}"),
+                    point::First::None => assert_eq!(first, None, "first from {i}"),
+                    point::First::Unknown => {}
+                }
+                drop(r2);
+                assert_eq!(s.get_with(&mut r, &k, true).unwrap().and_then(|v| v.1), want, "get {i} again");
+            }
+        }
+    }
+
     /// A linked run whose keys no other source holds goes to L1 as it is (written once);
     /// one overlapping a file's or a memtable's keys, or not compressed, goes to L0. Reads,
     /// older snapshots and a crash's recovery see them all as the commit's.

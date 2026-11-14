@@ -482,6 +482,7 @@ impl Database {
             snapshot_ts: ts,
             start_ts: ts,
             snapshot_fixed: false,
+            first_snapshot: false,
             stmt_snapshot: false,
             _pin: Some(pin),
             xmin: None,
@@ -951,6 +952,9 @@ pub struct Txn {
     pub start_ts: u64,
     /// A transaction snapshot (REPEATABLE READ / SERIALIZABLE) was taken.
     snapshot_fixed: bool,
+    /// A statement of the transaction took a snapshot (FirstSnapshotSet): its isolation,
+    /// read-write mode and deferrability are fixed from then on.
+    pub first_snapshot: bool,
     /// The running statement has a snapshot (Postgres's ActiveSnapshotSet): queries then
     /// leave out partitions whose pending detach it sees.
     stmt_snapshot: bool,
@@ -1343,6 +1347,7 @@ impl Txn {
             }
         }
         self.stmt_snapshot = needs_snapshot;
+        self.first_snapshot |= needs_snapshot;
         // A transaction snapshot is taken by the first statement that needs one.
         if self.isolation.txn_snapshot() {
             if needs_snapshot && !self.snapshot_fixed {
@@ -3011,6 +3016,22 @@ impl Txn {
         self.get_many_snap_with(keys, s, false)
     }
 
+    /// `get_many_snap` (`resolve`) or `get_many_snap_raw` of one key, without their vectors
+    /// (a unique key's row fetch).
+    pub fn get_one_snap(&self, key: &[u8], s: &Snap, resolve: bool) -> Result<Option<Bytes>> {
+        self.catch_up(s);
+        let st = s.st.borrow();
+        match self.snap_get(key, &st)? {
+            Some(v) if resolve => self.resolve_own(key, v, Some(&st), st.ts),
+            Some(v) => Ok(v),
+            None => {
+                let store = &self.db.store;
+                let mut r = store.point_reader(st.ts, false);
+                Ok(store.get_with(&mut r, key, resolve)?.and_then(|(_, v)| v))
+            }
+        }
+    }
+
     fn get_many_snap_with(&self, keys: &[Vec<u8>], s: &Snap, resolve: bool) -> Result<Vec<Option<Bytes>>> {
         self.catch_up(s);
         let st = s.st.borrow();
@@ -4195,6 +4216,7 @@ impl Txn {
         self.snapshot_ts = ts;
         self.start_ts = ts;
         self.snapshot_fixed = true;
+        self.first_snapshot = true;
     }
 
     /// SET TRANSACTION SNAPSHOT (ImportSnapshot): run on the exported snapshot `id`. The
@@ -4229,6 +4251,7 @@ impl Txn {
         self.start_ts = ts;
         // (The transaction's snapshot is this one now: SSI tracks it from here.)
         self.snapshot_fixed = true;
+        self.first_snapshot = true;
         if self.isolation == Isolation::Serializable {
             self.register_serializable()?;
         }

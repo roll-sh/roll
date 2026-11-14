@@ -320,16 +320,21 @@ impl Conn {
 /// A session: `setup` simple queries (their replies dropped), then each step sent and what
 /// it got, " / " between steps.
 pub fn session(addr: &str, setup: &[&str], steps: &[Vec<u8>]) -> String {
-    session_as(addr, P30, setup, steps)
+    session_as(addr, P30, &[], setup, steps)
 }
 
 /// `session` of protocol `proto`, without setup.
 pub fn session_at(addr: &str, proto: i32, steps: &[Vec<u8>]) -> String {
-    session_as(addr, proto, &[], steps)
+    session_as(addr, proto, &[], &[], steps)
 }
 
-fn session_as(addr: &str, proto: i32, setup: &[&str], steps: &[Vec<u8>]) -> String {
-    let mut c = Conn::open(addr, &startup_packet(proto, &[], b"\0"));
+/// `session` whose startup packet has `params` too, without setup.
+pub fn session_params(addr: &str, params: &[(&str, &str)], steps: &[Vec<u8>]) -> String {
+    session_as(addr, P30, params, &[], steps)
+}
+
+fn session_as(addr: &str, proto: i32, params: &[(&str, &str)], setup: &[&str], steps: &[Vec<u8>]) -> String {
+    let mut c = Conn::open(addr, &startup_packet(proto, params, b"\0"));
     let s = c.startup();
     if s.last().map(String::as_str) != Some("ZI") {
         return format!("startup {}", s.join(" "));

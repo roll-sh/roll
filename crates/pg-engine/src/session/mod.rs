@@ -1,6 +1,7 @@
 //! A session: one client's statements, transactions, prepared statements, portals and
 //! cursors. The wire server drives it message by message; tests drive it directly.
 
+mod badparams;
 pub mod copy;
 mod createdb;
 pub mod current;
@@ -151,6 +152,9 @@ struct PlanUses {
     /// it, and their plan is the generic one whichever it chooses.
     uncosted: Vec<(Arc<BoundQuery>, Vec<Value>)>,
     unnamed: bool,
+    /// Whether a custom plan folds parameter values into constants that may fail
+    /// (`fold::param_folds` of the generic binding), found at the first Bind with values.
+    param_folds: Option<bool>,
 }
 
 /// RevalidateCachedQuery's error: a prepared statement whose result row the catalog changed
@@ -263,6 +267,8 @@ pub struct Portal {
     /// A SELECT suspended after an Execute's row count: its executor, which the next
     /// Execute runs on (PORTAL_ONE_SELECT runs as its rows are asked for).
     lazy: Option<cursor::Lazy>,
+    /// The plan the Bind made (GetCachedPlan), when it planned: the Execute runs it.
+    planned: Option<Arc<BoundQuery>>,
 }
 
 /// How far a portal's statement has run (its PortalStatus, and the rows PortalRun holds).
@@ -365,6 +371,21 @@ pub struct Session {
     /// An Execute completed since the last Sync (XACT_FLAGS_PIPELINING): what follows in
     /// the pipeline is in an implicit transaction block.
     pipelining: bool,
+    /// An Execute ran since the last Sync: the extended protocol's transaction is open
+    /// (start_xact_command) until the Sync ends it, or an error aborts it.
+    extended: bool,
+    /// The statement's generic binding failed the last `describe` (an error planning would
+    /// raise, which analysis doesn't): a Bind plans it then (`bind_inner`).
+    generic_failed: bool,
+    /// The plan a portal's Bind made, for the `run_query` of its Execute.
+    portal_plan: Option<Arc<BoundQuery>>,
+    /// What a chain gave the block's transaction (isolation, read-only, deferrable), set
+    /// directly rather than as its settings, so an abort keeps it; None: the defaults (a BEGIN's
+    /// block, whose options an abort undoes).
+    chain_base: Option<(Isolation, bool, bool)>,
+    /// The failed block's error came outside any savepoint: its transaction's own settings
+    /// went back (AbortTransaction), not only a subtransaction's.
+    top_aborted: bool,
     /// The query string of the statements being run (pg_cursors / pg_prepared_statements
     /// show it whole).
     source: String,
@@ -530,6 +551,11 @@ impl Session {
             infer_params: false,
             multi_stmt: false,
             pipelining: false,
+            extended: false,
+            generic_failed: false,
+            portal_plan: None,
+            chain_base: None,
+            top_aborted: false,
             ro_stack: Vec::new(),
             source: String::new(),
             txn_cmds: Vec::new(),
@@ -667,6 +693,18 @@ impl Session {
             || self.multi_stmt
             || self.pipelining
             || self.implicit && self.txn.as_ref().is_some_and(|t| t.borrow().has_writes())
+    }
+
+    /// Whether a transaction is open around the running statement, whose abort undoes what
+    /// it SETs: an explicit block, an implicit transaction already begun, the implicit block
+    /// of a multi-statement query (which PostgreSQL's first statement opens, however little
+    /// it needs one), or the extended protocol's (Execute to Sync).
+    pub(crate) fn guc_in_txn(&self) -> bool {
+        self.status != TxnStatus::Idle
+            || self.txn.is_some()
+            || self.multi_stmt
+            || self.pipelining
+            || self.extended
     }
 
     /// An Execute message completed (exec_execute_message's XACT_FLAGS_PIPELINING).
@@ -1000,6 +1038,12 @@ impl Session {
         }
         let keep = self.state.commit_on_error.replace(false);
         if self.status == TxnStatus::InBlock || self.status == TxnStatus::Failed {
+            // AbortTransaction / AbortSubTransaction: the failing level's settings go back
+            // now, not at the ROLLBACK (their ParameterStatus goes with the error).
+            if self.status == TxnStatus::InBlock {
+                self.state.settings.borrow_mut().abort_level();
+                self.top_aborted = !self.txn.as_ref().is_some_and(|t| t.borrow().in_savepoint());
+            }
             self.status = TxnStatus::Failed;
             if let Some(t) = &self.txn
                 && let Ok(mut t) = t.try_borrow_mut()
@@ -1035,6 +1079,13 @@ impl Session {
         } else if self.status == TxnStatus::Idle {
             // Utility-only transactions (such as SET) need statistics cleanup too.
             crate::exec::pgstat::clear_snapshot(&self.state);
+            // An implicit block that never needed a transaction of the engine's (SETs, SHOWs)
+            // commits what it set; SET TRANSACTION's options were its transaction's.
+            self.txn_opts = None;
+            let mut st = self.state.settings.borrow_mut();
+            if st.in_transaction() {
+                st.end_transaction(true);
+            }
         }
         Ok(())
     }
@@ -1071,6 +1122,7 @@ impl Session {
         self.implicit = false;
         self.txn_time = Self::now();
         self.txn_opts = Some(opts);
+        self.chain_base = None;
         self.status = TxnStatus::InBlock;
     }
 
@@ -1648,7 +1700,8 @@ impl Session {
                 crate::exec::pgstat::report_checkpoint(&db, log, || db.store.flush_all())?;
                 done(QueryResult::command("CHECKPOINT"))
             }
-            NodeEnum::LockStmt(_) if self.status == TxnStatus::Idle && !self.implicit => {
+            // (A multi-statement query's implicit block is a transaction block.)
+            NodeEnum::LockStmt(_) if self.status == TxnStatus::Idle && !self.implicit && !self.multi_stmt => {
                 Err(Error::new(
                     code::NO_ACTIVE_SQL_TRANSACTION,
                     "LOCK TABLE can only be used in transaction blocks",
@@ -2098,28 +2151,33 @@ impl Session {
         fn own(p: &Prepared) -> Result<&Node> {
             p.stmt.as_ref().ok_or_else(|| Error::new(code::INTERNAL_ERROR, "a query without a tree"))
         }
-        // (A simple query's template's kept plan, run with its literals' values.)
-        let (mut bq, mut lit_vals) = match self.lit_plan_for(p, params) {
-            Some(kept) => {
-                // (Debug builds: the kept plan is the one the query plans to.)
-                #[cfg(debug_assertions)]
-                {
-                    let own = self.planned(p, own(p)?, params)?.0;
-                    assert!(litplan::same_plan(&own, &kept.0, &kept.0.params, &kept.1), "kept plan of {:?}", p.sql);
-                }
-                kept
-            }
-            None => match self.lit_values_plan(p, params) {
-                // (A plan that depends on the values: the template's analysis with them in.)
-                Some(bq) => (bq, Vec::new()),
-                None => {
-                    let bq = self.planned(p, own(p)?, params)?.0;
-                    if p.lit.is_some() && params.is_empty() {
-                        self.lit_learn(p, own(p)?, &bq);
+        // (A simple query's template's kept plan, run with its literals' values; or the plan
+        // a portal's Bind made.)
+        let (mut bq, mut lit_vals) = if let Some(bind) = self.portal_plan.take() {
+            (bind, Vec::new())
+        } else {
+            match self.lit_plan_for(p, params) {
+                Some(kept) => {
+                    // (Debug builds: the kept plan is the one the query plans to.)
+                    #[cfg(debug_assertions)]
+                    {
+                        let own = self.planned(p, own(p)?, params)?.0;
+                        assert!(litplan::same_plan(&own, &kept.0, &kept.0.params, &kept.1), "kept plan of {:?}", p.sql);
                     }
-                    (bq, Vec::new())
+                    kept
                 }
-            },
+                None => match self.lit_values_plan(p, params) {
+                    // (A plan that depends on the values: the template's analysis with them in.)
+                    Some(bq) => (bq, Vec::new()),
+                    None => {
+                        let bq = self.planned(p, own(p)?, params)?.0;
+                        if p.lit.is_some() && params.is_empty() {
+                            self.lit_learn(p, own(p)?, &bq);
+                        }
+                        (bq, Vec::new())
+                    }
+                },
+            }
         };
         self.pgss_planned(planning.elapsed());
         // Its relations are locked before it runs; a wait for a lock may end with another
@@ -2452,6 +2510,23 @@ impl Session {
                 "current transaction is aborted, commands ignored until end of transaction block",
             ).routine("exec_parse_message"));
         }
+        // Parameters of a type no oid has: the first lookup analysis makes of one fails the
+        // Parse; none looked up keep their oid (bound as text meanwhile).
+        let mut accepted = false;
+        if !missing.is_empty()
+            && let Some(s) = p.stmt.as_ref()
+        {
+            match badparams::verdict(s, &missing) {
+                badparams::Verdict::Fails(e) => return Err(e),
+                badparams::Verdict::Accepted => {
+                    for (i, _) in &missing {
+                        p.param_types[*i] = DataType::Text;
+                    }
+                    accepted = true;
+                }
+                badparams::Verdict::Unmodelled => {}
+            }
+        }
         // A superuser's DML on a system catalog the engine derives: the query it runs types
         // its parameters; it returns no rows.
         if let Some(q) = p.stmt.as_ref().and_then(inner).and_then(ddl::catalog_dml_query) {
@@ -2656,7 +2731,7 @@ impl Session {
             }
         }
         if !missing.is_empty() {
-            missing_param_types(&mut p, sql, &missing)?;
+            missing_param_types(&mut p, sql, &missing, accepted)?;
         }
         Ok(Arc::new(p))
     }
@@ -2683,7 +2758,10 @@ impl Session {
                     Ok(b) => b.cols.clone(),
                     Err(e) if is_result_change(&e) => return Err(e),
 
-                    Err(e) => self.analyzed_params(stmt, &p.param_types, e)?.1.into(),
+                    Err(e) => {
+                        self.generic_failed = true;
+                        self.analyzed_params(stmt, &p.param_types, e)?.1.into()
+                    }
                 })),
                 Some(
                     NodeEnum::InsertStmt(_)
@@ -2693,9 +2771,11 @@ impl Session {
                 ) => {
                     let cols = match self.bound(p, stmt, &[]) {
                         Ok(b) => b.cols.clone(),
-                            Err(e) if is_result_change(&e) => return Err(e),
-
-                            Err(e) => self.analyzed_params(stmt, &p.param_types, e)?.1.into(),
+                        Err(e) if is_result_change(&e) => return Err(e),
+                        Err(e) => {
+                            self.generic_failed = true;
+                            self.analyzed_params(stmt, &p.param_types, e)?.1.into()
+                        }
                     };
                     Ok((!cols.is_empty()).then_some(cols))
                 }
@@ -2861,9 +2941,9 @@ impl Session {
         let mut values = Vec::with_capacity(params.len());
         // Parameters of a domain type: their input is domain_in / domain_recv, which checks
         // the domain's constraints here, whether or not the statement reads them.
-        let domains = {
+        let (domains, param_folds) = {
             let plans = p.plans.lock();
-            (!plans.param_oids.is_empty()).then(|| plans.param_oids.clone())
+            ((!plans.param_oids.is_empty()).then(|| plans.param_oids.clone()), plans.param_folds)
         };
         for (i, &raw) in params.iter().enumerate() {
             let f = match formats.len() {
@@ -2948,21 +3028,41 @@ impl Session {
         if trailing {
             return Err(Error::new(code::PROTOCOL_VIOLATION, "invalid message format"));
         }
+        self.generic_failed = false;
         let cols = self.describe(&p)?;
-        // PortalSetResultFormat
-        if let Some(cols) = &cols
-            && result_formats.len() > 1
-            && result_formats.len() != cols.len()
+        let generic_failed = std::mem::take(&mut self.generic_failed);
+        // PortalSetResultFormat's count check (after GetCachedPlan and PortalStart: an error
+        // planning the query or starting its executor comes first).
+        let mismatch = cols
+            .as_ref()
+            .is_some_and(|cols| result_formats.len() > 1 && result_formats.len() != cols.len());
+        // GetCachedPlan: a query is planned at its Bind, and what planning raises (a constant
+        // expression failing to fold, in the generic plan or in a custom one that has the
+        // values in) fails the Bind; the portal keeps the plan for its Execute. A statement
+        // whose generic binding stands and whose custom plans fold no value can't fail
+        // there: the Execute plans it, as it would have.
+        let folds = !values.is_empty()
+            && p.is_query()
+            && param_folds.unwrap_or_else(|| {
+                let f = p.bound.lock().as_ref().is_some_and(|b| crate::sql::binder::fold::param_folds(&b.3.plan));
+                p.plans.lock().param_folds = Some(f);
+                f
+            });
+        let mut planned = None;
+        if p.is_query()
+            && (mismatch || generic_failed || folds)
+            && let Some(stmt) = p.stmt.as_ref()
         {
-            // (After GetCachedPlan and PortalStart: an error planning the query or starting
-            // its executor comes first. The query is planned at Execute otherwise.)
-            if p.is_query()
-                && let Some(stmt) = p.stmt.as_ref()
-            {
-                self.ensure_txn();
-                let bq = self.planned(&p, stmt, &values)?.0;
+            self.ensure_txn();
+            let bq = self.planned(&p, stmt, &values)?.0;
+            if mismatch {
                 self.with_ctx(&values, |ctx| bq.check_perms(ctx))?;
             }
+            planned = Some(bq);
+        }
+        if let Some(cols) = &cols
+            && mismatch
+        {
             return Err(Error::new(
                 code::PROTOCOL_VIOLATION,
                 format!(
@@ -2988,6 +3088,7 @@ impl Session {
                 run: PortalRun::Ready,
                 cols,
                 lazy: None,
+                planned,
             },
         );
         Ok(())
@@ -2996,6 +3097,7 @@ impl Session {
     /// Execute message. Returns the outcome and whether the portal was suspended (more rows).
     pub fn execute_portal(&mut self, portal: &str, max_rows: usize) -> Result<(Outcome, bool)> {
         self.waits_armed = false;
+        self.extended = true;
         crate::stack::grow(|| self.execute_portal_here(portal, max_rows))
     }
 
@@ -3065,7 +3167,9 @@ impl Session {
         if max_rows > 0 && matches!(stmt.stmt.as_ref().and_then(inner), Some(NodeEnum::SelectStmt(_))) {
             self.fetch_limit = max_rows;
         }
+        self.portal_plan = pt.planned.take();
         let out = self.execute_with(&stmt, &params, max_rows);
+        self.portal_plan = None;
         self.fetch_limit = 0;
         pt.lazy = self.suspended.take();
         let out = match out {
@@ -3280,6 +3384,7 @@ impl Session {
     /// with a suspended unnamed portal.
     pub fn sync(&mut self) -> Result<()> {
         self.pipelining = false;
+        self.extended = false;
         if !matches!(self.status, TxnStatus::InBlock | TxnStatus::Failed)
             && let Err(e) = self.close_portal("")
         {
@@ -3312,17 +3417,24 @@ impl Session {
                     ));
                     return Ok(QueryResult::command(tag));
                 }
-                let (mut iso, mut ro) = self.default_txn_opts();
-                apply_txn_options(&t.options, &mut iso, &mut ro)?;
-                default_deferrable(&self.state);
-                set_deferrable(&self.state, &t.options);
-                if self.implicit {
-                    // Earlier statements of this batch join the block.
+                if self.txn.is_some() {
+                    // The implicit block's transaction (a multi-statement query's, a
+                    // pipeline's) becomes the block: the statements before join it, and the
+                    // options are SET LOCALs in it, checked as SET TRANSACTION's are
+                    // (BeginTransactionBlock in TBLOCK_IMPLICIT_INPROGRESS).
+                    self.set_txn_options(&t.options)?;
                     self.implicit = false;
                 } else {
+                    // (Over what SET TRANSACTION gave the implicit block before it.)
+                    let (mut iso, mut ro) =
+                        self.txn_opts.unwrap_or_else(|| self.default_txn_opts());
+                    apply_txn_options(&t.options, &mut iso, &mut ro)?;
+                    default_deferrable(&self.state);
+                    set_deferrable(&self.state, &t.options);
                     self.txn_time = Self::now();
                     self.txn_opts = Some((iso, ro));
                 }
+                self.chain_base = None;
                 self.status = TxnStatus::InBlock;
                 Ok(QueryResult::command(tag))
             }
@@ -3350,10 +3462,10 @@ impl Session {
                     return self.chain(false);
                 }
                 if self.status == TxnStatus::Idle {
-                    self.raise_notice(warning(
-                        code::NO_ACTIVE_SQL_TRANSACTION,
-                        "there is no transaction in progress",
-                    ));
+                    self.raise_notice(
+                        warning(code::NO_ACTIVE_SQL_TRANSACTION, "there is no transaction in progress")
+                            .routine("UserAbortTransactionBlock"),
+                    );
                 }
                 self.finish_txn_untimed(false)?;
                 Ok(QueryResult::command("ROLLBACK"))
@@ -3460,20 +3572,37 @@ impl Session {
                 format!("{what} can only be used in transaction blocks"),
             ));
         }
-        let opts = self.txn.as_ref().map(|t| {
-            let t = t.borrow();
-            (t.isolation, t.read_only)
-        });
         let failed = self.status == TxnStatus::Failed;
-        let deferrable = self.state.settings.borrow().get_raw("transaction_deferrable");
+        // The chained transaction takes the ending one's characteristics
+        // (SaveTransactionCharacteristics). A failed one's abort already put back those its
+        // BEGIN or SET TRANSACTION set to what it started with: the defaults, or what the chain
+        // that started it gave (set directly, not undone); an error in a savepoint undid only
+        // the subtransaction's.
+        let (opts, deferrable) = if failed && self.top_aborted {
+            match self.chain_base {
+                Some((iso, ro, d)) => (Some((iso, ro)), Some(d)),
+                None => (None, None),
+            }
+        } else {
+            let opts = self.txn.as_ref().map(|t| {
+                let t = t.borrow();
+                (t.isolation, t.read_only)
+            });
+            (opts.or(self.txn_opts), Some(self.state.settings.borrow().bool("transaction_deferrable")))
+        };
         self.finish_txn(commit && !failed)?;
         self.status = TxnStatus::InBlock;
         self.txn_opts = opts;
-        if let Some(d) = deferrable {
-            let mut st = self.state.settings.borrow_mut();
-            let _ = st.set("transaction_deferrable", Some(&d), true, true);
-            st.changed.retain(|n| n != "transaction_deferrable");
+        match deferrable {
+            Some(d) => {
+                let mut st = self.state.settings.borrow_mut();
+                let _ = st.set("transaction_deferrable", Some(if d { "on" } else { "off" }), true, true);
+                st.changed.retain(|n| n != "transaction_deferrable");
+            }
+            None => default_deferrable(&self.state),
         }
+        let (iso, ro) = opts.unwrap_or_else(|| self.default_txn_opts());
+        self.chain_base = Some((iso, ro, self.state.settings.borrow().bool("transaction_deferrable")));
         self.txn_time = Self::now();
         Ok(QueryResult::command(if commit && !failed {
             "COMMIT"
@@ -4118,14 +4247,23 @@ fn plain_query(n: &NodeEnum) -> bool {
 
 /// The command tag of a finished query.
 fn query_tag(plan: &Plan, stmt: &Node, nrows: usize, processed: u64) -> String {
+    // (Its word and count put together without the formatting machinery: a tag per statement.)
+    let tag = |word: &str, n: u64| {
+        let mut b = itoa::Buffer::new();
+        let n = b.format(n);
+        let mut s = String::with_capacity(word.len() + n.len());
+        s.push_str(word);
+        s.push_str(n);
+        s
+    };
     match inner(stmt) {
-        Some(NodeEnum::InsertStmt(_)) => format!("INSERT 0 {processed}"),
-        Some(NodeEnum::UpdateStmt(_)) => format!("UPDATE {processed}"),
-        Some(NodeEnum::DeleteStmt(_)) => format!("DELETE {processed}"),
-        Some(NodeEnum::MergeStmt(_)) => format!("MERGE {processed}"),
+        Some(NodeEnum::InsertStmt(_)) => tag("INSERT 0 ", processed),
+        Some(NodeEnum::UpdateStmt(_)) => tag("UPDATE ", processed),
+        Some(NodeEnum::DeleteStmt(_)) => tag("DELETE ", processed),
+        Some(NodeEnum::MergeStmt(_)) => tag("MERGE ", processed),
         _ => {
             let _ = plan;
-            format!("SELECT {nrows}")
+            tag("SELECT ", nrows as u64)
         }
     }
 }
@@ -4144,10 +4282,10 @@ fn max_param(n: &Node, sql: &str) -> usize {
 /// column builds its tuple descriptor (TupleDescInitEntry), one the statement gives a type
 /// to coerces it (getBaseTypeAndTypmod). One it doesn't read keeps the oid (its
 /// ParameterDescription's) and fails at Bind (getTypeInputInfo).
-fn missing_param_types(p: &mut Prepared, sql: &str, missing: &[(usize, u32)]) -> Result<()> {
+fn missing_param_types(p: &mut Prepared, sql: &str, missing: &[(usize, u32)], accepted: bool) -> Result<()> {
     // (A utility statement's text isn't analyzed: PREPARE ... AS's $n aren't the Parse's.)
     let used = match p.stmt.as_ref() {
-        Some(s) if p.is_query() => param_numbers(s, sql),
+        Some(s) if p.is_query() && !accepted => param_numbers(s, sql),
         _ => Default::default(),
     };
     for &(i, oid) in missing {
