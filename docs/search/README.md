@@ -218,7 +218,7 @@ Measured on the tree merged with `main` (2026-11-12), on ai-server (a shared 18-
 | Elasticsearch 9.5.5 YAML REST suite (`test/free` + clients-tests) | **3,810 of 3,905 pass**, 0 fail, 95 skipped; 0 regressions against the baseline |
 | OpenSearch 3.9.0 YAML REST suite | **1,455 of 1,506 pass**, 0 fail, 51 skipped |
 | OpenSearch SQL plugin's PPL suite | **204 of 204** |
-| extended suites (67 module, plugin and x-pack suites, each on its test cluster's settings) | **5,059 of the 5,541 tests that pass on Elasticsearch** (6,349 in all); 42 suites at 100% (EQL 39 of 39, ent-search 371 of 371, ES\|QL 549 of 549, KQL 34 of 34, `otel-data` 68 of 68, transforms 108 of 108, watcher 89 of 89, `watcher-security` 9 of 9), runtime fields 247 of 248, `logsdb` 225 of 234; round 6 passed 3,463. Largest gaps: x-pack `platinum` (1,064 of 1,412: rollup 52 of 52, security 100 of 101), downsampling (58 of 59) |
+| extended suites (67 module, plugin and x-pack suites, each on its test cluster's settings) | **5,046 of the 5,541 tests that pass on Elasticsearch** (6,349 in all); 41 suites at 100% (EQL 39 of 39, ent-search 371 of 371, ES\|QL 549 of 549, KQL 34 of 34, `otel-data` 68 of 68, transforms 108 of 108, watcher 89 of 89, `watcher-security` 9 of 9), runtime fields 247 of 248, `logsdb` 225 of 234; round 6 passed 3,463. Largest gaps: x-pack `platinum` (1,064 of 1,412: rollup 52 of 52, security 100 of 101), downsampling (58 of 59) |
 | differential suite against Elasticsearch 9.5.5 (seed 1, 60 random workloads) | 2,325 of 2,333 steps equal (99.7%); the 8 others are 2 known differences (soft-delete tombstones in phrase-suggester and term statistics), none new or open; 69 replayed fixtures equal |
 | client matrix (unmodified official clients in Docker) | **11 of 11**: Python, JavaScript, Java, Go, Ruby and PHP clients, the OpenSearch Python and JavaScript clients, django-elasticsearch-dsl, Laravel Scout, and searchkick's own suite (540 runs, 0 failures) |
 | x-pack REST fixtures (`search-es/tests/xpack_fixtures.rs`) | 1,097 of 1,097 steps equal Elasticsearch |
@@ -265,19 +265,9 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    throughput against Lucene 10.5.1 on the same lines: Japanese and Korean at parity or ahead
    (`kuromoji_tokenizer` ~505k tokens/s against ~500k, `nori_tokenizer` ~295k against ~280k),
    `smartcn_tokenizer` behind (~390k against ~480k). 26 of 26 tests, listed in `_cat/plugins` and
-   `_nodes/plugins`. And `analysis-icu`, 13 of 13: ICU4J 77.1's normalizer, break iterator and
-   Thai, Lao, Khmer, Burmese and CJK dictionary engines ported over ICU's own data (every code
-   point through all six normalization data sets in both modes, 20,000 random strings, 7,525
-   char filter lines with offsets and 4,579 lines of Thai, Lao, Khmer, Burmese, Chinese, Japanese,
-   Korean and emoji text identical to ICU4J and Lucene), `icu_collation` and the
-   `icu_collation_keyword` field on ICU4X's collator (orderings identical to ICU4J in 10
-   configurations over 20,000 words; key bytes differ above primary strength), `icu_transform`
-   from rules, the built-in normalization, case, `Remove` and `Null` IDs, and the
-   `icu_analyzer`; ICU's data is read in place (FOOTPRINT). Left: ICU's data-driven
-   transforms (`Any-Latin`, `Hiragana-Katakana`, `Han-Latin`, `Latin-ASCII`: ICU's
-   transliteration rule data and its rule features beyond plain conversions), custom collation
-   `rules` and `rule_files` for the tokenizer (both need ICU's rule compilers); then smartcn's
-   speed.
+   `_nodes/plugins`. Left: `analysis-icu` (ICU tokenizer, normalizer, folding, collation,
+   transforms: the word segmentation Thai, Lao, Khmer, Burmese and CJK text needs): 13 tests; then
+   smartcn's speed.
 3. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
    Elasticsearch 9.5.5 and OpenSearch 3.9). Roll leads on indexing (4,735 docs/s against 3,585
    and 2,978 at 8 clients), merged `knn` (1.9 ms CPU against 6.1 and 4.9), `rrf` (3.2 against 13.8
@@ -317,7 +307,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    its `ism_template`). Next: saved console requests. Signed-in users who aren't admins follow
    accounts' phase 2: today every product but code, agents and projects answers them 403
    (docs/accounts.md), search included.
-5. **Compatibility gaps** from the extended suites (5,059 of the 5,541 Elasticsearch passes; a full run on 2026-11-14),
+5. **Compatibility gaps** from the extended suites (5,046 of the 5,541 Elasticsearch passes; a full run on 2026-11-14),
    largest first. Landed: ent-search's last 5 (a `rule` retriever over `rrf`/`linear`, inference
    inside a rule query's organic, workflow-restricted API keys), ES|QL's last 5 (`TOP_SNIPPETS`,
    `CATEGORIZE`, approximation's columns, `LIMIT n BY`, `unsigned_long` past `i64::MAX`),
