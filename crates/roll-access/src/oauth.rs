@@ -156,10 +156,9 @@ async fn register(State(a): S, req: axum::extract::Request) -> Response {
     if r.grant_types.as_ref().is_some_and(|g| g.iter().any(|t| t != "authorization_code" && t != "refresh_token")) {
         return reg_error("invalid_client_metadata", "grant_types: authorization_code and refresh_token");
     }
-    // A name as consent and agents show it: no control or invisible formatting characters (bidi
-    // overrides, zero-width), no backticks, at most 64 (what a token's name may be).
-    let invisible = |c: char| matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}' | '`');
-    let cleaned: String = r.client_name.as_deref().unwrap_or("").chars().filter(|c| !c.is_control() && !invisible(*c)).take(64).collect();
+    // A name as consent and agents show it: no control or invisible characters, no backticks, at
+    // most 64 (what a token's name may be).
+    let cleaned: String = r.client_name.as_deref().unwrap_or("").chars().filter(|c| shown(*c)).take(64).collect();
     let name = if cleaned.trim().is_empty() { "MCP client".to_string() } else { cleaned.trim().to_string() };
     let uri = r.client_uri.filter(|u| u.starts_with("https://") && u.len() <= 500);
     let uris = r.redirect_uris.clone();
@@ -323,7 +322,7 @@ pub async fn fetch_metadata(id: &str, allow_private: bool) -> Result<crate::stor
     if redirect_uris.is_empty() || redirect_uris.len() > 10 || !redirect_uris.iter().all(|u| redirect_ok(u)) {
         return Err("the client's metadata needs 1-10 redirect_uris, each https, http on localhost, or an app scheme".into());
     }
-    let name: String = doc["client_name"].as_str().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(url.host_str().unwrap_or("MCP client")).chars().filter(|c| !c.is_control()).take(80).collect();
+    let name: String = doc["client_name"].as_str().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(url.host_str().unwrap_or("MCP client")).chars().filter(|c| shown(*c)).take(80).collect();
     let uri = doc["client_uri"].as_str().filter(|u| u.starts_with("https://") && u.len() <= 500).map(str::to_string);
     Ok(crate::store::Client { id: id.to_string(), name, uri, redirect_uris, created_at: code_sql::now_ms(), last_used_at: None })
 }
@@ -385,6 +384,15 @@ async fn revoke(State(a): S, Form(f): Form<HashMap<String, String>>) -> Response
         let _ = tokio::task::spawn_blocking(move || a.store.revoke_secret(&t)).await;
     }
     StatusCode::OK.into_response()
+}
+
+/// Whether a client's name keeps `c`: not a control character, a backtick, or one a person can't
+/// see but a model reads (zero-width and bidi controls, tag characters smuggling ASCII, variation
+/// selectors hiding bytes).
+fn shown(c: char) -> bool {
+    !c.is_control()
+        && c != '`'
+        && !matches!(c as u32, 0x00AD | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2069 | 0xFE00..=0xFE0F | 0xFEFF | 0xE0000..=0xE007F | 0xE0100..=0xE01EF)
 }
 
 #[cfg(test)]
