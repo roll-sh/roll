@@ -268,6 +268,19 @@ async fn api_keys() {
     assert_eq!(e.roll(&["search", "keys", "revoke", "keyed", &id]).await.trim(), format!("revoked {id}"));
     assert_eq!(put("2").await.unwrap().status().as_u16(), 401);
     assert_eq!(e.roll(&["search", "keys", "list", "keyed"]).await.trim(), "no keys");
+
+    // An OpenSearch-flavor cluster's key is an internal user: a username and password, shown once.
+    e.roll(&["search", "clusters", "create", "oskeyed", "--flavor", "opensearch"]).await;
+    let out = e.roll(&["search", "keys", "create", "oskeyed", "os worker"]).await;
+    let (user, pw) = (field(&out, "username"), field(&out, "password"));
+    assert!(user.ends_with("@oskeyed") && out.contains("OPENSEARCH_USERNAME="), "{out}");
+    let put = http.put(format!("{url}/notes/_doc/1")).basic_auth(&user, Some(&pw)).json(&serde_json::json!({"t": 1})).send().await.unwrap();
+    assert_eq!(put.status().as_u16(), 201);
+    let listed = e.roll_json(&["search", "keys", "list", "oskeyed"]).await;
+    let id = listed[0]["id"].as_str().unwrap().to_string();
+    assert_eq!((listed[0]["name"].as_str(), listed[0]["access"].as_str()), (Some("os worker"), Some("data")), "{listed}");
+    e.roll(&["search", "keys", "revoke", "oskeyed", &id]).await;
+    assert_eq!(e.roll(&["search", "keys", "list", "oskeyed"]).await.trim(), "no keys");
 }
 
 /// `roll search inference`: the built-in endpoints are listed, a create without a key in the

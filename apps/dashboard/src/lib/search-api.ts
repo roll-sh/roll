@@ -149,11 +149,14 @@ export interface SearchUsage {
  * lifecycle policies, no security); `admin` is everything the cluster's own user may do. */
 export type KeyAccess = "data" | "admin";
 
-/** A new API key (`POST …/keys`): `api_key` goes in `Authorization: ApiKey …`, shown once. */
+/** A new API key (`POST …/keys`), shown once: `api_key` for `Authorization: ApiKey …`, or on an
+ * OpenSearch-flavor cluster an internal user's `username` and `password`. */
 export interface NewSearchKey {
   id: string;
   name: string;
-  api_key: string;
+  api_key?: string;
+  username?: string;
+  password?: string;
   url: string;
   expires_at?: number;
 }

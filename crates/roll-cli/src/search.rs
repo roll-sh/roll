@@ -512,6 +512,34 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
         Search::Keys(cmd) => match cmd {
             Keys::List { cluster } => {
                 let c = find(api, &cluster).await?;
+                if c["flavor"] == "opensearch" {
+                    // The keys route's internal users (`roll-key-*`).
+                    let v = es_request(api, &c, "GET", "/_plugins/_security/api/internalusers", None).await?;
+                    let keys: Vec<Value> = v
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .filter(|(id, _)| id.starts_with("roll-key-"))
+                        .map(|(id, u)| {
+                            let roles: Vec<&str> = u["opendistro_security_roles"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                            let expires = u["attributes"]["roll_expires_at"].as_str().and_then(|v| v.parse::<i64>().ok());
+                            let name = u["description"].as_str().unwrap_or_default().trim_start_matches("roll key: ");
+                            json!({ "id": id, "name": name, "access": if roles.contains(&id.as_str()) { "data" } else { "admin" }, "expires_at": expires.map(|ms| ms / 1000) })
+                        })
+                        .collect();
+                    if !as_json {
+                        if keys.is_empty() {
+                            println!("no keys");
+                        }
+                        for k in &keys {
+                            let expires = k["expires_at"].as_i64().map_or("never expires".to_string(), |s| format!("expires {}", key_time(s * 1000)));
+                            println!("{:<22}  {:<6}  {expires}  {}", s(&k["id"]), s(&k["access"]), s(&k["name"]));
+                        }
+                        return Ok(());
+                    }
+                    println!("{}", serde_json::to_string_pretty(&Value::Array(keys))?);
+                    return Ok(());
+                }
                 let r = api.post(&format!("/v1/search/clusters/{}/request", s(&c["id"])), json!({ "method": "GET", "path": "/_security/api_key" })).await?;
                 let status = r["status"].as_u64().unwrap_or(0);
                 let body: Value = serde_json::from_str(r["body"].as_str().unwrap_or("null")).unwrap_or(Value::Null);
@@ -537,6 +565,18 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 let c = find(api, &cluster).await?;
                 let expires = expires_in.as_deref().map(crate::storage::duration).transpose()?;
                 let v = api.post(&format!("/v1/search/clusters/{}/keys", s(&c["id"])), json!({ "name": name, "access": access, "expires_in_s": expires })).await?;
+                if !as_json && v.get("api_key").is_none() {
+                    // An OpenSearch-flavor cluster: the key is an internal user.
+                    println!("key {} ({}) of {}, {access} access", s(&v["id"]), s(&v["name"]), s(&c["name"]));
+                    println!("username  {}", s(&v["username"]));
+                    println!("password  {}   (shown once)", s(&v["password"]));
+                    if let Some(at) = v["expires_at"].as_i64() {
+                        println!("expires   {}", key_time(at * 1000));
+                    }
+                    println!();
+                    println!("OPENSEARCH_URL={} OPENSEARCH_USERNAME={} OPENSEARCH_PASSWORD={}", s(&v["url"]), s(&v["username"]), s(&v["password"]));
+                    return Ok(());
+                }
                 if !as_json {
                     println!("key {} ({}) of {}, {access} access", s(&v["id"]), s(&v["name"]), s(&c["name"]));
                     println!("api_key   {}   (shown once)", s(&v["api_key"]));

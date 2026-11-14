@@ -32,8 +32,8 @@ function accessOf(k: SearchKeyInfo) {
 /**
  * API keys of a cluster: a client that mustn't share the cluster's password gets a key of its
  * own, revoked without touching anyone else. The list is loaded on request (it wakes the
- * cluster); a new key is shown once. OpenSearch-flavor clusters have no API keys (their clients
- * sign in with a user).
+ * cluster); a new key is shown once. On an OpenSearch-flavor cluster (whose clients sign in with
+ * a user) a key is an internal user of its own (`roll-key-*`).
  */
 export function ApiKeys({ cluster }: { cluster: SearchCluster }) {
   const { copied, copy } = useCopy();
@@ -45,6 +45,7 @@ export function ApiKeys({ cluster }: { cluster: SearchCluster }) {
   const [revoking, setRevoking] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const opensearch = cluster.flavor === "opensearch";
 
   const act = async <T,>(label: string, f: () => Promise<T>): Promise<{ value: T } | null> => {
     setBusy(label);
@@ -60,20 +61,30 @@ export function ApiKeys({ cluster }: { cluster: SearchCluster }) {
   };
   const load = () =>
     act("load", async () => {
+      if (opensearch) {
+        // The keys route's internal users: a data key has a role of its own, an admin key all_access.
+        const users = await esJson<Record<string, { description?: string; opendistro_security_roles?: string[]; attributes?: Record<string, string> }>>(
+          cluster.id,
+          "GET",
+          "/_plugins/_security/api/internalusers",
+        );
+        setKeys(
+          Object.entries(users)
+            .filter(([id]) => id.startsWith("roll-key-"))
+            .map(([id, u]) => ({
+              id,
+              name: (u.description ?? "").replace(/^roll key: /, ""),
+              creation: 0,
+              expiration: Number(u.attributes?.roll_expires_at) || undefined,
+              invalidated: false,
+              role_descriptors: u.opendistro_security_roles?.includes(id) ? { [DATA_ROLE]: {} } : {},
+            })),
+        );
+        return;
+      }
       const r = await esJson<{ api_keys: SearchKeyInfo[] }>(cluster.id, "GET", "/_security/api_key");
       setKeys(r.api_keys.filter((k) => !k.invalidated).sort((a, b) => b.creation - a.creation));
     });
-
-  if (cluster.flavor === "opensearch") {
-    return (
-      <Panel title="API keys">
-        <p className="px-5 py-4 text-[13px] text-muted">
-          OpenSearch clients sign in with a user, not an API key. An app linked to this cluster gets an internal user of its own
-          that can use the data only.
-        </p>
-      </Panel>
-    );
-  }
 
   return (
     <Panel
@@ -87,7 +98,7 @@ export function ApiKeys({ cluster }: { cluster: SearchCluster }) {
       <div className="space-y-4 px-5 py-4">
         <p className="text-[13px] text-muted">
           A client that shouldn&apos;t share the cluster&apos;s password gets a key of its own, sent as{" "}
-          <span className="font-mono">Authorization: ApiKey &lt;key&gt;</span>. Data keys read and write indices, templates, pipelines and
+          <span className="font-mono">{opensearch ? "a user name and password (Basic auth)" : "Authorization: ApiKey <key>"}</span>. Data keys read and write indices, templates, pipelines and
           lifecycle policies, but can&apos;t manage users or keys.
         </p>
         <form
@@ -144,9 +155,26 @@ export function ApiKeys({ cluster }: { cluster: SearchCluster }) {
               </span>
               <span className="text-[12px] text-subtle">shown once</span>
             </div>
-            <SecretField id="key" value={made.api_key} masked="••••••••••••••••••••••••" copied={copied} onCopy={copy} />
+            {made.api_key ? (
+              <SecretField id="key" value={made.api_key} masked="••••••••••••••••••••••••" copied={copied} onCopy={copy} />
+            ) : (
+              <div className="grid gap-2 sm:grid-cols-2">
+                <SecretField id="user" value={made.username ?? ""} masked={made.username ?? ""} copied={copied} onCopy={copy} />
+                <SecretField id="pw" value={made.password ?? ""} masked="••••••••••••••••••••••••" copied={copied} onCopy={copy} />
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
-              <button onClick={() => copy("env", `ELASTICSEARCH_URL=${made.url}\nELASTICSEARCH_API_KEY=${made.api_key}\n`)} className={btn}>
+              <button
+                onClick={() =>
+                  copy(
+                    "env",
+                    made.api_key
+                      ? `ELASTICSEARCH_URL=${made.url}\nELASTICSEARCH_API_KEY=${made.api_key}\n`
+                      : `OPENSEARCH_URL=${made.url}\nOPENSEARCH_USERNAME=${made.username}\nOPENSEARCH_PASSWORD=${made.password}\n`,
+                  )
+                }
+                className={btn}
+              >
                 {copied === "env" ? "Copied .env" : "Copy as .env"}
               </button>
               {made.expires_at && <span className="text-[12px] text-muted">expires {day(made.expires_at * 1000)}</span>}
@@ -189,7 +217,7 @@ export function ApiKeys({ cluster }: { cluster: SearchCluster }) {
                         </div>
                       </td>
                       <td className="px-3 py-2 text-muted">{accessOf(k)}</td>
-                      <td className="px-3 py-2 font-mono text-[12px] text-muted">{day(k.creation)}</td>
+                      <td className="px-3 py-2 font-mono text-[12px] text-muted">{k.creation ? day(k.creation) : "—"}</td>
                       <td className="px-3 py-2 font-mono text-[12px] text-muted">{k.expiration ? day(k.expiration) : "never"}</td>
                       <td className="whitespace-nowrap px-3 py-2 text-right">
                         {revoking === k.id ? (
