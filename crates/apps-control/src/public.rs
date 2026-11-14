@@ -190,7 +190,9 @@ pub fn with_forwarded(api: axum::Router, apps: Arc<Apps>) -> axum::Router {
     let route = axum::Router::new()
         .route(INTERNAL, axum::routing::any(forwarded_public))
         .with_state(apps)
-        .layer(axum::middleware::from_fn_with_state(cluster, roll_cluster::require_signed));
+        // Only the route: a layer would wrap the router's fallback too, and the merge carries it
+        // over, so every other path's 404 would answer this check's 401.
+        .route_layer(axum::middleware::from_fn_with_state(cluster, roll_cluster::require_signed));
     api.merge(route)
 }
 

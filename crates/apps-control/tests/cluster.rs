@@ -480,6 +480,10 @@ async fn a_visitor_cant_reach_a_service_through_the_internal_route() {
     // Straight at the owner's route, unsigned.
     let direct = reqwest::Client::new().get(format!("http://{}/internal/apps/public", owner.addr)).header("x-roll-apps-target", &target).header("x-roll-apps-uri", "/").header("x-roll-via-site", "1").send().await.unwrap();
     assert_eq!(direct.status().as_u16(), 401, "only a node's signed request gets in");
+    // Only that route: any other path no route has is still the API's 404, not the check's 401
+    // (a layer on the merged router would wrap its fallback too).
+    let other_path = reqwest::Client::new().get(format!("http://{}/v1/nothing/here", owner.addr)).send().await.unwrap();
+    assert_eq!(other_path.status().as_u16(), 404);
     // On an API call another node forwards to the owner: answered by the API, not the app.
     // (Before 2026-11-14's fix the owner trusted these as plain headers on any forward.)
     let (st, env) = call_with(&other.api, &base, &[("x-roll-apps-target", &target), ("x-roll-apps-uri", "/"), ("x-roll-via-site", "1"), ("x-roll-apps-public", "1"), ("x-roll-rewrite-to", &target)]).await;
