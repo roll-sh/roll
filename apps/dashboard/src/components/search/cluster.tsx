@@ -243,7 +243,7 @@ function OverviewTab({ cluster, info }: { cluster: SearchCluster; info: SearchIn
                 ? `wakes on the next request, or at ${formatTime(st.wakes_at)} for a background job`
                 : "wakes on the next request",
           },
-          { label: "Indices", value: formatCount(st.indices ?? cluster.indices), hint: `${formatCount(cluster.docs)} documents` },
+          { label: "Indices", value: formatCount(st.indices ?? cluster.indices), hint: `${formatCount(st.docs ?? cluster.docs)} documents` },
           {
             label: "Stored",
             value: formatBytes(cluster.stored_bytes),

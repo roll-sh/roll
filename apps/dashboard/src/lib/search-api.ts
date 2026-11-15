@@ -61,6 +61,8 @@ export interface SearchStatus {
   state: "loaded" | "asleep";
   in_flight?: number;
   indices?: number;
+  /** Loaded with every index open: live documents (the cluster's `docs` is the last metered). */
+  docs?: number;
   cluster_uuid?: string;
   /** Asleep: when a background job (a watch, a transform, ILM, a rollup) wakes it (unix s). */
   wakes_at?: number;

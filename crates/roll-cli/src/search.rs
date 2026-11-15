@@ -325,7 +325,7 @@ fn print_cluster(c: &Value) {
         s(&c["flavor"]),
         state,
         st["indices"].as_i64().or(c["indices"].as_i64()).unwrap_or(0),
-        s(&c["docs"]),
+        if st["docs"].is_u64() { s(&st["docs"]) } else { s(&c["docs"]) },
         bytes(c["stored_bytes"].as_f64().unwrap_or(0.0)),
         s(&c["url"]),
     );

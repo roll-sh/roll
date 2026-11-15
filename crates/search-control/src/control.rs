@@ -1083,6 +1083,12 @@ impl Control {
                     "indices": st.metadata.indices.len(),
                     "cluster_uuid": st.metadata.cluster_uuid,
                 });
+                // Live documents from shard statistics (no search runs) once every index is
+                // open; the metered `docs` lags until the next sample.
+                let f = crate::meter::engine_figures(&l.cluster);
+                if f.complete() {
+                    v["docs"] = json!(f.docs);
+                }
                 if let Some(l) = self.cluster_leases() {
                     v["node"] = json!(l.cluster().node_id());
                 }

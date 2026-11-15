@@ -191,9 +191,14 @@ async fn lifecycle() {
     let r = e.http.get(format!("{}/products", e.es)).header("authorization", format!("ApiKey {key}")).send().await.unwrap();
     assert_eq!(r.status().as_u16(), 200);
 
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/products/_doc/1?refresh=true", Some(json!({"title": "shoe"}))).await;
+    assert_eq!(s, 201, "{v}");
+
     let shown = e.get(&format!("/v1/search/clusters/{id}")).await;
     assert_eq!(shown["status"]["state"], "loaded");
     assert_eq!(shown["status"]["indices"], 1);
+    // Live, while the metered `docs` waits for the next sample.
+    assert_eq!(shown["status"]["docs"], 1, "{shown}");
 
     // Indices listing.
     let idx = e.get(&format!("/v1/search/clusters/{id}/indices")).await;
@@ -267,10 +272,10 @@ async fn lifecycle() {
     e.control.sample().await.unwrap();
     let u = e.get(&format!("/v1/search/clusters/{id}/usage?days=1")).await;
     assert_eq!(u["cluster_id"], id.as_str());
-    // Every request the node admitted: 6 from clients (also across the unload), the indices
+    // Every request the node admitted: 7 from clients (also across the unload), the indices
     // listing and 5 console requests. Not counted: wrong passwords, the 413, the console's own
     // 400s.
-    assert_eq!(u["requests"], 12, "the node's request counts are metered: {u}");
+    assert_eq!(u["requests"], 13, "the node's request counts are metered: {u}");
     assert!(u["loaded_seconds"].as_i64().unwrap() >= 1, "{u}");
     assert!(u["loaded_gib_hours"].as_f64().unwrap() > 0.0);
     let cost = &u["cost"];
