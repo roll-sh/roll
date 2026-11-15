@@ -1177,8 +1177,10 @@ impl Control {
     }
 
     /// A new internal user of an OpenSearch-flavor cluster named `<prefix><random>`, with a random
-    /// password: a role of its own with [`os_link_role`]'s permissions (`data`), else `all_access`
-    /// (which can't administer security). `expires_ms`: it can't sign in from then on
+    /// password: a role of its own with [`os_link_role`]'s permissions (`data`: no security REST
+    /// API, the security index restricted), else `all_access`, which can use the security REST
+    /// API like the cluster's own admin (an `admin` key is the cluster's password by another
+    /// name, so it could also make a user without an expiry). `expires_ms`: it can't sign in from then on
     /// (`EXPIRES_ATTRIBUTE`, checked by the cluster). Returns its name and password.
     async fn os_user(&self, c: &SearchCluster, prefix: &str, data: bool, description: &str, expires_ms: Option<i64>) -> Result<(String, String)> {
         let name = format!("{prefix}{}", random_string(12));
