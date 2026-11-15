@@ -14,6 +14,7 @@ pub mod ext;
 pub mod git;
 pub mod leaks;
 pub mod github;
+mod secret_leaks;
 pub mod mcp;
 pub mod model;
 pub mod names;
@@ -27,7 +28,7 @@ pub mod settings;
 pub mod streams;
 pub mod webhooks;
 
-pub use ext::{PreviewBackend, Runner};
+pub use ext::{PreviewBackend, Runner, SecretEnv};
 pub use service::{FileWrite, LandOutcome, WriteFiles};
 
 use axum::Json;
@@ -411,6 +412,8 @@ pub struct Code {
     pub runner: RwLock<Option<Arc<dyn Runner>>>,
     /// The GitHub App, once [`github::enable`] ran.
     pub(crate) github: std::sync::OnceLock<Arc<github::Hub>>,
+    /// roll secrets, once rolld plugged it in ([`Code::set_secret_env`]).
+    pub(crate) secret_env: std::sync::OnceLock<Arc<dyn SecretEnv>>,
     pub(crate) queues: queue::Queues,
     pub(crate) settings_cache: Mutex<HashMap<String, SettingsAt>>,
     /// Checks failing on a head the queue built a batch on.
@@ -419,6 +422,12 @@ pub struct Code {
     pub(crate) review_configs: Mutex<HashMap<String, Arc<review::ReviewConfig>>>,
     /// What review rules need to know about a change's diff, per (repo, merge base, head).
     pub(crate) review_facts: Cache<(String, Option<ChangesetId>, ChangesetId), Arc<review::rules::Facts>>,
+    /// The secrets a change's added lines hold, per (repo, head), with the merge base they were
+    /// found from (`leaks.rs`).
+    pub(crate) leak_facts: Cache<(String, ChangesetId), (Option<ChangesetId>, secret_leaks::Leaks)>,
+    /// The environment variables a change reads that a roll secrets environment lacks, per
+    /// (repo, head), with the merge base they were found from (`secret_leaks.rs`).
+    pub(crate) env_facts: Cache<(String, ChangesetId), (Option<ChangesetId>, secret_leaks::Missing)>,
     /// Review-app webhook deliveries.
     pub(crate) deliveries: review::Deliveries,
     /// roll's own reviewer: its job queue, the codebase index, sealed keys.
@@ -546,11 +555,14 @@ impl Code {
             previews: RwLock::new(None),
             runner: RwLock::new(None),
             github: std::sync::OnceLock::new(),
+            secret_env: std::sync::OnceLock::new(),
             queues: queue::Queues::default(),
             settings_cache: Mutex::new(HashMap::new()),
             baselines: Cache::new(1024),
             review_configs: Mutex::new(HashMap::new()),
             review_facts: Cache::new(16_384),
+            leak_facts: Cache::new(16_384),
+            env_facts: Cache::new(16_384),
             deliveries: review::Deliveries::default(),
             ai,
             worktrees: checkout::Worktrees::default(),
@@ -583,6 +595,11 @@ impl Code {
 
     pub fn set_runner(&self, r: Arc<dyn Runner>) {
         *self.runner.write() = Some(r);
+    }
+
+    /// Plug in roll secrets (sandboxes started with an environment's secrets).
+    pub fn set_secret_env(&self, s: Arc<dyn SecretEnv>) {
+        let _ = self.secret_env.set(s);
     }
 
     /// The cluster, if this node is part of one.

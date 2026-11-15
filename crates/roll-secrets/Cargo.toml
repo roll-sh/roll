@@ -1,0 +1,37 @@
+[package]
+name = "roll-secrets"
+description = "Secrets and environment variables of workspace projects: environments, folders, versions, references, links, approvals (/v1/secrets)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aes-gcm.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+code-sql.workspace = true
+curve25519-dalek.workspace = true
+getrandom.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+ipnet.workspace = true
+regex.workspace = true
+ring.workspace = true
+roll-auth.workspace = true
+roll-workspace.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+x509-parser.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+http-body-util.workspace = true
+tempfile.workspace = true
+tower.workspace = true
