@@ -565,6 +565,8 @@ async fn run() -> anyhow::Result<()> {
     let products_api = secrets::Api::default();
     let grants: std::sync::Arc<dyn roll_auth::Grants> = access.clone();
     let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), Some(grants), people)?;
+    // Its counters and gauges, a line a minute beside the cluster's (JSON logs only).
+    let _secrets_metrics = logs::SecretsMetrics::start(cluster.node_id().to_string(), secrets.clone());
     code_secrets.set(secrets.clone(), workspace.clone());
     apps_secrets.set(secrets.clone(), workspace.clone());
     let _ = secrets_envs.0.set(secrets.clone());

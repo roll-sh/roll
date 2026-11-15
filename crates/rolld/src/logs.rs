@@ -286,6 +286,10 @@ fn route_product(route: &str) -> &'static str {
     if route == "/git" || route.starts_with("/git/") {
         return "git";
     }
+    // roll secrets is always on (no ROLL_PRODUCTS switch), so it isn't a `Product`.
+    if route == "/v1/secrets" || route.starts_with("/v1/secrets/") {
+        return "secrets";
+    }
     crate::products::Product::of_route(route).map_or(SERVICE, crate::products::Product::name)
 }
 
@@ -406,6 +410,76 @@ impl ClusterMetrics {
     }
 }
 
+// ---- roll secrets' metrics ----
+
+/// Publishes roll secrets' counters (what changed in the last minute) and gauges (JSON logs only):
+/// reads, dynamic credentials, revocations, syncs, scheduled rotations, KMS refusals; live leases,
+/// failing syncs and failing rotations.
+pub struct SecretsMetrics {
+    node: String,
+    secrets: Arc<roll_secrets::Secrets>,
+    last: std::sync::Mutex<roll_secrets::Metrics>,
+}
+
+impl SecretsMetrics {
+    pub fn start(node: String, secrets: Arc<roll_secrets::Secrets>) -> Arc<SecretsMetrics> {
+        let last = secrets.metrics().unwrap_or_default();
+        let m = Arc::new(SecretsMetrics { node, secrets, last: std::sync::Mutex::new(last) });
+        if json_on() {
+            let weak = Arc::downgrade(&m);
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(ClusterMetrics::EVERY);
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    let Some(m) = weak.upgrade() else { return };
+                    // The gauges read the store: off the async threads.
+                    let _ = tokio::task::spawn_blocking(move || m.flush()).await;
+                }
+            });
+        }
+        m
+    }
+
+    /// The counters' change since `last`, and the gauges as they are, as one EMF line's fields.
+    fn fields(node: &str, now: roll_secrets::Metrics, last: roll_secrets::Metrics) -> Map<String, Value> {
+        let d = |a: u64, b: u64| a.saturating_sub(b);
+        let mut f = Map::new();
+        f.insert("node".into(), node.into());
+        f.insert("service".into(), SERVICE.into());
+        f.insert("product".into(), "secrets".into());
+        let metrics: [(&str, u64, &str); 12] = [
+            ("SecretsReads", d(now.reads, last.reads), "Count"),
+            ("SecretsDynamicIssued", d(now.dynamic_issued, last.dynamic_issued), "Count"),
+            ("SecretsLeasesRevoked", d(now.leases_revoked, last.leases_revoked), "Count"),
+            ("SecretsRevokeFailures", d(now.revoke_failures, last.revoke_failures), "Count"),
+            ("SecretsSyncsPushed", d(now.syncs_pushed, last.syncs_pushed), "Count"),
+            ("SecretsSyncFailures", d(now.sync_failures, last.sync_failures), "Count"),
+            ("SecretsRotations", d(now.rotations, last.rotations), "Count"),
+            ("SecretsRotationFailures", d(now.rotation_failures, last.rotation_failures), "Count"),
+            ("SecretsKmsRefusals", d(now.kms_refusals, last.kms_refusals), "Count"),
+            ("SecretsLeasesLive", now.leases_live, "Count"),
+            ("SecretsSyncsFailing", now.syncs_failing, "Count"),
+            ("SecretsRotationsFailing", now.rotations_failing, "Count"),
+        ];
+        for (name, v, _) in &metrics {
+            f.insert((*name).into(), (*v).into());
+        }
+        let declared: Vec<(&str, &str)> = metrics.iter().map(|(n, _, u)| (*n, *u)).collect();
+        f.insert("_aws".into(), emf(&declared, &[&["service"], &["product"]]));
+        f
+    }
+
+    pub fn flush(&self) {
+        if !json_on() {
+            return;
+        }
+        let Ok(now) = self.secrets.metrics() else { return };
+        let last = std::mem::replace(&mut *self.last.lock().unwrap_or_else(|e| e.into_inner()), now);
+        write_line(line("INFO", "metrics", "secrets", Self::fields(&self.node, now, last)));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,7 +530,14 @@ mod tests {
         let l = line("INFO", "metrics", "cluster", ClusterMetrics::fields("i-1", stats));
         check_emf(&l);
         assert_eq!((l["HandoffFailures"].as_u64(), l["LeaseTakeovers"].as_u64()), (Some(1), Some(2)));
-        // Pushes and clones aren't code's API latency.
+        // Pushes and clones aren't code's API latency; roll secrets' routes are its own product.
         assert_eq!((route_product("/git/{*rest}"), route_product("/v1/code/repos"), route_product(UNMATCHED)), ("git", "code", "rolld"));
+        assert_eq!((route_product("/v1/secrets/projects/{project}/environments/{env}/values"), route_product("/v1/secretsx")), ("secrets", "rolld"));
+        // roll secrets' line: counters as what changed since the last one, gauges as they are.
+        let last = roll_secrets::Metrics { reads: 10, sync_failures: 1, leases_live: 4, ..Default::default() };
+        let now = roll_secrets::Metrics { reads: 25, sync_failures: 1, leases_live: 3, ..Default::default() };
+        let l = line("INFO", "metrics", "secrets", SecretsMetrics::fields("i-1", now, last));
+        check_emf(&l);
+        assert_eq!((l["SecretsReads"].as_u64(), l["SecretsSyncFailures"].as_u64(), l["SecretsLeasesLive"].as_u64()), (Some(15), Some(0), Some(3)));
     }
 }
