@@ -89,7 +89,9 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    ```
 
    In Go, `sdk/go/secrets` has the same surface, and `FromEnv` logs a workload identity in with
-   its own OIDC token as `roll run` does (`ROLL_IDENTITY`):
+   its own OIDC token as `roll run` does (`ROLL_IDENTITY`). It logs in again before the login's
+   token ends, and when the server refuses it, reading the OIDC token afresh each time, so a
+   long-running watch keeps working:
 
    ```go
    c, err := secrets.FromEnv(ctx)

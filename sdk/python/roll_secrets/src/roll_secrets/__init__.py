@@ -16,6 +16,7 @@ import base64
 import json
 import os
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -75,12 +76,26 @@ class Client:
         self.project = project
         self.timeout = timeout
         self._lock = threading.Lock()
+        # Renews the token of a client a workload identity's login made.
+        self._login: Optional[_Relogin] = None
 
     def _call(self, method: str, path: str, body: Any = None) -> Any:
+        if self._login is None:
+            return self._send(self.token, method, path, body)
+        token = self._login.token(self)
+        try:
+            return self._send(token, method, path, body)
+        except SecretsError as e:
+            # Refused: revoked, or ended early. One new login, then once more.
+            if e.status != 401:
+                raise
+            return self._send(self._login.token(self, stale=token), method, path, body)
+
+    def _send(self, token: str, method: str, path: str, body: Any = None) -> Any:
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(self.api + path, data=data, method=method)
-        if self.token:
-            req.add_header("Authorization", "Bearer " + self.token)
+        if token:
+            req.add_header("Authorization", "Bearer " + token)
         if data is not None:
             req.add_header("Content-Type", "application/json")
         try:
@@ -182,11 +197,40 @@ class Client:
 
 def login(api: str, identity: str, oidc_token: str) -> Client:
     """Exchanges a workload's own OIDC token for a short-lived roll token through workload identity
-    (docs/secrets.md, "Workload identities"): nothing long-lived in the workload's settings."""
-    r = Client(api, "")._call("POST", "/v1/secrets/login", {"identity": identity, "token": oidc_token.strip()})
-    if not r or not r.get("token"):
-        raise SecretsError("the login answered no token", 502)
-    return Client(api, r["token"], project=r.get("project"))
+    (docs/secrets.md, "Workload identities"): nothing long-lived in the workload's settings. The
+    client logs in again with the same OIDC token before its roll token ends (``from_env`` reads a
+    fresh OIDC token each time)."""
+    return _logged_in(api, identity, lambda: oidc_token)
+
+
+def _logged_in(api: str, identity: str, source: Callable[[], str]) -> Client:
+    c = Client(api, "")
+    c._login = _Relogin(identity, source)
+    c._login.token(c, stale="")
+    return c
+
+
+class _Relogin:
+    """Keeps a logged-in client's token fresh: a new login once less than a fifth of its life (at
+    least a minute) is left, or when the server refuses it."""
+
+    def __init__(self, identity: str, source: Callable[[], str]):
+        self.identity = identity
+        self.source = source
+        self.lock = threading.Lock()
+        self.issued = self.expires = 0.0
+
+    def token(self, c: Client, stale: Optional[str] = None) -> str:
+        with self.lock:
+            margin = max(60.0, (self.expires - self.issued) / 5)
+            if stale == c.token or time.time() > self.expires - margin:
+                r = Client(c.api, "", timeout=c.timeout)._send("", "POST", "/v1/secrets/login", {"identity": self.identity, "token": self.source().strip()})
+                if not r or not r.get("token"):
+                    raise SecretsError("the login answered no token", 502)
+                c.token, self.issued, self.expires = r["token"], time.time(), (r.get("expires_at") or 0) / 1000
+                if not c.project:
+                    c.project = r.get("project")
+            return c.token
 
 
 def from_env() -> Client:
@@ -201,7 +245,8 @@ def from_env() -> Client:
     if env("ROLL_TOKEN"):
         c = Client(api, env("ROLL_TOKEN"))
     elif env("ROLL_IDENTITY"):
-        c = login(api, env("ROLL_IDENTITY"), _oidc_token(api, env))
+        # The OIDC token is read again for each login (a projected token is replaced on disk).
+        c = _logged_in(api, env("ROLL_IDENTITY"), lambda: _oidc_token(api, env))
     else:
         raise SecretsError("set ROLL_TOKEN, or ROLL_IDENTITY for a workload identity", 400, "config")
     if env("ROLL_PROJECT"):
