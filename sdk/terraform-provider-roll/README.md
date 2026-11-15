@@ -57,7 +57,10 @@ data "roll_secrets_values" "production" {
 }
 ```
 
-- Identities, syncs and tokens don't change in place: every attribute replaces them.
+- Identities, syncs and tokens don't change in place: every attribute replaces them, and so do
+  `roll_secrets_ca`, `roll_secrets_ssh_ca`, `roll_secrets_transit_key` and
+  `roll_secrets_outside_database` (whose `admin_url_wo` is write-only: bump
+  `admin_url_wo_version` to register it again).
 
 - A key's value is read back on refresh, references as written, so a change made outside
   Terraform shows in the plan (the token needs `reveal`).

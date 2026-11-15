@@ -129,6 +129,13 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
   project's secrets, made through `POST /v1/access/tokens` as the dashboard's New token. Its
   secret is in the state (sensitive). Any change replaces it, and destroying it revokes it.
 - **`data.roll_secrets_values`** is an environment's resolved values, for another provider.
+- **What a project registers itself**: **`roll_secrets_ca`** (domains, `allow_ip`, `max_days`; the
+  CA's `certificate` out), **`roll_secrets_ssh_ca`** (principals, host domains; its `public_key` and
+  `known_hosts` out), **`roll_secrets_transit_key`** (an encryption key; destroying it confirms with
+  its name, and what it encrypted can't be read after) and **`roll_secrets_outside_database`**
+  (roles, group, CA; its admin URL `admin_url_wo` is write-only, Terraform 1.11+: sent once and
+  sealed in roll, never in the state, and bumping `admin_url_wo_version` registers it again). roll
+  changes none in place, so every attribute replaces them; keys link to them as to any resource.
 
 Values land in Terraform's state, as with every provider: keep the state as private as the values.
 ## GitHub Actions
@@ -2723,9 +2730,9 @@ user's call).
    `…/values` (a 304 reads, issues and audits nothing; never for dynamic credentials), and a TTL
    cache in the TypeScript, Go and Python clients that revalidates with it.
 4. **Terraform without values in state** (#66, on #62): an `ephemeral "roll_secrets_values"`
-   resource (dynamic credentials revoked when the run closes) and a write-only `value_wo`. Next:
-   resources for CAs, SSH CAs, encryption keys and outside databases. Transit in the Go and Python
-   clients is #67.
+   resource (dynamic credentials revoked when the run closes) and a write-only `value_wo`. Resources for
+   CAs, SSH CAs, encryption keys and outside databases are #72; transit in the Go and Python clients
+   is #67.
 5. **AWS through roll's own issuer** (#68, on #62): `trust: "oidc"` roles, assumed with
    `AssumeRoleWithWebIdentity` and a token roll's issuer signs for the project (`sub` pinned, as GCP
    and Azure): no AWS credential of roll's at all.
