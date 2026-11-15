@@ -1,16 +1,20 @@
-import { Clock, Dices, Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, Trash2, Upload, User } from "lucide-react";
+import { Clock, Copy, Dices, Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, Trash2, Upload, User, Users } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
 import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type KeyInsight, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
 import { generateValue } from "@/lib/secrets-generate";
 import { childPath, folderName } from "@/lib/secrets-grid";
+import { rollRef } from "@/lib/secrets-ref";
 import { misfit } from "@/lib/secrets-required";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../agents/ui/menu";
 import { Segmented } from "../agents/ui/toggle-group";
 import { FolderCrumbs } from "./folders";
+import { FolderPolicyChip } from "./folder-policy";
 import { useSlashFocus } from "./grid";
 import { HistoryDrawer, type Drawer } from "./history";
 import { ImportDialog } from "./import-dialog";
+import { ReachDialog } from "./reach-dialog";
+import { EsoDialog } from "./eso-dialog";
 import { ImportsPanel } from "./imports";
 import { RefInput, useRefSource, useRefWarnings, type RefSource } from "./ref-input";
 import { ShareDialog, type ShareSource } from "./share-dialog";
@@ -39,6 +43,8 @@ export function EnvView({ env }: { env: Environment }) {
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [reaching, setReaching] = useState<string | null>(null);
+  const [pulling, setPulling] = useState(false);
   const [linking, setLinking] = useState(false);
   const [drawer, setDrawer] = useState<Drawer | null>(null);
   const [sharing, setSharing] = useState<ShareSource | null>(null);
@@ -113,6 +119,8 @@ export function EnvView({ env }: { env: Environment }) {
     } catch (e) {
       if (needsApproval(e)) setPending({ batch, why: e.message, label: done });
       else setError(errorText(e));
+      // Someone changed it since it was shown: show what's there now.
+      if ((e as { code?: string }).code === "stale") refresh();
       return false;
     }
   };
@@ -165,12 +173,13 @@ export function EnvView({ env }: { env: Environment }) {
               <MenuTrigger className={button} aria-label="Export">
                 <Download className="size-3.5" /> Export
               </MenuTrigger>
-              <MenuPopup align="end" className="w-48">
+              <MenuPopup align="end" className="w-56">
                 {(["dotenv", "json", "shell", "yaml", "docker", "kubernetes"] as const).map((f) => (
                   <MenuItem key={f} onClick={() => exportAs(f)}>
                     {{ dotenv: ".env", json: "json", shell: "shell", yaml: "yaml", docker: "Docker env file", kubernetes: "Kubernetes Secret" }[f]} <span className="ml-auto text-[10.5px] text-subtle">audited</span>
                   </MenuItem>
                 ))}
+                <MenuItem onClick={() => setPulling(true)}>External Secrets Operator…</MenuItem>
               </MenuPopup>
             </Menu>
             <button className={button} onClick={() => setDrawer({ kind: "changes" })} title="History (h)">
@@ -201,6 +210,7 @@ export function EnvView({ env }: { env: Environment }) {
           {tab === "secrets" && (
             <>
               <FolderCrumbs path={path} onPath={(np) => go({ env: env.slug, path: np === "/" ? undefined : np })} />
+              <FolderPolicyChip env={env} path={path} />
               {childFolders.map((f) => (
                 <button key={f.path} onClick={() => go({ env: env.slug, path: f.path })} className="inline-flex h-6 items-center gap-1 rounded-md border border-line-2 px-1.5 text-[11.5px] text-muted transition-colors hover:border-line-3 hover:text-fg" title={`${f.secrets} secrets, ${f.folders} folders`}>
                   <Folder className="size-3" /> {f.name || folderName(f.path)}
@@ -349,6 +359,8 @@ export function EnvView({ env }: { env: Environment }) {
                     onWrite={write}
                     onHistory={() => setDrawer({ kind: "versions", key: s.key, type: s.type })}
                     onShare={() => setSharing({ kind: "secret", env: env.slug, key: s.key, path })}
+                    onReach={() => setReaching(s.key)}
+                    onCopied={(text) => setNote({ text, warnings: [] })}
                     onSource={(src) => (src.kind === "import" ? setImportsOpen({ highlight: { ...(src.project && { project: src.project }), environment: src.environment, path: src.path } }) : go({ env: src.environment, path: p, key: s.key }))}
                   />
                 ))}
@@ -360,6 +372,8 @@ export function EnvView({ env }: { env: Environment }) {
       </div>
 
       <HistoryDrawer env={env} drawer={drawer} onClose={() => setDrawer(null)} onDrawer={setDrawer} onChanged={refresh} />
+      <ReachDialog open={reaching !== null} onClose={() => setReaching(null)} env={env} path={path} keyName={reaching ?? ""} />
+      <EsoDialog open={pulling} onClose={() => setPulling(false)} env={env} path={path} />
       <ImportDialog open={importing} onClose={() => setImporting(false)} env={env} path={path} current={secrets} onImported={(text, w) => (setNote({ text, warnings: w }), refresh(), open.reload())} />
       <ShareDialog source={sharing} onClose={() => setSharing(null)} onShared={() => {}} />
       <LinkDialog open={linking} onClose={() => setLinking(false)} env={env} path={path} taken={keys} onWrite={write} />
@@ -493,6 +507,8 @@ function SecretRow({
   onHistory,
   onShare,
   onSource,
+  onReach,
+  onCopied,
 }: {
   env: Environment;
   secret: Secret;
@@ -509,6 +525,10 @@ function SecretRow({
   onHistory: () => void;
   onShare: () => void;
   onSource: (source: Exclude<Secret["source"], { kind: "own" }>) => void;
+  /** Who and what can read it (a project admin's). */
+  onReach: () => void;
+  /** Says what was copied. */
+  onCopied: (text: string) => void;
 }) {
   const { api, project, resourceName } = useSecrets();
   const [editing, setEditing] = useState<null | EditMode>(null);
@@ -564,6 +584,10 @@ function SecretRow({
               <Link className="text-accent hover:underline" href={secretsHref(project.id, { view: "access" })}>
                 leases
               </Link>
+            </span>
+          ) : s.tags.includes("sensitive") ? (
+            <span className="flex items-center gap-1 text-[11px] text-subtle" title="Sensitive: only roll's runtimes and syncs read it, never a person or a token">
+              <Lock className="size-3" /> sensitive, never shown
             </span>
           ) : (
             <Reveal className="flex-1" load={() => api.value(env.slug, s.key, path)} />
@@ -637,6 +661,26 @@ function SecretRow({
                       <Pencil className="size-3.5" /> Set here (own value)
                     </MenuItem>
                   )}
+                  {!personal && rollRef(env.slug, path, s.key) && (
+                    <MenuItem
+                      onClick={() => {
+                        const ref = rollRef(env.slug, path, s.key) ?? "";
+                        // No clipboard on a page that isn't https: then the note shows it to copy.
+                        const copy = navigator.clipboard?.writeText(ref) ?? Promise.reject(new Error("no clipboard"));
+                        copy.then(
+                          () => onCopied(`Copied ${ref}: in an env file, roll run --env-file reads it`),
+                          () => onCopied(`${ref}: in an env file, roll run --env-file reads it`),
+                        );
+                      }}
+                    >
+                      <Copy className="size-3.5" /> Copy reference
+                    </MenuItem>
+                  )}
+                  {!personal && (
+                    <MenuItem onClick={onReach}>
+                      <Users className="size-3.5" /> Who can read it…
+                    </MenuItem>
+                  )}
                   {s.link?.mode !== "dynamic" && (
                     <MenuItem onClick={onShare}>
                       <Send className="size-3.5" /> Share once…
@@ -666,8 +710,11 @@ function SecretRow({
           onCancel={() => setEditing(null)}
           onSave={async (body) => {
             const type: SecretType | undefined = editing === "personal" || (editing === "edit" && personal) ? "personal" : undefined;
-            const op: Op = { op: "set", key: s.key, ...body, type };
-            const ok = await onWrite(() => api.set(env.slug, s.key, { ...body, type }, path), { path, ops: [op], message: `updated ${s.key}` }, editing === "personal" ? `Set ${s.key} for you` : editing === "own" ? `Set ${s.key} here` : `Saved ${s.key}`);
+            // Editing this environment's own entry: only if nobody changed it since it was shown
+            // (a change request where protected keeps that check).
+            const ifVersion = editing === "edit" && own ? s.version : undefined;
+            const op: Op = { op: "set", key: s.key, ...body, type, if_version: ifVersion };
+            const ok = await onWrite(() => api.set(env.slug, s.key, { ...body, type, if_version: ifVersion }, path), { path, ops: [op], message: `updated ${s.key}` }, editing === "personal" ? `Set ${s.key} for you` : editing === "own" ? `Set ${s.key} here` : `Saved ${s.key}`);
             if (ok) setEditing(null);
           }}
         />

@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, Finding, ProjectFindings, SyncPreview, FileDiff } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, AwsUser, CloudAccount, NewCloudAccount, SignedCertificate, CaCertificate, Ca, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach } from "@roll/secrets/types";
 import { withSession } from "./code-token";
 import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
@@ -105,10 +105,19 @@ export function secretsApi(project: string) {
     deleteEnvironment: (env: string, confirm?: string) => req<null>("DELETE", `${E(env)}${qs({ confirm })}`),
     /** `notify_url`: where opened change requests are announced (null stops it, absent keeps it). */
     policy: (env: string, p: { protected: boolean; approvals?: number; approvers?: string[]; notify_url?: string | null }) => req<Environment>("PUT", `${E(env)}/policy`, p),
+    folderPolicies: (env: string) => req<FolderPolicy[]>("GET", `${E(env)}/folder-policies`),
+    setFolderPolicy: (env: string, path: string, p: { approvals?: number; approvers?: string[] } = {}) => req<FolderPolicy>("PUT", `${E(env)}/folder-policies${qs({ path })}`, p),
+    deleteFolderPolicy: (env: string, path: string) => req<null>("DELETE", `${E(env)}/folder-policies${qs({ path })}`),
     /** Destroys older versions' values of a key (all but the current one by default). */
     purge: (env: string, key: string, path = "/", before_version?: number) => req<{ purged: number }>("POST", `${K(env, key)}/purge${qs({ path })}`, before_version ? { before_version } : {}),
     /** How long old values are kept (null: for good). */
     setHistoryDays: (history_days: number | null) => req<{ history_days: number | null }>("PATCH", P, { history_days }),
+    /** The customer-managed KMS key wrapping the project's data key (admin), if one does. */
+    kms: () => req<{ key: string | null }>("GET", `${P}/kms`),
+    /** Wrap the data key with a KMS key's ARN: roll encrypts and decrypts with it first. */
+    setKms: (key: string) => req<{ key: string }>("PUT", `${P}/kms`, { key }),
+    /** Back to roll's deployment key alone (the KMS key must still answer). */
+    removeKms: () => req<{ key: null }>("DELETE", `${P}/kms`),
 
     folders: (env: string, path = "/") => req<{ path: string; folders: Folder[] }>("GET", `${E(env)}/folders${qs({ path })}`),
     createFolder: (env: string, path: string) => req<Folder>("POST", `${E(env)}/folders`, { path }),
@@ -155,6 +164,7 @@ export function secretsApi(project: string) {
     openRequest: (env: string, b: Batch) => req<ChangeRequest>("POST", `${E(env)}/requests`, b),
     /** When each key of a folder was last read and changed, and which are stale. */
     insights: (env: string, path = "/") => req<Insights>("GET", `${E(env)}/insights${qs({ path })}`),
+    reach: (env: string, path = "/", key?: string) => req<Reach>("GET", `${E(env)}/reach${qs({ path, key })}`),
     request: (env: string, id: string) => req<ChangeRequest>("GET", `${E(env)}/requests/${enc(id)}`),
     /** A request's values now and proposed, for an approver who may reveal them (audited). */
     requestValues: (env: string, id: string) => req<RequestValue[]>("GET", `${E(env)}/requests/${enc(id)}/values`),
@@ -175,6 +185,8 @@ export function secretsApi(project: string) {
     required: () => req<Required[]>("GET", `${P}/required`),
     setRequired: (list: Required[]) => req<Required[]>("PUT", `${P}/required`, list),
     identities: () => req<Identity[]>("GET", `${P}/identities`),
+    /** Replace an identity's pinned keys (its id stays). */
+    setIdentityKeys: (id: string, jwks: string) => req<Identity>("PUT", `${P}/identities/${enc(id)}/jwks`, { jwks }),
     createIdentity: (i: NewIdentity) => req<Identity>("POST", `${P}/identities`, i),
     deleteIdentity: (id: string) => req<null>("DELETE", `${P}/identities/${enc(id)}`),
 
@@ -195,12 +207,53 @@ export function secretsApi(project: string) {
     auditText: (f: AuditFilter, format: AuditFormat) => text(`${P}/audit${qs({ ...f, before: undefined, limit: undefined, format })}`),
     sinks: () => req<Sink[]>("GET", `${P}/audit/sinks`),
     /** The `whsec_…` signing secret comes back once. */
+    /** Postgres outside roll: registering one connects to it and checks both roles. */
+    outsideDatabases: () => req<OutsideDatabase[]>("GET", `${P}/outside-databases`),
+    addOutsideDatabase: (d: { name: string; url: string; roles: [string, string] | []; group?: string; ca?: string }) => req<OutsideDatabase>("POST", `${P}/outside-databases`, d),
+    deleteOutsideDatabase: (id: string) => req<null>("DELETE", `${P}/outside-databases/${enc(id)}`),
     createSink: (url: string, fromStart = false) => req<Sink & { secret: string }>("POST", `${P}/audit/sinks`, { url, from_start: fromStart }),
     deleteSink: (id: string) => req<null>("DELETE", `${P}/audit/sinks/${enc(id)}`),
     /** Which candidates (tokens of some text) are this project's values the caller may reveal; never the values. */
     scanLeaks: (candidates: string[]) => req<{ index: number; key: string; environment: string; path: string }[]>("POST", `${P}/leaks`, { candidates }),
     /** `code`: also the keys no repository on the canvas mentions (a search per key: on request). */
     health: (code = false) => req<Finding[]>("GET", `${P}/health${qs({ code: code ? 1 : undefined })}`),
+    /** Every managed credential: schedule, last issue, next due, last failure. */
+    rotations: () => req<Rotation[]>("GET", `${P}/rotations`),
+    /** Encryption keys: apps encrypt and decrypt through roll; the key never leaves it. */
+    transitKeys: () => req<TransitKey[]>("GET", `${P}/transit`),
+    addTransitKey: (name: string) => req<TransitKey>("POST", `${P}/transit`, { name }),
+    rotateTransitKey: (name: string) => req<TransitKey>("POST", `${P}/transit/${enc(name)}/rotate`),
+    /** Every version's public signing key: what a service checks `…/sign`'s signatures with. */
+    transitPublicKeys: (name: string) => req<TransitPublicKey[]>("GET", `${P}/transit/${enc(name)}/public`),
+    /** The project's certificate authorities (pki links). */
+    cas: () => req<Ca[]>("GET", `${P}/cas`),
+    addCa: (c: { name: string; domains: string[]; allow_ip?: boolean; max_days?: number }) => req<Ca>("POST", `${P}/cas`, c),
+    deleteCa: (id: string) => req<null>("DELETE", `${P}/cas/${enc(id)}`),
+    /** SSH CAs (ssh links): servers trust their public keys. */
+    sshCas: () => req<SshCa[]>("GET", `${P}/ssh-cas`),
+    addSshCa: (c: { name: string; principals: string[]; max_hours?: number; host_domains?: string[]; max_host_days?: number }) => req<SshCa>("POST", `${P}/ssh-cas`, c),
+    /** Certify a person's own key (its public half) for logins the CA allows (reveal). */
+    signUserKey: (id: string, b: { public_key: string; principals: string[]; ttl_minutes?: number }) => req<UserCertificate>("POST", `${P}/ssh-cas/${enc(id)}/sign-user`, b),
+    /** Sign a server's host key for names under the CA's host domains (admin). */
+    signHostKey: (id: string, b: { public_key: string; hosts: string[]; days?: number }) => req<HostCertificate>("POST", `${P}/ssh-cas/${enc(id)}/sign-host`, b),
+    deleteSshCa: (id: string) => req<null>("DELETE", `${P}/ssh-cas/${enc(id)}`),
+    /** Sign a CSR within the CA's policy: only its key and subjectAltName names are taken. */
+    signCsr: (id: string, csr: string, days?: number) => req<SignedCertificate>("POST", `${P}/cas/${enc(id)}/sign`, { csr, days }),
+    caCertificates: (id: string) => req<CaCertificate[]>("GET", `${P}/cas/${enc(id)}/certificates`),
+    /** On the CA's CRL until it expires. */
+    revokeCertificate: (id: string, serial: string) => req<null>("POST", `${P}/cas/${enc(id)}/revoke`, { serial }),
+    /** GCP and Azure accounts: registering one proves its trust names this project and no other. */
+    cloudAccounts: () => req<CloudAccount[]>("GET", `${P}/cloud-accounts`),
+    addCloudAccount: (a: NewCloudAccount) => req<CloudAccount>("POST", `${P}/cloud-accounts`, a),
+    deleteCloudAccount: (id: string) => req<null>("DELETE", `${P}/cloud-accounts/${enc(id)}`),
+    /** AWS roles for dynamic credentials: registering one assumes it (its trust policy must pin the ExternalId). */
+    awsRoles: () => req<AwsRole[]>("GET", `${P}/aws-roles`),
+    addAwsRole: (r: { name: string; role_arn: string }) => req<AwsRole>("POST", `${P}/aws-roles`, r),
+    deleteAwsRole: (id: string) => req<null>("DELETE", `${P}/aws-roles/${enc(id)}`),
+    /** IAM users whose keys roll rotates as a role: registering one lists its keys as the role. */
+    awsUsers: () => req<AwsUser[]>("GET", `${P}/aws-users`),
+    addAwsUser: (u: { name: string; role: string; user: string }) => req<AwsUser>("POST", `${P}/aws-users`, u),
+    deleteAwsUser: (id: string) => req<null>("DELETE", `${P}/aws-users/${enc(id)}`),
     rotators: () => req<Rotator[]>("GET", `${P}/rotators`),
     /** The answer holds its signing secret, once. */
     addRotator: (r: { name: string; url: string }) => req<Rotator & { secret: string }>("POST", `${P}/rotators`, r),
@@ -212,6 +265,8 @@ export type SecretsApi = ReturnType<typeof secretsApi>;
 
 export const secretsHealth = () => req<Health>("GET", "/v1/secrets/health");
 export const secretsWhoami = () => req<WhoAmI>("GET", "/v1/secrets/whoami");
+/** roll's OIDC issuer, which a GCP pool or an Azure federated credential trusts (public). */
+export const secretsIssuer = () => req<{ issuer: string; jwks_uri: string }>("GET", "/v1/secrets/oidc/.well-known/openid-configuration");
 /** Every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read. */
 /** Every project's findings the caller may read, projects with none left out. */
 export const allFindings = () => req<ProjectFindings[]>("GET", "/v1/secrets/findings");

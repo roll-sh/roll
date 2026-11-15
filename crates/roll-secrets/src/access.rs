@@ -303,23 +303,38 @@ pub struct Caller {
     pub grants: std::sync::Arc<dyn Grants>,
     /// The client's address, for the audit log.
     pub ip: Option<String>,
+    /// A machine roll runs or trusts (apps, previews, checks, sandboxes, syncs, a workload
+    /// identity's login): the only callers a sensitive key's value reaches.
+    pub runtime: bool,
 }
 
 impl Caller {
     pub fn operator() -> Caller {
-        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None }
+        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false }
     }
 
     /// An in-process consumer (roll apps, previews, sandboxes, tasks): everything the caller
     /// handing out the call may do, named for the audit log.
     pub fn consumer(name: &str) -> Caller {
-        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None }
+        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true }
+    }
+
+    /// Whether this caller may learn anything of a row's value: reveal it, see its fingerprint, or
+    /// test a guess against it. A sensitive row's only reaches a runtime.
+    pub fn sees(&self, project: &str, env: &str, path: &str, tags: &[String]) -> bool {
+        (self.runtime || !crate::names::sensitive(tags)) && self.allows(Action::Reveal, &Scope::at(project, env, path))
+    }
+
+    /// The same caller, not a runtime: sensitive values are left out (checks, sandboxes).
+    pub fn not_runtime(mut self) -> Caller {
+        self.runtime = false;
+        self
     }
 
     /// This caller, kept out of `except` (a project's protected environments) whatever it may
     /// otherwise do.
     pub fn without(&self, except: Vec<String>) -> Caller {
-        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone() }
+        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime }
     }
 
     pub fn allows(&self, action: Action, at: &Scope<'_>) -> bool {

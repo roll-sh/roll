@@ -64,6 +64,10 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
         deliver: None,
         grants: None,
         people: None,
+        clouds: None,
+        outside: None,
+        kms: None,
+        sts: None,
     };
     let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -80,15 +84,65 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     assert!(ls.contains("DATABASE_URL") && !ls.contains("s3cret"), "values are masked: {ls}");
 
     // The child sees resolved values; the shell's own variables win unless --override.
-    let out = ok(&api, &[("PORT", "6000")], &["run", "-p", "shop", "-e", "production", "--", "sh", "-c", "echo $DATABASE_URL $PORT"], None).await;
+    let out = ok(&api, &[("PORT", "6000")], &["run", "-p", "shop", "-e", "production", "--no-mask", "--", "sh", "-c", "echo $DATABASE_URL $PORT"], None).await;
     assert_eq!(out.trim(), "postgres://app:s3cret@db.internal:5432/shop 6000");
+    // In CI, output that isn't a terminal or a file (a build log) goes through roll, which
+    // conceals the values it added; the command's exit code is still roll's.
+    let logged = roll(&api, &[("PORT", "6000"), ("CI", "true")], &["run", "-p", "shop", "-e", "production", "--", "sh", "-c", "echo $DATABASE_URL $PORT >&2; echo $HOST"], None).await;
+    assert_eq!((logged.code, logged.stdout.trim(), logged.stderr.trim()), (Some(0), "<concealed by roll>", "<concealed by roll> 6000"));
+    let failed = roll(&api, &[], &["run", "-p", "shop", "-e", "production", "--", "sh", "-c", "exit 3"], None).await;
+    assert_eq!(failed.code, Some(3));
+
+    // An env file committed with references and no value: `roll://ENV/KEY` resolved at run time,
+    // plain values as written, and the file's entries win over the environment's.
+    let files = tempfile::tempdir().unwrap();
+    let env_file = files.path().join(".env");
+    std::fs::write(&env_file, "# app\nPORT=7000\nDB=roll://production/DATABASE_URL\nOTHER=roll://shop@production/HOST\n").unwrap();
+    let out = ok(&api, &[], &["run", "-p", "shop", "-e", "production", "--env-file", env_file.to_str().unwrap(), "--", "sh", "-c", "echo $DB $OTHER $PORT"], None).await;
+    assert_eq!(out.trim(), "postgres://app:s3cret@db.internal:5432/shop db.internal 7000");
+    // Masked, the references are concealed and the file's own plain values aren't.
+    let logged = ok(&api, &[("CI", "true")], &["run", "-p", "shop", "-e", "production", "--env-file", env_file.to_str().unwrap(), "--", "sh", "-c", "echo $DB $OTHER $PORT"], None).await;
+    assert_eq!(logged.trim(), "<concealed by roll> <concealed by roll> 7000");
+    std::fs::write(&env_file, "MISSING=roll://production/NOPE\n").unwrap();
+    let refused = roll(&api, &[], &["run", "-p", "shop", "-e", "production", "--env-file", env_file.to_str().unwrap(), "--", "true"], None).await;
+    assert!(refused.code != Some(0) && refused.stderr.contains("roll://production/NOPE"), "{}", refused.stderr);
 
     // A scoped token implies its project and reaches only its environments.
     let token = ok(&api, &[], &["secrets", "-p", "shop", "tokens", "create", "ci", "--for-env", "production"], None).await;
     let t = [("ROLL_TOKEN", token.trim())];
-    assert_eq!(ok(&api, &t, &["run", "-e", "production", "--", "sh", "-c", "echo $HOST"], None).await.trim(), "db.internal");
+    assert_eq!(ok(&api, &t, &["run", "-e", "production", "--no-mask", "--", "sh", "-c", "echo $HOST"], None).await.trim(), "db.internal");
     let denied = roll(&api, &t, &["run", "-e", "staging", "--", "true"], None).await;
     assert_ne!(denied.code, Some(0));
+    // `kubernetes` prints what External Secrets Operator needs: its store's URL, with the token it
+    // made, reads the environment.
+    let yaml = ok(&api, &[], &["secrets", "-p", "shop", "-e", "production", "kubernetes", "--url", &api], None).await;
+    let field = |k: &str| yaml.lines().find_map(|l| l.trim().strip_prefix(k)).unwrap().trim_matches('"').to_string();
+    let url = field("url: ").replace("{{ .remoteRef.key | urlquery }}", "production");
+    let pulled: serde_json::Value = reqwest::Client::new().get(url).bearer_auth(field("token: ")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(pulled["values"]["HOST"], "db.internal");
+
+    // Through an outage: the last values fetched (kept encrypted with --fallback) start the
+    // command, and only with the key they were kept with.
+    let fallback = dir.path().join("production.fallback");
+    let fb = fallback.to_str().unwrap();
+    let key = [("ROLL_FALLBACK_KEY", "fallback-key-of-at-least-32-chars")];
+    // An env file's references are kept too.
+    std::fs::write(&env_file, "PORT=7000\nDB=roll://production/DATABASE_URL\n").unwrap();
+    let ef = env_file.to_str().unwrap();
+    let echo = ["run", "-p", "shop", "-e", "production", "--fallback", fb, "--env-file", ef, "--", "sh", "-c", "echo $HOST $DB $PORT"];
+    let all = "db.internal postgres://app:s3cret@db.internal:5432/shop 7000";
+    assert_eq!(ok(&api, &key, &echo, None).await.trim(), all);
+    assert!(!std::fs::read_to_string(&fallback).unwrap().contains("s3cret"), "kept encrypted");
+    let down = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://127.0.0.1:{}", l.local_addr().unwrap().port())
+    };
+    assert_eq!(ok(&down, &key, &echo, None).await.trim(), all);
+    // A reference added since the last fetch can't start from it.
+    std::fs::write(&env_file, "NEW=roll://production/PORT\n").unwrap();
+    let added = roll(&down, &key, &echo, None).await;
+    assert!(added.code != Some(0) && added.stderr.contains("roll://production/PORT isn't in the fallback"), "{}", added.stderr);
+    assert_ne!(roll(&down, &[("ROLL_FALLBACK_KEY", "another-key-of-at-least-32-chars!")], &echo, None).await.code, Some(0));
 
     // `roll secrets setup` remembers the project and environment for a directory and the ones
     // under it, in the user's config: then `roll run` needs no flags there.
@@ -98,7 +152,7 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let cfg = home.path().join("config");
     let (app, web, cfg) = (app.to_str().unwrap(), web.to_str().unwrap(), cfg.to_str().unwrap());
     ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", app)], &["secrets", "setup", "-p", "shop", "-e", "production"], None).await;
-    let here = ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", web)], &["run", "--", "sh", "-c", "echo $HOST"], None).await;
+    let here = ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", web)], &["run", "--no-mask", "--", "sh", "-c", "echo $HOST"], None).await;
     assert_eq!(here.trim(), "db.internal");
     let doctor = ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", web)], &["secrets", "doctor"], None).await;
     assert!(doctor.contains("ok   this directory is set up for shop production:/") && !doctor.contains("FAIL"), "{doctor}");
@@ -119,6 +173,9 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let tpl = "url: http://${HOST}:${PORT}\nliteral: \\${HOST} ${HOME:-x} $PORT\n";
     let filled = ok(&api, &[], &[&at[..], &["render", "-"]].concat(), Some(tpl)).await;
     assert_eq!(filled, "url: http://db.internal:5432\nliteral: ${HOST} ${HOME:-x} $PORT\n");
+    // References stand where they are; neither kind of value is read again as a template.
+    let mixed = ok(&api, &[], &[&at[..], &["render", "-"]].concat(), Some("host: ${HOST}\nurl: \"roll://production/DATABASE_URL\"\n")).await;
+    assert_eq!(mixed, "host: db.internal\nurl: \"postgres://app:s3cret@db.internal:5432/shop\"\n");
     let unset = roll(&api, &[], &[&at[..], &["render", "-"]].concat(), Some("${HOST} ${MISSING}")).await;
     assert!(unset.code != Some(0) && unset.stderr.contains("MISSING isn't set") && !unset.stdout.contains("db.internal"), "{}", unset.stderr);
 
@@ -157,6 +214,6 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     assert!(!std::fs::read_to_string(file).unwrap().contains("s3cret"), "sealed at rest");
     projects.create("", "copy", "", None).unwrap();
     ok(&api, &[], &["secrets", "-p", "copy", "restore", file, "--key", key], None).await;
-    let restored = ok(&api, &[], &["run", "-p", "copy", "-e", "production", "--allow-unresolved", "--", "sh", "-c", "echo $HOST $PASSWORD"], None).await;
+    let restored = ok(&api, &[], &["run", "-p", "copy", "-e", "production", "--allow-unresolved", "--no-mask", "--", "sh", "-c", "echo $HOST $PASSWORD"], None).await;
     assert_eq!(restored.trim(), "db.internal s3cret");
 }

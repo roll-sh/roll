@@ -36,6 +36,10 @@ pub enum Op {
         /// When the value stops working outside roll (ms); `null` clears it, absent keeps it.
         #[serde(default, deserialize_with = "some")]
         expires_at: Option<Option<i64>>,
+        /// Check-and-set: apply only if the key is still at this version (0: only if it doesn't
+        /// exist yet); else the whole change is refused as `stale`.
+        #[serde(default)]
+        if_version: Option<i64>,
     },
     Delete {
         key: String,
@@ -43,6 +47,8 @@ pub enum Op {
         kind: Option<SecretType>,
         #[serde(default)]
         path: Option<String>,
+        #[serde(default)]
+        if_version: Option<i64>,
     },
 }
 
@@ -69,6 +75,35 @@ pub struct Batch {
     /// Fail with `stale` if the environment changed after this change.
     #[serde(default)]
     pub if_seq: Option<i64>,
+}
+
+/// Each op's `if_version`, by its item's index (each op makes one item, in order).
+pub(crate) fn expectations(ops: &[Op]) -> Result<Vec<(usize, i64)>> {
+    let expect: Vec<(usize, i64)> = ops
+        .iter()
+        .enumerate()
+        .filter_map(|(i, op)| match op {
+            Op::Set { if_version, .. } | Op::Delete { if_version, .. } => if_version.map(|v| (i, v)),
+        })
+        .collect();
+    if expect.iter().any(|(_, v)| *v < 0) {
+        return Err(Error::BadRequest("if_version is a key's version, or 0 for a key that must not exist yet".into()));
+    }
+    Ok(expect)
+}
+
+/// Check-and-set, inside a write: each expected key is still at the version its writer read.
+pub(crate) fn check_versions(c: &Conn<'_>, env_id: &str, items: &[Item], expect: &[(usize, i64)]) -> Result<()> {
+    for (i, want) in expect {
+        let item = &items[*i];
+        let now_at: Option<i64> = c.query_row("SELECT version FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ?", params![env_id, item.path, item.key, item.owner], |r| r.get(0)).optional()?;
+        let have = now_at.unwrap_or(0);
+        if have != *want {
+            let now_is = if have == 0 { "it doesn't exist".to_string() } else { format!("it's at version {have}") };
+            return Err(Error::Conflict("stale", format!("{} changed since version {want}: {now_is}; read it again and reapply", item.key)));
+        }
+    }
+    Ok(())
 }
 
 /// One key's operation, resolved to its folder and owner.
@@ -158,7 +193,7 @@ pub(crate) fn items(path: &str, ops: &[Op], caller: &Caller) -> Result<Vec<Item>
     let mut out = Vec::with_capacity(ops.len());
     for op in ops {
         let item = match op {
-            Op::Set { key, value, comment, tags, kind, link, path: p, expires_at } => {
+            Op::Set { key, value, comment, tags, kind, link, path: p, expires_at, .. } => {
                 names::key(key)?;
                 if let Some(Some(t)) = expires_at
                     && !(0..=names::MAX_TIME).contains(t)
@@ -185,7 +220,7 @@ pub(crate) fn items(path: &str, ops: &[Op], caller: &Caller) -> Result<Vec<Item>
                     action: ItemAction::Set { value: value.clone().map(Value::new), comment: comment.clone(), tags: tags.clone(), link: link.clone(), link_state: None, expires_at: *expires_at },
                 }
             }
-            Op::Delete { key, kind, path: p } => {
+            Op::Delete { key, kind, path: p, .. } => {
                 names::key(key)?;
                 Item { path: names::path(p.as_deref().unwrap_or(path))?, key: key.clone(), owner: owner(kind)?, action: ItemAction::Delete }
             }
@@ -308,7 +343,13 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
                 };
                 let comment_now = comment.clone().or_else(|| cur.as_ref().map(|c| c.comment.clone())).unwrap_or_default();
                 let tags_now = tags.clone().or_else(|| cur.as_ref().map(|c| c.tags.clone())).unwrap_or_default();
+                // Sensitive is for good: taking the tag off would hand the value back to people.
+                if cur.as_ref().is_some_and(|c| names::sensitive(&c.tags)) && !names::sensitive(&tags_now) {
+                    return Err(Error::BadRequest(format!("{} is sensitive for good: delete it and set it again to have a value people can read", item.key)));
+                }
                 let weak = stored_value.as_ref().and_then(|v| crate::strength::weakness(&item.key, v.expose()));
+                // By the value only: a link's secret field is health's to judge (it asks the provider).
+                let public = crate::strength::browser_exposure(&item.key, stored_value.as_ref().map(|v| v.expose()), None);
                 // Unless the writer said: a new certificate's own date, else the date it had.
                 let expires_now = expires_at.unwrap_or_else(|| value.as_ref().and_then(|v| certificate_expiry(v.expose())).or_else(|| cur.as_ref().and_then(|c| c.expires_at)));
                 let mut what = vec![];
@@ -364,15 +405,15 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
                 match &cur {
                     Some(_) => {
                         c.execute(
-                            "UPDATE secrets SET version = ?, value = ?, fp = ?, comment = ?, tags = ?, link = ?, link_state = ?, refs = ?, updated_at = ?, updated_by = ?, expires_at = ?, weak = ? WHERE id = ?",
-                            params![version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now, weak, id],
+                            "UPDATE secrets SET version = ?, value = ?, fp = ?, comment = ?, tags = ?, link = ?, link_state = ?, refs = ?, updated_at = ?, updated_by = ?, expires_at = ?, weak = ?, public = ? WHERE id = ?",
+                            params![version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now, weak, public, id],
                         )?;
                     }
                     None => {
                         c.execute(
-                            "INSERT INTO secrets (id, project_id, env_id, path, key, owner, version, value, fp, comment, tags, link, link_state, refs, updated_at, updated_by, expires_at, weak)
-                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            params![id, project, env.id, item.path, item.key, item.owner, version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now, weak],
+                            "INSERT INTO secrets (id, project_id, env_id, path, key, owner, version, value, fp, comment, tags, link, link_state, refs, updated_at, updated_by, expires_at, weak, public)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            params![id, project, env.id, item.path, item.key, item.owner, version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now, weak, public],
                         )?;
                         envs::ensure_folders(c, &env.id, &item.path, now)?;
                     }
@@ -506,12 +547,14 @@ impl Secrets {
         for item in &mut out.items {
             let ItemAction::Set { link: Some(Some(link)), value, .. } = &item.action else { continue };
             let (link, has_value) = (link.clone(), value.is_some());
-            if let Err(e) = self.links.check(&link) {
-                result = Err(e);
-                break;
-            }
+            // The project's own resource first: a provider's check asks the product, which would
+            // say whether someone else's resource exists.
             if !resources.contains(&(link.kind.clone(), link.r#ref.clone())) {
                 result = Err(Error::BadRequest(self.not_linkable(project, &link.kind, &link.r#ref)));
+                break;
+            }
+            if let Err(e) = self.links.check(&link) {
+                result = Err(e);
                 break;
             }
             if link.mode != Mode::Managed || has_value {
@@ -536,6 +579,13 @@ impl Secrets {
                 let entry = match shared {
                     Some((_, state)) => (open_parts(&dek, project, state)?, state.clone()),
                     None => {
+                        if let Ok(p) = self.links.get(&link.kind)
+                            && p.exclusive()
+                            && let Some(other) = self.holder(project, env_slug, &link, items)?
+                        {
+                            result = Err(Error::Conflict("in_use", format!("{} {} already issues {other}'s credential: one environment per resource of this kind", link.kind, p.name(&link.r#ref).unwrap_or_else(|| link.r#ref.clone()))));
+                            break;
+                        }
                         let label = format!("roll secrets {env_slug} {}", item.key);
                         match self.links.get(&link.kind).and_then(|p| p.issue(&link.r#ref, &cred, &link, &label, None)) {
                             Ok(i) => {
@@ -569,25 +619,57 @@ impl Secrets {
         Ok(out)
     }
 
+    /// A linked key's field, when its provider says it's secret: `a postgres password`.
+    pub(crate) fn secret_field(&self, link: Option<&Link>) -> Option<String> {
+        let l = link?;
+        let p = self.links.get(&l.kind).ok()?;
+        let f = p.fields().iter().find(|f| f.field == l.field && f.secret)?;
+        Some(format!("a {} {}", l.kind, f.label.to_lowercase()))
+    }
+
     /// What this project may link, sink to or sync to, as (kind, ref): its canvas's resources and
-    /// its own rotators, checked on every write, read, issue, rotation and delivery (a resource
-    /// can move to another project).
+    /// its own registrations (rotators, databases outside roll, AWS roles and IAM users, cloud
+    /// accounts, CAs and SSH CAs), checked on every write, read, issue, rotation and delivery (a
+    /// resource can move to another project).
     ///
     /// A person's project (docs/accounts.md) has only what the workspace trusts it for
-    /// ([`roll_workspace::Workspace::trusts`]) and its rotators: anyone may put any resource on
-    /// their own canvas, and a link reaches a resource as the operator.
+    /// ([`roll_workspace::Workspace::trusts`]) and its own registrations: anyone may put any
+    /// resource on their own canvas, and a link reaches a resource as the operator.
     pub(crate) fn members(&self, project: &str) -> Result<BTreeSet<(String, String)>> {
         let p = self.workspace.get(roll_workspace::Scope::All, project).map_err(|e| Error::Internal(e.to_string()))?;
         let mut out: BTreeSet<(String, String)> = p.resources.iter().filter(|r| self.workspace.trusts(&p, r.kind, &r.r#ref)).map(|r| (r.kind.as_str().to_string(), r.r#ref.clone())).collect();
         out.extend(self.rotator_refs(project)?.into_iter().map(|(id, _)| (crate::rotators::KIND.to_string(), id)));
+        out.extend(self.ca_refs(project)?.into_iter().map(|(id, _)| (crate::pki::KIND.to_string(), id)));
+        out.extend(self.ssh_ca_refs(project)?.into_iter().map(|(id, _)| (crate::ssh::KIND.to_string(), id)));
+        out.extend(self.cloud_refs(project)?.into_iter().map(|(kind, id, _)| (kind, id)));
+        out.extend(self.aws_role_refs(project)?.into_iter().map(|(id, _)| (crate::aws::KIND.to_string(), id)));
+        out.extend(self.aws_user_refs(project)?.into_iter().map(|(id, _)| (crate::iam::KIND.to_string(), id)));
+        out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, _)| (crate::outside::KIND.to_string(), id)));
         Ok(out)
+    }
+
+    /// Another environment (or another credential here, not rewritten by `items`) that holds a
+    /// managed credential of `link`'s resource.
+    fn holder(&self, project: &str, env_slug: &str, link: &Link, items: &[Item]) -> Result<Option<String>> {
+        let rows: Vec<(String, String, String, String, String)> = self.db.read(|c| {
+            Ok::<_, Error>(c.query(
+                "SELECT e.slug, s.path, s.key, s.owner, s.link FROM secrets s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? AND s.link_state IS NOT NULL AND s.link LIKE ? AND s.link LIKE ?",
+                params![project, format!("%\"kind\":\"{}\"%", link.kind), format!("%\"ref\":\"{}\"%", link.r#ref)],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?)
+        })?;
+        Ok(rows.into_iter().find_map(|(env, path, key, owner, l)| {
+            let l: Link = serde_json::from_str(&l).ok()?;
+            let rewritten = env == env_slug && items.iter().any(|i| i.path == path && i.key == key && i.owner == owner);
+            (l.kind == link.kind && l.r#ref == link.r#ref && !rewritten && (env != env_slug || l.options != link.options)).then_some(env)
+        }))
     }
 
     /// Why `kind ref` isn't something `project` may reach.
     pub(crate) fn not_linkable(&self, project: &str, kind: &str, r#ref: &str) -> String {
         let personal = self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty() && p.resources.iter().any(|r| r.kind.as_str() == kind && r.r#ref == r#ref));
         if personal {
-            format!("{kind} {ref} is on this project's canvas, but roll can't tell it's yours: links, sinks and syncs reach roll's products only from the operator's projects and an admin's for now (a rotator works anywhere)", ref = r#ref)
+            format!("{kind} {ref} is on this project's canvas, but roll can't tell it's yours: links, sinks and syncs reach roll's products only from the operator's projects and an admin's for now (the project's own registrations work anywhere: rotators, databases outside roll, AWS roles and IAM users, cloud accounts, CAs and SSH CAs)", ref = r#ref)
         } else {
             format!("{kind} {ref} isn't in this project", ref = r#ref)
         }
@@ -608,6 +690,13 @@ impl Secrets {
     /// unless `force` (an approved request, a rotation).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit(&self, project: &str, env_slug: &str, items: Vec<Item>, kind: &str, message: &str, if_seq: Option<i64>, force: bool, caller: &Caller) -> Result<Applied> {
+        self.commit_with(project, env_slug, items, &[], kind, message, if_seq, force, caller)
+    }
+
+    /// [`Self::commit`], checking each key's expected version in the same transaction
+    /// (`if_version`: the key moved since it was read, so the change is refused as `stale`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_with(&self, project: &str, env_slug: &str, items: Vec<Item>, expect: &[(usize, i64)], kind: &str, message: &str, if_seq: Option<i64>, force: bool, caller: &Caller) -> Result<Applied> {
         let warnings = self.warnings(project, env_slug, &items, caller);
         // A rollback restores what was there, typed or not.
         if kind != "rollback" {
@@ -618,8 +707,17 @@ impl Secrets {
         let now = self.db.now_ms()?;
         let res = self.db.write(|c| {
             let env = envs::by_slug(c, project, env_slug)?;
+            // Stale before protected: a writer whose read is out of date learns that, rather than
+            // opening a request for it.
+            check_versions(c, &env.id, &items, expect)?;
             if env.protected && !force {
                 return Err(Error::Conflict("approval_required", format!("{} is protected: open a change request", env.slug)));
+            }
+            if !force {
+                let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
+                if let Some(p) = crate::folder_policy::covering(c, &env.id, &paths)?.first() {
+                    return Err(Error::Conflict("approval_required", format!("changes to {} in {} need approval: open a change request", p.path, env.slug)));
+                }
             }
             if let Some(s) = if_seq
                 && last_seq(c, &env.id)? > s
@@ -663,7 +761,8 @@ impl Secrets {
         names::message(&message)?;
         let items = items(&path, &b.ops, caller)?;
         self.check_items(project, env, &items, caller)?;
-        self.commit(project, env, items, "write", &message, b.if_seq, false, caller)
+        let expect = expectations(&b.ops)?;
+        self.commit_with(project, env, items, &expect, "write", &message, b.if_seq, false, caller)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -675,11 +774,13 @@ impl Secrets {
         Ok(Written { change: a.change, secret, warnings: a.warnings })
     }
 
-    pub fn delete_secret(&self, project: &str, env: &str, path: &str, key: &str, kind: Option<SecretType>, caller: &Caller) -> Result<Written> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn delete_secret(&self, project: &str, env: &str, path: &str, key: &str, kind: Option<SecretType>, if_version: Option<i64>, caller: &Caller) -> Result<Written> {
         let path = names::path(path)?;
         caller.need(Action::Delete, &Scope::at(project, env, &path))?;
-        let items = items(&path, &[Op::Delete { key: key.into(), kind, path: None }], caller)?;
-        let a = self.commit(project, env, items, "write", &format!("deleted {key}"), None, false, caller)?;
+        let items = items(&path, &[Op::Delete { key: key.into(), kind, path: None, if_version }], caller)?;
+        let expect = expectations(&[Op::Delete { key: key.into(), kind, path: None, if_version }])?;
+        let a = self.commit_with(project, env, items, &expect, "write", &format!("deleted {key}"), None, false, caller)?;
         Ok(Written { change: a.change, secret: None, warnings: vec![] })
     }
 
@@ -766,12 +867,18 @@ impl Secrets {
         self.check_items(project, to, &items, caller)?;
         let message = p.message.unwrap_or_else(|| format!("promoted {} from {from}", plural(items.len(), "key")));
         names::message(&message)?;
-        // Into a protected environment, a promotion is a change request with the values in it.
-        if self.db.read(|c| envs::by_slug(c, project, to))?.protected {
+        // Into a protected environment, or a folder with a change policy, a promotion is a change
+        // request with the values in it.
+        let guarded = self.db.read(|c| {
+            let env = envs::by_slug(c, project, to)?;
+            let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
+            Ok::<_, Error>(env.protected || !crate::folder_policy::covering(c, &env.id, &paths)?.is_empty())
+        })?;
+        if guarded {
             if items.is_empty() {
                 return Ok(Applied { change: None, items: vec![], warnings: vec![], request: None });
             }
-            let request = self.open_request_items(project, to, &path, message, items, caller)?;
+            let request = self.open_request_items(project, to, &path, message, items, &[], caller)?;
             return Ok(Applied { change: None, items: vec![], warnings: vec![], request: Some(request) });
         }
         self.commit(project, to, items, "promote", &message, None, false, caller)

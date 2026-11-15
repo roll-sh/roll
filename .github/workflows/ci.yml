@@ -60,8 +60,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --locked ${{ matrix.packages }} --lib
 
-  # Every package's types (TypeScript 7, scripts/typecheck.mjs), the dashboard's node tests and the
-  # desktop app's tests.
+  # Every package's types (TypeScript 7, scripts/typecheck.mjs), the dashboard's node tests, the
+  # desktop app's tests and the VS Code extension's.
   web:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -71,6 +71,7 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm --filter dashboard test:node
       - run: pnpm --filter @roll/desktop test
+      - run: pnpm --filter roll-secrets test
 
   # The dashboard's vitest suite, split across runners.
   dashboard:
@@ -86,11 +87,70 @@ jobs:
           filter: dashboard...
       - run: pnpm --filter dashboard exec vitest run --shard=${{ matrix.shard }}/3
 
+  # roll secrets' Go and Python clients (sdk/): the same surface as @roll/secrets.
+  sdk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Go
+        working-directory: sdk/go/secrets
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race -count=1 ./...
+      - name: Kubernetes operator
+        working-directory: sdk/kubernetes-operator
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race -count=1 ./...
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: The operator's Helm chart
+        run: helm lint sdk/kubernetes-operator/chart --set roll.identity=idn_ci
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python
+        working-directory: sdk/python/roll_secrets
+        run: |
+          pip install -q cryptography
+          PYTHONPATH=src python -m unittest discover -s tests
+
+  # The roll Terraform provider (sdk/terraform-provider-roll): Terraform drives it against a fake
+  # rolld in memory.
+  terraform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    defaults:
+      run:
+        working-directory: sdk/terraform-provider-roll
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: sdk/terraform-provider-roll/go.mod
+          cache-dependency-path: sdk/terraform-provider-roll/go.sum
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: TF_ACC=1 go test -count=1 ./...
+
   scripts:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v5
+      - name: The roll secrets GitHub Action (sdk/github-action)
+        run: node --test sdk/github-action/test.js
       - name: Validate test scripts
         run: |
           for script in scripts/test-*.sh scripts/lib/*.sh scripts/nosql-conformance.sh; do
@@ -107,7 +167,7 @@ jobs:
           fi
 
   ci:
-    needs: [rust, web, dashboard, scripts]
+    needs: [rust, web, dashboard, sdk, scripts, terraform]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2

@@ -45,7 +45,7 @@ impl Secrets {
         // Shared values and the caller's own personal ones: never someone else's personal value,
         // which no other caller ever sees.
         let found: Vec<Found> = self
-            .matches(project, candidates, Some(&caller.principal))?
+            .matches(project, candidates, Some(&caller.principal), caller.runtime)?
             .into_iter()
             .filter(|(_, l)| !l.environment.contains('/') && caller.allows(Action::Reveal, &Scope::at(project, &l.environment, &l.path)))
             .map(|(index, leak)| Found { index, leak })
@@ -66,11 +66,13 @@ impl Secrets {
     /// [`leaks`](Self::leaks) with which candidate (its index) each one was: a scan says where.
     /// Personal values count too: one pushed into code leaked as much as a shared one.
     pub fn leak_matches(&self, project: &str, candidates: &[String]) -> Result<Vec<(usize, Leak)>> {
-        self.matches(project, candidates, None)
+        // roll code's scans: a sensitive value pushed into code leaked like any other.
+        self.matches(project, candidates, None, true)
     }
 
-    /// The matches, among personal values only `owner`'s when one is given.
-    fn matches(&self, project: &str, candidates: &[String], owner: Option<&str>) -> Result<Vec<(usize, Leak)>> {
+    /// The matches, among personal values only `owner`'s when one is given; sensitive values only
+    /// with `sensitive` (never a test of a person's guess against one).
+    fn matches(&self, project: &str, candidates: &[String], owner: Option<&str>, sensitive: bool) -> Result<Vec<(usize, Leak)>> {
         if !candidates.iter().any(|c| c.chars().count() >= MIN_LEN) {
             return Ok(Vec::new());
         }
@@ -83,13 +85,14 @@ impl Secrets {
         // project that has rows to match.
         let rows = self.db.read(|c| {
             c.query(
-                "SELECT s.key, e.slug, s.path, s.fp, s.project_id FROM secrets s JOIN environments e ON e.id = s.env_id
+                "SELECT s.key, e.slug, s.path, s.fp, s.project_id, s.tags FROM secrets s JOIN environments e ON e.id = s.env_id
                  WHERE s.value IS NOT NULL AND (CAST(? AS TEXT) IS NULL OR s.owner = '' OR s.owner = ?)
                    AND (s.project_id = ? OR (s.owner = '' AND EXISTS (SELECT 1 FROM exports x WHERE x.env_id = s.env_id AND x.path = s.path AND x.to_project = ?)))",
                 code_sql::params![owner, owner, project, project],
-                |r| Ok((Leak { key: r.get(0)?, environment: r.get(1)?, path: r.get(2)? }, r.get::<_, String>(3)?, r.get::<_, String>(4)?)),
+                |r| Ok((Leak { key: r.get(0)?, environment: r.get(1)?, path: r.get(2)? }, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?)),
             )
         })?;
+        let rows: Vec<(Leak, String, String)> = rows.into_iter().filter(|(_, _, _, tags)| sensitive || !crate::names::sensitive(&crate::from_json::<Vec<String>>(tags))).map(|(l, fp, p, _)| (l, fp, p)).collect();
         let mut fps: HashMap<String, HashMap<String, Vec<usize>>> = HashMap::new();
         let mut out: Vec<(usize, Leak)> = vec![];
         for (mut l, fp, p) in rows {
