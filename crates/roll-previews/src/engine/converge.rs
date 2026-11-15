@@ -591,7 +591,10 @@ impl Engine {
                 pages.extend(self.other_services_pages(r, &first.name, &entries, &hide).await);
                 // Keeping it compares PNGs (with the push before, every page): CPU work, off the
                 // runtime's workers.
-                let wanted: Vec<String> = entries.iter().cloned().chain(width_keys.iter().cloned()).chain(own_keys.iter().cloned()).collect();
+                // Another browser's page only when this run took it: a failed browsers run leaves
+                // no older picture behind to be compared and reviewed as this head's.
+                let took = |k: &String| !k.starts_with("browser:") || pages.iter().any(|p| p.path == *k);
+                let wanted: Vec<String> = entries.iter().cloned().chain(width_keys.iter().cloned()).chain(own_keys.iter().filter(|k| took(k)).cloned()).collect();
                 let (store, id, head) = (self.store.clone(), r.id.clone(), r.build().to_string());
                 let kept = tokio::task::spawn_blocking(move || {
                     store.set_screenshot(&id, &head, &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok()

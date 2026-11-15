@@ -124,32 +124,42 @@ pub fn nosql_key_masks(schema: &serde_json::Value, columns: &BTreeMap<String, St
 /// `remove`d. One line per problem; a field the mapping doesn't have yet (a document may add it)
 /// is none.
 pub fn search_field_masks(mapping: &serde_json::Value, fields: &BTreeMap<String, String>) -> Vec<String> {
-    const TEXT: [&str; 6] = ["text", "keyword", "match_only_text", "wildcard", "search_as_you_type", "constant_keyword"];
+    // The types a string goes into (`constant_keyword` takes only its one value, so not it).
+    const TEXT: [&str; 8] = ["text", "keyword", "match_only_text", "wildcard", "search_as_you_type", "semantic_text", "completion", "token_count"];
     let mut out = Vec::new();
     for (spec, rule) in fields {
         if rule == "remove" {
             continue;
         }
         let Some((index, path)) = spec.split_once('.') else { continue };
-        let Some(props) = mapping.get(index).map(|m| &m["mappings"]["properties"]) else { continue };
-        // Down the path through objects' `properties` (nested ones too).
-        let mut at = props;
-        let mut ty = None;
-        let parts: Vec<&str> = path.split('.').collect();
-        for (i, part) in parts.iter().enumerate() {
-            let Some(f) = at.get(*part) else { break };
-            if i == parts.len() - 1 {
-                ty = Some(f["type"].as_str().unwrap_or(if f.get("properties").is_some() { "object" } else { "?" }).to_string());
-            } else {
-                at = &f["properties"];
-            }
-        }
-        if let Some(t) = ty.filter(|t| !TEXT.contains(&t.as_str()) && t != "?") {
+        // The index as named, or every index an alias or pattern answered for (`GET /<it>/_mapping`
+        // is keyed by the real names): the first that says the field isn't text.
+        let named: Vec<&serde_json::Value> = match mapping.get(index) {
+            Some(m) => vec![m],
+            None => mapping.as_object().into_iter().flatten().map(|(_, m)| m).collect(),
+        };
+        let Some(props) = named.iter().map(|m| &m["mappings"]["properties"]).find(|props| field_type(props, path).is_some_and(|t| !TEXT.contains(&t.as_str()) && t != "?")).or_else(|| named.first().map(|m| &m["mappings"]["properties"])) else { continue };
+        if let Some(t) = field_type(props, path).filter(|t| !TEXT.contains(&t.as_str()) && t != "?") {
             let a = if t.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
             out.push(format!("{spec} is {a} {t} field: {rule} writes a string it won't take; use remove"));
         }
     }
     out
+}
+
+/// A field's mapping type down `path` through objects' `properties` (nested ones too), if the
+/// mapping has it.
+fn field_type(props: &serde_json::Value, path: &str) -> Option<String> {
+    let mut at = props;
+    let parts: Vec<&str> = path.split('.').collect();
+    for (i, part) in parts.iter().enumerate() {
+        let f = at.get(*part)?;
+        if i == parts.len() - 1 {
+            return Some(f["type"].as_str().unwrap_or(if f.get("properties").is_some() { "object" } else { "?" }).to_string());
+        }
+        at = &f["properties"];
+    }
+    None
 }
 
 #[cfg(test)]
@@ -216,5 +226,9 @@ mod tests {
                 "products.owner.age is an integer field: redact writes a string it won't take; use remove",
             ]
         );
+        // An alias answers with its real index's name: that one is checked.
+        let aliased = serde_json::json!({ "products-v2": { "mappings": { "properties": { "emb": { "type": "dense_vector" } } } } });
+        let rule: BTreeMap<String, String> = [("products.emb".to_string(), "redact".to_string())].into_iter().collect();
+        assert_eq!(super::search_field_masks(&aliased, &rule).len(), 1, "through the alias");
     }
 }

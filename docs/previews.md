@@ -1011,24 +1011,29 @@ type Settings = {
     `{"click": selector}`, `{"type": [selector, text]}`, `{"press": key}` from a short list,
     `{"wait": ms}` up to 5 s), and the first service's run reaches each one after loading its page,
     in the checks' world (the page's DOM, none of its JavaScript; a value typed the way a person's
-    input sets it, so a framework's change handler sees it), 15 s at most. Each is a page of its own
+    input sets it, so a framework's change handler sees it; Enter submits a form as a person's
+    does; a dialog a step opens is dismissed rather than left holding the page), 15 s at most,
+    each state given 25 s more of the run. Each is a page of its own
     (`state:<name>`): screenshotted, checked, compared with main's same state and reviewed. The
     first step that finds nothing ends the steps and is said (`step`, "its steps stopped at `click
     #open: nothing matched`"), the state taken as it was then (checked by hand in the screenshot
     image: a click opening a cart, typing reaching the page's handler, Escape closing it, a missing
     element named; live: a Tab state compared with main's).
     Other browsers too (Percy's and Chromatic's browsers; `github.browsers`: `firefox`, `webkit`,
-    and `webkit-phone`, WebKit at 390 × 844 at three times the density as a touch device, mobile
-    Safari's engine):
+    and `webkit-phone`, WebKit at 390 × 844 at twice the density as a touch device, mobile
+    Safari's engine; a picture past 2 MiB is left out so the others still fit):
     the screenshot image ships Playwright's builds of both, but only Playwright drives them, so
     the first time a project asks, rolld builds `roll-previews-shot:<version>` (the screenshot
     image and `playwright-core` of the same version, about 35 s, once per node). After Chromium's
     run a second one, in the service's network and locked down the same way, takes the first page
     in each, stilled as Chromium's capture is (`browsers.js`), with its errors counted; each is a
     page of its own (`browser:firefox`), compared with main's in that browser and reviewed like a
-    page. Best effort: a browser that fails leaves Chromium's screenshot as it is, and a build of
-    the image that fails (a node without npm's registry) isn't tried again for an hour, so
-    screenshots don't each wait on it (live: Firefox's page compared with main's).
+    page. Best effort: a browser that fails leaves Chromium's screenshot as it is, and its page
+    from an earlier push is dropped rather than compared and reviewed as this one's. The image is
+    built `FROM` the configured screenshot image, `playwright-core` pinned and installed without
+    its scripts, within 180 s; a build that fails (a node without npm's registry) isn't tried
+    again for an hour, so screenshots don't each wait on it (live: Firefox's page compared with
+    main's).
     A page that moves by itself (Argos's and Chromatic's flake detection): after each page's
     capture the session waits a second and captures it again, stilled as before; Chrome encodes
     the same pixels the same way, so different data is a page that changed with nobody touching
@@ -1249,6 +1254,12 @@ Ranked by what a person notices first. Done so far:
 - a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
+- a tenth review (states, browsers, search masks) and its fixes: a dialog a state's step opens
+  dismissed (it held the whole screenshot), Enter submitting a form, an earlier push's browser
+  page dropped when the browsers run fails, the image build bounded in time and built from the
+  configured image without install scripts, WebKit at a phone at twice the density, room for 10
+  pages a run and time for each state's steps, states re-checked before a run, the search mask
+  check through aliases and with the right string types, the secrets retry on the exact error;
 - the first page in Firefox and WebKit (`github.browsers`), each compared with main's in that
   browser, through a screenshot image with `playwright-core` built once per node;
 - page states reached by a few steps (Chromatic's interaction tests): `github.states`, each

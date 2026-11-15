@@ -100,6 +100,7 @@ listeners.add((m) => {
   else if (m.method === "Runtime.executionContextsCleared") world = null;
 });
 const check = (params, sessionId) => (world == null ? Promise.resolve(null) : send("Runtime.evaluate", { ...params, contextId: world }, sessionId).catch(() => null));
+const checkIn = check;
 // What a screen reader can't name, and what a document misses (WCAG's most common failures).
 const A11Y = `JSON.stringify((() => {
   const named = (el) => (el.getAttribute("aria-label") || "").trim() || el.getAttribute("aria-labelledby") || (el.getAttribute("title") || "").trim();
@@ -352,7 +353,9 @@ const STATES = (() => {
   }
 })();
 const KEYS = { Enter: 13, Escape: 27, Tab: 9, ArrowDown: 40, ArrowUp: 38, ArrowLeft: 37, ArrowRight: 39, Space: 32, Backspace: 8 };
-const step = async (sessionId, s) => {
+const step = async (sessionId, s, until) => {
+  const left = () => Math.max(until - Date.now(), 0);
+  const check = (params, sid) => Promise.race([checkIn(params, sid), sleep(left()).then(() => null)]);
   const sel = (x) => JSON.stringify(String(x));
   if (typeof s.click === "string") {
     const r = await check({ expression: `(() => { const el = document.querySelector(${sel(s.click)}); if (!el) return false; el.scrollIntoView({ block: "center" }); el.click(); return true; })()`, returnByValue: true }, sessionId);
@@ -371,7 +374,10 @@ const step = async (sessionId, s) => {
   }
   if (typeof s.press === "string" && KEYS[s.press]) {
     const key = s.press === "Space" ? " " : s.press;
-    for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key, code: s.press, windowsVirtualKeyCode: KEYS[s.press], text: type === "keyDown" && key.length === 1 ? key : undefined }, sessionId).catch(() => null);
+    // A key that types (Enter is "\r": it submits a form, presses a focused button) goes down
+    // with its text, as a person's does; one that doesn't, as a raw key.
+    const text = s.press === "Enter" ? "\r" : key.length === 1 ? key : undefined;
+    for (const type of [text ? "keyDown" : "rawKeyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key, code: s.press, windowsVirtualKeyCode: KEYS[s.press], text: type === "keyUp" ? undefined : text }, sessionId).catch(() => null);
     return null;
   }
   if (typeof s.wait === "number") {
@@ -397,6 +403,11 @@ const moves = async (sessionId, first) => {
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
   await send("Page.enable", {}, sessionId);
+  // A dialog (`alert`, `confirm`, a "leave this page?") would hold the page until answered:
+  // dismissed at once, as Playwright does.
+  listeners.add((m) => {
+    if (m.method === "Page.javascriptDialogOpening") send("Page.handleJavaScriptDialog", { accept: false }, sessionId).catch(() => null);
+  });
   await send("Runtime.enable", {}, sessionId);
   await send("Network.enable", {}, sessionId);
   mainFrame = (await send("Page.getFrameTree", {}, sessionId)).frameTree.frame.id;
@@ -463,10 +474,10 @@ const moves = async (sessionId, first) => {
   // loaded to $OUT.pages.json. Best effort too.
   const pages = [];
   try {
-    for (const [n, path] of JSON.parse(process.env.PAGES || "[]").slice(0, 5).entries()) {
+    for (const [n, path] of JSON.parse(process.env.PAGES || "[]").slice(0, 10).entries()) {
       const width = /^@[1-9][0-9]*$/.test(path) ? Number(path.slice(1)) : null;
       const state = /^state:[a-z0-9-]{1,40}$/.test(path) ? STATES[path.slice(6)] : null;
-      const at = state && typeof state.page === "string" && /^\/[^\s#"'`]{0,199}$/.test(state.page) ? state.page : null;
+      const at = state && typeof state.page === "string" && /^\/(?!\/)[^\s#"'`\\]{0,199}$/.test(state.page) ? state.page : null;
       if (width) await send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: width < 600 }, sessionId);
       else await send("Emulation.clearDeviceMetricsOverride", {}, sessionId);
       const before = errors.length + failed.length;
@@ -480,7 +491,7 @@ const moves = async (sessionId, first) => {
         const until = Date.now() + 15000;
         for (const s of (Array.isArray(state.steps) ? state.steps : []).slice(0, 10)) {
           if (Date.now() > until) break;
-          stepFailed = await step(sessionId, s || {});
+          stepFailed = await step(sessionId, s || {}, until);
           if (stepFailed) break;
           await sleep(150);
         }
