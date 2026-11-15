@@ -332,6 +332,10 @@ impl Secrets {
         if expires_at.is_some() && env.kind != Kind::Ephemeral {
             return Err(Error::BadRequest("only an ephemeral environment expires".into()));
         }
+        // A later expiry that moves it by less than a tenth of what's left (at least 10 minutes)
+        // leaves it: a preview ensured on every converge with "a day from now" isn't a change (or
+        // an audit row) each time. An earlier one always moves it.
+        let expires_at = expires_at.filter(|&at| env.expires_at.is_none_or(|old| at < old || at - old > ((at - now) / 10).max(10 * 60_000)));
         if e.labels.as_ref().is_some_and(|l| *l != env.labels) || expires_at.is_some_and(|at| Some(at) != env.expires_at) || e.name.as_ref().is_some_and(|n| *n != env.name) {
             if let Some(n) = &e.name {
                 names::env_name(n)?;
@@ -363,11 +367,11 @@ impl Secrets {
     }
 
     /// The caller a read of `slug` runs as: an ephemeral environment that isn't trusted never reads
-    /// a protected one (its base, an import or a reference), whoever reads it, since the code
-    /// running with it wasn't vetted.
+    /// a protected one (its base, an import or a reference), nor a sensitive key, whoever reads it
+    /// (roll apps running a fork's preview included), since the code running with it wasn't vetted.
     pub(crate) fn caller_for(&self, project: &str, slug: &str, caller: &Caller) -> Result<Caller> {
         let env = self.db.read(|c| by_slug(c, project, slug))?;
-        if env.kind == Kind::Ephemeral && !env.trusted { self.untrusted(project, caller) } else { Ok(caller.clone()) }
+        if env.kind == Kind::Ephemeral && !env.trusted { Ok(self.untrusted(project, caller)?.not_runtime()) } else { Ok(caller.clone()) }
     }
 
     /// `caller` as a consumer running code nobody vetted (a check, a sandbox, a preview): kept out
