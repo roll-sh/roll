@@ -279,6 +279,24 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
     Ok(out)
 }
 
+/// Value reads a principal may make in a minute on one node, as Vault's rate-limit quotas: a
+/// token or a person in a loop is told to slow down (429) before it decrypts, audits and issues
+/// without end. roll's own runtimes (apps, previews, checks, syncs) and the operator aren't held to it.
+pub(crate) const READS_PER_MINUTE: u32 = 600;
+
+impl Secrets {
+    /// Count one read of values for `caller`; past [`READS_PER_MINUTE`] in this minute, refused.
+    pub(crate) fn read_quota(&self, caller: &Caller) -> Result<()> {
+        if caller.runtime || caller.principal == "operator" {
+            return Ok(());
+        }
+        if !self.reads.allow(&caller.principal, READS_PER_MINUTE) {
+            return Err(Error::TooMany(format!("more than {READS_PER_MINUTE} reads of values a minute: slow down, or cache them (watches follow the digest)")));
+        }
+        Ok(())
+    }
+}
+
 impl Secrets {
     /// The effective entries of a folder; `shared` leaves out the caller's personal values.
     /// Imports and the base show through only where the caller may `action` them.
@@ -344,6 +362,7 @@ impl Secrets {
     pub fn reveal(&self, project: &str, slug: &str, path: &str, key: &str, resolve: bool, caller: &Caller) -> Result<(Value, Vec<Problem>)> {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        self.read_quota(caller)?;
         let narrowed = self.caller_for(project, slug, caller)?;
         let caller = &narrowed;
         let dek = self.project(project)?;
@@ -372,6 +391,7 @@ impl Secrets {
     pub fn values_for(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, caller: &Caller) -> Result<Values> {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        self.read_quota(caller)?;
         let narrowed = self.caller_for(project, slug, caller)?;
         let caller = &narrowed;
         let dek = self.project(project)?;
