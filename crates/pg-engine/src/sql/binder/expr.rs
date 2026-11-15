@@ -7473,7 +7473,11 @@ impl Binder<'_, '_> {
                     None => t.display(),
                 })
                 .collect();
-            format!("{name}({})", parts.join(", "))
+            // (func_signature_string: the name as written, qualified or not.)
+            match schema {
+                Some(s) => format!("{s}.{name}({})", parts.join(", ")),
+                None => format!("{name}({})", parts.join(", ")),
+            }
         };
         // The parameters a call matches against: (name, type, default).
         let params =
@@ -8351,7 +8355,13 @@ impl Binder<'_, '_> {
         }
         let at = self.sql_fn_at(&fdef, &coerced, FnPlace::Scalar);
         let hidden_rtes = self.hidden_rtes;
+        // (A body the planner runs (evaluate_function) is planned when it runs: the
+        // PL/pgSQL calls in it run then, not as it is bound here.)
+        let evaluated = at.is_some_and(|c| c.fold && matches!(c.at, SqlFnAt::Statement(_)));
+        let skip = self.skip_procs;
+        self.skip_procs |= evaluated;
         let bound = self.in_sql_fn(&fdef, at, |b| b.scalar_fn_body(&fdef, &coerced));
+        self.skip_procs = skip;
         let (plan, cols) = match bound {
             Ok(x) => x,
             // Postgres reads a SQL function's body only when it plans the call (inlining)
@@ -8460,6 +8470,28 @@ impl Binder<'_, '_> {
                 Ok(v) => return Ok(Expr::Const(v, ret)),
                 Err(err) if self.fold_err.is_some() => self.fold_failed(&sub, err)?,
                 Err(_) => {}
+            }
+        }
+        // evaluate_function runs an immutable PL/pgSQL call over constants while planning:
+        // its value is a constant of the plan, its NOTICEs come then (once per plan), and
+        // one that fails stays a call that fails the statement if planning still has it
+        // (`fold_failed`). A statement only analyzed leaves it for when it is planned.
+        // (Not an index's expressions: its build runs them as the table's owner, in a
+        // security-restricted operation, as it reads each row.)
+        if !self.unplanned
+            && !self.skip_procs
+            && !matches!(self.clause(), Clause::IndexExpr | Clause::IndexPredicate)
+            && let Expr::Subquery(s) = &sub
+            && super::fold::proc_call(s).is_some()
+        {
+            if self.defer_procs {
+                self.procs.deferred = true;
+            } else {
+                self.procs.folded = true;
+                match crate::sql::expr::eval(&sub, &[], self.ctx) {
+                    Ok(v) => return Ok(Expr::Const(v, ret)),
+                    Err(err) => self.fold_failed(&sub, err)?,
+                }
             }
         }
         if fdef.strict {

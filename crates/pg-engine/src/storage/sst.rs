@@ -752,7 +752,9 @@ impl Block {
     }
 
     /// The restart a `seek` of `key` decodes from: the one before the first whose key is >=
-    /// `key` (`seek_from`).
+    /// `key` (`seek_from`). (Inlined: `seek`, every point read's, stays the one function it
+    /// was: as two calls, a point select took 0.4% more instructions.)
+    #[inline(always)]
     pub fn restart_for(&self, key: &[u8]) -> usize {
         self.first_restart(key).saturating_sub(1)
     }
@@ -772,6 +774,7 @@ impl Block {
     }
 
     /// `seek` of `key` from restart `r`, `restart_for(key)`.
+    #[inline(always)]
     pub fn seek_from(&self, r: usize, key: &[u8], pos: &mut BlockPos) {
         if r >= self.restarts.len() {
             pos.i = self.len;
