@@ -2738,10 +2738,11 @@ App installation tokens (#73).
    value's keyed fingerprint (read at most every 10 s), and a product's own password, reset or
    restore route moves it at once, so watches, syncs, apps' redeploys and conditional reads see a
    credential however it changed (and #65's 304s come back for live links).
-2. **Rotating a registration's admin credential, and editing registrations in place** (building:
-   databases outside roll first), as Vault's `rotate-root`; Terraform then updates them instead
-   of replacing.
-3. **Syncs driven by changes**, not digest polling: a write marks its environment's syncs due, so
+2. **Rotating a registration's admin credential, and editing registrations in place** (built for
+   databases outside roll, #75: `rotate-admin`, `PATCH`, checked live on Postgres and MySQL),
+   as Vault's `rotate-root`; next the same for AWS users and rotators, and Terraform updating
+   registrations in place (#72).
+3. **Syncs driven by changes** (building), not digest polling: a write marks its environment's syncs due, so
    a change reaches Vercel or GitHub in seconds however many syncs there are (Doppler, Infisical).
 4. **Metrics**: resolves, 304s, KMS refusals, sync failures and lag, leases, sweeper lag and
    rotation failures, in rolld's metrics (Vault telemetry, CloudWatch).
@@ -2769,6 +2770,28 @@ App installation tokens (#73).
    environment).
 
 ### Landing
+
+**To main** (merges are approved from 2026-11-15; one thread at a time behind
+`~/.local/share/roll-merge/lock`). About 50 pull requests sit on #20; the plan folds them into a
+few reviewable ones and closes what they supersede:
+
+1. **#20 → main** (the store, links, CLI, dashboard, integrations; green and mergeable), after
+   roll MCP's #24 if that's ready first; whichever lands second merges main and gates again.
+2. **#62 → main**: retargeted once #20 is in. It is #31–#61 merged in order with every
+   conflict resolved and seventeen independent reviews' fixes, so it lands as one squash, and
+   #31–#61 close as superseded by it (their branches stay; #35 and #59, which conflict on their
+   own, are in it too). #30 closes as superseded by #64.
+3. **The follow-ups, one at a time**, each a small pull request of its own: each merges main,
+   is retargeted to main and lands in order — #63 (CSI provider), #65 (conditional reads),
+   then #74 (live digests, after #65), #66, #67, #68, #69, #70, #71 (#70 and #71 together:
+   see the merge note below), #72, #73, #75, #76.
+4. **#64** (the landed stack on roll-access) waits for roll MCP's #25 on main, then lands
+   like the rest.
+
+Before each lands: origin/main merged, the full gate (`cargo build/test/clippy`, roll-secrets on
+Postgres, `pnpm typecheck` and the dashboard's tests, the SDK suites, `pnpm test:code --docker`
+where AGENTS.md asks for it), CI green, a squash titled like #18–#27, main's CI green on the
+merge commit, a line in the merge log.
 
 Merging the stack in order (2026-11-14) found what no single pull request could:
 
