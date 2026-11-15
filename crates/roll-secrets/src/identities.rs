@@ -335,8 +335,13 @@ impl Secrets {
         // A roll-access workload token: the identity's scope, its addresses, owned by whoever made
         // the identity (roll-access refuses one whose owner can't sign in any more).
         let rule = crate::access::rule(&project, i.environments.clone(), i.paths.clone(), &i.actions);
-        let owner = crate::access::is_person(&i.created_by).then_some(i.created_by.as_str());
-        let m = workloads.mint(&i.name, rule, i.allowed_ips.clone(), i.ttl_minutes as u32, owner)?;
+        // Owned by the person behind whoever made it (a person's token is that person).
+        let owner = match self.maker(&i.created_by)? {
+            crate::caller::Maker::Person(user) => Some(user),
+            crate::caller::Maker::Operator => None,
+            crate::caller::Maker::Gone => return Err(denied()),
+        };
+        let m = workloads.mint(&i.name, rule, i.allowed_ips.clone(), i.ttl_minutes as u32, owner.as_deref())?;
         let caller = Caller { principal: format!("identity:{}", i.id), grants: std::sync::Arc::new(crate::access::Everything), ip, runtime: false };
         let kept = self.db.write(|c| {
             // Deleted meanwhile, or its keys replaced (and so its maker changed): the token goes

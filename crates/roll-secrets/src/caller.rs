@@ -58,6 +58,16 @@ pub(crate) fn ip_allowed(list: &[String], ip: Option<&str>) -> bool {
     list.iter().filter_map(|n| n.parse::<ipnet::IpNet>().ok()).any(|n| n.contains(&ip))
 }
 
+/// Who made something, in the end ([`Secrets::maker`]).
+pub(crate) enum Maker {
+    /// A person (`usr_…`): it acts while they can sign in and reach the project.
+    Person(String),
+    /// The operator (or a token of theirs).
+    Operator,
+    /// A link of the chain is gone.
+    Gone,
+}
+
 impl Secrets {
     /// Who a request is: a roll-access grant (as its person, when it's one's own token), a
     /// signed-in person, or the operator (or anyone when rolld has no operator token).
@@ -152,27 +162,48 @@ impl Secrets {
 
     /// Whether what `by` made (an identity, a sync) may still act on `project`: walked back to
     /// whoever made the first link of the chain. A person must still be able to sign in and still
-    /// reach the project (an admin then, or its owner now); the operator and roll-access's grants
-    /// (roll-access answers for those) always.
+    /// reach the project (an admin then, or its owner now); the operator always.
     pub(crate) fn maker_reaches(&self, by: &str, project: &str) -> Result<bool> {
+        match self.maker(by)? {
+            Maker::Gone => Ok(false),
+            Maker::Operator => Ok(true),
+            Maker::Person(user) => {
+                let Some(p) = self.person(&user)? else { return Ok(false) };
+                Ok(p.admin || self.workspace.ids_of(&user).map_err(|e| Error::Internal(e.to_string()))?.iter().any(|x| x == project))
+            }
+        }
+    }
+
+    /// Who made `by` in the end: an identity's maker, a token's person (a roll-access grant made by
+    /// someone acts as them), up the chain. A token that's gone (revoked, expired, its person
+    /// unable to sign in) or an identity that's gone ends it.
+    pub(crate) fn maker(&self, by: &str) -> Result<Maker> {
         let mut by = by.to_string();
         for _ in 0..16 {
             if crate::access::is_person(&by) {
-                let Some(p) = self.person(&by)? else { return Ok(false) };
-                return Ok(p.admin || self.workspace.ids_of(&by).map_err(|e| Error::Internal(e.to_string()))?.iter().any(|x| x == project));
+                return Ok(Maker::Person(by));
             }
-            let parent: Option<String> = if by.starts_with("token:") {
-                // A roll-access grant: roll-access answers for it (and a person's acts as them).
-                return Ok(true);
+            let parent: Option<String> = if let Some(id) = by.strip_prefix("token:") {
+                match &self.grants {
+                    // roll-access as it answers now: a person's token continues with them.
+                    Some(grants) => match grants.grant(id) {
+                        None => return Ok(Maker::Gone),
+                        Some(g) => match &g.user {
+                            Some(user) => Some(user.to_string()),
+                            None => return Ok(Maker::Operator),
+                        },
+                    },
+                    None => return Ok(Maker::Operator),
+                }
             } else if let Some(i) = by.strip_prefix("identity:") {
                 self.db.read(|c| c.query_row("SELECT created_by FROM identities WHERE id = ?", [i], |r| r.get::<_, String>(0)).optional())?
             } else {
-                return Ok(true);
+                return Ok(Maker::Operator);
             };
-            let Some(parent) = parent else { return Ok(false) };
+            let Some(parent) = parent else { return Ok(Maker::Gone) };
             by = parent;
         }
-        Ok(false)
+        Ok(Maker::Gone)
     }
 
     /// Who the caller is, for `roll secrets` to find its project.
