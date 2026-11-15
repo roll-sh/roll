@@ -61,6 +61,10 @@ pub fn extra_params(api: Api) -> &'static [&'static str] {
         // `RestGetSourceAction` reads it though the spec leaves it out.
         Api::GetSource | Api::ExistsSource => &["_source_exclude_vectors"],
         Api::CatTasks => &["ts", "pri", "size", "detailed"],
+        // `RestIndicesAction` and `RestCatRecoveryAction` read `IndicesOptions.fromRequest`
+        // though the spec leaves its parameters out (`local` only on indices).
+        Api::CatIndices => &["ts", "pri", "size", "ignore_unavailable", "allow_no_indices", "ignore_throttled", "local"],
+        Api::CatRecovery => &["ts", "pri", "size", "ignore_unavailable", "allow_no_indices", "ignore_throttled", "expand_wildcards"],
         a if a.name().starts_with("cat.") => &["ts", "pri", "size"],
         _ => &[],
     }
