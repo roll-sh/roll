@@ -11,6 +11,7 @@
   const root = host.attachShadow({ mode: "closed" });
   root.innerHTML = `<style>
 :host{all:initial}
+[hidden]{display:none!important}
 *{box-sizing:border-box;font:12.5px/1.4 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
 .btn{display:flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:999px;border:1px solid rgba(255,255,255,.14);
  background:#0a0a0a;color:#ededed;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,.35)}
