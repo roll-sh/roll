@@ -672,7 +672,9 @@ Read the resource roll://access/me for what this connection may do, in words, an
 fn server_icon() -> Value {
     use base64::Engine;
     static ICON: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        let svg = include_str!("../../../apps/dashboard/public/icon.svg");
+        // The crate's own copy of the dashboard's favicon (`@roll/brand`'s export): roll-mcp builds
+        // where apps/ isn't there (rolld's image); a test keeps the two the same.
+        let svg = include_str!("icon.svg");
         format!("data:image/svg+xml;base64,{}", base64::engine::general_purpose::STANDARD.encode(svg.trim()))
     });
     json!({ "src": ICON.as_str(), "mimeType": "image/svg+xml", "sizes": ["any"] })
@@ -943,6 +945,18 @@ mod progress_tests {
         assert_eq!(got.last().unwrap()["id"], 1, "the answer comes last");
         let plain: Vec<serde_json::Value> = super::progress_stream(slow(), None, every).collect().await;
         assert_eq!(plain.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod icon_tests {
+    /// The icon `initialize` sends is the dashboard's favicon, byte for byte: regenerate the brand
+    /// assets (`pnpm --filter @roll/brand export`) and copy it here, never redraw it.
+    #[test]
+    fn the_server_icon_is_the_dashboards_favicon() {
+        let ours = include_str!("icon.svg");
+        let dashboard = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../apps/dashboard/public/icon.svg")).unwrap();
+        assert_eq!(ours, dashboard, "copy apps/dashboard/public/icon.svg to crates/roll-mcp/src/icon.svg");
     }
 }
 
