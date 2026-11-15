@@ -1068,6 +1068,33 @@ pub(crate) fn relation_lock_rows(ctx: &ExecCtx) -> Vec<Vec<Value>> {
             }),
             wait_start,
         ]);
+        // (Another backend's transaction with an id still holds its virtual transaction
+        // id's lock, the one the entry started as: it shows both.)
+        if let Tag::Transaction { id, xid } = l.tag
+            && xid != 0
+            && l.granted
+            && l.pid.is_some_and(|p| p != me)
+        {
+            let v = Value::text(vxid(l.owner, l.pid));
+            rows.push(vec![
+                Value::text("virtualxid"),
+                n(),
+                n(),
+                n(),
+                n(),
+                v.clone(),
+                n(),
+                n(),
+                n(),
+                n(),
+                v,
+                l.pid.map_or(Value::Null, Value::Int4),
+                Value::text("ExclusiveLock"),
+                Value::Bool(true),
+                Value::Bool(!waited.contains(&id)),
+                n(),
+            ]);
+        }
     }
     // Parallel workers: AccessShareLock on the relations their part opens and their own
     // virtual transaction ids' locks, all fast-path.

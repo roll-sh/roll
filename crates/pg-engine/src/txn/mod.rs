@@ -3610,16 +3610,12 @@ impl Txn {
         });
     }
 
-    fn find_savepoint(&self, name: &str) -> Result<usize> {
-        self.savepoints
-            .iter()
-            .rposition(|s| s.name == name)
-            .ok_or_else(|| {
-                err!(
-                    INVALID_SAVEPOINT_SPECIFICATION,
-                    "savepoint \"{name}\" does not exist"
-                )
-            })
+    /// The savepoint `name`, else RollbackToSavepoint's or ReleaseSavepoint's error
+    /// (`at`: the routine and its line).
+    fn find_savepoint(&self, name: &str, at: (&'static str, u32)) -> Result<usize> {
+        self.savepoints.iter().rposition(|s| s.name == name).ok_or_else(|| {
+            err!(INVALID_SAVEPOINT_SPECIFICATION, "savepoint \"{name}\" does not exist").routine_at(at.0, at.1)
+        })
     }
 
     /// ROLLBACK TO SAVEPOINT: undo writes after it; the savepoint stays.
@@ -3627,7 +3623,7 @@ impl Txn {
         self.derived.clear();
         // (What a load measured may be rolled back.)
         self.loads.clear();
-        let i = self.find_savepoint(name)?;
+        let i = self.find_savepoint(name, ("RollbackToSavepoint", 4593))?;
         // The change records written since stay, as the aborted subtransactions' (read
         // before the writes are undone, written again after).
         let aborted_log = match &self.log {
@@ -3736,7 +3732,7 @@ impl Txn {
     }
 
     pub fn release_savepoint(&mut self, name: &str) -> Result<()> {
-        let i = self.find_savepoint(name)?;
+        let i = self.find_savepoint(name, ("ReleaseSavepoint", 4482))?;
         for nest in (i + 2..=self.savepoints.len() + 1).rev() {
             self.pgstat.end_subxact(nest, true);
         }

@@ -2609,7 +2609,9 @@ fn junk_layout_node(
         }
     }
     // (A Subquery Scan returns its reltarget; an inheritance tree's Append its parent's.)
+    // (A Bitmap Heap Scan is a scan of its relation too: its reltarget, not its child's.)
     let rank: Box<dyn Fn(&String) -> (usize, usize)> = if n.children.is_empty()
+        || n.node_type == "Bitmap Heap Scan"
         || n.node_type == "Subquery Scan"
         || (n.node_type == "Append" && last.iter().any(|l| n.output.contains(l)))
     {
@@ -5790,7 +5792,11 @@ impl Builder<'_, '_> {
             let sorted_append = matches!(b.node.node_type, "Sort" | "Incremental Sort")
                 && matches!(&**p, Plan::Sort { input, .. } if matches!(&**input, Plan::Append { inh: Some(_), .. }))
                 && b.node.children.first().is_some_and(|c| c.node_type == "Append" && c.children.iter().all(ExNode::is_scan));
-            let mut mask = (b.node.is_join() || appendrel || sorted_append || b.node.node_type == "Index Only Scan" || b.node.node_type == "WindowAgg" || dummy || member || sorted_join || srf_target || marked || sys_cols || dropped)
+            // (Nor a bitmap heap scan nothing is read of: use_physical_tlist refuses one with
+            // an empty target, which it returns.)
+            let bitmap_none = b.node.node_type == "Bitmap Heap Scan"
+                && self.needed.get(&addr(p)).is_some_and(|m| m.iter().all(|x| !x));
+            let mut mask = (b.node.is_join() || appendrel || sorted_append || b.node.node_type == "Index Only Scan" || b.node.node_type == "WindowAgg" || dummy || member || sorted_join || srf_target || marked || sys_cols || dropped || bitmap_none)
                 .then(|| self.needed.get(&addr(p)).cloned())
                 .flatten();
             if srf_target
@@ -6293,7 +6299,7 @@ impl Builder<'_, '_> {
                 Built::passthrough(n, names)
             }
             Plan::FunctionScan {
-                calls, alias, cols, ..
+                calls, alias, cols, ordinality, ..
             } => {
                 let refname = self
                     .refnames
@@ -6346,26 +6352,26 @@ impl Builder<'_, '_> {
                     .map(|c| costs::call_cost(&c.func) + c.args.iter().map(costs::qual_cost).sum::<f64>())
                     .sum();
                 n.total_cost = n.startup_cost + n.rows * costs::CPU_TUPLE_COST;
-                n.width = calls.iter().map(|c| type_width(&c.ty)).sum();
-                // (Only the columns used above: its reltarget.)
-                if calls.len() == cols.len()
-                    && let Some(m) = self.needed.get(&key)
-                    && m.len() == calls.len()
-                {
-                    n.width = calls
-                        .iter()
-                        .zip(m)
-                        .filter(|(_, x)| **x)
-                        .map(|(c, _)| type_width(&c.ty))
-                        .sum();
-                } else if let [c] = &calls[..]
-                    && c.func.out_cols.len() == cols.len()
-                    && let Some(m) = self.needed.get(&key)
-                    && m.len() == cols.len()
-                {
-                    // (A call returning a row: the columns of it used above.)
-                    n.width = c.func.out_cols.iter().zip(m).filter(|(_, x)| **x).map(|((_, t), _)| type_width(t)).sum();
+                // Its columns' widths: each call's value (a call returning a row: its
+                // columns), then WITH ORDINALITY's bigint; only those used above count (its
+                // reltarget).
+                let mut widths: Vec<u32> = Vec::with_capacity(cols.len());
+                for c in calls {
+                    if calls.len() == 1 && !c.func.out_cols.is_empty() && c.func.out_cols.len() + *ordinality as usize == cols.len() {
+                        widths.extend(c.func.out_cols.iter().map(|(_, t)| type_width(t)));
+                    } else {
+                        widths.push(type_width(&c.ty));
+                    }
                 }
+                if *ordinality {
+                    widths.push(8);
+                }
+                n.width = match self.needed.get(&key) {
+                    Some(m) if m.len() == widths.len() && widths.len() == cols.len() => {
+                        widths.iter().zip(m).filter(|(_, x)| **x).map(|(w, _)| w).sum()
+                    }
+                    _ => calls.iter().map(|c| type_width(&c.ty)).sum::<u32>() + if *ordinality { 8 } else { 0 },
+                };
                 // (A worker can run it when its calls are parallel safe:
                 // set_rel_consider_parallel.)
                 n.par_safe = {
@@ -6953,6 +6959,25 @@ impl Builder<'_, '_> {
                         Plan::LockRows { marks, .. } => 6 * marks.len() as u32,
                         _ => 0,
                     },
+                    // (Over windows: the WindowAgg computing the target list returns their
+                    // PARTITION BY / ORDER BY keys the select list doesn't have, resjunk
+                    // entries the parser added, findTargetlistEntrySQL99.)
+                    None if c.node.node_type == "WindowAgg"
+                        && let Plan::Window { input: wi, calls } = &**input =>
+                    {
+                        let iw = super::binder::plan_width(wi);
+                        let mut keys: Vec<usize> = Vec::new();
+                        for k in calls.iter().flat_map(|w| w.partition_by.iter().chain(w.order_by.iter().map(|o| &o.expr))) {
+                            if let Expr::Col(j, _) = k
+                                && *j < iw
+                                && !keys.contains(j)
+                                && !exprs.iter().any(|e| matches!(e, Expr::Col(x, _) if x == j))
+                            {
+                                keys.push(*j);
+                            }
+                        }
+                        keys.iter().filter_map(|j| c.node.cols.get(*j).map(|x| x.width)).sum()
+                    }
                     _ => 0,
                 };
                 // (A node that can't project under a projection only dropping the level's
@@ -9237,9 +9262,12 @@ impl Builder<'_, '_> {
                         vec![]
                     } else {
                         let grouped = cte_grouped(cte);
+                        let types = cte_col_types(cte);
                         node.cols
                             .iter()
-                            .map(|c| ColInfo {
+                            .zip(types.iter().chain(std::iter::repeat(&DataType::Unknown)))
+                            .map(|(c, ty)| ColInfo {
+                                width: cte_col_width(c.width, ty),
                                 // (A column of a relation: its statistics, as
                                 // examine_simple_variable finds them through the CTE,
                                 // unless it groups or is a set operation.)
@@ -11510,6 +11538,7 @@ impl Builder<'_, '_> {
         let mut names = None;
         let mut members = Vec::new();
         let mut member_tuples: Vec<f64> = Vec::new();
+        let mut member_size = 0.0;
         for (i, a) in arms.iter().enumerate() {
             // (A UNION ALL arm reading one table is an appendrel member too.)
             let one_table = match &***a {
@@ -11610,6 +11639,7 @@ impl Builder<'_, '_> {
             }
             n.rows += c.node.rows;
             n.width = n.width.max(c.node.width);
+            member_size += c.node.rows * c.node.width as f64;
             member_tuples.push(c.node.cols.iter().find_map(|x| x.var.as_ref().map(|v| v.tuples)).unwrap_or(c.node.rows));
             names.get_or_insert(c.exported);
             // (A UNION ALL arm's own Append is flattened into this one:
@@ -11645,6 +11675,11 @@ impl Builder<'_, '_> {
         }
         // cost_append: half a tuple cost per row passed up.
         n.total_cost += n.rows * costs::CPU_TUPLE_COST * 0.5;
+        // (An inheritance appendrel's width: its members' average by their rows,
+        // set_append_rel_size.)
+        if inh && n.rows > 0.0 {
+            n.width = (member_size / n.rows).round_ties_even() as u32;
+        }
         // A partitioned table's columns: the parent's (its inherited statistics), over
         // all the members' tuples.
         // (A plain inheritance parent is its own first member, the others its
@@ -17680,11 +17715,13 @@ pub(crate) fn push_cte_estimates(ctes: &[(usize, Arc<Plan>)], names: &[String], 
     for ((_, cte), name) in ctes.iter().zip(names) {
         let e = estimate(cte, ctx);
         let grouped = cte_grouped(cte);
+        let types = cte_col_types(cte);
         let cols: Vec<ColInfo> = e
             .cols
             .iter()
-            .map(|(w, v, d)| ColInfo {
-                width: *w,
+            .zip(&types)
+            .map(|((w, v, d), ty)| ColInfo {
+                width: cte_col_width(*w, ty),
                 var: v.clone().filter(|v| v.expr.is_none() && !grouped),
                 // (get_variable_numdistinct without statistics: a small relation's rows.)
                 distinct: d.or((e.rows < costs::DEFAULT_NUM_DISTINCT).then(|| costs::clamp_rows(e.rows))),
@@ -17701,13 +17738,15 @@ pub(crate) fn push_cte_estimates(ctes: &[(usize, Arc<Plan>)], names: &[String], 
 /// (set_cte_size_estimates of a self-reference: ten times the non-recursive term's rows).
 pub(crate) fn push_work_estimate(id: usize, base: &Arc<Plan>, ctx: &ExecCtx) {
     let e = estimate(base, ctx);
+    let types = cte_col_types(base);
     let cols: Vec<ColInfo> = e
         .cols
         .iter()
+        .zip(&types)
         // (No statistics through a self-reference: examine_variable doesn't look into it;
         // get_variable_numdistinct takes a small relation's tuples.)
-        .map(|(w, _, _)| ColInfo {
-            width: *w,
+        .map(|((w, _, _), ty)| ColInfo {
+            width: cte_col_width(*w, ty),
             var: None,
             distinct: (e.rows * 10.0 < costs::DEFAULT_NUM_DISTINCT).then(|| costs::clamp_rows(e.rows * 10.0)),
             groups: None,
@@ -17772,6 +17811,21 @@ impl Drop for CteEstimatesPushed {
 }
 
 /// A CTE's estimate and output order, for the CTE Scans of the query being planned.
+/// A CTE's column types (Unknown where its plan doesn't say), one per estimated column.
+fn cte_col_types(p: &Plan) -> Vec<DataType> {
+    crate::sql::paths::analyzejoins::col_types(p)
+}
+
+/// A CTE (or work table) column's width: set_rel_width finds no attr_widths for it (nor a
+/// relation's statistics), so get_typavgwidth of its type; the query's estimate where the
+/// type isn't known.
+fn cte_col_width(estimated: u32, ty: &DataType) -> u32 {
+    match ty {
+        DataType::Unknown => estimated,
+        t => costs::type_width(t),
+    }
+}
+
 fn cte_push(name: String, rows: f64, cols: Vec<ColInfo>, order: Vec<SortKey>) {
     CTE_ORDERS.with(|m| m.borrow_mut().push((name.clone(), order)));
     CTE_ESTIMATES.with(|m| m.borrow_mut().push((name, rows, cols)));

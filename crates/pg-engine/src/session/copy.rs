@@ -460,6 +460,11 @@ pub struct CopyInParsed {
     records: usize,
     /// Physical lines read (a CSV record may span several).
     phys_lines: usize,
+    /// CSV: the end of line the first record ended with ('\r' for CR and CRLF), once it
+    /// did, and the quoted ends of lines since (CopyReadLineText counts those in its line
+    /// number, of that type only, after the first record).
+    csv_eol: Option<char>,
+    csv_quoted_lines: usize,
     /// Bytes taken.
     bytes: usize,
     /// The end-of-copy marker or the binary trailer came: what follows is ignored.
@@ -1656,12 +1661,12 @@ pub(crate) fn parse_copy_data(
         )
     })?;
     let t = c.table.clone();
-    let (records, open_quote) = if f.csv {
+    let (records, open_quote, eol) = if f.csv {
         split_csv(text, f)
     } else {
         let (records, ended) = split_text(text, f, &t.name, st.records)?;
         st.ended = ended;
-        (records, None)
+        (records, None, None)
     };
     let first = st.records;
     st.records += records.len();
@@ -1672,6 +1677,8 @@ pub(crate) fn parse_copy_data(
         lines,
         skipped,
         plain,
+        csv_eol,
+        csv_quoted_lines,
         ..
     } = st;
     let plain = *plain;
@@ -1680,7 +1687,12 @@ pub(crate) fn parse_copy_data(
     let direct = plain && !f.csv && f.default.is_none() && f.null.contains('\\') && c.ncols > 0 && c.target.len() == c.ncols;
     'records: for (lineno, (raw, rec)) in records.into_iter().enumerate() {
         let lineno = first + lineno;
-        let line = lineno + 1;
+        match *csv_eol {
+            Some(e) => *csv_quoted_lines += raw.matches(e).count(),
+            // (This, the first record, ended with it.)
+            None => *csv_eol = eol,
+        }
+        let line = lineno + 1 + *csv_quoted_lines;
         let rec = match rec {
             Rec::Fields(v) => v,
             Rec::Plain(text) => {
@@ -1813,10 +1825,15 @@ pub(crate) fn parse_copy_data(
         rows.push(if plain { CopyRow::Values(vals) } else { CopyRow::Exprs(row) });
         lines.push((line, raw));
     }
-    // (Its line: the physical line the data ended on, the record's text with its newlines.)
+    // (Its line: the record's number, the lines CopyReadLine read, however many physical
+    // lines its quoted newlines span; its text with them.)
     if let Some(raw) = open_quote {
         return Err(Error::new(code::BAD_COPY_FILE_FORMAT, "unterminated CSV quoted field")
-            .context(format!("COPY {}, line {}: \"{raw}\"", t.name, st.phys_lines + 1)));
+            .context(format!(
+                "COPY {}, line {}: \"{raw}\"",
+                t.name,
+                st.records + 1 + st.csv_quoted_lines + st.csv_eol.map_or(0, |e| raw.matches(e).count())
+            )));
     }
     Ok(take)
 }
@@ -2240,13 +2257,16 @@ fn split_text_escaped(line: &str, f: &CopyFormat, table: &str, lineno: usize) ->
 /// Split CSV data (quoted fields may span lines); a quoted field left open at the end: the
 /// records before it and that record's text, whose error comes after they went in
 /// (CopyReadLineText finds it reading that record).
-fn split_csv(data: &str, f: &CopyFormat) -> (Records<'static>, Option<String>) {
+/// The records of CSV `data`, the text of a last one a quote leaves open, and the end of line
+/// its first record ended with ('\r' for CR and CRLF).
+fn split_csv(data: &str, f: &CopyFormat) -> (Records<'static>, Option<String>, Option<char>) {
     let mut out = Vec::new();
     let mut fields: Vec<InField> = Vec::new();
     let mut cur = String::new();
     let mut line = String::new();
     let mut quoted = false;
     let mut in_quotes = false;
+    let mut eol = None;
     let mut chars = data.chars().peekable();
     let finish_field = |cur: &mut String, quoted: &mut bool, fields: &mut Vec<InField>| {
         let value = std::mem::take(cur);
@@ -2286,8 +2306,11 @@ fn split_csv(data: &str, f: &CopyFormat) -> (Records<'static>, Option<String>) {
                 line.push(c);
                 finish_field(&mut cur, &mut quoted, &mut fields);
             }
-            '\r' if chars.peek() == Some(&'\n') => {}
+            '\r' if chars.peek() == Some(&'\n') => {
+                eol.get_or_insert('\r');
+            }
             '\n' | '\r' => {
+                eol.get_or_insert(ch);
                 finish_field(&mut cur, &mut quoted, &mut fields);
                 out.push((std::mem::take(&mut line), Rec::Fields(std::mem::take(&mut fields))));
             }
@@ -2298,13 +2321,13 @@ fn split_csv(data: &str, f: &CopyFormat) -> (Records<'static>, Option<String>) {
         }
     }
     if in_quotes {
-        return (out, Some(line));
+        return (out, Some(line), eol);
     }
     if !cur.is_empty() || !fields.is_empty() || quoted {
         finish_field(&mut cur, &mut quoted, &mut fields);
         out.push((line, Rec::Fields(fields)));
     }
-    (out, None)
+    (out, None, eol)
 }
 
 /// COPY TO in binary format: the signature, flags and extension area, then each row as a

@@ -87,6 +87,8 @@ const KNOWN: &[(&str, &str, &str, &str, &str, u32)] = &[
     ("42883", "operator does not exist: ", "", "op_error", "parse_oper.c", 635),
     ("P0004", "", "", "exec_stmt_assert", "pl_exec.c", 3965),
     ("2BP01", "cannot drop ", " because other objects depend on it", "reportDependentObjects", "dependency.c", 1148),
+    ("2BP01", "cannot drop desired object(s) because other objects depend on them", "", "reportDependentObjects", "dependency.c", 1156),
+    ("2BP01", "role \"", "\" cannot be dropped because some objects depend on it", "DropRole", "user.c", 1297),
     ("42P01", "table \"", "\" does not exist", "DropErrorMsgNonExistent", "tablecmds.c", 1500),
     ("0A000", "cannot alter type of a column used by a view or rule", "", "RememberAllDependentForRebuilding", "tablecmds.c", 15163),
     ("57014", "canceling statement due to statement timeout", "", "ProcessInterrupts", "postgres.c", 3444),
@@ -308,9 +310,41 @@ const KNOWN: &[(&str, &str, &str, &str, &str, u32)] = &[
 /// NOTICEs matched by their message (`KNOWN`'s INFO messages are too general for that).
 const NOTICES: &[(&str, &str, &str, &str, &str, u32)] = &[
     ("00000", "table \"", "\" does not exist, skipping", "DropErrorMsgNonExistent", "tablecmds.c", 1506),
+    ("00000", "drop cascades to ", " other objects", "reportDependentObjects", "dependency.c", 1165),
+    ("00000", "drop cascades to ", "", "reportDependentObjects", "dependency.c", 1176),
     ("42P07", "relation \"", "\" already exists, skipping", "transformCreateStmt", "parse_utilcmd.c", 208),
     ("00000", "", " skipped due to data type incompatibility", "CopyFrom", "copyfrom.c", 1473),
     ("00000", "skipping row due to data type incompatibility at line ", "", "CopyFromTextLikeOneRow", "copyfromparse.c", 1055),
+];
+
+/// The files of routines whose errors always name their line (`Error::routine_at`).
+const ROUTINE_FILES: &[(&str, &str)] = &[
+    ("RollbackToSavepoint", "xact.c"),
+    ("findDependentObjects", "dependency.c"),
+    ("ReleaseSavepoint", "xact.c"),
+    ("checkInsertTargets", "parse_target.c"),
+    ("transformUpdateTargetList", "analyze.c"),
+    ("ATExecDropColumn", "tablecmds.c"),
+    ("ComputeIndexAttrs", "indexcmds.c"),
+    ("LookupFuncWithArgs", "parse_func.c"),
+    ("PerformPortalClose", "portalcmds.c"),
+    ("find_option", "guc.c"),
+    ("RangeVarGetRelidExtended", "namespace.c"),
+    ("transformTypeCast", "parse_expr.c"),
+    ("array_in", "arrayfuncs.c"),
+    ("ReadArrayDimensions", "arrayfuncs.c"),
+    ("ReadArrayStr", "arrayfuncs.c"),
+    ("ReadArrayToken", "arrayfuncs.c"),
+    ("date_pli", "date.c"),
+    ("date_mii", "date.c"),
+    ("datetime_timestamp", "date.c"),
+    ("timestamp_pl_interval", "timestamp.c"),
+    ("timestamptz_pl_interval_internal", "timestamp.c"),
+    ("interval_um_internal", "timestamp.c"),
+    ("interval_pl", "timestamp.c"),
+    ("interval_mi", "timestamp.c"),
+    ("finite_interval_pl", "timestamp.c"),
+    ("finite_interval_mi", "timestamp.c"),
 ];
 
 /// Messages matched only by the routine an error names (each type has its own).
@@ -337,7 +371,8 @@ pub fn location(e: &Error) -> (&'static str, String, &'static str) {
         k.0 == e.code
             && m.starts_with(k.1)
             && (m.ends_with(k.2)
-                || (k.2.starts_with(" violates") || k.2.starts_with("violates") || k.2.ends_with(' ')) && m.contains(k.2))
+                || (k.2.starts_with(" violates") || k.2.starts_with("violates") || k.2.ends_with(' ') || k.2.ends_with('"'))
+                    && m.contains(k.2))
     };
     if let Some(r) = e.objects.as_ref().and_then(|o| o.routine) {
         // (The routine's message that this is, else its first.)
@@ -345,10 +380,14 @@ pub fn location(e: &Error) -> (&'static str, String, &'static str) {
         if let Some(k) = of.clone().find(matches).or_else(|| of.next()) {
             return (k.4, special_line(k, e), r);
         }
+        let line = |l: u32| e.objects.as_ref().and_then(|o| o.line).unwrap_or(l).to_string();
         return match r {
             "RevalidateCachedQuery" => ("plancache.c", "866".into(), r),
             "exec_stmt_raise" => ("pl_exec.c", "3909".into(), r),
-            _ => ("pg-engine", "0".into(), r),
+            _ => match ROUTINE_FILES.iter().find(|f| f.0 == r) {
+                Some(f) => (f.1, line(0), r),
+                None => ("pg-engine", "0".into(), r),
+            },
         };
     }
     if !matches!(e.severity, crate::error::Severity::Error | crate::error::Severity::Fatal)

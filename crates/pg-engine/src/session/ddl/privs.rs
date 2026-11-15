@@ -1761,10 +1761,10 @@ impl Ddl<'_, '_> {
                             });
                             continue;
                         }
-                        return Err(crate::catalog::no_such_relation(
-                            Self::rv_schema(rv),
-                            &rv.relname,
-                        ));
+                        // (objectNamesToOids' RangeVarGetRelid.)
+                        let line = if Self::rv_schema(rv).is_some() { 631 } else { 636 };
+                        return Err(crate::catalog::no_such_relation(Self::rv_schema(rv), &rv.relname)
+                            .routine_at("RangeVarGetRelidExtended", line));
                     };
                     if objtype == O::ObjectSequence && !matches!(rel, Relation::Sequence(_)) {
                         return Err(Error::new(

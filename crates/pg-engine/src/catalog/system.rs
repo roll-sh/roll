@@ -6002,7 +6002,12 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
             let mut rels: Vec<(u32, u32, String, bool)> = pick(&cat.tables, only)
                 .map(|t| (t.oid, t.schema, t.name.clone(), true))
                 .collect();
-            rels.extend(pick(&cat.views, only).map(|v| (v.oid, v.schema, v.name.clone(), false)));
+            // (relkind r, v, f, p: no materialized view's.)
+            rels.extend(
+                pick(&cat.views, only)
+                    .filter(|v| !v.materialized)
+                    .map(|v| (v.oid, v.schema, v.name.clone(), false)),
+            );
             rels.extend(
                 (SysTable::all().filter(|s| only.is_none_or(|o| s.oid() == o)))
                     .map(|s| (s.oid(), s.schema(), s.name().to_string(), false)),
@@ -6059,9 +6064,10 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                         ConstraintKind::Exclusion { .. } if con.period == Some('u') => "UNIQUE",
                         ConstraintKind::Exclusion { .. } => continue,
                     };
+                    // (Only a UNIQUE constraint's, contype u.)
                     let nulls = match con.kind {
-                        ConstraintKind::Exclusion { .. } => Some("YES"),
-                        ConstraintKind::Unique { index } | ConstraintKind::PrimaryKey { index } => {
+                        ConstraintKind::Exclusion { .. } if con.period == Some('u') => Some("YES"),
+                        ConstraintKind::Unique { index } => {
                             Some(
                                 if cat
                                     .indexes

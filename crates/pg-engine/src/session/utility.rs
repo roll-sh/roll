@@ -1212,7 +1212,8 @@ impl Session {
             None => return Err(Error::new(
                 code::INVALID_CURSOR_NAME,
                 format!("cursor \"{}\" does not exist", s.portalname),
-            )),
+            )
+            .routine_at("PerformPortalClose", 250)),
         }
         Ok(QueryResult::command("CLOSE CURSOR"))
     }
