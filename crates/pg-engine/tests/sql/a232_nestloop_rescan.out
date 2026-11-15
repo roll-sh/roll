@@ -1,0 +1,349 @@
+> create table a232_r (rk int, name text)
+-- CREATE TABLE
+
+> insert into a232_r values (0, 'AF'), (1, 'AM'), (2, 'AS'), (3, 'EU'), (4, 'ME')
+-- INSERT 0 5
+
+> create table a232_n (nk int primary key, rk int)
+-- CREATE TABLE
+
+> insert into a232_n select g, g % 5 from generate_series(0, 24) g
+-- INSERT 0 25
+
+> create table a232_s (sk int primary key, nk int)
+-- CREATE TABLE
+
+> insert into a232_s select g, (g * 7) % 25 from generate_series(1, 200) g
+-- INSERT 0 200
+
+> create table a232_ps (pk int, sk int, cost int, primary key (pk, sk))
+-- CREATE TABLE
+
+> insert into a232_ps select p, 1 + (p * 13 + i * 50) % 200, (p * 31 + i * 17) % 997 from generate_series(1, 300) p, generate_series(0, 3) i
+-- INSERT 0 1200
+
+> create table a232_p (pk int, sz int)
+-- CREATE TABLE
+
+> insert into a232_p select g, g % 9 from generate_series(1, 300) g
+-- INSERT 0 300
+
+> analyze a232_r, a232_n, a232_s, a232_ps, a232_p
+-- ANALYZE
+
+> set enable_hashjoin = off
+-- SET
+
+> set enable_mergejoin = off
+-- SET
+
+> set enable_material = off
+-- SET
+
+> set enable_memoize = off
+-- SET
+
+> set max_parallel_workers_per_gather = 0
+-- SET
+
+> explain (costs off)
+> select p.pk, (select min(ps.cost) from a232_ps ps, a232_s s, a232_n n, a232_r r
+>                where ps.pk = p.pk and s.sk = ps.sk and n.nk = s.nk and n.rk = r.rk and r.name = 'EU')
+>   from a232_p p where p.sz = 3
+QUERY PLAN:text
+Seq Scan on a232_p p
+  Filter: (sz = 3)
+  SubPlan 1
+    ->  Aggregate
+          ->  Nested Loop
+                Join Filter: (n.rk = r.rk)
+                ->  Seq Scan on a232_r r
+                      Filter: (name = 'EU'::text)
+                ->  Nested Loop
+                      ->  Nested Loop
+                            ->  Bitmap Heap Scan on a232_ps ps
+                                  Recheck Cond: (pk = p.pk)
+                                  ->  Bitmap Index Scan on a232_ps_pkey
+                                        Index Cond: (pk = p.pk)
+                            ->  Index Scan using a232_s_pkey on a232_s s
+                                  Index Cond: (sk = ps.sk)
+                      ->  Index Scan using a232_n_pkey on a232_n n
+                            Index Cond: (nk = s.nk)
+-- EXPLAIN
+
+> select p.pk, (select min(ps.cost) from a232_ps ps, a232_s s, a232_n n, a232_r r
+>                where ps.pk = p.pk and s.sk = ps.sk and n.nk = s.nk and n.rk = r.rk and r.name = 'EU') as m
+>   from a232_p p where p.sz = 3 order by 1
+pk:int4 | m:int4
+3 | NULL
+12 | NULL
+21 | 651
+30 | NULL
+39 | NULL
+48 | NULL
+57 | NULL
+66 | 52
+75 | NULL
+84 | NULL
+93 | NULL
+102 | NULL
+111 | 450
+120 | NULL
+129 | NULL
+138 | NULL
+147 | NULL
+156 | 848
+165 | NULL
+174 | NULL
+183 | NULL
+192 | NULL
+201 | 249
+210 | NULL
+219 | NULL
+228 | NULL
+237 | NULL
+246 | 647
+255 | NULL
+264 | NULL
+273 | NULL
+282 | NULL
+291 | 48
+300 | NULL
+-- SELECT 34
+
+> select count(*), sum(m), count(m) from (
+>   select (select min(ps.cost) from a232_ps ps, a232_s s, a232_n n, a232_r r
+>            where ps.pk = p.pk and s.sk = ps.sk and n.nk = s.nk and n.rk = r.rk and r.name in ('EU', 'AS')) as m
+>     from a232_p p) t
+count:int8 | sum:int8 | count:int8
+300 | 52608 | 120
+-- SELECT 1
+
+> select p.pk, (select count(n.nk) from a232_r r left join a232_n n on n.rk = r.rk and n.nk = p.pk % 30) as c
+>   from a232_p p where p.pk <= 40 order by 1
+pk:int4 | c:int8
+1 | 1
+2 | 1
+3 | 1
+4 | 1
+5 | 1
+6 | 1
+7 | 1
+8 | 1
+9 | 1
+10 | 1
+11 | 1
+12 | 1
+13 | 1
+14 | 1
+15 | 1
+16 | 1
+17 | 1
+18 | 1
+19 | 1
+20 | 1
+21 | 1
+22 | 1
+23 | 1
+24 | 1
+25 | 0
+26 | 0
+27 | 0
+28 | 0
+29 | 0
+30 | 1
+31 | 1
+32 | 1
+33 | 1
+34 | 1
+35 | 1
+36 | 1
+37 | 1
+38 | 1
+39 | 1
+40 | 1
+-- SELECT 40
+
+> select p.pk, (select count(*) from a232_r r where exists (select 1 from a232_n n where n.rk = r.rk and n.nk = p.pk % 30)) as c
+>   from a232_p p where p.pk <= 40 order by 1
+pk:int4 | c:int8
+1 | 1
+2 | 1
+3 | 1
+4 | 1
+5 | 1
+6 | 1
+7 | 1
+8 | 1
+9 | 1
+10 | 1
+11 | 1
+12 | 1
+13 | 1
+14 | 1
+15 | 1
+16 | 1
+17 | 1
+18 | 1
+19 | 1
+20 | 1
+21 | 1
+22 | 1
+23 | 1
+24 | 1
+25 | 0
+26 | 0
+27 | 0
+28 | 0
+29 | 0
+30 | 1
+31 | 1
+32 | 1
+33 | 1
+34 | 1
+35 | 1
+36 | 1
+37 | 1
+38 | 1
+39 | 1
+40 | 1
+-- SELECT 40
+
+> select p.pk, (select count(*) from a232_r r where not exists (select 1 from a232_n n where n.rk = r.rk and n.nk = p.pk % 30)) as c
+>   from a232_p p where p.pk <= 40 order by 1
+pk:int4 | c:int8
+1 | 4
+2 | 4
+3 | 4
+4 | 4
+5 | 4
+6 | 4
+7 | 4
+8 | 4
+9 | 4
+10 | 4
+11 | 4
+12 | 4
+13 | 4
+14 | 4
+15 | 4
+16 | 4
+17 | 4
+18 | 4
+19 | 4
+20 | 4
+21 | 4
+22 | 4
+23 | 4
+24 | 4
+25 | 5
+26 | 5
+27 | 5
+28 | 5
+29 | 5
+30 | 4
+31 | 4
+32 | 4
+33 | 4
+34 | 4
+35 | 4
+36 | 4
+37 | 4
+38 | 4
+39 | 4
+40 | 4
+-- SELECT 40
+
+> reset enable_hashjoin
+-- RESET
+
+> select p.pk, ps.sk, ps.cost from a232_p p, a232_ps ps
+>   where p.pk = ps.pk and p.sz = 5
+>     and ps.cost = (select min(ps2.cost) from a232_ps ps2, a232_s s, a232_n n, a232_r r
+>                     where ps2.pk = p.pk and s.sk = ps2.sk and n.nk = s.nk and n.rk = r.rk and r.name = 'EU')
+>   order by 1, 2
+pk:int4 | sk:int4 | cost:int4
+41 | 134 | 274
+86 | 119 | 672
+131 | 104 | 73
+176 | 89 | 471
+221 | 74 | 869
+266 | 59 | 270
+-- SELECT 6
+
+> set enable_hashjoin = off
+-- SET
+
+> set enable_indexscan = off
+-- SET
+
+> explain (costs off)
+> select p.pk, (select avg(ps.cost) from a232_ps ps where ps.pk = p.pk) from a232_p p where p.sz = 1
+QUERY PLAN:text
+Seq Scan on a232_p p
+  Filter: (sz = 1)
+  SubPlan 1
+    ->  Aggregate
+          ->  Bitmap Heap Scan on a232_ps ps
+                Recheck Cond: (pk = p.pk)
+                ->  Bitmap Index Scan on a232_ps_pkey
+                      Index Cond: (pk = p.pk)
+-- EXPLAIN
+
+> select p.pk, (select avg(ps.cost) from a232_ps ps where ps.pk = p.pk) as a, (select count(*) from a232_ps ps where ps.pk = p.pk + 1000) as none
+>   from a232_p p where p.sz = 1 order by 1
+pk:int4 | a:numeric | none:int8
+1 | 56.5000000000000000 | 0
+10 | 335.5000000000000000 | 0
+19 | 614.5000000000000000 | 0
+28 | 893.5000000000000000 | 0
+37 | 175.5000000000000000 | 0
+46 | 454.5000000000000000 | 0
+55 | 733.5000000000000000 | 0
+64 | 264.7500000000000000 | 0
+73 | 294.5000000000000000 | 0
+82 | 573.5000000000000000 | 0
+91 | 852.5000000000000000 | 0
+100 | 134.5000000000000000 | 0
+109 | 413.5000000000000000 | 0
+118 | 692.5000000000000000 | 0
+127 | 722.2500000000000000 | 0
+136 | 253.5000000000000000 | 0
+145 | 532.5000000000000000 | 0
+154 | 811.5000000000000000 | 0
+163 | 93.5000000000000000 | 0
+172 | 372.5000000000000000 | 0
+181 | 651.5000000000000000 | 0
+190 | 930.5000000000000000 | 0
+199 | 212.5000000000000000 | 0
+208 | 491.5000000000000000 | 0
+217 | 770.5000000000000000 | 0
+226 | 52.5000000000000000 | 0
+235 | 331.5000000000000000 | 0
+244 | 610.5000000000000000 | 0
+253 | 889.5000000000000000 | 0
+262 | 171.5000000000000000 | 0
+271 | 450.5000000000000000 | 0
+280 | 729.5000000000000000 | 0
+289 | 260.7500000000000000 | 0
+298 | 290.5000000000000000 | 0
+-- SELECT 34
+
+> reset enable_indexscan
+-- RESET
+
+> reset enable_hashjoin
+-- RESET
+
+> reset enable_mergejoin
+-- RESET
+
+> reset enable_material
+-- RESET
+
+> reset enable_memoize
+-- RESET
+
+> reset max_parallel_workers_per_gather
+-- RESET
+
