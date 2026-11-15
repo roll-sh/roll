@@ -12,6 +12,7 @@ const STATUS: Record<CompareStatus, { label: string; tone: string; promotable: b
   only_from: { label: "only in from", tone: "text-ok", promotable: true },
   only_to: { label: "only in to", tone: "text-subtle", promotable: false },
   same: { label: "same", tone: "text-faint", promotable: false },
+  hidden: { label: "in both", tone: "text-subtle", promotable: true },
 };
 
 /**
