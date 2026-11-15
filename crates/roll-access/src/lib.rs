@@ -100,7 +100,8 @@ fn checksum(body: &str) -> String {
 }
 
 /// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`) and other
-/// products' made the same way ([`new_secret`]): apps' deploy hooks (`rlk_`).
+/// products' made the same way ([`new_secret`]): apps' deploy hooks (`rlk_`). (`rlh_` is roll code's
+/// automations' inbound webhook secrets: another shape, not ours.)
 pub const SECRET_PREFIXES: [&str; 4] = ["rlt_", "rlo_", "rlf_", "rlk_"];
 
 /// Whether `s` is shaped like a roll secret ([`SECRET_PREFIXES`]) whose checksum holds: what
@@ -144,6 +145,7 @@ mod policy_tests {
             kind: "token",
             rules: Default::default(),
             expires_at: None,
+            not_before: None,
             ip_allow: vec![],
             created_by: "operator".into(),
             created_at: created,
@@ -202,10 +204,20 @@ pub struct Config {
     pub locked: bool,
     /// Days of audit log kept.
     pub audit_days: i64,
-    /// Take the client's address from `X-Forwarded-For`'s first entry (behind roll's edge).
+    /// Take the client's address from `X-Forwarded-For` (behind roll's edge): its first entry, or,
+    /// with `trusted_proxies`, the right-most one that isn't a proxy.
     pub trust_forwarded_for: bool,
+    /// The products this node runs (rule names; the workspace and access always): the token
+    /// builder offers only them. Empty: every product (tests, embedding).
+    pub products: Vec<String>,
+    /// When set, `X-Forwarded-For` counts only from these peers (the edge's addresses), and the
+    /// client is the right-most address in it that isn't one of them: what a client wrote into the
+    /// header itself is never taken (`ROLL_TRUSTED_PROXIES`).
+    pub trusted_proxies: Vec<ipnet::IpNet>,
     /// How long a request waits for an approval before answering `approval_pending`.
     pub approval_wait: std::time::Duration,
+    /// A spent refresh token presented again within this is a retry, not a stolen copy.
+    pub refresh_grace: std::time::Duration,
     /// Fetch MCP clients' metadata documents from private addresses and over http (local
     /// development and tests only; `ROLL_ACCESS_METADATA_ALLOW_PRIVATE`).
     pub metadata_allow_private: bool,
@@ -221,7 +233,10 @@ impl Default for Config {
             locked: false,
             audit_days: 90,
             trust_forwarded_for: false,
+            products: Vec::new(),
+            trusted_proxies: Vec::new(),
             approval_wait: std::time::Duration::from_secs(55),
+            refresh_grace: std::time::Duration::from_millis(store::REFRESH_GRACE_MS as u64),
             metadata_allow_private: false,
             github_keys_url: leaks::GITHUB_KEYS.into(),
         }
@@ -358,6 +373,15 @@ impl Resolver for Fns {
     }
 }
 
+/// Open registrations by network, each with its last minute's times: a sliding window, so a burst
+/// across a minute's edge counts as one minute (a fixed window let through twice the limit there).
+#[derive(Default)]
+pub(crate) struct Registrations {
+    /// When the map was last swept of networks idle a minute (one sweep a minute, no scan per request).
+    pub swept: i64,
+    pub by: std::collections::HashMap<String, std::collections::VecDeque<i64>>,
+}
+
 /// The access service: the store, the catalogue and the resolvers.
 pub struct Access {
     pub store: Store,
@@ -365,6 +389,9 @@ pub struct Access {
     pub resolvers: Resolvers,
     /// Approvals in chat, when rolld wires them.
     pub chat: std::sync::OnceLock<Arc<dyn ApprovalChat>>,
+    /// How many nodes serve requests now (rolld's cluster): a grant's rate is shared among them
+    /// ([`Access::rate_share`]). Unset: one.
+    pub nodes: std::sync::OnceLock<Box<dyn Fn() -> usize + Send + Sync>>,
     /// How other products revoke their own leaked secrets, by prefix ([`Access::on_leaked`]).
     revokers: std::sync::RwLock<Vec<(&'static str, Revoker)>>,
     /// Grants' request limits on this node.
@@ -373,6 +400,9 @@ pub struct Access {
     pub sinks: std::sync::OnceLock<Arc<dyn sinks::SinkTransport>>,
     /// GitHub's secret scanning keys, cached.
     pub(crate) github_keys: leaks::GithubKeys,
+    /// OAuth registrations lately, per network: their times in the last minute (open
+    /// registration's limit).
+    pub(crate) registrations: std::sync::Mutex<Registrations>,
     /// The token policy as last read (`policy_now`).
     policy_cache: std::sync::Mutex<Option<(std::time::Instant, Policy)>>,
 }
@@ -388,7 +418,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), github_keys: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), github_keys: Default::default(), registrations: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -411,9 +441,15 @@ impl Access {
 }
 
 impl Access {
-    /// Secrets found where they shouldn't be (a pushed file, a public repo, a report from GitHub's
-    /// secret scanning): each live grant they open is revoked at once, with why, and logged.
-    /// Returns the grants revoked.
+    /// This node's share of a grant's `rate_per_minute`: the rate over the nodes serving requests,
+    /// rounded up (at least one a minute). Counted in memory on each node, so the fleet as a whole
+    /// allows about the rate, with no shared write per request; a client whose requests all reach
+    /// one node gets that node's share.
+    pub fn rate_share(&self, rate: u32) -> u32 {
+        let nodes = self.nodes.get().map_or(1, |n| n()).max(1) as u32;
+        rate.div_ceil(nodes).max(1)
+    }
+
     /// A product's own leaked secrets (apps' deploy hooks, `rlk_`): found wherever roll's are
     /// (roll code's landings, GitHub's secret scanning), revoked by `revoke`, which says what it
     /// revoked (`None`: nothing live).
@@ -421,6 +457,9 @@ impl Access {
         self.revokers.write().unwrap_or_else(|e| e.into_inner()).push((prefix, Box::new(revoke)));
     }
 
+    /// Secrets found where they shouldn't be (a pushed file, a public repo, a report from GitHub's
+    /// secret scanning): each live grant they open is revoked at once, with why, and logged.
+    /// Returns the grants revoked.
     pub fn revoke_leaked(&self, secrets: &[String], found_at: &str) -> Result<Vec<store::Grant>> {
         let mut out = Vec::new();
         for s in secrets.iter().filter(|s| checksum_ok(s)) {
@@ -494,7 +533,8 @@ impl Access {
         let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return Ok(false) };
         let now = code_sql::now_ms();
         let week = now + 7 * 86_400_000;
-        let mut soon: Vec<store::Grant> = self.store.list()?.into_iter().filter(|g| g.live(now) && g.expires_at.is_some_and(|e| e <= week)).collect();
+        // A token made to last a day or less (one a workload made for its job) knows its end.
+        let mut soon: Vec<store::Grant> = self.store.list()?.into_iter().filter(|g| g.live(now) && g.expires_at.is_some_and(|e| e <= week && e - g.created_at > 86_400_000)).collect();
         if soon.is_empty() {
             return Ok(false);
         }
@@ -660,7 +700,11 @@ impl Access {
 impl roll_auth::Grants for Access {
     fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
         let g = self.store.get(id).ok()?;
-        g.live(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.effective_rules(code_sql::now_ms())), ask_otherwise: g.ask_otherwise })
+        // Stopped for being idle (the token policy), as the evaluator answers its requests.
+        if self.policy_now().idle(&g, code_sql::now_ms()) {
+            return None;
+        }
+        g.usable(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.effective_rules(code_sql::now_ms())), ask_otherwise: g.ask_otherwise })
     }
 }
 

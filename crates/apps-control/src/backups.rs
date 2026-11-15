@@ -14,6 +14,8 @@ use std::sync::Arc;
 const KEEP: usize = 7;
 /// A day between scheduled backups.
 const EVERY_MS: i64 = 24 * 3_600_000;
+/// How long a deleted environment's (or service's) backups are kept to restore from by hand.
+const ORPHAN_MS: i64 = 7 * 24 * 3_600_000;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Backup {
@@ -76,6 +78,24 @@ impl Apps {
         Ok(Backup { id: at.to_string(), at, size })
     }
 
+    /// The volume's last backup before it goes (its environment or service deleted): taken after
+    /// its instances stopped, kept [`ORPHAN_MS`] under the same prefix, best effort (a node
+    /// without object storage, or a service without a volume, has none to take).
+    pub(crate) async fn last_backup(self: &Arc<Self>, service: &str, env: &str, had_volume: bool) {
+        let Some(objects) = self.deps.objects.as_ref().filter(|_| had_volume) else { return };
+        let at = code_sql::now_ms();
+        let key = format!("{}{at}.tar", prefix(service, env));
+        let taken = async {
+            let tar = self.deps.runtime.read_volume(&volume_name(service, env)).await?;
+            objects.upload(&key, tar).await
+        }
+        .await;
+        match taken {
+            Ok(size) => tracing::info!(service, env, size, "apps: a deleted environment's volume was backed up (kept a week)"),
+            Err(e) => tracing::warn!(service, env, error = %e, "apps: a deleted environment's volume couldn't be backed up"),
+        }
+    }
+
     /// `POST …/volume/backups/{id}/restore`: the volume as it was then. The backup is
     /// downloaded whole and checked against its listed size before anything touches the volume;
     /// then the environment is held asleep (requests get a 503 a moment; rollouts and cron runs
@@ -102,6 +122,11 @@ impl Apps {
             .await;
             let restored = match fetched {
                 Ok(()) => {
+                    // What's there now, first: a restore can be undone by restoring that.
+                    if let Err(e) = this.backup_volume(&service, &env).await {
+                        let _ = tokio::fs::remove_file(&path).await;
+                        return Err(Error::Internal(format!("backing up what's there before the restore (the volume is untouched): {e}")));
+                    }
                     let _held = this.live(&service, &env).hold_asleep().await;
                     match tokio::fs::File::open(&path).await {
                         Ok(f) => this.deps.runtime.write_volume(&volume, Box::new(f)).await.map_err(|e| Error::Internal(format!("writing the volume (it's as it was): {e:#}"))),
@@ -117,6 +142,47 @@ impl Apps {
         })
         .await
         .map_err(|e| Error::Internal(e.to_string()))?
+    }
+
+    /// Once an hour, on the owner: how full each volume is (`du` in a helper container on Docker),
+    /// kept for the environment's answer, and `volume.full` once it passes 90% of its size (again
+    /// only after it went under 80%): a volume that fills up takes its database down.
+    pub async fn measure_volumes(self: &Arc<Self>) {
+        for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {
+            let Some(vol) = l.template().and_then(|t| t.run.volume.clone()) else { continue };
+            let Some(bytes) = self.deps.runtime.volume_used(&volume_name(&l.service, &l.env)).await else { continue };
+            let size = vol.size_gb as u64 * (1 << 30);
+            let pct = bytes.saturating_mul(100).checked_div(size).unwrap_or(0);
+            let (used, full) = (format!("volume_used:{}/{}", l.service, l.env), format!("volume_full:{}/{}", l.service, l.env));
+            let (sid, en, now) = (l.service.clone(), l.env.clone(), code_sql::now_ms());
+            let alert = self
+                .db(move |s| {
+                    s.set_state(&used, &format!("{bytes} {now}"))?;
+                    let was = s.get_state(&full)?.is_some_and(|v| !v.is_empty());
+                    if pct >= 90 && !was {
+                        s.set_state(&full, "1")?;
+                        s.add_event("volume.full", &sid, &en, None, &serde_json::json!({ "used_bytes": bytes, "size_gb": vol.size_gb, "pct": pct }))?;
+                        return Ok(true);
+                    }
+                    if pct < 80 && was {
+                        s.set_state(&full, "")?;
+                    }
+                    Ok(false)
+                })
+                .await
+                .unwrap_or(false);
+            if alert {
+                l.log.stream(crate::logs::Stream::System).line(format!("the volume is {pct}% full ({} of {} GB)", human_bytes(bytes), vol.size_gb));
+            }
+        }
+    }
+
+    /// What an environment's volume was last measured at: (bytes, when).
+    pub(crate) async fn volume_usage(self: &Arc<Self>, service: &str, env: &str) -> Option<(u64, i64)> {
+        let key = format!("volume_used:{service}/{env}");
+        let v = self.db(move |s| s.get_state(&key)).await.ok().flatten()?;
+        let (b, at) = v.split_once(' ')?;
+        Some((b.parse().ok()?, at.parse().ok()?))
     }
 
     /// Once an hour, on the owner: a backup of each volume whose newest is a day old.
@@ -135,7 +201,39 @@ impl Apps {
             }
             if let Err(e) = self.backup_volume(&l.service, &l.env).await {
                 tracing::warn!(service = %l.service, env = %l.env, error = %e, "apps: a scheduled volume backup failed");
+                // Said where the team looks: its log, and an event its targets hear by default.
+                l.log.stream(crate::logs::Stream::System).line(format!("the daily volume backup failed: {e}"));
+                let (sid, en, data) = (l.service.clone(), l.env.clone(), serde_json::json!({ "error": e.to_string() }));
+                let _ = self.db(move |s| s.add_event("volume.backup_failed", &sid, &en, None, &data)).await;
             }
         }
+        // Once on the fleet: a deleted environment's (or service's) backups go after a week.
+        if self.deps.cluster.singleton("apps:spend") {
+            self.expire_orphaned_backups().await;
+        }
+    }
+
+    async fn expire_orphaned_backups(self: &Arc<Self>) {
+        let Some(objects) = self.deps.objects.as_ref() else { return };
+        let Ok(envs) = self.db(|s| s.all_environments()).await else { return };
+        let live: std::collections::HashSet<(String, String)> = envs.into_iter().map(|e| (e.service, e.name)).collect();
+        let Ok(all) = objects.list("apps/volumes/").await else { return };
+        let now = code_sql::now_ms();
+        for (key, _) in all {
+            let mut parts = key.trim_start_matches("apps/volumes/").splitn(3, '/');
+            let (Some(svc), Some(env), Some(file)) = (parts.next(), parts.next(), parts.next()) else { continue };
+            let at: i64 = file.trim_end_matches(".tar").parse().unwrap_or(now);
+            if !live.contains(&(svc.to_string(), env.to_string())) && now - at > ORPHAN_MS {
+                let _ = objects.delete(&key).await;
+            }
+        }
+    }
+}
+
+fn human_bytes(b: u64) -> String {
+    match b {
+        b if b >= 1 << 30 => format!("{:.1} GB", b as f64 / (1u64 << 30) as f64),
+        b if b >= 1 << 20 => format!("{:.0} MB", b as f64 / (1u64 << 20) as f64),
+        b => format!("{} KB", b / 1024),
     }
 }

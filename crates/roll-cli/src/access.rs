@@ -20,10 +20,18 @@ pub enum Token {
     List,
     /// Show a token's rules, expiry and last use.
     Show { id: String },
+    /// What an agent connected with a token is offered over MCP: its tools (those that change
+    /// things marked), prompts, and what the list costs an agent's context.
+    Tools { id: String },
     /// Revoke a token or connection: every request with it fails from now on.
     Revoke { id: String },
     /// A new secret for a token, with the same rules; the old one stops working at once.
-    Rotate { id: String },
+    Rotate {
+        id: String,
+        /// The old secret keeps working this long (1h, 2d; at most 7d) while deployments switch.
+        #[arg(long)]
+        keep_old: Option<String>,
+    },
     /// Change a token: its name, expiry, addresses, or (with --preset/--allow/--ask) its rules.
     Edit(Box<Edit>),
     /// Its rules narrowed to the actions and resources its requests used (never wider); `--apply`
@@ -70,9 +78,12 @@ pub struct Create {
     name: String,
     #[command(flatten)]
     rules: RuleArgs,
-    /// Lifetime: 30d, 12h, 90m, or never (default 30d).
+    /// Lifetime: 30d, 12h, 90m, or never (default 30d); from its start with --starts.
     #[arg(long, default_value = "30d")]
     expires: String,
+    /// It works only from this far on (2h, 1d): refused until then.
+    #[arg(long)]
+    starts: Option<String>,
     /// Addresses it may be used from (CIDRs), repeatable.
     #[arg(long = "ip", value_delimiter = ',')]
     ip_allow: Vec<String>,
@@ -203,6 +214,9 @@ pub enum Mcp {
     },
     /// Every request made with a token and every MCP tool call, newest first.
     Audit {
+        /// csv or jsonl: the matching events as that, for a spreadsheet or a log tool.
+        #[arg(long)]
+        format: Option<String>,
         /// Only this token (tok_…).
         #[arg(long)]
         token: Option<String>,
@@ -234,20 +248,34 @@ pub enum Client {
 
 /// "30d" → milliseconds from now; "never" → none.
 fn expiry(s: &str) -> anyhow::Result<Option<i64>> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    Ok(span(s, "--expires")?.map(|ms| now + ms))
+}
+
+/// `--starts` and `--expires` as times: the expiry counts from the start.
+fn window(starts: Option<&str>, expires: &str) -> anyhow::Result<(Option<i64>, Option<i64>)> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    let from = match starts {
+        Some(s) => Some(now + span(s, "--starts")?.with_context(|| format!("--starts {s}: a number and d, h or m (2h)"))?),
+        None => None,
+    };
+    Ok((from, span(expires, "--expires")?.map(|ms| from.unwrap_or(now) + ms)))
+}
+
+/// "30d" → its milliseconds; "never" → none.
+fn span(s: &str, flag: &str) -> anyhow::Result<Option<i64>> {
     let s = s.trim();
     if s.eq_ignore_ascii_case("never") {
         return Ok(None);
     }
     let (n, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
-    let n: i64 = n.parse().with_context(|| format!("--expires {s}: a number and d, h or m (30d), or never"))?;
-    let ms = match unit {
+    let n: i64 = n.parse().with_context(|| format!("{flag} {s}: a number and d, h or m (30d), or never"))?;
+    Ok(Some(match unit {
         "d" => n * 86_400_000,
         "h" => n * 3_600_000,
         "m" => n * 60_000,
-        _ => bail!("--expires {s}: a number and d, h or m (30d), or never"),
-    };
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
-    Ok(Some(now + ms))
+        _ => bail!("{flag} {s}: a number and d, h or m (30d), or never"),
+    }))
 }
 
 /// The rules a `create` asks for: the preset's (its "project" filled in), then a rule of its own.
@@ -367,7 +395,8 @@ pub fn date(ms: i64) -> String {
 pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> {
     match cmd {
         Token::Create(c) => {
-            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow, "rate_per_minute": c.rate, "ask_otherwise": c.ask_otherwise });
+            let (not_before, expires_at) = window(c.starts.as_deref(), &c.expires)?;
+            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "not_before": not_before, "expires_at": expires_at, "ip_allow": c.ip_allow, "rate_per_minute": c.rate, "ask_otherwise": c.ask_otherwise });
             let made = api.post("/v1/access/tokens", body).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&made)?);
@@ -405,6 +434,24 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 println!("{}", serde_json::to_string_pretty(&g)?);
             } else {
                 println!("revoked {} ({})", s(&g["id"]), s(&g["name"]));
+            }
+        }
+        Token::Tools { id } => {
+            let seen = api.get(&format!("/v1/access/tokens/{}/tools", urlencoding::encode(&id))).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&seen)?);
+                return Ok(());
+            }
+            let tools = seen["tools"].as_array().cloned().unwrap_or_default();
+            let changes = tools.iter().filter(|t| t["read_only"] != true).count();
+            println!("{} tools ({changes} that change things), ~{} tokens of an agent's context", tools.len(), seen["context_tokens"].as_u64().unwrap_or(0));
+            for t in &tools {
+                let mark = if t["destructive"] == true { "!" } else if t["read_only"] == true { " " } else { "*" };
+                println!("  {mark} {}", s(&t["name"]));
+            }
+            let prompts: Vec<String> = seen["prompts"].as_array().into_iter().flatten().map(|p| s(&p["name"])).collect();
+            if !prompts.is_empty() {
+                println!("prompts: {}", prompts.join(", "));
             }
         }
         Token::Tighten { id, days, apply } => {
@@ -469,8 +516,9 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 print_grant(&g);
             }
         }
-        Token::Rotate { id } => {
-            let made = api.post(&format!("/v1/access/tokens/{id}/rotate"), json!({})).await?;
+        Token::Rotate { id, keep_old } => {
+            let keep = keep_old.as_deref().map(|k| span(k, "--keep-old")).transpose()?.flatten().map(|ms| ms / 1000);
+            let made = api.post(&format!("/v1/access/tokens/{id}/rotate"), json!({ "keep_old_for_s": keep })).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&made)?);
                 return Ok(());
@@ -681,13 +729,17 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
                 println!("approvals are also posted to {} in {}; decided there by {}", s(&v["chat"]["channel"]), s(&v["chat"]["install"]), who.join(", "));
             }
         }
-        Mcp::Audit { token, product, decision, resource, action, limit } => {
+        Mcp::Audit { format, token, product, decision, resource, action, limit } => {
             let mut q = url::form_urlencoded::Serializer::new(String::new());
             q.append_pair("limit", &limit.to_string());
-            for (k, v) in [("grant", token), ("product", product), ("decision", decision), ("resource", resource), ("action", action)] {
+            for (k, v) in [("grant", token), ("product", product), ("decision", decision), ("resource", resource), ("action", action), ("format", format.clone())] {
                 if let Some(v) = v {
                     q.append_pair(k, &v);
                 }
+            }
+            if format.is_some() {
+                print!("{}", api.get_text(&format!("/v1/access/audit?{}", q.finish())).await?);
+                return Ok(());
             }
             let log = api.get(&format!("/v1/access/audit?{}", q.finish())).await?;
             if json_out {
