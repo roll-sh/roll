@@ -756,7 +756,9 @@ async fn oauth_connects_an_mcp_client() {
 /// are capped per caller, and a refused device is told so.
 #[tokio::test]
 async fn a_device_signs_in_with_a_code() {
-    let d = Daemon::with(0, |c| c.device_interval = std::time::Duration::from_millis(200));
+    // The default interval (5 s): two polls in a row are always inside it, however slow the
+    // machine, and an allowed, refused or expired request answers whatever the interval.
+    let d = Daemon::new(0);
     let (_, meta) = d.call("", Method::GET, "/.well-known/oauth-authorization-server", None).await;
     assert!(meta["device_authorization_endpoint"].as_str().is_some_and(|e| e.ends_with("/v1/access/oauth/device_authorization")), "{meta}");
     let (s, client) = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "client_name": "roll CLI", "redirect_uris": [], "grant_types": ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"] }))).await;
@@ -790,7 +792,6 @@ async fn a_device_signs_in_with_a_code() {
     let (s, ok) = d.call(OPERATOR, Method::POST, &format!("/v1/access/oauth/devices/{user_code}"), Some(allow.clone())).await;
     assert_eq!(s, StatusCode::OK, "{ok}");
     assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/oauth/devices/{user_code}"), Some(allow)).await.0, StatusCode::NOT_FOUND, "a code is used once");
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     let (s, tokens) = poll(device_code.clone()).await;
     assert_eq!(s, StatusCode::OK, "{tokens}");
     assert_eq!(tokens["grant_id"], ok["grant_id"]);
