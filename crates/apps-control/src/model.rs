@@ -180,26 +180,59 @@ pub struct Event {
 
 /// Where a project's events go (`…/projects/{project}/notifications`): a webhook (JSON, signed),
 /// a Slack or a Discord incoming webhook. The URL is sealed; only its host shows.
-/// A project's log drain (`/v1/apps/projects/{project}/drains`): where its runtime output goes.
-/// The URL is never returned, only its host.
+/// A project's log drain (`/v1/apps/projects/{project}/drains`): where its output goes. The URL
+/// and the headers' values are never returned, only the host and the headers' names.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct LogDrain {
     pub id: String,
     pub project: String,
     pub host: String,
     pub created_at: i64,
+    /// What it's sent: `runtime` (the instances' output and roll's lines about them), `http`
+    /// (the access log, a request a line) and `build`.
+    pub sources: Vec<String>,
+    /// Only these environments' (empty: every one).
+    pub environments: Vec<String>,
+    /// Only these services' (ids; empty: every one).
+    pub services: Vec<String>,
+    /// Preview environments' too.
+    pub previews: bool,
+    /// The names of the headers it's sent with (an API key's: their values are sealed).
+    pub headers: Vec<String>,
 }
+
+/// What a drain can be sent.
+pub const DRAIN_SOURCES: [&str; 3] = ["runtime", "http", "build"];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NotifyTarget {
     pub id: String,
     pub project: String,
-    /// `webhook`, `slack`, `discord`.
+    /// `webhook`, `slack`, `discord`, `email` (the project's owner).
     pub kind: String,
     /// The URL's host, for recognising it (the URL itself is a secret).
     pub host: String,
     pub events: Vec<String>,
+    /// Only these environments' events (names); empty: every environment's.
+    pub environments: Vec<String>,
+    /// Only these services' events (ids); empty: every service's.
+    pub services: Vec<String>,
+    /// Whether preview (ephemeral) environments' events come too.
+    pub previews: bool,
     pub created_at: i64,
+}
+
+impl NotifyTarget {
+    /// Whether an event of `service` in `env` (empty: the project's own, as spend) is this
+    /// target's to send; `ephemeral`: the environment is a preview's.
+    pub fn follows(&self, service: &str, env: &str, ephemeral: bool) -> bool {
+        if service.is_empty() {
+            return true;
+        }
+        (self.services.is_empty() || self.services.iter().any(|s| s == service))
+            && (self.environments.is_empty() || self.environments.iter().any(|e| e == env))
+            && (self.previews || !ephemeral || self.environments.iter().any(|e| e == env))
+    }
 }
 
 /// One try of sending one event to one target.
@@ -281,6 +314,14 @@ pub struct Build {
     /// detected; unset: detected (a static build with a client-side router).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spa: Option<bool>,
+    /// The tree's own Dockerfile's stage to build (`--target`), for a multi-stage one whose last
+    /// stage isn't what runs (Fly's and Render's).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// System packages the generated Dockerfile installs (Railpack's `aptPkgs`, Heroku's
+    /// Aptfile): apt or apk names, in every stage built on an image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packages: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,6 +347,15 @@ impl Build {
         {
             return Err(Error::BadRequest("build.watch is at most 50 path patterns of at most 200 characters".into()));
         }
+        // A stage's name, as a Dockerfile's `FROM … AS <name>` has it (one argv word).
+        if let Some(t) = &self.target
+            && (t.is_empty() || t.len() > 64 || !t.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')) || t.starts_with('-'))
+        {
+            return Err(Error::BadRequest("build.target is a Dockerfile stage's name: letters, digits, _, - and . (at most 64)".into()));
+        }
+        if let Some(p) = &self.packages {
+            apps_build::packages::check(p).map_err(|why| Error::BadRequest(format!("build.{why}")))?;
+        }
         Ok(())
     }
 
@@ -320,6 +370,7 @@ impl Build {
             build: self.build.clone(),
             start: self.start.clone(),
             spa: self.spa,
+            packages: self.packages.clone().unwrap_or_default(),
             build_env: Vec::new(),
             process: None,
         }
@@ -362,6 +413,10 @@ pub struct Run {
     pub timezone: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_s: Option<u32>,
+    /// A cron run that fails or times out is tried again this many times (Cloud Run Jobs'
+    /// `--max-retries`), each try its own run after a backoff; `cron.failed` only for the last.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retries: Option<u8>,
     pub min_instances: u32,
     pub max_instances: u32,
     pub concurrency: u32,
@@ -422,6 +477,36 @@ pub struct Run {
     /// at-once deploy. Never a rollback's own: no two in a row.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rollback_on_crash: bool,
+    /// Commands on a schedule, each a job of the live deployment at its due times (Heroku
+    /// Scheduler, Vercel crons): any service's, without a cron service of its own.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub schedules: Vec<Scheduled>,
+}
+
+/// A volume's measured size ([`Environment::volume_used`]).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct VolumeUsed {
+    pub bytes: u64,
+    /// When it was measured (unix ms).
+    pub at: i64,
+}
+
+/// A command on a schedule ([`Run::schedules`]): a job (`crate::jobs`) at each due time, skipped
+/// while its last one still runs; a paused environment's move on without making up the runs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scheduled {
+    /// Unique in the service: a-z, 0-9 and -, at most 32.
+    pub name: String,
+    /// Five fields or `@hourly`, `@daily` … ([`crate::cron::Schedule`]).
+    pub schedule: String,
+    pub command: String,
+    /// The schedule's time zone (IANA; default UTC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    /// 1–86400 (default 3600).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -539,6 +624,7 @@ impl Default for Run {
             schedule: None,
             timezone: None,
             timeout_s: None,
+            retries: None,
             min_instances: 0,
             max_instances: 3,
             concurrency: 50,
@@ -561,6 +647,7 @@ impl Default for Run {
             affinity: false,
             tcp: false,
             rollback_on_crash: false,
+            schedules: Vec::new(),
         }
     }
 }
@@ -576,6 +663,21 @@ impl Run {
             return Err(Error::BadRequest("alerts.log_match is 1–200 characters, alerts.log_count 1–10000".into()));
         }
         let bad = |m: &str| Err(Error::BadRequest(format!("run.{m}")));
+        if self.schedules.len() > 20 {
+            return bad("schedules is at most 20");
+        }
+        for (i, sc) in self.schedules.iter().enumerate() {
+            if sc.name.is_empty() || sc.name.len() > 32 || !sc.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') || self.schedules[..i].iter().any(|o| o.name == sc.name) {
+                return bad("schedules' names are unique: a-z, 0-9 and -, at most 32");
+            }
+            crate::cron::Schedule::parse(&sc.schedule, sc.timezone.as_deref()).map_err(|e| Error::BadRequest(format!("run.schedules.{}: {e}", sc.name)))?;
+            if sc.command.trim().is_empty() || sc.command.len() > 2000 || sc.command.contains('\0') {
+                return bad("schedules' commands are 1–2000 characters");
+            }
+            if sc.timeout_s.is_some_and(|t| !(1..=86_400).contains(&t)) {
+                return bad("schedules' timeout_s is 1–86400");
+            }
+        }
         let r = &self.rollout;
         if r.steps.len() > 5 || r.steps.iter().any(|s| !(1..=99).contains(s)) || r.steps.windows(2).any(|w| w[0] >= w[1]) {
             return bad("rollout.steps is up to five increasing percents, 1–99");
@@ -688,6 +790,9 @@ impl Run {
                 if self.timeout_s.is_some_and(|t| !(1..=86_400).contains(&t)) {
                     return bad("timeout_s is 1–86400");
                 }
+                if self.retries.is_some_and(|r| r > 5) {
+                    return bad("retries is 0–5");
+                }
                 self.min_instances = 0;
             }
             RunType::Worker => {
@@ -799,6 +904,10 @@ pub struct EnvironmentSummary {
     pub url: Option<String>,
     pub active: Option<DeployRef>,
     pub latest: Option<LatestRef>,
+    /// What wants its owner's eye, for a list or a canvas card (Render's, Railway's): a crash loop,
+    /// the project capped by its spend limit, maintenance, its latest deploy failed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attention: Vec<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -818,6 +927,9 @@ pub struct Environment {
     pub private: bool,
     /// A cron service's next scheduled run (unix ms), once it has a deployment.
     pub next_run_at: Option<i64>,
+    /// How full its volume was when last measured (hourly), when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume_used: Option<VolumeUsed>,
     /// Its instances keep crashing: three or more in the last ten minutes.
     pub crash_loop: Option<CrashLoop>,
     /// A gradual rollout under way: the new deployment and the percent of requests it takes.
@@ -829,12 +941,21 @@ pub struct Environment {
     /// An image service's tag is watched: a new digest behind it deploys (Railway's image auto
     /// updates).
     pub follow_tag: bool,
+    /// Redeploys (the same image, the new values) when the project's secrets change.
+    pub redeploy_on_secrets: bool,
     /// A preview's pages carry roll previews' feedback button for visitors who came in through
     /// its access link.
     pub feedback: bool,
     /// In maintenance (Render's maintenance mode): its public names answer a 503 page with the
     /// message, and nothing wakes. Null: serving.
     pub maintenance: Option<Maintenance>,
+    /// Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until it's resumed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
+    /// Deploys are held after this rollback: pushes, hooks and tag moves aren't put live until a
+    /// person deploys, redeploys or promotes, or resumes them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held_after: Option<String>,
     /// Its own pages for what roll would otherwise answer (Heroku's error and maintenance pages).
     #[serde(skip_serializing_if = "Pages::is_empty")]
     pub pages: Pages,
@@ -844,6 +965,9 @@ pub struct Environment {
     pub rate_limit: Option<RateLimit>,
     /// Its firewall rules, in order ([]: none).
     pub firewall: Vec<FirewallRule>,
+    /// Headers its answers carry ([]: none).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<HeaderRule>,
     /// A worker that follows its work: the backlog it last read (null before the first read)
     /// and the instances that wants.
     pub scaling: Option<Scaling>,
@@ -941,19 +1065,79 @@ impl FirewallRule {
     /// `path` as [`normal_path`] gives it. Paths compare in any case and without a trailing
     /// slash (`/admin/*` takes `/admin` too); HEAD is a GET.
     pub fn matches(&self, method: &str, path: &str, user_agent: &str) -> bool {
-        let trim = |p: &str| if p.len() > 1 { p.trim_end_matches('/').to_ascii_lowercase() } else { p.to_ascii_lowercase() };
-        let path = trim(path);
-        let path_ok = self.path.as_deref().is_none_or(|p| match p.strip_suffix('*') {
-            Some(prefix) => {
-                let prefix = prefix.to_ascii_lowercase();
-                path.starts_with(&prefix) || path == trim(&prefix)
-            }
-            None => path == trim(p),
-        });
+        let path_ok = self.path.as_deref().is_none_or(|p| path_matches(p, path));
         let method = if method.eq_ignore_ascii_case("HEAD") { "GET" } else { method };
         let method_ok = self.methods.is_empty() || self.methods.iter().any(|m| m.eq_ignore_ascii_case(method));
         let ua_ok = self.user_agent.as_deref().is_none_or(|u| user_agent.to_ascii_lowercase().contains(u));
         path_ok && method_ok && ua_ok
+    }
+}
+
+/// Whether `path` ([`normal_path`]'s) is `pattern`: a path, or a prefix ending in `*` (which
+/// takes the prefix itself too); any case, no trailing slash.
+pub fn path_matches(pattern: &str, path: &str) -> bool {
+    let trim = |p: &str| if p.len() > 1 { p.trim_end_matches('/').to_ascii_lowercase() } else { p.to_ascii_lowercase() };
+    let path = trim(path);
+    match pattern.strip_suffix('*') {
+        Some(prefix) => {
+            let prefix = prefix.to_ascii_lowercase();
+            path.starts_with(&prefix) || path == trim(&prefix)
+        }
+        None => path == trim(pattern),
+    }
+}
+
+/// Headers an environment's answers carry (HSTS, a CSP, `X-Frame-Options`), on the paths a rule
+/// names: Vercel's and Netlify's `headers`. The app's own header of the same name wins unless
+/// the rule `replace`s it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeaderRule {
+    /// A path, or a prefix ending in `*` (`/assets/*`); none: every path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub set: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replace: bool,
+}
+
+/// The most header rules an environment has.
+pub const MAX_HEADER_RULES: usize = 20;
+
+impl HeaderRule {
+    /// Checked as given, names kept lower case. Never one that frames the answer or is roll's
+    /// own (`content-length`, `set-cookie`, `x-roll-*`…).
+    pub fn check(mut self) -> Result<HeaderRule> {
+        let bad = |m: String| Err(Error::BadRequest(format!("headers: {m}")));
+        if let Some(p) = &self.path
+            && (!p.starts_with('/') || p.len() > 512 || p.strip_suffix('*').unwrap_or(p).contains('*'))
+        {
+            return bad("a path starts with / (at most 512 characters, `*` only at its end)".into());
+        }
+        if self.set.is_empty() || self.set.len() > 20 {
+            return bad("a rule sets 1–20 headers".into());
+        }
+        const FORBIDDEN: [&str; 12] = ["content-length", "transfer-encoding", "connection", "keep-alive", "upgrade", "host", "te", "trailer", "set-cookie", "content-encoding", "proxy-authenticate", "proxy-connection"];
+        let mut set = std::collections::BTreeMap::new();
+        for (k, v) in &self.set {
+            let name = k.trim().to_ascii_lowercase();
+            if name.is_empty() || name.len() > 64 || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) {
+                return bad(format!("{k:?} isn't a header name"));
+            }
+            if FORBIDDEN.contains(&name.as_str()) || name.starts_with("x-roll-") || name.starts_with("proxy-") {
+                return bad(format!("{name} is the connection's or roll's to set"));
+            }
+            if v.len() > 1024 || !v.bytes().all(|b| b == b'\t' || (b' '..=b'~').contains(&b)) {
+                return bad(format!("{name}'s value is at most 1024 printable characters"));
+            }
+            set.insert(name, v.trim().to_string());
+        }
+        self.set = set;
+        Ok(self)
+    }
+
+    pub fn matches(&self, path: &str) -> bool {
+        self.path.as_deref().is_none_or(|p| path_matches(p, path))
     }
 }
 
@@ -1135,6 +1319,13 @@ pub struct Deployment {
     /// Who asked for it: a push's commit author, the token or connection that called the API
     /// (`operator` for the operator's token), none when roll did it on its own or nothing said.
     pub actor: Option<String>,
+    /// What the app or the build printed when it failed (the step, its last line): shown to its
+    /// owner, never in a commit status or a notification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<String>,
+    /// When it was pruned (unix ms): out of what's kept, its image gone; history only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pruned_at: Option<i64>,
     /// The settings this deployment runs with (frozen when it was made).
     #[serde(skip)]
     pub run: Run,
@@ -1453,6 +1644,8 @@ pub struct CronRun {
     pub exit_code: Option<i32>,
     pub started_at: i64,
     pub finished_at: Option<i64>,
+    /// Which try of its due time it is (1: the first; `run.retries` more may follow a failure).
+    pub attempt: u32,
 }
 
 /// `<prefix>_` and 12 random characters of lowercase base32.
@@ -1502,3 +1695,73 @@ mod tests {
         assert!(check_var_name("DATABASE_URL").is_ok() && check_var_name("1X").is_err());
     }
 }
+
+/// What DNS answered for a custom domain that doesn't verify ([`domain_diagnosis`]).
+pub struct DnsSeen {
+    pub cnames: Vec<String>,
+    /// At the challenge name.
+    pub txts: Vec<String>,
+    /// At the hostname itself (a TXT put on the wrong name).
+    pub host_txts: Vec<String>,
+    pub addresses: Vec<String>,
+}
+
+/// Why `host` isn't verified, from what DNS answered: what's missing and the likely mistake
+/// (another target, a proxy answering with addresses, the TXT on the wrong name or with more
+/// around the token), as Vercel's "Invalid configuration" says.
+pub fn domain_diagnosis(host: &str, target: &str, challenge: &str, token: &str, seen: &DnsSeen, shared: bool) -> String {
+    let list = |v: &[String]| v.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    let route = if seen.cnames.iter().any(|c| c == target) {
+        None
+    } else if !seen.cnames.is_empty() {
+        Some(format!("{host} points at {} instead of {target}", list(&seen.cnames)))
+    } else if !seen.addresses.is_empty() {
+        Some(format!(
+            "{host} answers with addresses ({}) instead of a CNAME to {target}: if its DNS is on Cloudflare, turn the proxy off for it (DNS only); an apex domain needs its provider's CNAME flattening or ALIAS",
+            list(&seen.addresses)
+        ))
+    } else {
+        Some(format!("{host} has no CNAME to {target} yet (a new record can take a few minutes to show)"))
+    };
+    let proof = if seen.txts.iter().any(|t| t == token) {
+        None
+    } else if seen.txts.iter().any(|t| t.contains(token)) {
+        Some(format!("the TXT {challenge} holds the token with more around it (quotes?): it must be exactly {token}"))
+    } else if !seen.txts.is_empty() {
+        Some(format!("the TXT {challenge} holds something else ({})", list(&seen.txts)))
+    } else if seen.host_txts.iter().any(|t| t.contains(token)) {
+        Some(format!("the TXT with the token is on {host}; it goes on {challenge}"))
+    } else {
+        Some(format!("no TXT {challenge} with the token yet"))
+    };
+    match (shared, route, proof) {
+        // Behind a shared target the CNAME routes it and only the TXT proves it's yours.
+        (true, None, Some(p)) => format!("{p} (the CNAME to {target} routes it; the TXT record proves it's yours)"),
+        (true, Some(r), Some(p)) => format!("{p}; and {r}"),
+        (false, Some(r), Some(p)) => format!("{r}; or prove it with a TXT: {p}"),
+        (_, Some(r), None) | (_, None, Some(r)) => r,
+        (_, None, None) => format!("{host} is set up; it's checked again in a minute"),
+    }
+}
+
+#[cfg(test)]
+mod domain_diagnosis_tests {
+    use super::*;
+
+    fn seen(cnames: &[&str], txts: &[&str], host_txts: &[&str], addresses: &[&str]) -> DnsSeen {
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect();
+        DnsSeen { cnames: v(cnames), txts: v(txts), host_txts: v(host_txts), addresses: v(addresses) }
+    }
+
+    #[test]
+    fn says_what_dns_answered_and_the_likely_mistake() {
+        let d = |s: &DnsSeen, shared| domain_diagnosis("www.shop.com", "edge.roll.site", "_roll-challenge.www.shop.com", "tok123", s, shared);
+        assert!(d(&seen(&["old.herokudns.com"], &[], &[], &[]), false).starts_with("www.shop.com points at old.herokudns.com instead of edge.roll.site"));
+        assert!(d(&seen(&[], &[], &[], &["104.21.4.1"]), false).contains("turn the proxy off"));
+        assert!(d(&seen(&[], &[], &["tok123"], &[]), true).starts_with("the TXT with the token is on www.shop.com; it goes on _roll-challenge.www.shop.com"));
+        assert!(d(&seen(&["edge.roll.site"], &["\"tok123\""], &[], &[]), true).contains("more around it (quotes?)"));
+        assert!(d(&seen(&["edge.roll.site"], &["other"], &[], &[]), true).contains("holds something else (other)"));
+        assert!(d(&seen(&[], &[], &[], &[]), false).contains("no CNAME to edge.roll.site yet"));
+    }
+}
+

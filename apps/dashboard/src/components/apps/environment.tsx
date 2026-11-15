@@ -1,9 +1,9 @@
 import { Lock, Rocket, Trash2, Unlock } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { appsApi, formatFirewall, parseAllowList, parseFirewall, PRODUCTION, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
+import { appsApi, formatFirewall, formatHeaders, parseAllowList, parseFirewall, parseHeaders, PRODUCTION, shortSha, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
-import { CPU, MEMORY, mb, SureButton, type Runner } from "./shared";
+import { clock, CPU, MEMORY, mb, since, StateBadge, SureButton, type Runner } from "./shared";
 
 /** A private environment's token: 32 of [a-z0-9], from the browser's CSPRNG. */
 export function newAccessToken(): string {
@@ -19,6 +19,38 @@ export function newAccessToken(): string {
 /** The link that lets a visitor into a private environment (once: then a cookie). */
 export const accessLink = (url: string, token: string) => `${url.replace(/\/$/, "")}/?roll_access=${encodeURIComponent(token)}`;
 
+/** The environment's instances, each restarted on its own (a fresh one answers before it leaves). */
+export function InstancesPanel({ service, env, runner }: { service: Service; env: Environment; runner: Runner }) {
+  if (env.instances.length === 0) return null;
+  return (
+    <Panel title="Instances" aside={<span className="text-[12px] text-muted">restart one on its own</span>}>
+      <ul className="divide-y divide-line">
+        {env.instances.map((i) => (
+          <li key={i.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-2.5 text-[13px]">
+            <span className="flex min-w-0 items-center gap-3">
+              <StateBadge state={i.state} />
+              <span className="truncate font-mono text-[12px]">{i.id}</span>
+            </span>
+            <span className="flex items-center gap-3 font-mono text-[11.5px] text-subtle">
+              {i.started_at && <span>since {clock(i.started_at, true)}</span>}
+              {i.in_flight > 0 && <span>{i.in_flight} in flight</span>}
+              <SureButton
+                className={btn}
+                disabled={runner.busy !== null}
+                sure="Sure? Restart it"
+                title="Replace just this instance: a fresh one answers before it leaves"
+                onSure={() => runner.run(`restart:${i.id}`, () => appsApi.restartInstance(service.id, env.name, i.id))}
+              >
+                Restart
+              </SureButton>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </Panel>
+  );
+}
+
 /**
  * The environment shown, its own settings: the branch that deploys to it, promoting another
  * environment's live image to it, private access, and removing it (production stays).
@@ -27,6 +59,17 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   const [branch, setBranch] = useState(env.branch ?? "");
   const sources = service.environments.filter((e) => e.name !== env.name && e.active);
   const [from, setFrom] = useState(sources[0]?.name ?? "");
+  // What a promotion puts live, looked at before it does: the deployment (sent as `expect`) and
+  // the variables `from` has that this environment lacks (names only).
+  const [promoting, setPromoting] = useState<{ from: string; deployment: string; revision: string | null; missing: string[] } | null>(null);
+  const look = async () => {
+    const source = service.environments.find((e) => e.name === from)?.active;
+    if (!source) return;
+    const [theirs, ours] = await Promise.all([appsApi.variables(service.id, from), appsApi.variables(service.id, env.name)]);
+    const have = new Set(ours.vars.map((v) => v.name));
+    const missing = theirs.vars.filter((v) => (v.source === "service" || v.source === "reference" || v.source === "secret") && !have.has(v.name)).map((v) => v.name);
+    setPromoting({ from, deployment: source.id, revision: source.revision, missing });
+  };
   const [link, setLink] = useState<string | null>(null);
   const [hook, setHook] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -37,6 +80,9 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   const fwText = formatFirewall(env.firewall ?? []);
   const [fw, setFw] = useState(fwText);
   useEffect(() => setFw(fwText), [fwText]);
+  const hdrText = formatHeaders(env.headers ?? []);
+  const [hdr, setHdr] = useState(hdrText);
+  useEffect(() => setHdr(hdrText), [hdrText]);
   const rateText = env.rate_limit ? String(env.rate_limit.per_minute) : "";
   const [rate, setRate] = useState(rateText);
   useEffect(() => setRate(rateText), [rateText]);
@@ -127,6 +173,20 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </div>
         )}
 
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <div>
+            <p className="text-[13px] font-medium">Redeploy when secrets change</p>
+            <p className="mt-1 text-[12px] text-muted">
+              {env.redeploy_on_secrets
+                ? `When the project's ${env.name} secrets change (a rotated key), ${env.name} redeploys the same image with them, checked each minute.`
+                : "A changed project secret waits for the next deploy; the Redeploy banner says when one did."}
+            </p>
+          </div>
+          <button className={btn} disabled={busy} aria-pressed={!!env.redeploy_on_secrets} onClick={() => runner.run("secrets", () => appsApi.putEnvironment(service.id, env.name, { redeploy_on_secrets: !env.redeploy_on_secrets }))}>
+            {env.redeploy_on_secrets ? "Stop redeploying" : "Redeploy on changes"}
+          </button>
+        </div>
+
         <div className="space-y-3 px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -187,12 +247,41 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
                   </option>
                 ))}
               </select>
-              <button className={btn} disabled={!from || busy} onClick={() => runner.run("promote", () => appsApi.promote(service.id, env.name, from))}>
-                <Rocket className="size-3.5" /> {runner.busy === "promote" ? <span className="shimmer">Promoting…</span> : `Promote ${from}`}
+              <button className={btn} disabled={!from || busy || promoting !== null} onClick={() => void runner.run("promote-look", look)}>
+                <Rocket className="size-3.5" /> Promote {from}…
               </button>
             </>
           )}
         </div>
+        {promoting && (
+          <div className="rise mx-5 mb-4 space-y-2 rounded-lg border border-line bg-bg px-3 py-3 text-[13px]">
+            <p>
+              Put <span className="font-mono">{promoting.deployment}</span>
+              {promoting.revision ? <span className="font-mono text-muted"> ({shortSha(promoting.revision)})</span> : null} from {promoting.from} live in{" "}
+              <span className="font-mono">{env.name}</span>, with {env.name}'s variables and no build?
+            </p>
+            {promoting.missing.length > 0 && (
+              <p className="text-[12px] text-danger">
+                {env.name} lacks {promoting.missing.length === 1 ? "a variable" : "variables"} {promoting.from} has: <span className="font-mono">{promoting.missing.join(", ")}</span>.
+              </p>
+            )}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className={primary}
+                disabled={busy}
+                onClick={() =>
+                  void runner.run("promote", () => appsApi.promote(service.id, env.name, promoting.from, promoting.deployment)).then((d) => d && setPromoting(null))
+                }
+              >
+                {runner.busy === "promote" ? <span className="shimmer">Promoting…</span> : "Promote"}
+              </button>
+              <button type="button" className={btn} onClick={() => setPromoting(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
 
         <p className="px-5 pb-2 pt-5 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Who gets in</p>
 
@@ -279,6 +368,31 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
               placeholder={"allow /admin/health\ndeny /admin/*"}
               spellCheck={false}
               aria-label="Firewall rules, one a line"
+              className={`${input} mt-2 w-full font-mono text-[12px]`}
+            />
+          </div>
+        )}
+
+        {service.run.type === "web" && !service.run.tcp && (
+          <div className="px-5 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-[13px] font-medium">Response headers</p>
+                <p className="mt-1 text-[12px] text-muted">
+                  One a line, on every answer or a path's: <code className="font-mono">/api/* Cache-Control: no-store</code>. The app's own header wins unless the line starts with <code className="font-mono">!</code>.
+                </p>
+              </div>
+              <button className={btn} disabled={busy || hdr === hdrText} onClick={() => runner.run("headers", () => appsApi.putEnvironment(service.id, env.name, { headers: parseHeaders(hdr) }))}>
+                Save
+              </button>
+            </div>
+            <textarea
+              value={hdr}
+              onChange={(e) => setHdr(e.target.value)}
+              rows={Math.min(8, Math.max(2, hdr.split("\n").length))}
+              placeholder={"Strict-Transport-Security: max-age=63072000\nX-Frame-Options: DENY"}
+              spellCheck={false}
+              aria-label="Response headers, one a line"
               className={`${input} mt-2 w-full font-mono text-[12px]`}
             />
           </div>
@@ -488,6 +602,21 @@ function OwnRun({ service, env, runner }: { service: Service; env: Environment; 
 const size = (n: number) => (n >= 1 << 30 ? `${(n / (1 << 30)).toFixed(1)} GB` : n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
 /** The volume's backups (daily, the newest seven kept): back up now, or restore one after typing the environment's name. */
+/** How full the volume was when last measured: a hairline meter, the danger colour from 90% (`volume.full`). */
+function VolumeMeter({ used, sizeGb }: { used: { bytes: number; at: number }; sizeGb: number }) {
+  const pct = Math.min(100, Math.round((used.bytes / (sizeGb * 2 ** 30)) * 100));
+  return (
+    <div className="mt-2 w-64 max-w-full">
+      <div className="h-1 overflow-hidden rounded-full bg-fg/[0.08]" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct} aria-label="Volume used">
+        <div className={`h-full rounded-full ${pct >= 90 ? "bg-danger" : "bg-fg/40"}`} style={{ width: `${pct}%` }} />
+      </div>
+      <p className={`mt-1 text-[11.5px] ${pct >= 90 ? "text-danger" : "text-subtle"}`}>
+        {size(used.bytes)} of {sizeGb} GB ({pct}%), measured {since(used.at, Date.now())}
+      </p>
+    </div>
+  );
+}
+
 function Backups({ service, env, runner }: { service: Service; env: Environment; runner: Runner }) {
   const [list, setList] = useState<Backup[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -509,6 +638,7 @@ function Backups({ service, env, runner }: { service: Service; env: Environment;
         <div>
           <p className="text-[13px] font-medium">Volume backups</p>
           <p className="mt-1 text-[12px] text-muted">{service.run.volume!.mount} is copied to object storage once a day; the newest seven are kept.</p>
+          {env.volume_used && <VolumeMeter used={env.volume_used} sizeGb={service.run.volume!.size_gb} />}
         </div>
         <button className={btn} disabled={busy} onClick={() => runner.run("backup", () => appsApi.backUp(service.id, env.name)).then(load)}>
           {runner.busy === "backup" ? <span className="shimmer">Backing up…</span> : "Back up now"}

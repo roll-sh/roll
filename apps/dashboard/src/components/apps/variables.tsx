@@ -4,6 +4,8 @@ import { appsApi, describePending, parseEnv, toEnv, VARIABLE_NAME, type Environm
 import { KIND_LABEL, resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { btn, input, panel, primary } from "../ui";
+import type { RefCatalog } from "@/lib/var-refs";
+import { RefInput } from "./ref-input";
 import { message, SureButton, type Runner } from "./shared";
 
 const SOURCE_LABEL: Record<VariableSource, string> = { service: "service", secret: "secret", link: "link", roll: "roll", reference: "reference" };
@@ -42,6 +44,23 @@ export function VariablesTab({
   onRedeploy: () => void;
 }) {
   const [vars, setVars] = useState<Variables | null>(null);
+  // What a reference can name, read the first time one is typed.
+  const [catalog, setCatalog] = useState<RefCatalog | null>(null);
+  const [wanted, setWanted] = useState(false);
+  useEffect(() => {
+    if (!wanted) return;
+    let live = true;
+    void (async () => {
+      const others = (await appsApi.services(project).catch(() => [])).filter((s) => s.id !== service);
+      const services = await Promise.all(
+        others.map(async (s) => ({ name: s.name, vars: await appsApi.variables(s.id, env.name).then((v) => v.vars.map((x) => x.name), () => [] as string[]) })),
+      );
+      if (live) setCatalog({ own: (vars?.vars ?? []).map((v) => v.name), services });
+    })();
+    return () => {
+      live = false;
+    };
+  }, [wanted, project, service, env.name]); // eslint-disable-line react-hooks/exhaustive-deps
   const [values, setValues] = useState<Record<string, string> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [edits, setEdits] = useState<Record<string, string>>({});
@@ -51,16 +70,6 @@ export function VariablesTab({
   const [added, setAdded] = useState<Edit[]>([]);
   const [pasting, setPasting] = useState(false);
   const [pasted, setPasted] = useState("");
-  // What the next deploy would change, named (read again whenever the environment changes).
-  const [pending, setPending] = useState<string | null>(null);
-  useEffect(() => {
-    if (!env.needs_deploy) return setPending(null);
-    let live = true;
-    appsApi.pending(service, env.name).then((p) => live && setPending(describePending(p)), () => live && setPending(null));
-    return () => {
-      live = false;
-    };
-  }, [service, env.name, env.needs_deploy, env.active?.id, vars]);
   const parsed = useMemo(() => parseEnv(pasted), [pasted]);
   // Railway's raw editor: the environment's own variables as one `.env` text, saved as the
   // difference (a line gone is unset). Sealed ones aren't in it and stay.
@@ -156,17 +165,6 @@ export function VariablesTab({
 
   return (
     <div className="space-y-6">
-      {env.needs_deploy && (
-        <div className="rise flex flex-wrap items-center gap-3 rounded-xl border border-accent/40 bg-accent/[0.06] px-4 py-3">
-          <div className="min-w-0 flex-1">
-            <p className="text-[13px]">Variables or settings changed since the live deployment. Redeploy to apply them: the same image, no build.</p>
-            {pending && <p className="mt-1 font-mono text-[11.5px] text-muted">{pending}</p>}
-          </div>
-          <button className={primary} onClick={onRedeploy} disabled={runner.busy !== null || !env.active}>
-            <Rocket className="size-3.5" /> Redeploy
-          </button>
-        </div>
-      )}
 
       <section className={panel}>
         <div className="flex min-h-14 flex-wrap items-center justify-between gap-3 border-b border-line px-5 py-3">
@@ -282,13 +280,13 @@ export function VariablesTab({
                     </span>
                   )}
                   {editing ? (
-                    <input
+                    <RefInput
                       autoFocus
-                      placeholder={v.sealed ? "new value (stays sealed)" : "new value"}
-                      value={edits[v.name]}
-                      onChange={(e) => setEdits((x) => ({ ...x, [v.name]: e.target.value }))}
-                      className={`${input} min-w-0 flex-1 font-mono text-[12px]`}
-                      spellCheck={false}
+                      placeholder={v.sealed ? "new value (stays sealed)" : "new value, or ${{ service.NAME }}"}
+                      value={edits[v.name] ?? ""}
+                      onChange={(val) => setEdits((x) => ({ ...x, [v.name]: val }))}
+                      catalog={catalog}
+                      onWantCatalog={() => setWanted(true)}
                     />
                   ) : (
                     <button
@@ -337,12 +335,11 @@ export function VariablesTab({
                   className={`${input} w-56 max-w-full font-mono text-[12px] ${a.name && !VARIABLE_NAME.test(a.name) ? "border-danger/60" : ""}`}
                   spellCheck={false}
                 />
-                <input
+                <RefInput
                   value={a.value}
-                  placeholder="value"
-                  onChange={(e) => setAdded((l) => l.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)))}
-                  className={`${input} min-w-0 flex-1 font-mono text-[12px]`}
-                  spellCheck={false}
+                  onChange={(val) => setAdded((l) => l.map((x, j) => (j === i ? { ...x, value: val } : x)))}
+                  catalog={catalog}
+                  onWantCatalog={() => setWanted(true)}
                 />
                 <button
                   onClick={() => setAdded((l) => l.map((x, j) => (j === i ? { ...x, seal: !x.seal } : x)))}
@@ -463,3 +460,32 @@ function Links({ service, project, runner, onChange }: { service: string; projec
     </section>
   );
 }
+
+/**
+ * Variables or settings changed since the live deployment: what the next deploy changes, named,
+ * and Redeploy (the same image, no build), on every tab (Railway's "Apply changes" bar).
+ */
+export function RedeployBanner({ service, env, runner, onRedeploy }: { service: string; env: Environment; runner: Runner; onRedeploy: () => void }) {
+  const [pending, setPending] = useState<string | null>(null);
+  useEffect(() => {
+    if (!env.needs_deploy) return setPending(null);
+    let live = true;
+    appsApi.pending(service, env.name).then((p) => live && setPending(describePending(p)), () => live && setPending(null));
+    return () => {
+      live = false;
+    };
+  }, [service, env.name, env.needs_deploy, env.active?.id]);
+  if (!env.needs_deploy) return null;
+  return (
+    <div className="rise mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-accent/40 bg-accent/[0.06] px-4 py-3">
+      <div className="min-w-0 flex-1">
+        <p className="text-[13px]">Variables or settings changed since the live deployment. Redeploy to apply them: the same image, no build.</p>
+        {pending && <p className="mt-1 font-mono text-[11.5px] text-muted">{pending}</p>}
+      </div>
+      <button className={primary} onClick={onRedeploy} disabled={runner.busy !== null || !env.active}>
+        <Rocket className="size-3.5" /> Redeploy
+      </button>
+    </div>
+  );
+}
+

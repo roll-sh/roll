@@ -21,6 +21,8 @@ hkdf.workspace = true
 sha2.workspace = true
 agent-host.workspace = true
 apps-build.workspace = true
+# `roll apps cp`: files to and from an instance as tar (Docker's `docker cp`).
+tar.workspace = true
 agent-proto.workspace = true
 libc.workspace = true
 # `roll gateway`: the standalone model gateway.
@@ -64,6 +66,9 @@ serde_yaml_ng.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+# `tests/apps.rs`: roll apps in process on its fake runtime.
+apps-control.workspace = true
+roll-cluster.workspace = true
 # `tests/token.rs`: scoped tokens behind the real gate in process.
 roll-access.workspace = true
 roll-auth.workspace = true
