@@ -652,15 +652,28 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Everyday routes with no tool:** tasks, streams, storage, queues, postgres, Redis and NoSQL have
+1. **Credentials a read token can see** (in progress): a sweep of every route classified read
+   for answers that hold a credential (passwords, connection strings, keys, tokens, signing
+   secrets, presigned URLs, share links, variable values) its row's `.reveals(…)` doesn't cover.
+   Each finding is checked in the code before it's fixed. This is the read side of the write-side
+   sweep in Done lately.
+2. **Merge #80** once previews' #28 frees the lock: merge main, the full gate
+   (`pnpm test:code --docker --stress`, every route classified, roll-secrets), the merge queue.
+3. **The admin caller, structurally:** a scoped token reaches roll code as `Caller::Admin`, so
+   every "needs the admin token" check in a product relies on the catalogue classifying that
+   behaviour admin (the sweep found five that didn't). A test that lists each product's
+   admin-only checks and fails when the route they sit behind isn't admin in the catalogue
+   would stop the next one. Or the gate could hand products the action it decided
+   (`roll_auth::Grant` already carries the scope), so a check can ask "was this admin?".
+4. **Everyday routes with no tool:** tasks, streams, storage, queues, postgres, Redis and NoSQL have
    theirs (`tool-gaps.py origin/main <product>` lists what's left). What's left is mostly what only
    an operator does by hand: keys, passwords, accounts, IAM, roles, CDN, migrations, evict and
    unload, which stay without tools. Recheck each product after its thread lands new routes.
-2. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
+5. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
    automations that pick up issues and chat messages (the agents thread's call; tell it), and
    chat messages that reach an agent marked `outside` (an install's non-members can't drive
    roll, so mostly members' text).
-3. **MCP tasks, as the 2026-07-28 extension** (`io.modelcontextprotocol/tasks`, SEP-2663: the
+6. **MCP tasks, as the 2026-07-28 extension** (`io.modelcontextprotocol/tasks`, SEP-2663: the
    server answers a task handle when a call will take long, `tasks/get` polls with the result in
    it, `tasks/update` carries input, no `tasks/result` or `tasks/list`; 2025-11-25's experimental
    tasks are retired, and no client in the extensions matrix supports either yet): for calls that
@@ -668,21 +681,21 @@ waits on a sibling PR reaching main is last.
    the system database (a fleet's poll lands on another node), results sealed with
    `ROLL_SECRET_KEY` (a reveal's answer is a credential), each task bound to its grant and looked
    up on every call, caps per caller, and audit rows; and a client people use that sends it. Waits on clients.
-4. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+7. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25; agreed conflicts resolved by `known-conflicts.py`), and
    compare each product's routes with its tools (an everyday route with no tool is a gap: apps'
    were found this way). #24 and #25 are on main, so `feature/mcp-on-landing` is retired:
    secrets' #64 lands on main directly.
-5. **Transit key lists by key:** each key's routes now name it (`.index("name")`), so a rule can
+8. **Transit key lists by key:** each key's routes now name it (`.index("name")`), so a rule can
    grant one key. `GET …/transit` stays the project's and refuses a key-limited token until roll
    secrets filters it by `Grant::allows(…, Some(name))` (their Next, after #80). Then extend
    `filters_itself` to cover `index` and mark that row with it.
-6. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+9. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-7. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+10. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset (see Toolsets: it would drop tools from connections that use them; search mode is opt-in); a connection narrowed to one project (Supabase's `project_ref`): their
@@ -690,7 +703,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: write and deploy tokens no longer pass roll code's admin-only checks (connecting a GitHub repository, landing with `bypass`), shorten a stream's retention (now `delete`), mint agents machine tokens (`admin`) or share threads (`reveal`); a rule can grant one transit key (`{"id": "prj_x", "index": "payments"}`: the per-key rows name it); loosening a NoSQL database's masking policy or read-only flag is `admin` (it was `write`, so a token that could read and write could drop the masking and read raw values); postgres, Redis, storage, queues, streams and tasks tools for their everyday routes; lockdown (`?lockdown=1`: work items from GitHub issues, reviews and review comments whose author can't push, and changes from forks, are `outside`, and their text is withheld from the model); search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
+Done lately: apps' notifications and log drains and secrets' key workflows as tools; write and deploy tokens no longer pass roll code's admin-only checks (connecting a GitHub repository, landing with `bypass`), shorten a stream's retention (now `delete`), mint agents machine tokens (`admin`) or share threads (`reveal`); a rule can grant one transit key (`{"id": "prj_x", "index": "payments"}`: the per-key rows name it); loosening a NoSQL database's masking policy or read-only flag is `admin` (it was `write`, so a token that could read and write could drop the masking and read raw values); postgres, Redis, storage, queues, streams and tasks tools for their everyday routes; lockdown (`?lockdown=1`: work items from GitHub issues, reviews and review comments whose author can't push, and changes from forks, are `outside`, and their text is withheld from the model); search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
 revocations were counted as asks: "1 asked" on a token that never made a request; seen in the review
 pack) (#25); ended OAuth connections and their kept clients are forgotten after the audit log's days
 (each `roll login` made one of each, kept forever) (#25); `roll login` checked live against a rolld
