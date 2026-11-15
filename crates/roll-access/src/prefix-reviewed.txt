@@ -252,4 +252,3 @@ GET /v1/secrets/projects/{project}/suggestions
 POST /v1/secrets/projects/{project}/syncs/preview
 DELETE /v1/secrets/projects/{project}/syncs/{id}
 POST /v1/secrets/projects/{project}/syncs/{id}/run
-DELETE /v1/secrets/projects/{project}/tokens/{id}
