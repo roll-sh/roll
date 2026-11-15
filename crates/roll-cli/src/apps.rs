@@ -588,6 +588,11 @@ pub enum AppsCmd {
         /// Print the values (never a sealed one's).
         #[arg(long)]
         reveal: bool,
+        /// Keep these revealable: a new variable whose name reads as a secret (`*_KEY`, `*TOKEN*`,
+        /// `*PASSWORD*`, `*SECRET*`) is sealed unless it's named here (Vercel's sensitive by
+        /// default).
+        #[arg(long, value_name = "NAME")]
+        plain: Vec<String>,
         /// Set every `KEY=value` line of a `.env` file (`export`, comments and quotes as in a
         /// shell's).
         #[arg(long, value_name = "PATH")]
@@ -1704,6 +1709,18 @@ fn fill_vars(app: &str, vars: &std::collections::BTreeMap<String, apps_build::pr
     Ok(out)
 }
 
+/// Whether a variable's name reads as a secret, as the dashboard's `looksSecret` does.
+fn looks_secret(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    let words = ["SECRET", "TOKEN", "PASSWORD", "PASSWD", "PASS", "PRIVATE_KEY", "API_KEY", "ACCESS_KEY", "KEY", "CREDENTIAL", "CREDENTIALS", "DSN"];
+    let parts: Vec<&str> = n.split('_').collect();
+    // A whole word of the name (`DB_PASS`, `API_KEY`), or anywhere for the plain ones.
+    words.iter().any(|w| {
+        let wp: Vec<&str> = w.split('_').collect();
+        parts.windows(wp.len()).any(|win| win == wp.as_slice())
+    }) || ["SECRET", "PASSWORD", "TOKEN"].iter().any(|w| n.contains(w))
+}
+
 /// How long ago, as a person reads it (`12s ago`, `3m ago`, `5h ago`, `2d ago`).
 fn ago(ms: i64) -> String {
     let s = ms.max(0) / 1000;
@@ -2812,7 +2829,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Vars { target, set, unset, seal, reveal, from_file, deploy } => {
+        AppsCmd::Vars { target, set, unset, mut seal, reveal, from_file, deploy, plain } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/variables", env_path(&svc, &target.env));
             let mut m = serde_json::Map::new();
@@ -2829,6 +2846,14 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     let (k, v) = kv.split_once('=').ok_or_else(|| anyhow::anyhow!("{kv}: set variables as KEY=value"))?;
                     m.insert(k.to_string(), v.into());
                 }
+                // New ones whose names read as secrets are sealed unless `--plain` keeps them; one
+                // already there keeps what it was.
+                let there: std::collections::HashSet<String> = api.get(&base).await.ok().and_then(|v| v["vars"].as_array().map(|a| a.iter().filter_map(|x| x["name"].as_str().map(str::to_string)).collect())).unwrap_or_default();
+                let auto: Vec<String> = m.keys().filter(|k| !there.contains(*k) && !plain.contains(*k) && !seal.contains(*k) && looks_secret(k)).cloned().collect();
+                if !auto.is_empty() && !json_out {
+                    eprintln!("sealed as secrets (--plain NAME keeps one revealable): {}", auto.join(", "));
+                }
+                seal.extend(auto);
                 api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset, "seal": seal }))).await?;
                 if deploy {
                     let dep = api.post(&format!("{}/redeploy", env_path(&svc, &target.env)), json!({})).await?;

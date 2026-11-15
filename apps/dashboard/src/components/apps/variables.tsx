@@ -4,6 +4,7 @@ import { appsApi, describePending, parseEnv, toEnv, VARIABLE_NAME, type Environm
 import { KIND_LABEL, resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { btn, input, panel, primary } from "../ui";
+import { looksSecret } from "@/lib/secret-names";
 import type { RefCatalog } from "@/lib/var-refs";
 import { RefInput } from "./ref-input";
 import { message, SureButton, type Runner } from "./shared";
@@ -21,7 +22,8 @@ const SOURCE_TONE: Record<VariableSource, string> = {
 /** What a service can link to today: rolld wires Postgres and Redis (buckets, streams and NoSQL come as roll secrets links, docs/apps/README.md "Next"). */
 export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", service: "service" };
 
-type Edit = { name: string; value: string; seal?: boolean };
+/** `sealSet`: the seal was chosen by hand (a secret-looking name no longer decides it). */
+type Edit = { name: string; value: string; seal?: boolean; sealSet?: boolean };
 
 /**
  * The environment's variables (masked; Reveal asks for the values), edited in place and saved in
@@ -80,7 +82,7 @@ export function VariablesTab({
   const stage = (set: Record<string, string>) => {
     const have = new Set((vars?.vars ?? []).filter((v) => v.source === "service" || v.source === "reference").map((v) => v.name));
     setEdits((e) => ({ ...e, ...Object.fromEntries(Object.entries(set).filter(([k]) => have.has(k))) }));
-    setAdded((a) => [...a.filter((x) => !(x.name in set)), ...Object.entries(set).filter(([k]) => !have.has(k)).map(([name, value]) => ({ name, value }))]);
+    setAdded((a) => [...a.filter((x) => !(x.name in set)), ...Object.entries(set).filter(([k]) => !have.has(k)).map(([name, value]) => ({ name, value, seal: looksSecret(name) }))]);
   };
   const copyFrom = async (from: string) => {
     // Reading another environment's values is a reveal there: the gate decides it as one.
@@ -331,7 +333,7 @@ export function VariablesTab({
                   autoFocus={i === added.length - 1}
                   value={a.name}
                   placeholder="NAME"
-                  onChange={(e) => setAdded((l) => l.map((x, j) => (j === i ? { ...x, name: e.target.value.toUpperCase() } : x)))}
+                  onChange={(e) => setAdded((l) => l.map((x, j) => (j === i ? { ...x, name: e.target.value.toUpperCase(), seal: x.sealSet ? x.seal : looksSecret(e.target.value) } : x)))}
                   className={`${input} w-56 max-w-full font-mono text-[12px] ${a.name && !VARIABLE_NAME.test(a.name) ? "border-danger/60" : ""}`}
                   spellCheck={false}
                 />
@@ -342,7 +344,7 @@ export function VariablesTab({
                   onWantCatalog={() => setWanted(true)}
                 />
                 <button
-                  onClick={() => setAdded((l) => l.map((x, j) => (j === i ? { ...x, seal: !x.seal } : x)))}
+                  onClick={() => setAdded((l) => l.map((x, j) => (j === i ? { ...x, seal: !x.seal, sealSet: true } : x)))}
                   className={`p-1 hover:text-fg ${a.seal ? "text-accent" : "text-subtle"}`}
                   aria-pressed={!!a.seal}
                   aria-label="Seal"
