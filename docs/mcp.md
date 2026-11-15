@@ -535,12 +535,7 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **MCP 2026-07-28 with a real client**: the stateless core is in (`server/discover`, per-request
-   `_meta`, header checks, `resultType`, cacheable lists, approvals as Multi Round-Trip Requests);
-   check it end to end with an official SDK's 2026-07-28 client against the live daemon once one
-   ships (the TypeScript SDK's v2), and add `subscriptions/listen` only if roll's lists ever
-   change under a client (today `listChanged` is false). Legacy clients keep `initialize`.
-2. **MCP tasks, as the 2026-07-28 extension** (`io.modelcontextprotocol/tasks`, SEP-2663: the
+1. **MCP tasks, as the 2026-07-28 extension** (`io.modelcontextprotocol/tasks`, SEP-2663: the
    server answers a task handle when a call will take long, `tasks/get` polls with the result in
    it, `tasks/update` carries input, no `tasks/result` or `tasks/list`; 2025-11-25's experimental
    tasks are retired, and no client in the extensions matrix supports either yet): for calls that
@@ -548,23 +543,23 @@ waits on a sibling PR reaching main is last.
    the system database (a fleet's poll lands on another node), results sealed with
    `ROLL_SECRET_KEY` (a reveal's answer is a credential), each task bound to its grant and looked
    up on every call, caps per caller, and audit rows; and a client people use that sends it.
-3. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25; agreed conflicts resolved by `known-conflicts.py`), and
    compare each product's routes with its tools (an everyday route with no tool is a gap: apps'
    were found this way). Keep **`feature/mcp-on-landing`** (#25 with secrets'
    `feature/roll-secrets-landing-access`) merged after either side moves: roll-access, roll-mcp,
    roll-secrets and roll-cli's token tests and rolld's route test before each push.
-4. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
+3. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
    `.index("name")` on the per-key routes and `Scope.key` in their own check (`GrantGrants` sets
    `id` since #30's fix). The tools and the builder's key picker are in; check both live once the
    rows land (a token on `prj_x/one-key` signs with it and is refused another key and the
    project's environments).
-5. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+4. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset, or search-then-call meta-tools (see Toolsets: clients handle long lists or have a picker, and meta-tools would hide each tool's hints); a connection narrowed to one project (Supabase's `project_ref`): their
@@ -572,7 +567,9 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: a token's "last day" counts only its own requests (its change history and roll's revocations were counted as asks: "1 asked" on a token that never made a request; seen in the review pack) (#25); ended OAuth connections and their kept clients are forgotten after the audit log's days
+Done lately: a token's "last day" counts only its own requests (its change history and roll's
+revocations were counted as asks: "1 asked" on a token that never made a request; seen in the review
+pack) (#25); ended OAuth connections and their kept clients are forgotten after the audit log's days
 (each `roll login` made one of each, kept forever) (#25); `roll login` checked live against a rolld
 set up as a deployment is (`ROLL_CODE_PUBLIC_URL`, over the tailnet; `users-live/login.sh`): over
 SSH it shows a code and link, the device page sees it with its network, allowing it signs the CLI in
@@ -636,186 +633,190 @@ mail per token per ten minutes and 20 a person an hour; workload tokens capped p
 person's listed before the limit; a refresh token's retry within its grace audited; apps settings
 that change what production runs, its source, build, start and pre-deploy commands, schedule, kind,
 port, volume and `run.public`, are deploy; `create_grant` refuses extensions that name no caller;
-the expiry digest leaves out tokens made for a day or less); apps reading a roll code repo for the
-caller (a plan, an import, a service built from it) needs read on that repo (any apps grant reached
-it; roll apps' finding) (#24); rolld builds in its image again (roll-mcp included the dashboard's
-icon from apps/, which the image leaves out) and the cluster e2e builds only its own checkout's code
-(a shared cargo cache id handed one branch's crates to another; roll previews' finding) (#24); MCP
-2026-07-28, the stateless core, beside the handshake revisions (a dual-era server):
-`server/discover`, requests served on their own `_meta` with no `initialize` or session,
-`MCP-Protocol-Version`/`Mcp-Method`/`Mcp-Name` checked against the body (`-32020`), unsupported
-versions answered with the list (`-32022`), unknown methods 404, `resultType` and `serverInfo` on
-every result, lists cacheable a minute for the caller only, and approvals as Multi Round-Trip
-Requests (`input_required` with the approval page; the retry runs once approved); a modern-only
-client failed against roll before (#24); Redis's `@dangerous` commands are admin (`MONITOR` and
-`SYNC` stream everyone's commands and data, `CLIENT` ends other connections, `SLOWLOG` shows others'
-arguments: they were write) and `SWAPDB` is delete; `run.rollback_on_crash` is deploy (it puts an
-older deployment live by itself; apps' review) (#24); an apps service's run settings fail closed:
-only size, scale, health checks, timers, alerts, rollout and restarts are write, every other run key
-is deploy, a new one too until it's listed (a list of deploy keys let `run.tcp`, a port on the
-internet, through as write, as it had `run.schedules`) (#24); setting a service's `run.schedules`
-(apps-next: commands run as jobs of the live deployment on a timer) is deploy, as a production job
-is (it was write: a token that couldn't run one production job could schedule one every minute), and
-`apps_update_service` says how to set it; `secrets_get_values` (one reveal for an environment, not
-one per key), `secrets_list_leases` and `secrets_end_lease`, and the secrets tools' descriptions
-brought up to date (secrets' seventeenth review) (#24); `secrets_set`, `secrets_delete` and
-`secrets_propose` take `if_version` (Vault's check-and-set: an agent can't silently overwrite a
-person's edit; 409 `stale`; secrets #62); this round's gate additions cost nothing measurable
-(`gate_latency`, release, pinned, eight alternating runs each at load ~44: CPU 2.88 s against 2.96
-s, within ±0.25 s run to run; 32-at-once token throughput median ~60k against ~55k, ranges 35–89k
-and 23–86k overlapping; one resource p50 84–97 µs against 114–133 µs); `apps_set_environment` takes
-`paused` and `apps_create_service` a repo's `branch` (apps-next); every answer to an expiring token
-says when (`Roll-Token-Expiration`, GitHub's `GitHub-Authentication-Token-Expiration`), and the CLI
-warns a week ahead; `apps_import` (a roll.toml or compose file checked before `roll up --all`;
-apps-next); the approval UI checked in a browser against `users-live` (the policy's checkboxes, a
-waiting token's badge with an admin's Approve and Deny, "Needs attention" leading with it, the
-person's view without them), which moved rotation's choice into a step Rotate opens (it was a select
-on every row); the `tune_slow_query` prompt (Neon's query tuning: the plan, an index tried on a
-branch, both plans compared, main only when you say so); the sixteenth review (this round's token
-surface): a rotated secret in its grace calls products but manages no tokens (it couldn't rotate,
-change or make one that outlives the grace), and a token whose checksum is wrong is refused before
-any lookup; `debug_failing_service` starts from what roll already flags (an environment's
-`attention`, `apps_activity` with `all`); `apps_activity` takes `all` (the whole timeline: deploys,
-failures, crash loops, alerts; apps-next); `secrets_reach` and `secrets_folder_policies` (secrets
-#61, #53); rotating a token can keep the old secret working a while (`keep_old_for_s`, at most a
-week: Stripe's roll key), from the dashboard's Rotate and `roll token rotate --keep-old 1h`, so
-deployments switch without an outage; `postgres_typescript_types` (Supabase's generated types,
-written by one read-only query: enums as unions, arrays, nullable) and the `compare_branch_schemas`
-prompt (Neon's schema compare: both branches described, the difference listed, advisors on the
-branch); open registration's limit is a sliding minute per network (a fixed minute let twice the
-limit through at its edge, and its test failed when a run crossed one); a token used before its
-start says so (401 `not_yet_valid`, "this token works from <time>", with `not_before`; the token
-list and page show the start); a token can start later (`not_before`, Cloudflare's TTL start):
-refused until then as an unknown token, the dashboard's "Starts" and `roll token create --starts 2h`
-(the expiry counts from the start), changeable and clearable; a person's own token's page tested to
-show only their reach; `roll token list --product/--resource` and `--workloads`; a workload token
-makes no tokens; workload tokens (`Access::mint_workload`: minutes, within an identity's scope,
-owned by its maker, out of the list and caps) for secrets' identity logins; a person's own tokens'
-news is mailed to them (an approval waiting on them, used from a new network, revoked as leaked,
-about to expire; only their own, never a secret); `previews_resolve_note` (a preview page's note,
-write by the prefix; previews-next), and `apps_logs` takes `before`, `instance`, `deployment` and
-`stream` (apps-next); Postgres analysis as Neon's and Supabase's MCP servers have it:
-`postgres_explain`, `postgres_slow_queries`, `postgres_advisors`, `postgres_list_extensions`
-(read-only SQL through the query route, checked on Postgres 18); names people choose can't hide
-text: a token's name with invisible characters is refused, OAuth clients' names (registered or from
-a metadata document) drop them, and `initialize`'s instructions escape them; `apps_set_environment`
-takes response header rules (`headers`, apps-next); a cron run's logs are read again, as apps-next
-decided (its lines were always in the read-level environment log); `apps_restart_instance`
-(apps-next, reviewed under the environment prefix: deploy in production); invisible characters (tag
-characters, zero-width and bidi controls, variation selectors) escaped in results' text, so
-instructions hidden in other people's text stay visible to the model; plain-read answers checked for
-credentials (key listings: streams' are usernames, storage's skip the secret, tasks' are hashes and
-prefixes); the fifteenth review: a list's credentials redacted item by item (a token with reveal on
-one Postgres database and read on all saw every database's password in `GET /v1/projects`; the same
-for every list with credential fields), a preview's `share_url` redacted without reveal (its access
-token: the QR code's reveal row protected nothing), and a cron run's logs reveal on this branch too;
-`previews_list_notes` and `previews_resolve_note` (a preview page's note, write by the prefix;
-previews-next), and `apps_logs` takes `before`, `instance`, `deployment` and `stream` (apps-next);
-apps-next's cron runs as tools (`apps_get_cron_run`, `apps_cron_run_logs`, `apps_cancel_cron_run`);
-a preview's caught mail as reveal, with `previews_list_mail` and `previews_read_mail`
-(previews-next); the connect panel says what a choice of toolsets costs (tools and context tokens,
-from `GET /v1/mcp/toolsets`) and warns past a client's limit (VS Code refuses more than 128 tools a
-request; with every product on roll lists about 259); the token page counts what a model reads
-(name, description, schema); `previews_connect` and its reveal row, and a preview's QR code as
-reveal (previews-next); the core products' everyday routes as tools (streams: a topic, a group's
-lag, branching; tasks: retrying messages and dead letters, cancelling and rerunning runs, functions,
-queues; NoSQL: reset, restore, a branch's diff; storage: branching a bucket, the trash and restoring
-from it); against Neon's MCP server and main's routes: `postgres_reset_branch` (reset from parent),
-`postgres_get_endpoint`, `postgres_update_endpoint`, `redis_restore`, `apps_delete_environment`;
-each product's routes compared with its tools (`tool-gaps.py`): `search_update_cluster`,
-`search_delete_cluster`, `secrets_list_rotators`, `secrets_list_syncs` and `secrets_diff` added;
-previews' bypass, search's keys, password and console, and secrets' bulk values, reviews and
-settings stay a person's; apps' missing everyday tools (`apps_create_service` takes links and run
-settings, an environment's state, linking and unlinking resources, checking a domain, volume backups
-and restoring one; all on main); a tool any token may call (`apps_plan`) is listed only where its
-product runs (it showed with apps off); previews' tools listed (they never were: roll previews runs
-with roll code and has no product switch, so MCP's product list left it out; rolld's auth test now
-fails on any product it serves with no tools listed); the token builder offers only the products
-this rolld runs (and any a token's rules name already), not all sixteen; checked live on #25's build
-(both official SDKs end to end, progress during an approval, URL elicitation; `serverInfo.icons`
-answered), which found roll code's fronted tools still carrying the approval argument for the
-operator (37 of 78): they drop it too now; the fourteenth review (key-scoped rules, before any row
-uses them): secrets' key names are literal (a key named `_all` is only that key; a list or a `*` in
-a request names none) and an approval remembers only a request that named one key; a pending answer
-says the call finds its approval without the argument too; the approval argument only where a person
-can be asked (a model reads every tool's schema: 92 → 73 KB for the operator and for tokens that
-only allow, every product on; `tools/list` 140 → 120 KB, 190 tools); the builder lists a secrets
-project's encryption keys to tick (one picker with search's indices; secrets' projects come from the
-workspace); encryption keys as MCP tools (`secrets_transit_encrypt`, `_decrypt`, `_sign`, `_verify`,
-`_public_key`; secrets #47: their rows narrow to one key); roll's mark as the server's icon
-(`serverInfo.icons`); a rule can narrow a secrets project to some of its encryption keys (`{id,
-index}`, as search's indices: signing with one key needn't be write on the project; secrets' transit
-rows add `.index("name")`); `secrets_list_rotations` and `secrets_ca_certificates` (secrets #48,
-#44); `tools/list` 11% smaller with every product on (183 tools, 150 → 134 KB: the approval
-argument's description shortened, the title not repeated in annotations); apps' plan, activity,
-deploys, links, cron runs and limits as MCP tools (apps-next #26; the shell, tunnel, hooks and
-webhook notifications stay out); secrets' history and workflow as MCP tools (changes, versions,
-compare, rotate, promote, change requests and proposing one: how an agent changes a protected
-environment); `previews_revoke_share` and `previews_settings` (previews-next #28); `apps_pending`
-and `apps_deploy_commits` (what the next deploy changes, what a deploy brought; apps-next #26), and
-`debug_failing_service` uses them; `roll token tools <id>` (what an agent sees, from the CLI); roll
-code's stream and device-login caps take the client the trusted proxy saw (the right-most
-`X-Forwarded-For` entry that isn't the proxy, over every line, only an address), not the left-most a
-client wrote; apps-next's head passes the per-method check with #25; the thirteenth review
-(X-Forwarded-For only from listed proxies, every line, a bad entry stopping the walk, IPv4-mapped
-addresses matched; nothing listed, the header counts for nothing; MCP tool calls carry the gate's
-address; unconsented client ids good for 90 days and kept ids small enough for Postgres);
-`ROLL_TRUSTED_PROXIES` (X-Forwarded-For only from the edge's addresses, the client the right-most
-entry that isn't one: a direct request can't name its own address for IP allowlists or
-registration's limit); sealed apps variables explained to agents (apps-next #26); the prefix check
-per method (rolld logs each route's methods; 194 `METHOD route` lines reviewed, 7 newly found and
-looked at: a route with its own row for one method can't gain another a prefix decides unseen);
-sensitive secrets explained to agents (`secrets_reveal` and `roll://guide`: a 403 and `withheld` are
-expected; secrets #46); open registration stores nothing (a client's id is the client, signed; kept
-once a person consents, else good for a day), so a flood has nothing to fill; the twelfth review's
-contained findings (CSV cells all quoted with formulas defused after in-cell separators too; a
-completion never waits on or uses an open approval; registration's rate map swept once a minute and
-bounded; the token-page list read from the caller's address and off the async threads; stored grants
-honour the idle policy; client names as consent shows them, no invisible characters); a person's own
-token's page tested to show only their reach (#25); `secrets_list_ssh_cas` (secrets #45); open
-client registration bounded (20 a minute a network; a flood never pushes out a client a person is
-connecting); `secrets_list_cas` (secrets #44); the prefix check skips public routes (no grant
-classifies what anyone may call); `secrets_list_cloud_accounts` (secrets #43); the audit log as CSV
-(the audit page, `roll mcp audit --format csv`; formula-safe cells); what an agent sees, on the
-token page (`GET /v1/access/tokens/{id}/tools`: the tools and prompts a token is offered and what
-the list costs an agent's context); completions named as such in the audit log
-(`completion/complete:<tool>`); a connection's tool names worked out once per request; every open
-sibling's head passes the route check with #25 (apps-next's rollback to the last deploy,
-previews-next's share revoke, search's index refresh and settings reviewed: 178 in all);
-`secrets_list_aws_users` (secrets #40); `apps_set_environment` takes who gets in (maintenance,
-allowed addresses, a rate limit, firewall rules; apps-next #26); routes a prefix row decides are
-reviewed (`prefix-reviewed.txt`, 138 looked at; rolld's auth test fails on a new one until it has
-its own row or is listed); previews-next's routes (#28): a preview's env is reveal, accepting a
-visual change is admin with no tool, screenshots come back as MCP image content
-(`previews_screenshot`), `previews_list_shares`, `previews_env`; the eleventh review (MCP's new
-surface): read-only excludes reveals that make something (a presigned PUT, a share link), either
-switch turns it on and a misspelled key is a 400; completions offer only ids and never ask a person;
-prompts' arguments are quoted ids; template errors say what they were;
-`secrets_list_outside_databases` (secrets #39); a project's page as a resource template
-(`roll://projects/{project}`, read through the gate, its id completed); progress while a call waits
-(`notifications/progress` every 10 s for a call with a `progressToken`, checked with the TypeScript
-SDK; both SDKs' end-to-end runs pass); `secrets_list_aws_roles` (secrets #38); read-only connections
-(`?readonly=1`: only read-only tools listed and run, a checkbox in the connect panel);
-`try_migration_on_branch` (a schema change on a Postgres branch first, main only when it worked and
-you say so); prompts' arguments complete from what the connection may list (`completion/complete`,
-through the gate); MCP prompts (roll's workflows as slash commands: what this connection may do,
-checking a diff for secrets, fixing secrets health, debugging a failing service; offered only with
-their tools); the integration branch on Postgres 18 (roll-access, roll-mcp, roll-workspace,
-roll-secrets) and live (a person's own token over MCP reads their own secrets project, the
-operator's answers 404, disabled it stops; `users-live/secrets.sh`); the tenth review (access with
-secrets): a person's stored grant dead for products' background work once they can't sign in
-(`Sessions::person_now`), hops carrying only their own product's routes, `Access::revoke_workload`;
-apps' rollbacks as tools say they put back a deploy's variables (`keep_variables`), and
-`apps_rollback_previous` (apps-next #26); every open sibling's routes classified, built with #25
-(apps-next #26, previews-next #28 and search #29 pass rolld's route test); a preview's share link is
-reveal (`previews_share`); search's index mapping, settings, refresh and analyze as MCP tools;
-`Access::create_grant` (a product makes its own tokens for its caller through the token route's own
-function) and tokens listed by what they were made for (`?product=&resource=`), for secrets retiring
-`rlst_`; taking an apps web service off the internet or putting it on (`run.public`) is deploy; a
-token's rate is the fleet's (each node enforces its share, the rate over the live nodes), not N
-times it; a worker's scaling stream needs read on it; a spent OAuth refresh token used again revokes
-the connection (OAuth 2.1; 30 seconds of grace for a retry); only token and access secrets sign a
-request in.
+the expiry digest leaves out tokens made for a day or less); MCP 2026-07-28 checked end to end with
+the official TypeScript SDK v2 (`@modelcontextprotocol/client` 2.4.0, `live/sdk2/`): pinned to
+2026-07-28, on `auto` (it probes `server/discover` and picks the modern era) and legacy, each
+listing tools, calling one, reading a resource and listing prompts; and an approval as a Multi
+Round-Trip Request, the SDK's own elicitation handler fulfilling it and retrying the call by itself
+(#24); apps reading a roll code repo for the caller (a plan, an import, a service built from it)
+needs read on that repo (any apps grant reached it; roll apps' finding) (#24); rolld builds in its
+image again (roll-mcp included the dashboard's icon from apps/, which the image leaves out) and the
+cluster e2e builds only its own checkout's code (a shared cargo cache id handed one branch's crates
+to another; roll previews' finding) (#24); MCP 2026-07-28, the stateless core, beside the handshake
+revisions (a dual-era server): `server/discover`, requests served on their own `_meta` with no
+`initialize` or session, `MCP-Protocol-Version`/`Mcp-Method`/`Mcp-Name` checked against the body
+(`-32020`), unsupported versions answered with the list (`-32022`), unknown methods 404,
+`resultType` and `serverInfo` on every result, lists cacheable a minute for the caller only, and
+approvals as Multi Round-Trip Requests (`input_required` with the approval page; the retry runs once
+approved); a modern-only client failed against roll before (#24); Redis's `@dangerous` commands are
+admin (`MONITOR` and `SYNC` stream everyone's commands and data, `CLIENT` ends other connections,
+`SLOWLOG` shows others' arguments: they were write) and `SWAPDB` is delete; `run.rollback_on_crash`
+is deploy (it puts an older deployment live by itself; apps' review) (#24); an apps service's run
+settings fail closed: only size, scale, health checks, timers, alerts, rollout and restarts are
+write, every other run key is deploy, a new one too until it's listed (a list of deploy keys let
+`run.tcp`, a port on the internet, through as write, as it had `run.schedules`) (#24); setting a
+service's `run.schedules` (apps-next: commands run as jobs of the live deployment on a timer) is
+deploy, as a production job is (it was write: a token that couldn't run one production job could
+schedule one every minute), and `apps_update_service` says how to set it; `secrets_get_values` (one
+reveal for an environment, not one per key), `secrets_list_leases` and `secrets_end_lease`, and the
+secrets tools' descriptions brought up to date (secrets' seventeenth review) (#24); `secrets_set`,
+`secrets_delete` and `secrets_propose` take `if_version` (Vault's check-and-set: an agent can't
+silently overwrite a person's edit; 409 `stale`; secrets #62); this round's gate additions cost
+nothing measurable (`gate_latency`, release, pinned, eight alternating runs each at load ~44: CPU
+2.88 s against 2.96 s, within ±0.25 s run to run; 32-at-once token throughput median ~60k against
+~55k, ranges 35–89k and 23–86k overlapping; one resource p50 84–97 µs against 114–133 µs);
+`apps_set_environment` takes `paused` and `apps_create_service` a repo's `branch` (apps-next); every
+answer to an expiring token says when (`Roll-Token-Expiration`, GitHub's
+`GitHub-Authentication-Token-Expiration`), and the CLI warns a week ahead; `apps_import` (a
+roll.toml or compose file checked before `roll up --all`; apps-next); the approval UI checked in a
+browser against `users-live` (the policy's checkboxes, a waiting token's badge with an admin's
+Approve and Deny, "Needs attention" leading with it, the person's view without them), which moved
+rotation's choice into a step Rotate opens (it was a select on every row); the `tune_slow_query`
+prompt (Neon's query tuning: the plan, an index tried on a branch, both plans compared, main only
+when you say so); the sixteenth review (this round's token surface): a rotated secret in its grace
+calls products but manages no tokens (it couldn't rotate, change or make one that outlives the
+grace), and a token whose checksum is wrong is refused before any lookup; `debug_failing_service`
+starts from what roll already flags (an environment's `attention`, `apps_activity` with `all`);
+`apps_activity` takes `all` (the whole timeline: deploys, failures, crash loops, alerts; apps-next);
+`secrets_reach` and `secrets_folder_policies` (secrets #61, #53); rotating a token can keep the old
+secret working a while (`keep_old_for_s`, at most a week: Stripe's roll key), from the dashboard's
+Rotate and `roll token rotate --keep-old 1h`, so deployments switch without an outage;
+`postgres_typescript_types` (Supabase's generated types, written by one read-only query: enums as
+unions, arrays, nullable) and the `compare_branch_schemas` prompt (Neon's schema compare: both
+branches described, the difference listed, advisors on the branch); open registration's limit is a
+sliding minute per network (a fixed minute let twice the limit through at its edge, and its test
+failed when a run crossed one); a token used before its start says so (401 `not_yet_valid`, "this
+token works from <time>", with `not_before`; the token list and page show the start); a token can
+start later (`not_before`, Cloudflare's TTL start): refused until then as an unknown token, the
+dashboard's "Starts" and `roll token create --starts 2h` (the expiry counts from the start),
+changeable and clearable; a person's own token's page tested to show only their reach; `roll token
+list --product/--resource` and `--workloads`; a workload token makes no tokens; workload tokens
+(`Access::mint_workload`: minutes, within an identity's scope, owned by its maker, out of the list
+and caps) for secrets' identity logins; a person's own tokens' news is mailed to them (an approval
+waiting on them, used from a new network, revoked as leaked, about to expire; only their own, never
+a secret); `previews_resolve_note` (a preview page's note, write by the prefix; previews-next), and
+`apps_logs` takes `before`, `instance`, `deployment` and `stream` (apps-next); Postgres analysis as
+Neon's and Supabase's MCP servers have it: `postgres_explain`, `postgres_slow_queries`,
+`postgres_advisors`, `postgres_list_extensions` (read-only SQL through the query route, checked on
+Postgres 18); names people choose can't hide text: a token's name with invisible characters is
+refused, OAuth clients' names (registered or from a metadata document) drop them, and `initialize`'s
+instructions escape them; `apps_set_environment` takes response header rules (`headers`, apps-next);
+a cron run's logs are read again, as apps-next decided (its lines were always in the read-level
+environment log); `apps_restart_instance` (apps-next, reviewed under the environment prefix: deploy
+in production); invisible characters (tag characters, zero-width and bidi controls, variation
+selectors) escaped in results' text, so instructions hidden in other people's text stay visible to
+the model; plain-read answers checked for credentials (key listings: streams' are usernames,
+storage's skip the secret, tasks' are hashes and prefixes); the fifteenth review: a list's
+credentials redacted item by item (a token with reveal on one Postgres database and read on all saw
+every database's password in `GET /v1/projects`; the same for every list with credential fields), a
+preview's `share_url` redacted without reveal (its access token: the QR code's reveal row protected
+nothing), and a cron run's logs reveal on this branch too; `previews_list_notes` and
+`previews_resolve_note` (a preview page's note, write by the prefix; previews-next), and `apps_logs`
+takes `before`, `instance`, `deployment` and `stream` (apps-next); apps-next's cron runs as tools
+(`apps_get_cron_run`, `apps_cron_run_logs`, `apps_cancel_cron_run`); a preview's caught mail as
+reveal, with `previews_list_mail` and `previews_read_mail` (previews-next); the connect panel says
+what a choice of toolsets costs (tools and context tokens, from `GET /v1/mcp/toolsets`) and warns
+past a client's limit (VS Code refuses more than 128 tools a request; with every product on roll
+lists about 259); the token page counts what a model reads (name, description, schema);
+`previews_connect` and its reveal row, and a preview's QR code as reveal (previews-next); the core
+products' everyday routes as tools (streams: a topic, a group's lag, branching; tasks: retrying
+messages and dead letters, cancelling and rerunning runs, functions, queues; NoSQL: reset, restore,
+a branch's diff; storage: branching a bucket, the trash and restoring from it); against Neon's MCP
+server and main's routes: `postgres_reset_branch` (reset from parent), `postgres_get_endpoint`,
+`postgres_update_endpoint`, `redis_restore`, `apps_delete_environment`; each product's routes
+compared with its tools (`tool-gaps.py`): `search_update_cluster`, `search_delete_cluster`,
+`secrets_list_rotators`, `secrets_list_syncs` and `secrets_diff` added; previews' bypass, search's
+keys, password and console, and secrets' bulk values, reviews and settings stay a person's; apps'
+missing everyday tools (`apps_create_service` takes links and run settings, an environment's state,
+linking and unlinking resources, checking a domain, volume backups and restoring one; all on main);
+a tool any token may call (`apps_plan`) is listed only where its product runs (it showed with apps
+off); previews' tools listed (they never were: roll previews runs with roll code and has no product
+switch, so MCP's product list left it out; rolld's auth test now fails on any product it serves with
+no tools listed); the token builder offers only the products this rolld runs (and any a token's
+rules name already), not all sixteen; checked live on #25's build (both official SDKs end to end,
+progress during an approval, URL elicitation; `serverInfo.icons` answered), which found roll code's
+fronted tools still carrying the approval argument for the operator (37 of 78): they drop it too
+now; the fourteenth review (key-scoped rules, before any row uses them): secrets' key names are
+literal (a key named `_all` is only that key; a list or a `*` in a request names none) and an
+approval remembers only a request that named one key; a pending answer says the call finds its
+approval without the argument too; the approval argument only where a person can be asked (a model
+reads every tool's schema: 92 → 73 KB for the operator and for tokens that only allow, every product
+on; `tools/list` 140 → 120 KB, 190 tools); the builder lists a secrets project's encryption keys to
+tick (one picker with search's indices; secrets' projects come from the workspace); encryption keys
+as MCP tools (`secrets_transit_encrypt`, `_decrypt`, `_sign`, `_verify`, `_public_key`; secrets #47:
+their rows narrow to one key); roll's mark as the server's icon (`serverInfo.icons`); a rule can
+narrow a secrets project to some of its encryption keys (`{id, index}`, as search's indices: signing
+with one key needn't be write on the project; secrets' transit rows add `.index("name")`);
+`secrets_list_rotations` and `secrets_ca_certificates` (secrets #48, #44); `tools/list` 11% smaller
+with every product on (183 tools, 150 → 134 KB: the approval argument's description shortened, the
+title not repeated in annotations); apps' plan, activity, deploys, links, cron runs and limits as
+MCP tools (apps-next #26; the shell, tunnel, hooks and webhook notifications stay out); secrets'
+history and workflow as MCP tools (changes, versions, compare, rotate, promote, change requests and
+proposing one: how an agent changes a protected environment); `previews_revoke_share` and
+`previews_settings` (previews-next #28); `apps_pending` and `apps_deploy_commits` (what the next
+deploy changes, what a deploy brought; apps-next #26), and `debug_failing_service` uses them; `roll
+token tools <id>` (what an agent sees, from the CLI); roll code's stream and device-login caps take
+the client the trusted proxy saw (the right-most `X-Forwarded-For` entry that isn't the proxy, over
+every line, only an address), not the left-most a client wrote; apps-next's head passes the
+per-method check with #25; the thirteenth review (X-Forwarded-For only from listed proxies, every
+line, a bad entry stopping the walk, IPv4-mapped addresses matched; nothing listed, the header
+counts for nothing; MCP tool calls carry the gate's address; unconsented client ids good for 90 days
+and kept ids small enough for Postgres); `ROLL_TRUSTED_PROXIES` (X-Forwarded-For only from the
+edge's addresses, the client the right-most entry that isn't one: a direct request can't name its
+own address for IP allowlists or registration's limit); sealed apps variables explained to agents
+(apps-next #26); the prefix check per method (rolld logs each route's methods; 194 `METHOD route`
+lines reviewed, 7 newly found and looked at: a route with its own row for one method can't gain
+another a prefix decides unseen); sensitive secrets explained to agents (`secrets_reveal` and
+`roll://guide`: a 403 and `withheld` are expected; secrets #46); open registration stores nothing (a
+client's id is the client, signed; kept once a person consents, else good for a day), so a flood has
+nothing to fill; the twelfth review's contained findings (CSV cells all quoted with formulas defused
+after in-cell separators too; a completion never waits on or uses an open approval; registration's
+rate map swept once a minute and bounded; the token-page list read from the caller's address and off
+the async threads; stored grants honour the idle policy; client names as consent shows them, no
+invisible characters); a person's own token's page tested to show only their reach (#25);
+`secrets_list_ssh_cas` (secrets #45); open client registration bounded (20 a minute a network; a
+flood never pushes out a client a person is connecting); `secrets_list_cas` (secrets #44); the
+prefix check skips public routes (no grant classifies what anyone may call);
+`secrets_list_cloud_accounts` (secrets #43); the audit log as CSV (the audit page, `roll mcp audit
+--format csv`; formula-safe cells); what an agent sees, on the token page (`GET
+/v1/access/tokens/{id}/tools`: the tools and prompts a token is offered and what the list costs an
+agent's context); completions named as such in the audit log (`completion/complete:<tool>`); a
+connection's tool names worked out once per request; every open sibling's head passes the route
+check with #25 (apps-next's rollback to the last deploy, previews-next's share revoke, search's
+index refresh and settings reviewed: 178 in all); `secrets_list_aws_users` (secrets #40);
+`apps_set_environment` takes who gets in (maintenance, allowed addresses, a rate limit, firewall
+rules; apps-next #26); routes a prefix row decides are reviewed (`prefix-reviewed.txt`, 138 looked
+at; rolld's auth test fails on a new one until it has its own row or is listed); previews-next's
+routes (#28): a preview's env is reveal, accepting a visual change is admin with no tool,
+screenshots come back as MCP image content (`previews_screenshot`), `previews_list_shares`,
+`previews_env`; the eleventh review (MCP's new surface): read-only excludes reveals that make
+something (a presigned PUT, a share link), either switch turns it on and a misspelled key is a 400;
+completions offer only ids and never ask a person; prompts' arguments are quoted ids; template
+errors say what they were; `secrets_list_outside_databases` (secrets #39); a project's page as a
+resource template (`roll://projects/{project}`, read through the gate, its id completed); progress
+while a call waits (`notifications/progress` every 10 s for a call with a `progressToken`, checked
+with the TypeScript SDK; both SDKs' end-to-end runs pass); `secrets_list_aws_roles` (secrets #38);
+read-only connections (`?readonly=1`: only read-only tools listed and run, a checkbox in the connect
+panel); `try_migration_on_branch` (a schema change on a Postgres branch first, main only when it
+worked and you say so); prompts' arguments complete from what the connection may list
+(`completion/complete`, through the gate); MCP prompts (roll's workflows as slash commands: what
+this connection may do, checking a diff for secrets, fixing secrets health, debugging a failing
+service; offered only with their tools); the integration branch on Postgres 18 (roll-access,
+roll-mcp, roll-workspace, roll-secrets) and live (a person's own token over MCP reads their own
+secrets project, the operator's answers 404, disabled it stops; `users-live/secrets.sh`); the tenth
+review (access with secrets): a person's stored grant dead for products' background work once they
+can't sign in (`Sessions::person_now`), hops carrying only their own product's routes,
+`Access::revoke_workload`; apps' rollbacks as tools say they put back a deploy's variables
+(`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open sibling's routes
+classified, built with #25 (apps-next #26, previews-next #28 and search #29 pass rolld's route
+test); a preview's share link is reveal (`previews_share`); search's index mapping, settings,
+refresh and analyze as MCP tools; `Access::create_grant` (a product makes its own tokens for its
+caller through the token route's own function) and tokens listed by what they were made for
+(`?product=&resource=`), for secrets retiring `rlst_`; taking an apps web service off the internet
+or putting it on (`run.public`) is deploy; a token's rate is the fleet's (each node enforces its
+share, the rate over the live nodes), not N times it; a worker's scaling stream needs read on it; a
+spent OAuth refresh token used again revokes the connection (OAuth 2.1; 30 seconds of grace for a
+retry); only token and access secrets sign a request in.
 
 Done before (oldest last): the consent screen says what a client's identity is worth (a metadata
 document's address vouches for it; a registered name doesn't); the access page's checkup and
