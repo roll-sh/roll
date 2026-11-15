@@ -124,6 +124,15 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
                   </label>
                 )}
                 {d.error && <p className="text-[12px] text-danger">{d.error}</p>}
+                {d.kind === "custom" && d.status !== "active" && (
+                  <p className="text-[12px] text-subtle">
+                    {(() => {
+                      // Unverified custom domains are removed 7 days after they're added (the name is someone's to claim).
+                      const days = Math.ceil((d.created_at + 7 * 86_400_000 - Date.now()) / 86_400_000);
+                      return days > 1 ? `Removed in ${days} days unless its DNS checks out.` : "Removed within a day unless its DNS checks out.";
+                    })()}
+                  </p>
+                )}
                 {d.status === "active" && d.tls !== "issued" && d.tls_error && (
                   <p className={`text-[12px] ${d.tls === "failed" ? "text-danger" : "text-subtle"}`}>{d.tls_error}</p>
                 )}

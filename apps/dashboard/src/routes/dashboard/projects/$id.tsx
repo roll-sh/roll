@@ -10,9 +10,9 @@ export const Route = createFileRoute("/dashboard/projects/$id")({
 
 function Page() {
   const { id } = Route.useParams();
-  const previews = useLocation({ select: (l) => /\/previews\/?$/.test(l.pathname) });
+  const tab = useLocation({ select: (l) => (/\/previews\/?$/.test(l.pathname) ? "previews" : /\/logs\/?$/.test(l.pathname) ? "logs" : "canvas") });
   return (
-    <ProjectPage id={id} tab={previews ? "previews" : "canvas"}>
+    <ProjectPage id={id} tab={tab}>
       <Outlet />
     </ProjectPage>
   );

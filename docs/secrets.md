@@ -2727,14 +2727,15 @@ Built since the last ranking, each in its own pull request on #62: live links' d
 rotating a database's admin password and editing registrations in place (#75), syncs in seconds
 (#76), rotators edited in place and re-keyed (#77).
 
-1. **Push instead of polling** (building): a long-poll `GET …/digest?wait=30` (or SSE) that
-   answers as soon as the folder's digest moves, used by `roll run --watch`, the SDKs' watches,
-   the operator and apps' redeploys, on #76's due marks (Doppler's live reload, Vault's event
-   subscriptions).
-2. **Metrics**: resolves, 304s, KMS refusals, sync failures and lag, leases, sweeper lag and
-   rotation failures, in rolld's metrics (Vault telemetry, CloudWatch).
-3. **Scheduled sealed backups** into a roll bucket or S3, with retention and a restore check (Vault
-   snapshots, Akeyless DR).
+1. **Push instead of polling** (built for the CLI and the TS, Go and Python watches, #79: a
+   long-poll `GET …/digest?since=&wait=` answering as soon as the folder's digest moves); next
+   the operator, the CSI provider and apps' redeploys, and one marker task per node waking
+   waiters (Doppler's live reload, Vault's event subscriptions).
+2. **Metrics** (building: `feature/roll-secrets-metrics`): roll secrets as its own product in
+   rolld's access metrics, and a line a minute of reads, dynamic credentials, revocations, syncs,
+   rotations, KMS refusals, live leases and failing work (Vault telemetry, CloudWatch).
+3. **Scheduled sealed backups** (building: into one of the project's roll buckets, read back and
+   pruned to `keep`; S3 next), as Vault's snapshots and Akeyless' DR.
 4. **Read quotas per token** on values, resolve and reveal (Vault's rate-limit quotas).
 5. **Rotation windows and schedules** (`Sun 02:00–04:00`, `rate(30 days)`, cron) and **password
    policies per key** (length, classes, a target's rules) for every generated value (AWS Secrets
@@ -2781,15 +2782,18 @@ few reviewable ones and closes what they supersede:
 3. **The follow-ups, one at a time**, each a small pull request of its own: each merges main,
    is retargeted to main and lands in order — #63 (CSI provider), #65 (conditional reads),
    then #74 (live digests, after #65), #66, #67, #68, #69, #70, #71 (#70 and #71 together:
-   see the merge note below), #72, #73, #75, #76.
-4. **#64** (the landed stack on roll-access) waits for roll MCP's #25 on main, then lands
-   like the rest.
+   see the merge note below), #72, #73, #75, #77 (after #75), #76, #79 (after #74 and #76).
+   Pairs that touch the same lines and keep both sides: #73 with #75, #66 with #72, #65 with
+   #67, #74 with #76 (`source_changed` calls `due_for_source` in its write).
+4. **#64** (the landed stack on roll-access): rebuilt on main once #62 is in (#30's change and
+   its two follow-up commits), not merged: its branch predates the squashes of #24 and #25.
 
 **Merging main after a squash.** A squash leaves main without the branch's commits, so merging
 main into the next branch would conflict wherever it changed the squashed lines. Once main has
 squash S of tip T: check `git diff S T` is empty, merge `S^` normally, then `git merge -s ours S`,
-then anything after S normally. Every follow-up merges landing's final tip before #62 squashes,
-so `-s ours` is right for each of them too (and for #74 after #65). No base branch is deleted
+then anything after S normally. Before `-s ours` on a follow-up, check that it contains the
+squashed tip (`git merge-base --is-ancestor <tip> <follow-up>`); if not, merge the tip normally
+first, or `-s ours` would silently drop the commits it lacks. The same goes for #74 after #65. No base branch is deleted
 until the pull requests on it are retargeted (deleting one closes them).
 
 Before each lands: origin/main merged, the full gate (`cargo build/test/clippy`, roll-secrets on
@@ -2813,6 +2817,17 @@ Merging the stack in order (2026-11-14) found what no single pull request could:
   registries a forgotten project drops lost `cloud_accounts` (#43). Every pull request's added lines
   were checked against the landing branch afterwards; everything else is there or extended.
 - Additive everywhere else: routes, catalogue rows, `Options` fields, types and this document.
+
+A nineteenth independent review (2026-11-15, of #62 with main merged, #73–#79) found two
+high-severity issues: two admin rotations at once could still lose the only working password
+(#75: a rotation in flight holds others off for 5 minutes, a promote that misses keeps whichever
+URL logs in, PATCH waits for it, and a rebuilt URL must keep its login and host) and `roll run
+--watch` spinning when a long poll failed fast (#79: a failure waits the interval; the server
+holds at most 25 s and 32 polls per principal; a stopped watch abandons its poll). Also fixed:
+one key's reveal in an untrusted preview could issue a dynamic credential (#62: the rule is the
+resolver's now), signing secrets shown to a grant without `reveal` (#62, #77), a rotator moved
+while its retired keys still wait to be revoked through it (#77). Merging #25 into #62 needed
+`roll_auth::Grant`'s new `user` field in three places.
 
 An eighteenth independent review (2026-11-15, of #62, #73–#76 and the last fixes against the
 other threads' heads) found two high-severity issues, both fixed on their pull requests: an
