@@ -211,6 +211,8 @@ export function secretsApi(project: string) {
     outsideDatabases: () => req<OutsideDatabase[]>("GET", `${P}/outside-databases`),
     addOutsideDatabase: (d: { name: string; url: string; roles: [string, string] | []; group?: string; ca?: string }) => req<OutsideDatabase>("POST", `${P}/outside-databases`, d),
     deleteOutsideDatabase: (id: string) => req<null>("DELETE", `${P}/outside-databases/${enc(id)}`),
+    updateOutsideDatabase: (id: string, ch: { name?: string; url?: string; ca?: string }) => req<OutsideDatabase>("PATCH", `${P}/outside-databases/${enc(id)}`, ch),
+    rotateOutsideAdmin: (id: string) => req<OutsideDatabase>("POST", `${P}/outside-databases/${enc(id)}/rotate-admin`),
     createSink: (url: string, fromStart = false) => req<Sink & { secret: string }>("POST", `${P}/audit/sinks`, { url, from_start: fromStart }),
     deleteSink: (id: string) => req<null>("DELETE", `${P}/audit/sinks/${enc(id)}`),
     /** Which candidates (tokens of some text) are this project's values the caller may reveal; never the values. */

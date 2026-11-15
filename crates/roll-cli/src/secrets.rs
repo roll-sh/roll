@@ -624,6 +624,23 @@ pub enum DatabasesCmd {
         #[arg(long)]
         ca: Option<std::path::PathBuf>,
     },
+    /// Change a registration in place: its name, its CA, or (--url) its admin URL from stdin,
+    /// checked before it's kept.
+    Set {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// The server's CA certificates (PEM file); --no-ca clears them.
+        #[arg(long, conflicts_with = "no_ca")]
+        ca: Option<std::path::PathBuf>,
+        #[arg(long)]
+        no_ca: bool,
+        /// Read a new admin URL from stdin (after its password changed elsewhere).
+        #[arg(long)]
+        url: bool,
+    },
+    /// Rotate the admin URL's own password to one only roll knows, as Vault's rotate-root.
+    RotateAdmin { id: String },
     Rm { id: String },
 }
 
@@ -1705,6 +1722,38 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     return print(&v);
                 }
                 println!("Added {} ({}): link DB_USER and DB_PASSWORD to it, managed (the roles take turns) or dynamic (a login per lease).", s(&v["name"]), s(&v["id"]));
+            }
+            DatabasesCmd::Set { id, name, ca, no_ca, url } => {
+                let mut body = json!({});
+                if let Some(n) = name {
+                    body["name"] = json!(n);
+                }
+                if let Some(p) = ca {
+                    body["ca"] = json!(std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?);
+                } else if no_ca {
+                    body["ca"] = json!("");
+                }
+                if url {
+                    // The admin URL holds a password: never an argument.
+                    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                        eprint!("New admin URL, then Enter and Ctrl-D: ");
+                    }
+                    let mut u = String::new();
+                    std::io::stdin().read_to_string(&mut u).context("reading the admin URL from stdin")?;
+                    body["url"] = json!(u.trim());
+                }
+                let v = c.call(Method::PATCH, &format!("{}/outside-databases/{}", c.base(), enc(&id)), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Changed {} ({})", s(&v["name"]), s(&v["host"]));
+            }
+            DatabasesCmd::RotateAdmin { id } => {
+                let v = c.call(Method::POST, &format!("{}/outside-databases/{}/rotate-admin", c.base(), enc(&id)), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Rotated {}'s admin password: only roll knows it now.", s(&v["name"]));
             }
             DatabasesCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/outside-databases/{}", c.base(), enc(&id)), None).await?;

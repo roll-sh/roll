@@ -196,6 +196,15 @@ impl roll_secrets::outside::OutsideDb for Outside {
         self.2.lock().unwrap().remove(name);
         Ok(())
     }
+    fn set_own_password(&self, url: &str, _: Option<&str>, password: &str) -> Result<(), String> {
+        // The admin logs in with the password it has, which then changes.
+        let admin = self.0.lock().unwrap().get("admin").cloned().unwrap_or_else(|| "hunter2".into());
+        if !url.contains(&format!(":{admin}@")) {
+            return Err("password authentication failed".into());
+        }
+        self.0.lock().unwrap().insert("admin".into(), password.into());
+        Ok(())
+    }
 }
 
 /// An ES256 key of the fake issuer, its JWKS, and tokens it signs.
@@ -1379,6 +1388,21 @@ async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
 
     let (s, _) = api.call(Method::DELETE, &format!("/outside-databases/{}", d["id"].as_str().unwrap()), None).await;
     assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");
+
+    // The admin's own password rotates to one nobody knows but roll, which keeps using it; the
+    // registration is edited in place (a name, a URL whose password changed elsewhere), links intact.
+    let id = d["id"].as_str().unwrap();
+    api.ok(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await;
+    let admin = api.outside.0.lock().unwrap()["admin"].clone();
+    assert!(admin.len() == 40 && admin != "hunter2");
+    assert!(api.ok(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await["host"] == "db.example:5432", "a second rotation logs in with the first's password");
+    assert_ne!(api.outside.0.lock().unwrap()["admin"], admin);
+    let (s, e) = api.call(Method::PATCH, &format!("/outside-databases/{id}"), Some(json!({ "url": "postgres://admin:x@other.example/app" }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && !e.to_string().contains(":x@"), "a URL that doesn't work isn't kept: {e}");
+    let renamed = api.ok(Method::PATCH, &format!("/outside-databases/{id}"), Some(json!({ "name": "billing-eu", "url": "postgres://admin:reset@db.example:5433/app" }))).await;
+    assert_eq!((renamed["name"].as_str(), renamed["host"].as_str()), (Some("billing-eu"), Some("db.example:5433")));
+    let lease = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;
+    assert!(password(lease["values"]["TMP_USER"].as_str().unwrap()).is_some(), "its links carry on through the new URL");
 }
 
 #[tokio::test]

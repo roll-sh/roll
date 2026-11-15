@@ -756,6 +756,17 @@ two login roles that take turns (managed links); `group` is a role whose grants 
 one or both. `ca` is the server's CA certificates (PEM) when the system's don't cover it (RDS).
 Registering connects once and checks the roles exist (and can log in).
 
+The admin credential rotates too, as Vault's `rotate-root` does (`POST …/outside-databases/{id}/rotate-admin`,
+`roll secrets databases rotate-admin ID`, or the key button in the dashboard): roll sets a password
+nobody chose on the user the admin URL logs in as (`ALTER ROLE CURRENT_USER`, MySQL's
+`ALTER USER CURRENT_USER()`, SQL Server's `ALTER LOGIN`, Redis' `ACL SETUSER`, MongoDB's
+`updateUser`, ClickHouse's `ALTER USER`, RabbitMQ's user API) and keeps it sealed, so after it
+nobody knows the admin password but roll. The new URL is stored before the server changes, so a
+rotation interrupted between the two finishes on the next one instead of locking roll out. A
+registration is edited in place (`PATCH …/outside-databases/{id} {name?, url?, ca?}`, `roll
+secrets databases set ID --name … --url < new-url`): a new URL is connected to and checked as
+registering checks it before it's kept, and links, their roles and their leases carry on.
+
 It's the link kind `outside_database` with fields `username` and `password`, one credential
 (`login`), `managed` or `dynamic`.
 
@@ -2342,6 +2353,8 @@ isn't in the workspace is 404.
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
+| `PATCH /outside-databases/{id}` | `{name?, url?, ca?}` (`ca: ""` clears it) | `OutsideDatabase` (`admin`; a new URL is checked first: 400 with the server's reason) |
+| `POST /outside-databases/{id}/rotate-admin` | | `OutsideDatabase` (`admin`; 400 when the server refuses, 409 while another rotation runs, 502 when the new password was kept but doesn't log in) |
 | `GET /cloud-accounts` | | `CloudAccount[]` (`read` on the project) |
 | `POST /cloud-accounts` | `{name, cloud: "gcp", audience, service_account}` or `{name, cloud: "azure", tenant, client_id, scope?}` | 201 `CloudAccount` (`admin`; 400 when a made-up project's token is taken, or this project's isn't) |
 | `DELETE /cloud-accounts/{id}` | | 204; 409 while a key links to it (`admin`) |
