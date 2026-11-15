@@ -64,6 +64,8 @@ struct Bufs {
     seek: Vec<u8>,
     /// `first_raw`'s candidate key.
     cand: Vec<u8>,
+    /// `get_sorted`'s keys.
+    sorted: Vec<Step>,
 }
 
 thread_local! {
@@ -110,6 +112,7 @@ impl PointReader {
         &self.view
     }
 
+
     /// The newest version of `key` visible at the reader's snapshot, range deletions applied;
     /// values as stored (out-of-line ones not put back).
     pub fn get_raw(&mut self, key: &[u8]) -> Result<Option<Version>> {
@@ -129,7 +132,7 @@ impl PointReader {
     /// visible version (deleted ones): a scan is cheaper.
     pub fn first_raw(&mut self, start: &[u8], end: &[u8]) -> Result<First> {
         self.room();
-        let Bufs { held, pos, seek: from, cand } = &mut self.bufs;
+        let Bufs { held, pos, seek: from, cand, .. } = &mut self.bufs;
         from.clear();
         from.extend_from_slice(start);
         let mut tries = 0;
@@ -164,6 +167,191 @@ impl PointReader {
             from.extend_from_slice(&[0xFF; 9]);
         })
     }
+}
+
+impl PointReader {
+    /// The rows visible at the reader's snapshot under strictly ascending `keys`, each in
+    /// its key's place (None: no row; out-of-line values put back when `resolve`): `get_raw`
+    /// of each key, the L1 reads made a step at a time for the whole batch. An index's row fetches are mostly in a block each, and one read's steps (the
+    /// file's block index, the block cache, the block's restarts, its entries) missed the
+    /// CPU's cache one after another; here every key's block is found, then the blocks are
+    /// taken from the cache, then each seek's restart is found, each step asking for the
+    /// cache lines the next reads, so the misses of different keys overlap. A key in the
+    /// block the key before it went to, or in the block the reader holds from its last read,
+    /// is sought on from there, without a search.
+    pub fn get_sorted<K: AsRef<[u8]>>(&mut self, keys: &[K], resolve: bool) -> Result<Vec<Option<Bytes>>> {
+        debug_assert!(keys.windows(2).all(|w| w[0].as_ref() < w[1].as_ref()), "keys strictly ascending");
+        self.room();
+        let ts = self.ts;
+        let mut out = vec![None; keys.len()];
+        let PointReader { view, bufs, .. } = self;
+        let Bufs { held, pos, seek, sorted, .. } = bufs;
+        let l1 = view.l1.as_slice();
+        let slot = view.imm.len() + view.l0.len();
+        let newer = !view.mem.is_empty() || !view.imm.is_empty() || !view.l0.is_empty();
+        // Each key: its seek key (in `seek`), a newer source's version, or where in L1 it is.
+        seek.clear();
+        sorted.clear();
+        let mut f = 0;
+        // (The block the last key searched for went to.)
+        let mut last: Option<(usize, usize)> = None;
+        for (i, k) in keys.iter().enumerate() {
+            let k = k.as_ref();
+            let at = seek.len();
+            seek.extend_from_slice(k);
+            seek.extend_from_slice(&(!ts).to_be_bytes());
+            let s = at..seek.len();
+            let sk = &seek[s.clone()];
+            if newer && let Some(hit) = newest_above_l1(view, k, sk, held, pos)? {
+                sorted.push(Step { i, seek: s, l1: L1::No, hit: Some(hit) });
+                continue;
+            }
+            let l1_at = if let Some((lf, lb)) = last.filter(|&(lf, lb)| l1[lf].block_holds(lb, sk)) {
+                L1::Block(lf, lb)
+            } else if held.get_mut(slot).is_some_and(|h| h.holding(sk).is_some()) {
+                L1::Held
+            } else {
+                while f < l1.len() && user_key(&l1[f].meta.last_key) < k {
+                    f += 1;
+                }
+                match l1.get(f) {
+                    Some(sst) if k >= user_key(&sst.meta.first_key) => {
+                        let b = sst.find_block(sk);
+                        if b < sst.block_count() {
+                            last = Some((f, b));
+                            L1::Block(f, b)
+                        } else {
+                            L1::No
+                        }
+                    }
+                    _ => L1::No,
+                }
+            };
+            sorted.push(Step { i, seek: s, l1: l1_at, hit: None });
+        }
+        // The blocks, from the cache (or the file), their restarts asked for.
+        let mut blocks: Vec<(usize, usize, Arc<super::sst::Block>)> = Vec::new();
+        for st in sorted.iter() {
+            let L1::Block(f, b) = st.l1 else { continue };
+            if blocks.last().is_some_and(|l| (l.0, l.1) == (f, b)) {
+                continue;
+            }
+            let block = l1[f].block(b)?;
+            block.prefetch_restarts();
+            blocks.push((f, b, block));
+        }
+        // The restart the first seek of each block starts at, its entries asked for (the
+        // next keys in the block are sought on from the one before).
+        let mut plan: Vec<(usize, usize)> = Vec::with_capacity(sorted.len());
+        let (mut bi, mut prev) = (0, None);
+        for st in sorted.iter() {
+            let L1::Block(f, b) = st.l1 else { continue };
+            while (blocks[bi].0, blocks[bi].1) != (f, b) {
+                bi += 1;
+            }
+            if prev == Some(bi) {
+                plan.push((bi, usize::MAX));
+                continue;
+            }
+            let block = &blocks[bi].2;
+            let r = block.restart_for(&seek[st.seek.clone()]);
+            block.prefetch_restart(r);
+            plan.push((bi, r));
+            prev = Some(bi);
+        }
+        // The reads, in key order.
+        let (mut pi, mut pos_in) = (0, None);
+        // (The last block read and the seek key its search found it by: the reader holds it.)
+        let mut keep: Option<(usize, std::ops::Range<usize>)> = None;
+        for st in sorted.iter() {
+            let key = keys[st.i].as_ref();
+            let sk = &seek[st.seek.clone()];
+            let (block, bpos) = match st.l1 {
+                L1::No => {
+                    if let Some((_, Some(v))) = st.hit.as_ref().and_then(|h| deleted_by_range(view, key, Some(h.clone()), ts)) {
+                        out[st.i] = Some(owned(view, key, v, resolve, ts)?);
+                    }
+                    continue;
+                }
+                L1::Held => {
+                    let (block, hpos) = held[slot].holding(sk).expect("a held block");
+                    block.seek_on(sk, hpos);
+                    (block, hpos)
+                }
+                L1::Block(..) => {
+                    let (b, r) = plan[pi];
+                    pi += 1;
+                    let block = &*blocks[b].2;
+                    match r {
+                        usize::MAX if pos_in == Some(b) => block.seek_on(sk, pos),
+                        usize::MAX => block.seek(sk, pos),
+                        r => {
+                            block.seek_from(r, sk, pos);
+                            keep = Some((b, st.seek.clone()));
+                        }
+                    }
+                    pos_in = Some(b);
+                    (block, &mut *pos)
+                }
+            };
+            if bpos.index() >= block.len() {
+                // (Past the block's last entry, which `find_block` doesn't leave: as `file_get`
+                // reads it.)
+                pos_in = None;
+                if let Some((_, Some(v))) = deleted_by_range(view, key, file_get(l1, false, None, key, sk, pos)?, ts) {
+                    out[st.i] = Some(owned(view, key, v, resolve, ts)?);
+                }
+                continue;
+            }
+            let k = bpos.key();
+            if user_key(k) != key {
+                continue;
+            }
+            let vts = key_ts(k);
+            if !view.rdels.is_empty() && view.rdels.covering(key, vts, ts).is_some() {
+                continue;
+            }
+            match block.value_ref(bpos) {
+                None => {}
+                Some(v) if resolve && super::toast::has_external(v) => {
+                    let v = block.value(bpos).expect("a value");
+                    out[st.i] = Some(super::toast::resolve(view, key, v, ts)?);
+                }
+                Some(_) => out[st.i] = block.value(bpos),
+            }
+        }
+        // (Held for the reader's next reads: a nested loop's next outer row's keys are often
+        // in it.)
+        if let Some((b, s)) = keep
+            && pos_in == Some(b)
+            && let Some(h) = held.get_mut(slot)
+        {
+            h.keep(blocks[b].2.clone(), &seek[s], pos);
+        }
+        Ok(out)
+    }
+}
+
+/// A key of `PointReader::get_sorted`: its place in the keys, its seek key's bytes,
+/// where in L1 it is, or the version a source newer than L1 holds.
+struct Step {
+    i: usize,
+    seek: std::ops::Range<usize>,
+    l1: L1,
+    hit: Option<Version>,
+}
+
+/// Where in L1 a key of `PointReader::get_sorted` is: in no file, in the block the
+/// reader holds, or in a file's block.
+enum L1 {
+    No,
+    Held,
+    Block(usize, usize),
+}
+
+/// A row read owned under `key`, its out-of-line values put back when `resolve`.
+fn owned(view: &View, key: &[u8], v: Bytes, resolve: bool, ts: u64) -> Result<Bytes> {
+    if resolve && super::toast::has_external(&v) { super::toast::resolve(view, key, v, ts) } else { Ok(v) }
 }
 
 /// The bytes a point read's key buffers are made with: a table's or an index's storage key
@@ -298,6 +486,31 @@ pub(super) fn newest(
         return Ok(None);
     }
     file_get(&view.l1, bloom_last, held.get_mut(slot), key, seek, pos)
+}
+
+/// `newest`'s version from the sources newer than L1 (None: none of them has one).
+fn newest_above_l1(view: &View, key: &[u8], seek: &[u8], held: &mut [Held], pos: &mut BlockPos) -> Result<Option<Version>> {
+    if let Some(hit) = mem_get(&view.mem, key, seek) {
+        return Ok(Some(hit));
+    }
+    let mut slot = 0;
+    for f in &view.imm {
+        let hit = match f {
+            Frozen::Mem(m) => mem_get(m, key, seek),
+            Frozen::Sst(s) => file_get(std::slice::from_ref(s), true, held.get_mut(slot), key, seek, pos)?,
+        };
+        if hit.is_some() {
+            return Ok(hit);
+        }
+        slot += 1;
+    }
+    for s in &view.l0 {
+        if let Some(hit) = file_get(std::slice::from_ref(s), true, held.get_mut(slot), key, seek, pos)? {
+            return Ok(Some(hit));
+        }
+        slot += 1;
+    }
+    Ok(None)
 }
 
 fn mem_get(m: &Memtable, key: &[u8], seek: &[u8]) -> Option<Version> {

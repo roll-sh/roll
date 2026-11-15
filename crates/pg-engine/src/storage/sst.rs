@@ -740,11 +740,39 @@ impl Block {
         lo
     }
 
+    /// Ask for the cache lines a `seek` here reads first, its restarts' numbers and restart
+    /// 0's key, ahead of it (a hint: `PointReader::get_sorted`).
+    pub fn prefetch_restarts(&self) {
+        // SAFETY: `restarts` is a live vector of u64s; the bytes are read only as a prefetch.
+        let words = unsafe { std::slice::from_raw_parts(self.restarts.as_ptr().cast::<u8>(), self.restarts.len() * 8) };
+        prefetch(words, 2);
+        if let Some(&r) = self.restarts.first() {
+            prefetch(self.data.get(r as u32 as usize..).unwrap_or_default(), 1);
+        }
+    }
+
+    /// The restart a `seek` of `key` decodes from: the one before the first whose key is >=
+    /// `key` (`seek_from`).
+    pub fn restart_for(&self, key: &[u8]) -> usize {
+        self.first_restart(key).saturating_sub(1)
+    }
+
+    /// Ask for restart `r`'s entries and the first of their values, which a `seek_from` it
+    /// decodes (a hint).
+    pub fn prefetch_restart(&self, r: usize) {
+        if let (Some(&e), Some(&v)) = (self.restarts.get(r), self.rvals.get(r)) {
+            prefetch(self.data.get(e as u32 as usize..).unwrap_or_default(), 2);
+            prefetch(self.data.get(v as usize..).unwrap_or_default(), 2);
+        }
+    }
+
     /// `pos` at the first entry whose key is >= `key` (`len`: none).
     pub fn seek(&self, key: &[u8], pos: &mut BlockPos) {
-        // The first restart whose key is >= `key`; the entries from the one before it.
-        let lo = self.first_restart(key);
-        let r = lo.saturating_sub(1);
+        self.seek_from(self.restart_for(key), key, pos)
+    }
+
+    /// `seek` of `key` from restart `r`, `restart_for(key)`.
+    pub fn seek_from(&self, r: usize, key: &[u8], pos: &mut BlockPos) {
         if r >= self.restarts.len() {
             pos.i = self.len;
             return;
@@ -1258,6 +1286,12 @@ impl SstReader {
         self.index.find(key)
     }
 
+    /// Whether `key` is at or below block `b`'s last key: past a key `find_block` found in
+    /// `b`, it is in `b` too.
+    pub fn block_holds(&self, b: usize, key: &[u8]) -> bool {
+        b < self.index.ends.len() && key <= self.index.key(b)
+    }
+
     pub fn block(&self, i: usize) -> Result<CachedBlock> {
         self.block_with(i, true)
     }
@@ -1329,6 +1363,19 @@ struct BlockIndex {
 }
 
 const TOP: usize = 64;
+
+/// Ask for the first `lines` cache lines of `b` ahead of their use: a hint, which the
+/// hardware's own prefetching follows on from (nothing on other targets).
+#[inline(always)]
+fn prefetch(b: &[u8], lines: usize) {
+    #[cfg(target_arch = "x86_64")]
+    for off in (0..b.len().min(lines * 64)).step_by(64) {
+        // SAFETY: the address is inside `b`; a prefetch reads nothing the program sees.
+        unsafe { std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(b.as_ptr().add(off).cast()) }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (b, lines);
+}
 
 fn word(b: &[u8]) -> u64 {
     let mut w = [0u8; 8];
