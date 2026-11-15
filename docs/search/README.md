@@ -288,11 +288,20 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `index.mapping.exclude_source_vectors` (Elasticsearch 9's default) and every reader patches
    them back as Elasticsearch prints them; fetching `_source` got cheaper too (vectors hidden 7.9
    → 2.0 ms CPU per `knn`, shown 13.5 → 8.7). Left in `_source`: vectors in `nested` objects and
-   `sparse_vector` values. In progress (`wip/search-vectors2`): knn segments searched in
-   parallel, AVX-512 distances, then 1-bit quantization quality (rescoring only the best candidates
-   halves CPU but drops recall to 0.43), AVX-512 distances for float HNSW indexing (1,250 against
-   1,174 µs/doc), searching unmerged segments in parallel (filtered latency 2-3x Elasticsearch's
-   there).
+   `sparse_vector` values. A `knn` now searches unmerged segments concurrently, one thread per
+   physical core (16 segments: p50 5.5 / 10.8 / 13.9 → 4.3 / 7.0 / 11.7 ms unfiltered / 10% /
+   1% filter, below Elasticsearch's 12.9 / 13.4 / 13.9, identical hits; CPU per query +3-25%),
+   and `int8_hnsw` construction prefetches codes (676 → 608 µs CPU/doc, same graphs). Measured,
+   not adopted (`wip/search-vectors2`): AVX-512 kernels (float bit-identical to AVX2, VNNI for
+   codes) run 4-22% slower on this Cascade Lake, and prefetch doesn't help float or one-bit
+   construction, so float HNSW indexing still costs 1,250 against 1,174 µs/doc (60% `dot_f32`
+   waiting on memory); Elasticsearch's optimized scalar quantization ranks the one-bit estimates
+   better (top 30 by estimate holds 0.877 of the true top 10 against 0.800) but with the whole
+   beam rescored, as roll does, its 1M graphs lose 10%-filter recall (0.903 → 0.884). Left: a
+   narrower rescore (roll still rescores the whole beam; it no longer costs measurable CPU, only
+   resident float pages) needs an estimator that keeps filtered recall, and the mapping's
+   default `rescore_vector.oversample` isn't applied to queries (no change to hits while every
+   candidate is rescored); float construction on CPUs without AVX-512 downclocking.
 4. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress). Landed: the
    index browser and console on the per-index routes, an API keys panel in Settings, the mapping
    view as a field table, OpenSearch-flavor clusters' own clients and `OPENSEARCH_*` variables,

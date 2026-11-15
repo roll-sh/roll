@@ -779,15 +779,18 @@ In short:
 
 - **Indexing**: with quantized graphs roll indexes fastest and cheapest (`bbq_hnsw` 4,735 docs/s
   at 8 clients against 3,585 and 2,978, 787 µs of CPU per document against 1,088 and 1,109;
-  one client 4,574 against 1,776 and 2,869). Float HNSW costs roll more CPU than Elasticsearch
-  (1,250 against 1,174 µs/doc).
+  one client 4,574 against 1,776 and 2,869; `int8_hnsw` 10% cheaper again since its graph
+  construction prefetches codes). Float HNSW costs roll more CPU than Elasticsearch (1,250
+  against 1,174 µs/doc).
 - **Search on one segment**: roll uses the least CPU for `knn` (1.8–2.4 ms against 6.1–9.4 for
   Elasticsearch and 3.5–5.3 for OpenSearch) and `rrf` (2.8–3.3 against 8.4–14.1), at equal or
   better recall than Elasticsearch in most rows: roll rescores the whole beam with floats.
   Filtered `knn` was up to 1.4× Elasticsearch's CPU and is now at or below it (change below).
-- **Search on the segments indexing left**: plain `knn` costs about what Elasticsearch's does;
-  filtered `knn` still costs roll more CPU and 2–3× the latency, since roll searches segments
-  one after another.
+- **Search on the segments indexing left**: roll searched segments one after another, so
+  filtered `knn` took 2–3× Elasticsearch's latency there. It now searches them concurrently (one
+  thread per physical core): on 16 segments p50 4.3 / 7.0 / 11.7 ms for `knn` / 10% / 1%
+  filter against Elasticsearch's 12.9 / 13.4 / 13.9 on its 33, at 5.8 / 11.4 / 18.1 ms of CPU
+  against 16.8 / 16.1 / 19.6 ("What changed" below).
 - **Footprint**: an idle roll node holds 34 MiB and answers the first `knn` 36 ms after a wake
   (213 ms with the page cache dropped), against 25–29 s for a node start of the others. roll's
   store was 56% larger than Elasticsearch's, all of it vectors kept in `_source`; since roll
@@ -1023,8 +1026,20 @@ float vectors it rescores, which is still two orders of magnitude below a node s
 | change | where | before | after |
 |---|---|---:|---:|
 | filtered k-NN reads its filter as a bitset over ordinals (`VectorsReader::ord_filter`): the filter's cardinality is a popcount of its words (was a cursor over every vector of the segment), and the graph search tests it inline (was a `dyn` closure per neighbor mapping the ordinal to a doc and checking live docs and the filter); bridges' adjacency rows are prefetched while the candidate's own neighbors are sorted out, and queued in a plain vector (was a `VecDeque`, whose `push_back` didn't inline). Hits and scores identical (all 600 responses compared byte for byte) | `search-codec` `vectors/mod.rs`, `vectors/hnsw.rs`; `search-index` `query/knn.rs` | 24 segments, server CPU per query, in two steps: the bitset, 10% filter 33.4 (32.6–33.6) ms and 1% filter 36.2 (34.6–37.1); then the prefetch and the queue, 23.8 (23.7–25.6) and 27.7 (27.7–30.1). One segment, release builds of the start and the end: 9.0 (8.7–12.7), 9.2 (9.1–9.7) | 26.2 (25.9–27.6) and 30.2 (30.1–31.3); then 22.9 (22.1–23.7) and 25.4 (25.2–26.8). One segment: 3.4 (3.4–3.6), 4.5 (4.4–4.6) |
+| a `knn` searches its segments concurrently on the search pool, one task per segment (Lucene's `AbstractKnnVectorQuery` hands each leaf to the executor), largest first, with one thread per physical core of the process's CPUs: filters and parents are resolved on the request's thread, each segment's hits are a serial search's, and the merge breaks ties by doc as before. Hits and scores identical (every response of 3 rounds compared) | `search-index` `query/knn.rs`, `search/pool.rs` (`physical_cores`) | 16 segments, p50 ms: `knn` 5.45 (5.34–5.48), 10% filter 10.83 (10.60–11.19), 1% filter 13.93 (13.70–14.03); CPU ms 4.94, 11.05, 14.48 | 4.32 (4.32–4.55), 7.03 (6.77–7.57), 11.73 (8.84–12.03); CPU 5.75, 11.39, 18.14 |
+| HNSW construction prefetches the scalar-quantized codes of each step's unvisited neighbors before scoring them, as search does (graphs identical, checked by hash) | `search-codec` `vectors/hnsw.rs`, `vectors/mod.rs` | `int8_hnsw`, 300k docs at 8 clients: 676 (630–727) µs CPU/doc with merges, 566–637 during the load, 6.1–6.9k docs/s; one thread, 50k graph: 196–252 µs/vector | 608 (590–624), 527–538, 7.2–7.4k; 153–187 (−17 to −26% in each of 7 rounds) |
 
-The unmerged numbers are interleaved A/B runs of two builds on a native `search-dev` over the
+The concurrent-segments row: the Docker harness above (server `10,11,28,29`, 6 GiB, client
+`12,13,30,31`, cgroup CPU), release builds of `0f9cd3b88` and `66d16fce6` alternated over one
+data directory (1M default-config docs at 8 clients, settled at 16 segments), 3 rounds of 200
+queries after 30 warm-up, median (min–max). With every hyperthread (3 helpers on 4 CPUs) the
+same change gave p50 3.9 / 5.9 / 7.9 ms but CPU 7.3 / 14.9 / 21.4: siblings share a core, so
+the second thread on one adds CPU time, not speed. The prefetch row: release builds of
+`66d16fce6` and `8b2276c07`, a fresh index per round, CPU over the load and the merges until
+the container settled; the one-thread numbers come from `search-codec`'s ignored
+`bench_build_graph` test on the corpus's first 50k vectors (same graph hash in every variant).
+
+The bitset row's unmerged numbers are interleaved A/B runs of two builds on a native `search-dev` over the
 same data directory (CPUs `0-5,18-23`, measured from `/proc/<pid>/stat`), so they are lower
 than the Docker rows above; plain `knn` stayed at 2.0 ms on one segment.
 
@@ -1095,7 +1110,10 @@ deterministic, the graph differs between loads.
 |---|---|
 | Lucene's own filtered-search bookkeeping: mark every rejected neighbor visited when first seen and cap two-hop exploration at `m · 2 · multiplier` (roll explores up to twice that and lets a rejected node be reached again) | 24 segments: 10% filter 35 → 19.5 ms CPU, 1% filter 37.5 → 30.5, but recall 0.995 → 0.970 and 0.874 → 0.803 (23% fewer vectors scored). Still above Elasticsearch's 0.927 and 0.772, but lower recall at the same settings: not adopted |
 | `MADV_RANDOM` on every mapped segment file (no readahead on faults) | page cache dropped, one segment: first `knn` after a wake 274–359 ms against 296–326 (no change), file RSS after three queries 55 MiB against 124, but a cold `match` query 157–197 ms against 85–137: not adopted. Advising only the vector sections would keep the RSS half without hurting text queries; it isn't worth it while RSS is page cache the kernel reclaims |
-| rescore only the best `k · oversample` (30) of each segment's beam with floats, as Elasticsearch does (roll rescores the whole beam of 100) | one segment: CPU 4.2 → 2.1 ms, file RSS after 400 queries 1.15 → 0.44 GiB, recall 0.856 → 0.427 (Elasticsearch: 0.757 with 30 rescored). roll's one-bit estimates rank worse than Elasticsearch's optimized scalar quantization, so it needs the wider rescore |
+| rescore only the best `k · oversample` of each segment's beam with floats, as Elasticsearch does (roll rescores the whole beam of 100) | first measured as 30 rescored (CPU 4.2 → 2.1 ms, recall 0.856 → 0.427), but that run rescored 10: roll never applies the mapping's `index_options.rescore_vector.oversample` (3 by default for `bbq_hnsw`; Elasticsearch uses it when a query has no `rescore_vector`), so `k` stayed 10. Remeasured (one segment, 1M, 2 graphs each): rescoring 10, 50 or all 100 of the beam costs 2.0, 2.2–2.5 and 2.2–2.4 ms CPU: the float reads no longer matter for CPU, only for resident pages. Recall below |
+| Elasticsearch's optimized scalar quantization for the one-bit records and the 4-bit query (per-vector intervals from a Lloyd-Max start, refined in closed form under the anisotropic loss with λ 0.1, Guo et al. 2020; same record layout) instead of a 2-means split and a min–max query | a better estimator: brute force over 1M, the true top 10 inside the top 30 by estimate 0.800 → 0.877, inside the top 100 0.971 → 0.995; on one graph searched with each (1M, built from exact distances) recall@10 with 30 rescored 0.616 → 0.681, all 100 0.743 → 0.771, 10% filter 0.768 → 0.762. But at roll's default (the whole beam rescored) the end result is mixed: 1M graphs built from each estimator, all 100 rescored, unfiltered 0.913 → 0.917, 10% filter 0.903 → 0.884 (lower in all three 1M comparisons, also the two Docker rounds: 0.883 → 0.852 and 0.884 → 0.877), 1% 0.723 → 0.731; on three 200k subsets 0.992 → 0.991. Rescoring 50 with it gives 0.984 against 0.992 for all 100 with the 2-means records. Not adopted (code on `wip/search-vectors2`): it pays only together with a narrower rescore, which saves no CPU now, and its graphs lose filtered recall at 1M |
+| AVX-512 distance kernels (float `dot`/`l2sq` in the AVX2 kernels' exact summation order, so scores stay bit-identical, at half the instructions; VNNI `vpdpbusd` for the int8/int4 codes) | one-thread graph construction of 50k vectors, against AVX2 in the same round: float 1.12–1.22× the time (3 of 3 rounds), int8 1.04–1.15×. This Xeon (W-2295, Cascade Lake) lowers its clock for 512-bit work, and construction interleaves short kernels with scalar heap work; a cold 384-dim `dot` alone ran 310–434 ns against 420. Not adopted; CPUs without that penalty (Ice Lake and later, Zen 4) would need their own measurement |
+| prefetch float vectors (all of each, or their first 2 or 4 cache lines) and one-bit records during HNSW construction | float 0.87–1.10×, 1.01–1.05×, 0.93–1.29× the time of no prefetch over 4 rounds; one-bit 0.89–1.11×: no consistent gain (only scalar codes kept it, above). `dot_f32` is 60% of a float ingest's CPU (perf, 200k docs), stalled on memory |
 
 ### Where roll still loses
 
@@ -1104,15 +1122,15 @@ deterministic, the graph differs between loads.
   objects and `sparse_vector` values (Elasticsearch rebuilds those from the nested documents and
   the feature postings).
 - **Float HNSW indexing**: 1,250 µs of CPU per document against Elasticsearch's 1,174 (3,104 vs
-  3,312 docs/s); with quantized graphs roll is ahead (bbq 787 vs 1,088, int8 718 vs 1,072).
-  The float distance kernels are AVX2; this Xeon has AVX-512, which Elasticsearch's Panama
-  kernels use.
-- **BBQ estimate quality**: see the rescore row above. A better one-bit quantizer (per-vector
-  optimized intervals, as Elasticsearch's) would let roll steer with fewer float reads.
-- **Filtered latency on many segments**: roll searches segments one after another, so with
-  18–64 segments its filtered p50 is 2–3× Elasticsearch's (which searches segments in
-  parallel) even where CPU per query is close; on one segment, with the change above, roll's
-  filtered `bbq_hnsw` search costs less CPU than Elasticsearch's.
+  3,312 docs/s); with quantized graphs roll is ahead (bbq 787 vs 1,088, int8 718 vs 1,072 and
+  10% less since). 60% of it is `dot_f32` waiting on memory; AVX-512 kernels and prefetching
+  measured slower or no better on this Cascade Lake (rows above).
+- **Rescoring fewer candidates**: roll rescores the whole beam where Elasticsearch rescores
+  `k · oversample`. Optimized scalar quantization ranks better but didn't keep recall at
+  roll's default (rows above), and roll doesn't apply a mapping's default `rescore_vector`
+  (no difference to hits while it rescores everything).
+- **CPU on many segments**: searching segments concurrently costs 3–25% more CPU per query
+  than one after another (16 segments, 2 cores), for 20–35% lower latency.
 
 ## Tuning log
 
@@ -1300,7 +1318,11 @@ hits and scores compared byte for byte):
 | filtered k-NN: the filter as a bitset over ordinals (cardinality by popcount, tested inline in the graph search), bridges' adjacency rows prefetched, a plain vector as the bridge queue | `search-codec` `vectors/mod.rs` (`OrdFilter`), `vectors/hnsw.rs`; `search-index` `query/knn.rs` | 24 segments: 10% filter 33.4 ms, 1% 36.2 (bitset: 26.2, 30.2); 1 segment: 9.0, 9.2 | 22.9, 25.4; 3.4, 4.5 |
 | (not adopted) Lucene's visited marking and exploration cap in the filtered search | `vectors/hnsw.rs` | 10% filter 35 ms, recall 0.995; 1% 37.5 ms, 0.874 | 19.5 ms, 0.970; 30.5 ms, 0.803 |
 | (not adopted) `MADV_RANDOM` on mapped segments | `search-store` `cache.rs` | cold wake, first `knn` 296–326 ms, cold `match` 85–137 ms | 274–359 ms, 157–197 ms |
-| (not adopted) rescore only the best `k · oversample` per segment | `vectors/mod.rs` | 1 segment: 4.2 ms, recall 0.856 | 2.1 ms, 0.427 |
+| (not adopted) rescore only the best `k · oversample` per segment (that run rescored `k`, 10: the mapping's oversample isn't applied; rescoring 10, 50 or 100 now costs 2.0–2.5 ms either way) | `vectors/mod.rs` | 1 segment: 4.2 ms, recall 0.856 | 2.1 ms, 0.427 |
+| `knn` segments searched concurrently, one thread per physical core (Docker harness, 16 segments, 3 alternating rounds; hits identical) | `search-index` `query/knn.rs`, `search/pool.rs` | p50 5.45 / 10.83 / 13.93 ms (`knn` / 10% / 1%), CPU 4.94 / 11.05 / 14.48 | 4.32 / 7.03 / 11.73, CPU 5.75 / 11.39 / 18.14 |
+| HNSW construction prefetches scalar-quantized codes (graphs identical) | `search-codec` `vectors/hnsw.rs`, `vectors/mod.rs` | `int8_hnsw` 300k docs: 676 µs CPU/doc | 608 |
+| (not adopted) AVX-512 float and VNNI kernels | `vectors/distance.rs` | one-thread construction, AVX2 | float 1.12–1.22×, int8 1.04–1.15× the time |
+| (not adopted) optimized scalar quantization (one-bit records, 4-bit query) | `vectors/bbq.rs` | 1M, all rescored: 0.913 / 0.903 / 0.723 (none / 10% / 1%) | 0.917 / 0.884 / 0.731 |
 
 ### Sorts against the doc order (2026-11-14): adopted; BP over text fields only: not adopted
 
