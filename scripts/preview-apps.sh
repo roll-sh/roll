@@ -169,6 +169,12 @@ case "$FB_BODY" in *"/__roll/feedback.js"*) ;; *) echo "a visitor through roll s
 NOTES=$(curl -sS -b "$JAR" -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/__roll/feedback.json?path=%2F")
 case "$NOTES" in "["*) ;; *) echo "the page's notes should come from roll previews: $NOTES"; exit 1;; esac
 api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"public"}' >/dev/null
+# Public again redeploys the environment (no feedback button, no access check): settled before
+# the promote reads which deployment runs, else the one it saw is replaced meanwhile (a 409).
+for _ in $(seq 1 600); do
+  [ "$(api GET "/v1/apps/services/$SVC/environments/$ENV" | jq_ "not d.get('feedback') and (d.get('latest') or {}).get('status') == 'active' and (d.get('latest') or {}).get('id') == (d.get('active') or {}).get('id')")" = True ] && break
+  sleep 1
+done
 BRANCH=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='redis'][0]")
 
 say "promote the preview's build to production (the sheet's Promote: roll apps' promote, its image, no build)"
