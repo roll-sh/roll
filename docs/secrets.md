@@ -2504,13 +2504,16 @@ and `product`. Numbers only: never a value, a key's name or a project.
 
 | Metric | What |
 | --- | --- |
-| `SecretsReads` | Folders read or resolved (people, tokens, runtimes) |
+| `SecretsReads` | Reads of values: a folder read or resolved, or a key revealed (people, tokens, runtimes) |
 | `SecretsDynamicIssued` | Dynamic credentials issued (a lease each) |
 | `SecretsLeasesRevoked`, `SecretsRevokeFailures` | Leases ended, and revocations a product refused (retried) |
 | `SecretsSyncsPushed`, `SecretsSyncFailures` | Sync pushes that worked and that failed |
 | `SecretsRotations`, `SecretsRotationFailures` | Scheduled rotations that worked and that failed |
 | `SecretsKmsRefusals` | A customer's KMS refusing to open a project's data key |
 | `SecretsLeasesLive`, `SecretsSyncsFailing`, `SecretsRotationsFailing` | Gauges: leases not ended, syncs whose last push failed, credentials whose last rotation failed |
+
+Each node counts what it did, so sum the counters across nodes. The gauges read the store every
+node shares, so every node reports the same number: read them with `Maximum`, never `Sum`.
 
 Alarms worth setting: `SecretsKmsRefusals` above zero (a customer's key policy changed),
 `SecretsRevokeFailures` and `SecretsRotationsFailing` staying above zero (health names them),

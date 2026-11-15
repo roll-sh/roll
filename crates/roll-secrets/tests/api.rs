@@ -757,7 +757,9 @@ async fn scoped_tokens_reach_only_their_environments_paths_and_actions() {
         let req = Request::get(format!("/v1/secrets/projects/{}/environments", api.project)).header("authorization", format!("Bearer {}", pinned["token"].as_str().unwrap())).header("x-forwarded-for", xff).body(Body::empty()).unwrap();
         assert_eq!(proxied.clone().oneshot(req).await.unwrap().status(), want, "{xff}");
     }
+    let reads = api.secrets.metrics().unwrap().reads;
     let (s, v) = api.req(Method::GET, "/environments/production/values?path=/api", None, Some(token)).await;
+    assert_eq!(api.secrets.metrics().unwrap().reads, reads + 1, "rolld's metrics count each read");
     assert_eq!((s, v["values"]["STRIPE"].as_str()), (StatusCode::OK, Some("sk_live")));
     for (method, path, body) in [
         (Method::GET, "/environments/production/values?path=/", None),

@@ -28,7 +28,8 @@ impl Counters {
 /// A snapshot: the counters since start, and the store's gauges now.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct Metrics {
-    /// Values read and resolved (each folder read, by a person, a token or a runtime).
+    /// Reads of values: a folder read or resolved, or one key revealed (by a person, a token or
+    /// a runtime).
     pub reads: u64,
     /// Dynamic credentials issued (a lease each).
     pub dynamic_issued: u64,

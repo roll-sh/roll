@@ -347,6 +347,7 @@ impl Secrets {
         let narrowed = self.caller_for(project, slug, caller)?;
         let caller = &narrowed;
         let dek = self.project(project)?;
+        crate::metrics::Counters::add(&self.counters.reads, 1);
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let e = entries.iter().find(|e| e.row.key == key).ok_or_else(|| Error::NotFound(format!("no secret {key} in {slug}:{path}")))?;
         if names::sensitive(&e.row.tags) && !caller.runtime {
