@@ -209,6 +209,7 @@ async fn plan(State(apps): S, b: Bytes) -> R {
             None => dir.clone(),
         };
         // What a build would use: roll.toml `[app]` over the settings sent, said in the notes.
+        use crate::config::Apply;
         let (mut build, mut said) = match crate::config::read(&root)? {
             Some(app) => {
                 let (b, _, said) = app.apply(&overrides, &crate::model::Run::default(), None)?;

@@ -1,0 +1,265 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "roll.toml",
+  "description": "roll apps' [app] in roll.toml (docs/apps/README.md). Other sections are roll code's and roll up --all's; they're left open here.",
+  "type": "object",
+  "properties": {
+    "app": {
+      "$ref": "#/definitions/app"
+    }
+  },
+  "definitions": {
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Run settings, as the API's run (not volume: that's the service's).",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "web",
+            "worker",
+            "cron"
+          ],
+          "description": "What it runs: a web service, a worker, or a cron job."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "The port the app listens on (PORT is set to it; default 8080)."
+        },
+        "start": {
+          "type": "string",
+          "description": "The start command."
+        },
+        "pre_deploy": {
+          "type": "string",
+          "description": "Runs once before each deployment goes live (a migration); a failure stops the deploy."
+        },
+        "schedule": {
+          "type": "string",
+          "description": "A cron's schedule (five fields, or @hourly, @daily\u2026)."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "The schedule's time zone (IANA, e.g. Europe/Budapest; default UTC)."
+        },
+        "timeout_s": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "A cron run's or a job's time limit, seconds."
+        },
+        "retries": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "A failed cron run's retries (backoff doubling)."
+        },
+        "min_instances": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Instances kept up (0: sleeps when idle)."
+        },
+        "max_instances": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The most instances it scales to."
+        },
+        "concurrency": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Requests an instance takes at once before another starts."
+        },
+        "cpu": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Cores per instance (0.25, 0.5, 1, 2, 4, 8)."
+        },
+        "memory_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Memory per instance, MB."
+        },
+        "health_path": {
+          "type": "string",
+          "description": "A path that answers 2xx or 3xx when the app is ready (starts with /)."
+        },
+        "health_timeout_s": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How long a new instance may take to become healthy, seconds."
+        },
+        "suspend_after_s": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Idle seconds before an instance is frozen (wakes in milliseconds)."
+        },
+        "sleep_after_s": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Idle seconds before an instance is stopped."
+        },
+        "alerts": {
+          "type": "object",
+          "description": "Alert thresholds (memory_pct, error_pct, p95_ms, log_match, log_count)."
+        },
+        "rollout": {
+          "type": "object",
+          "description": "A gradual rollout: steps (percents), step_s, error_pct."
+        },
+        "h2c": {
+          "type": "boolean",
+          "description": "The app speaks HTTP/2 without TLS (gRPC)."
+        },
+        "scale": {
+          "type": "object",
+          "description": "Scale a worker on a stream's lag: stream, group, per_instance."
+        },
+        "public": {
+          "type": "boolean",
+          "description": "Answers on its public address (false: only on the private network)."
+        },
+        "drain_s": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Seconds an old instance keeps serving in-flight requests after a switch."
+        },
+        "cpu_target": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Scale out above this CPU percent."
+        },
+        "restart": {
+          "type": "string",
+          "enum": [
+            "always",
+            "on_failure",
+            "never"
+          ],
+          "description": "When a worker that exits is started again."
+        },
+        "restart_tries": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Restarts before it's left stopped (on_failure)."
+        },
+        "affinity": {
+          "type": "boolean",
+          "description": "Send a client back to the same instance (a cookie)."
+        },
+        "tcp": {
+          "type": "boolean",
+          "description": "Raw TCP, not HTTP."
+        },
+        "rollback_on_crash": {
+          "type": "boolean",
+          "description": "Roll back when a new deployment crash-loops."
+        }
+      }
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "builder": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "dockerfile"
+          ],
+          "description": "auto: detect; dockerfile: build the tree's own Dockerfile."
+        },
+        "dockerfile": {
+          "type": "string",
+          "description": "The Dockerfile's path in the tree (builder = \"dockerfile\")."
+        },
+        "install": {
+          "type": "string",
+          "description": "The install command."
+        },
+        "build": {
+          "type": "string",
+          "description": "The build command."
+        },
+        "start": {
+          "type": "string",
+          "description": "The start command."
+        },
+        "pre_deploy": {
+          "type": "string",
+          "description": "Runs once before each deployment goes live (a migration)."
+        },
+        "health_path": {
+          "type": "string",
+          "description": "A path that answers 2xx or 3xx when the app is ready (starts with /)."
+        },
+        "watch": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Path patterns a push must touch to deploy."
+        },
+        "spa": {
+          "type": "boolean",
+          "description": "A single-page app: unknown paths answer index.html."
+        },
+        "run": {
+          "$ref": "#/definitions/run"
+        }
+      }
+    },
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A service's build and deploy settings, applied at each build over the service's own.",
+      "properties": {
+        "builder": {
+          "$ref": "#/definitions/settings/properties/builder"
+        },
+        "dockerfile": {
+          "$ref": "#/definitions/settings/properties/dockerfile"
+        },
+        "install": {
+          "$ref": "#/definitions/settings/properties/install"
+        },
+        "build": {
+          "$ref": "#/definitions/settings/properties/build"
+        },
+        "start": {
+          "$ref": "#/definitions/settings/properties/start"
+        },
+        "pre_deploy": {
+          "$ref": "#/definitions/settings/properties/pre_deploy"
+        },
+        "health_path": {
+          "$ref": "#/definitions/settings/properties/health_path"
+        },
+        "watch": {
+          "$ref": "#/definitions/settings/properties/watch"
+        },
+        "spa": {
+          "$ref": "#/definitions/settings/properties/spa"
+        },
+        "run": {
+          "$ref": "#/definitions/settings/properties/run"
+        },
+        "environments": {
+          "type": "object",
+          "description": "Per environment (by name), the same settings again, applied last.",
+          "additionalProperties": {
+            "$ref": "#/definitions/settings"
+          }
+        },
+        "previews": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/settings"
+            }
+          ],
+          "description": "Preview environments, the same settings again (before an environment's block)."
+        }
+      }
+    }
+  }
+}

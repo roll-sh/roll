@@ -475,7 +475,7 @@ pub enum AppsCmd {
     /// What a build would detect (no build): the provider, its commands, the port and why. A
     /// directory here is read on this machine (`roll up`'s tree, before it's uploaded); `--repo`
     /// or a repo service asks roll for its tree in roll code. Default: the service's repo, else
-    /// this directory. A roll.toml `[app]` (builder, commands) isn't applied to a local tree.
+    /// this directory. Its roll.toml `[app]` is checked and applied, as `--env`'s deploy would.
     Plan {
         /// A directory to read here.
         #[arg(conflicts_with_all = ["repo", "revision"])]
@@ -1477,6 +1477,10 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
         None => std::env::current_dir()?,
     };
     let dir = std::fs::canonicalize(&dir).with_context(|| format!("{}", dir.display()))?;
+    // A roll.toml the build would refuse is refused here, before anything is made or uploaded.
+    if !u.all {
+        apps_build::app::read(&dir).map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
     if u.all {
         return up_all(api, json_out, &dir, &u).await;
     }
@@ -1488,7 +1492,7 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
         (None, None) => {
             // Read here first: a tree nothing builds makes no service (a roll.toml `[app]` can
             // name its builder, so with one it's only said).
-            match local_plan(&dir) {
+            match local_plan(&dir, &u.target.env) {
                 Ok(p) => eprintln!("detected {}{}", serde_json::to_value(&p)?["provider"].as_str().unwrap_or("?"), p.framework.as_deref().map(|f| format!(" ({f})")).unwrap_or_default()),
                 Err(e) if dir.join("roll.toml").exists() => eprintln!("{e} (its roll.toml may say how)"),
                 Err(e) => bail!("{e}"),
@@ -1599,10 +1603,18 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
 
 /// What a build would make of `dir`, read here, as a new web service's would (a Procfile's
 /// `web:`); a roll.toml `[app]` isn't applied.
-fn local_plan(dir: &Path) -> anyhow::Result<apps_build::Plan> {
+/// What a build of `dir` would detect in `env`: its roll.toml `[app]` checked (an error before
+/// anything is pushed) and applied, its lines first in the notes.
+fn local_plan(dir: &Path, env: &str) -> anyhow::Result<apps_build::Plan> {
     anyhow::ensure!(dir.is_dir(), "{} isn't a directory", dir.display());
-    let o = apps_build::Overrides { process: Some("web".into()), ..Default::default() };
-    apps_build::plan(&apps_build::DirTree::new(dir), &o).map_err(|e| anyhow::anyhow!("{e}"))
+    let base = apps_build::Overrides { process: Some("web".into()), ..Default::default() };
+    let (o, said) = match apps_build::app::read(dir).map_err(|e| anyhow::anyhow!("{e}"))? {
+        Some(app) => app.overrides(&base, Some(apps_build::app::EnvScope { name: env, ephemeral: false })),
+        None => (base, Vec::new()),
+    };
+    let mut p = apps_build::plan(&apps_build::DirTree::new(dir), &o).map_err(|e| anyhow::anyhow!("{e}"))?;
+    p.notes.splice(0..0, said);
+    Ok(p)
 }
 
 async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result<()> {
@@ -2456,7 +2468,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     if let Some(r) = root {
                         at = at.join(r);
                     }
-                    serde_json::to_value(local_plan(&at)?)?
+                    serde_json::to_value(local_plan(&at, &target.env)?)?
                 }
             };
             if !json_out {

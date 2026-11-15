@@ -169,6 +169,18 @@ async fn a_local_tree_is_planned_before_anything_is_made() {
     std::fs::write(app.join("package.json"), r#"{"scripts":{"start":"node server.js"}}"#).unwrap();
     let plan = t.json(&["plan", "web"]).await;
     assert_eq!((plan["provider"].as_str(), plan["start"].as_str()), (Some("node"), Some("node server.js")), "{plan}");
+    // Its roll.toml `[app]` applied as the environment's deploy would, and a mistake in it said
+    // here, before anything is uploaded.
+    std::fs::write(app.join("roll.toml"), "[app.environments.production]\nstart = \"node cluster.js\"\n").unwrap();
+    let plan = t.json(&["plan", "web"]).await;
+    assert_eq!(plan["start"], "node cluster.js", "{plan}");
+    assert_eq!(t.json(&["plan", "web", "-e", "staging"]).await["start"], "node server.js");
+    std::fs::write(app.join("roll.toml"), "[app.run]\nmin_instaces = 1\n").unwrap();
+    let (code, _, err) = t.run(&["plan", "web"]).await;
+    assert!(code != Some(0) && err.contains("min_instaces"), "{err}");
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).args(["up", "web", "-p", "acme"]).current_dir(t.work.path()).env("ROLL_API_URL", &t.api).env_remove("ROLL_API_KEY").output().await.unwrap();
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("min_instaces"), "{}", String::from_utf8_lossy(&out.stderr));
+    std::fs::remove_file(app.join("roll.toml")).unwrap();
     // A tree nothing builds: said before any project or service is made.
     std::fs::create_dir_all(t.work.path().join("empty")).unwrap();
     std::fs::write(t.work.path().join("empty/notes.txt"), "hi").unwrap();

@@ -5,6 +5,7 @@
 //! Also the owner's background loops: the reaper and meter, deploy-on-push from roll code's
 //! land log, cron schedules, and custom domains' DNS checks.
 
+use crate::config::Apply;
 use crate::live::{EnvLive, Template};
 use crate::logs::{LogSink, Stream};
 use crate::model::*;

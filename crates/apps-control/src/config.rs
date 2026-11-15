@@ -1,33 +1,6 @@
-//! `roll.toml` `[app]`: a service's build and deploy settings kept in its tree (config as code,
-//! like `railway.json`). Read from the service's root directory at each build; what it sets wins
-//! over the service's settings, and every value it sets is named in the build log. The file's
-//! other sections are roll code's (checks, previews, the queue).
-//!
-//! ```toml
-//! [app]
-//! builder = "dockerfile"          # or "auto"
-//! dockerfile = "docker/Dockerfile"
-//! install = "pnpm install --frozen-lockfile"
-//! build = "pnpm build"
-//! start = "node dist/server.js"
-//! pre_deploy = "pnpm prisma migrate deploy"
-//! health_path = "/healthz"
-//! watch = ["apps/web/**", "packages/ui/**"]
-//!
-//! [app.run]                       # any run setting but the volume
-//! min_instances = 0
-//! concurrency = 50
-//!
-//! [app.environments.production]   # on top of the above, in that environment only
-//! start = "node dist/server.js --cluster"
-//!
-//! [app.environments.production.run]
-//! min_instances = 1
-//! memory_mb = 1024
-//!
-//! [app.previews.run]              # preview environments (ephemeral, `pv-<id>`)
-//! memory_mb = 256
-//! ```
+//! `roll.toml` `[app]` on a service's settings. `apps_build::app` parses the file and checks
+//! its shape (where `roll apps plan` and `roll up` read it too, before a push); here what it sets
+//! goes on top of the service's settings, checked as the API checks them, at each build.
 //!
 //! A preview environment scales to zero unless `[app.previews.run]` sets `min_instances`: an
 //! open pull request shouldn't keep an instance up because production does (Render's
@@ -36,43 +9,10 @@
 //! What a push can't change is what it shouldn't: the volume, domains, access and variables
 //! stay the service's settings.
 
+pub use apps_build::app::{AppConfig, EnvScope};
 use crate::model::{Build, Builder, Run};
 use crate::{Error, Result};
-use serde::Deserialize;
 use std::path::Path;
-
-/// The largest `roll.toml` read; a real one is a few hundred bytes.
-const MAX_BYTES: u64 = 64 << 10;
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct AppConfig {
-    pub builder: Option<Builder>,
-    pub dockerfile: Option<String>,
-    pub install: Option<String>,
-    pub build: Option<String>,
-    pub start: Option<String>,
-    pub pre_deploy: Option<String>,
-    pub health_path: Option<String>,
-    /// Path patterns a push must touch to deploy ([`Build::watch`]).
-    pub watch: Option<Vec<String>>,
-    /// A single-page app ([`Build::spa`]).
-    pub spa: Option<bool>,
-    /// Run settings ([`Run`]'s fields, as the API's `run`), but `volume`.
-    pub run: Option<toml::Table>,
-    /// Per environment, the same keys again (no `environments` in them), applied last.
-    pub environments: Option<std::collections::BTreeMap<String, AppConfig>>,
-    /// Preview environments (ephemeral ones), the same keys again, before a named block.
-    pub previews: Option<Box<AppConfig>>,
-}
-
-/// The environment a build or a deployment is for.
-#[derive(Clone, Copy, Debug)]
-pub struct EnvScope<'a> {
-    pub name: &'a str,
-    /// A preview's (`[app.previews]`, and scaled to zero by default).
-    pub ephemeral: bool,
-}
 
 /// What a preview environment runs with when nothing says otherwise: a web service scales to
 /// zero. A note when that changed something.
@@ -85,124 +25,123 @@ pub fn preview_defaults(mut run: Run, file: Option<&AppConfig>) -> (Run, Option<
     (run, Some("a preview environment scales to zero (roll.toml [app.previews.run] min_instances keeps instances up)".into()))
 }
 
-#[derive(Deserialize)]
-struct File {
-    app: Option<AppConfig>,
-    // Every other section belongs to roll code.
-    #[serde(flatten)]
-    _rest: toml::Table,
-}
-
-/// `[app]` of `<root>/roll.toml`, if there's one. The file must be a regular file (a pushed tree
-/// can hold symlinks), and a malformed `[app]` is an error, not a silent default.
+/// `[app]` of `<root>/roll.toml`, if there's one ([`apps_build::app::read`]).
 pub fn read(root: &Path) -> Result<Option<AppConfig>> {
-    let path = root.join("roll.toml");
-    let meta = match std::fs::symlink_metadata(&path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(Error::Internal(e.to_string())),
-    };
-    if !meta.is_file() {
-        return Err(Error::BadRequest("roll.toml isn't a regular file".into()));
-    }
-    if meta.len() > MAX_BYTES {
-        return Err(Error::BadRequest(format!("roll.toml is larger than {} KiB", MAX_BYTES >> 10)));
-    }
-    let text = std::fs::read_to_string(&path).map_err(|e| Error::BadRequest(format!("roll.toml: {e}")))?;
-    parse(&text)
+    apps_build::app::read(root).map_err(Error::BadRequest)
 }
 
 pub fn parse(text: &str) -> Result<Option<AppConfig>> {
-    let f: File = toml::from_str(text).map_err(|e| Error::BadRequest(format!("roll.toml: {}", e.message())))?;
-    if let Some(app) = &f.app {
-        let blocks = app.environments.iter().flatten().map(|(n, e)| (format!("environments.{n}"), e)).chain(app.previews.iter().map(|p| ("previews".to_string(), &**p)));
-        for (name, e) in blocks {
-            if e.environments.is_some() || e.previews.is_some() {
-                return Err(Error::BadRequest(format!("roll.toml: [app.{name}] holds settings, not more blocks")));
-            }
-        }
-        let runs = std::iter::once(&app.run).chain(app.environments.iter().flatten().map(|(_, e)| &e.run)).chain(app.previews.iter().map(|p| &p.run));
-        for run in runs.flatten() {
-            if run.contains_key("volume") {
-                return Err(Error::BadRequest("roll.toml: a volume is the service's setting, not the tree's (`roll apps set --volume`)".into()));
-            }
-        }
-    }
-    Ok(f.app)
+    apps_build::app::parse(text).map_err(Error::BadRequest)
 }
 
-impl AppConfig {
+/// The file on a service's settings.
+pub trait Apply {
     /// The service's settings with this file's on top (then the environment's block, when
     /// `env` is given and has one), checked as the API checks them, and a line for each value
     /// the file set.
-    pub fn apply(&self, build: &Build, run: &Run, env: Option<EnvScope<'_>>) -> Result<(Build, Run, Vec<String>)> {
-        let (mut b, mut r, mut said) = self.apply_one(build, run, "")?;
-        if let Some(p) = self.previews.as_ref().filter(|_| env.is_some_and(|e| e.ephemeral)) {
-            let more;
-            (b, r, more) = p.apply_one(&b, &r, " (previews)")?;
-            said.extend(more);
-        }
-        if let Some((e, c)) = env.and_then(|e| self.environments.as_ref()?.get(e.name).map(|c| (e.name, c))) {
-            let more;
-            (b, r, more) = c.apply_one(&b, &r, &format!(" ({e})"))?;
-            said.extend(more);
-        }
-        Ok((b, r, said))
-    }
+    fn apply(&self, build: &Build, run: &Run, env: Option<EnvScope<'_>>) -> Result<(Build, Run, Vec<String>)>;
+}
 
-    /// The paths a push must touch to deploy to `env`: its block's `watch`, else the file's.
-    pub fn watch_for(&self, env: &str) -> Option<Vec<String>> {
-        self.environments.as_ref().and_then(|m| m.get(env)).and_then(|c| c.watch.clone()).or_else(|| self.watch.clone())
-    }
-
-    fn apply_one(&self, build: &Build, run: &Run, scope: &str) -> Result<(Build, Run, Vec<String>)> {
+impl Apply for AppConfig {
+    fn apply(&self, build: &Build, run: &Run, env: Option<EnvScope<'_>>) -> Result<(Build, Run, Vec<String>)> {
         let (mut b, mut r, mut said) = (build.clone(), run.clone(), Vec::new());
-        let mut set = |what: &str, value: &str| said.push(format!("roll.toml sets {what}: {value}{scope}"));
-        if let Some(v) = self.builder {
-            set("builder", if v == Builder::Dockerfile { "dockerfile" } else { "auto" });
-            b.builder = v;
+        for (c, scope) in self.layers(env) {
+            (b, r) = apply_one(c, &b, &r)?;
+            said.extend(c.lines(&scope));
         }
-        for (what, from, to) in [
-            ("dockerfile", &self.dockerfile, &mut b.dockerfile),
-            ("install", &self.install, &mut b.install),
-            ("build", &self.build, &mut b.build),
-            ("start", &self.start, &mut b.start),
-        ] {
-            if let Some(v) = from {
-                set(what, v);
-                *to = Some(v.clone());
-            }
-        }
-        for (what, from, to) in [("pre_deploy", &self.pre_deploy, &mut r.pre_deploy), ("health_path", &self.health_path, &mut r.health_path)] {
-            if let Some(v) = from {
-                set(what, v);
-                *to = Some(v.clone());
-            }
-        }
-        if let Some(w) = &self.watch {
-            set("watch", &w.join(", "));
-            b.watch = Some(w.clone());
-        }
-        if let Some(v) = self.spa {
-            set("spa", &v.to_string());
-            b.spa = Some(v);
-        }
-        if let Some(t) = &self.run {
-            let patch = serde_json::to_value(t).map_err(|e| Error::BadRequest(format!("roll.toml: {e}")))?;
-            for (k, v) in t {
-                set(&format!("run.{k}"), &v.to_string());
-            }
-            r = r.merged(Some(&patch)).map_err(|e| Error::BadRequest(format!("roll.toml [app.run]: {e}")))?;
-        }
-        b.check()?;
-        let r = r.normalized()?;
         Ok((b, r, said))
     }
+}
+
+fn apply_one(c: &AppConfig, build: &Build, run: &Run) -> Result<(Build, Run)> {
+    let (mut b, mut r) = (build.clone(), run.clone());
+    if let Some(v) = c.builder {
+        b.builder = match v {
+            apps_build::Builder::Auto => Builder::Auto,
+            apps_build::Builder::Dockerfile => Builder::Dockerfile,
+        };
+    }
+    for (from, to) in [(&c.dockerfile, &mut b.dockerfile), (&c.install, &mut b.install), (&c.build, &mut b.build), (&c.start, &mut b.start), (&c.pre_deploy, &mut r.pre_deploy), (&c.health_path, &mut r.health_path)] {
+        if from.is_some() {
+            to.clone_from(from);
+        }
+    }
+    if c.watch.is_some() {
+        b.watch.clone_from(&c.watch);
+    }
+    if c.spa.is_some() {
+        b.spa = c.spa;
+    }
+    if let Some(t) = &c.run {
+        let patch = serde_json::to_value(t).map_err(|e| Error::BadRequest(format!("roll.toml: {e}")))?;
+        r = r.merged(Some(&patch)).map_err(|e| Error::BadRequest(format!("roll.toml [app.run]: {e}")))?;
+    }
+    b.check()?;
+    let r = r.normalized()?;
+    Ok((b, r))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{Alerts, Restart, Rollout, RunType, Scale, Volume};
+
+    #[test]
+    fn the_files_run_keys_are_the_services_run_settings() {
+        // Every field set, so every key serializes: a new field doesn't build until it's named here.
+        let all = Run {
+            kind: RunType::Cron,
+            port: Some(1),
+            start: Some("a".into()),
+            pre_deploy: Some("a".into()),
+            schedule: Some("* * * * *".into()),
+            timezone: Some("UTC".into()),
+            timeout_s: Some(1),
+            retries: Some(1),
+            min_instances: 1,
+            max_instances: 1,
+            concurrency: 1,
+            cpu: 1.0,
+            memory_mb: 1,
+            health_path: Some("/".into()),
+            health_timeout_s: 1,
+            suspend_after_s: 1,
+            sleep_after_s: 1,
+            volume: Some(Volume { mount: "/data".into(), size_gb: 1 }),
+            alerts: Alerts::default(),
+            rollout: Rollout::default(),
+            h2c: true,
+            scale: Some(Scale { stream: "s".into(), group: "g".into(), per_instance: 1 }),
+            public: false,
+            drain_s: Some(1),
+            cpu_target: Some(1),
+            restart: Restart::Never,
+            restart_tries: Some(1),
+            affinity: true,
+            tcp: true,
+            rollback_on_crash: true,
+        };
+        let keys: std::collections::BTreeSet<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().filter(|k| *k != "volume").cloned().collect();
+        let file: std::collections::BTreeSet<String> = apps_build::app::RUN_KEYS.iter().map(|k| k.to_string()).collect();
+        assert_eq!(keys, file);
+        // The editors' schema gives each the type it serializes as.
+        let schema: serde_json::Value = serde_json::from_str(include_str!("../../../docs/apps/roll.schema.json")).unwrap();
+        for (k, v) in serde_json::to_value(&all).unwrap().as_object().unwrap().iter().filter(|(k, _)| *k != "volume") {
+            let kind = match v {
+                serde_json::Value::Bool(_) => "boolean",
+                serde_json::Value::Number(n) if n.is_f64() => "number",
+                serde_json::Value::Number(_) => "integer",
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Object(_) => "object",
+                _ => "other",
+            };
+            assert_eq!(schema["definitions"]["run"]["properties"][k]["type"], kind, "{k}");
+        }
+        let restart = schema["definitions"]["run"]["properties"]["restart"]["enum"].clone();
+        for r in [Restart::Always, Restart::OnFailure, Restart::Never] {
+            assert!(restart.as_array().unwrap().contains(&serde_json::to_value(r).unwrap()), "{restart}");
+        }
+    }
 
     #[test]
     fn app_is_read_beside_roll_codes_sections_and_wins_over_the_settings() {

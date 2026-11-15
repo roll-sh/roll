@@ -6,6 +6,7 @@
 //! a slim runtime image with BuildKit. It only reads files: no network, no processes. The design
 //! is "Builds" in docs/apps/README.md.
 
+pub mod app;
 mod caches;
 mod cargo;
 mod deno;
