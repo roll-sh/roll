@@ -1,6 +1,8 @@
 //! Extension points that run code: previews (branched Postgres and Redis plus a container) and
 //! the checks runner. rolld plugs implementations in with [`crate::Code::set_preview_backend`]
 //! and [`crate::Code::set_runner`]; without them previews and runner checks are unavailable.
+//! [`SecretEnv`] is roll secrets, for checks, sandboxes and the `secret_leak` blocker
+//! ([`crate::Code::set_secret_env`]).
 
 use crate::model::{Change, Check, Preview, RepoRow};
 use async_trait::async_trait;
@@ -29,4 +31,27 @@ pub trait Runner: Send + Sync {
     }
     /// Remove what a previous process of this node left running; called before checks resume.
     async fn remove_leftovers(&self) {}
+}
+
+/// An environment's secrets from roll secrets (docs/secrets.md, "Consumption"). Values come back
+/// resolved; the caller puts them in a process's environment and nowhere else (no records, no
+/// logs). Every read is in the project's audit log as `consumer`.
+#[async_trait]
+pub trait SecretEnv: Send + Sync {
+    /// `environment` (`env`, or `env:/folder`) of the workspace project that has repo
+    /// `owner/name` on its canvas. Refuses a protected environment and unresolved references.
+    async fn for_repo(&self, repo: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>>;
+    /// The same for workspace project `project` (an id or a name), which must have one of
+    /// `owner`'s repos on its canvas (sandboxes).
+    async fn for_owner(&self, owner: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>>;
+    /// (candidate index, key, environment, folder) for every secret, in any environment of the
+    /// projects that have repo `owner/name` on their canvas, whose value is one of `candidates`
+    /// (matched by fingerprint; values never come back). Empty for a repo on no project's canvas.
+    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>>;
+    /// Of `keys`, the ones a standard environment of the project that has repo `owner/name` on its
+    /// canvas doesn't define, with those environments: (key, [environment]). Names only.
+    async fn missing(&self, repo: &str, keys: Vec<String>) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+        let _ = (repo, keys);
+        Ok(Vec::new())
+    }
 }
