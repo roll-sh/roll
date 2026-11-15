@@ -1232,6 +1232,12 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
     // Moved and re-keyed in place: the next call goes to the new URL, signed with the new secret
     // (shown once), and the link carries on.
     let id = r["id"].as_str().unwrap();
+    // Not while a retired key waits to be revoked through the old endpoint.
+    assert_eq!(api.call(Method::PATCH, &format!("/rotators/{id}"), Some(json!({ "url": "https://rotator2.example/stripe" }))).await.0, StatusCode::CONFLICT);
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
+    let sw = api.secrets.clone();
+    tokio::task::spawn_blocking(move || sw.sweep().unwrap()).await.unwrap();
     let moved = api.ok(Method::PATCH, &format!("/rotators/{id}"), Some(json!({ "url": "https://rotator2.example/stripe" }))).await;
     assert_eq!(moved["host"], "rotator2.example");
     let rekeyed = api.ok(Method::POST, &format!("/rotators/{id}/rotate-secret"), None).await;

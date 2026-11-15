@@ -221,6 +221,16 @@ impl Secrets {
                 changed.push("name");
             }
             if let Some((host, sealed)) = &url {
+                // A retired credential in its grace is revoked through the rotator that issued it:
+                // a new endpoint would get handles that aren't its own (and might answer 200).
+                let waiting: i64 = c.query_row(
+                    "SELECT COUNT(*) FROM leases WHERE project_id = ? AND revoked_at IS NULL AND link LIKE ? AND link LIKE ?",
+                    params![project, format!("%\"kind\":\"{KIND}\"%"), format!("%\"ref\":\"{id}\"%")],
+                    |r| r.get(0),
+                )?;
+                if waiting > 0 {
+                    return Err(Error::Conflict("in_use", format!("{} has {waiting} retired credential(s) still to revoke through its endpoint: move it once they're revoked", r.name)));
+                }
                 c.execute("UPDATE rotators SET url = ?, host = ? WHERE id = ?", params![sealed, host, id])?;
                 changed.push("URL");
             }
