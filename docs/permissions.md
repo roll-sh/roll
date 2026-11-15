@@ -57,6 +57,31 @@ used, is kept as spent until it would have expired: presented again later than 3
 its use, someone else has a copy (OAuth 2.1, section 4.3.1), so the connection is revoked, with why,
 and the audit log has it. Within those 30 seconds it's only refused (a client retrying after a lost
 answer keeps its connection), and the audit log has that too.
+Revoking a refresh token (`POST /v1/access/oauth/revoke`, RFC 7009) revokes its connection, why
+"its client revoked it", so a client that signs out leaves nothing listed as live; revoking an
+access token ends only that one.
+
+### Signing the CLI in
+
+`roll login` signs a person's CLI in through the browser, as `gh auth login` and Doppler's,
+Infisical's and 1Password's CLIs do, rather than a token pasted into a shell profile:
+
+- It registers itself as a public client (RFC 7591, named "roll CLI on <host>") with a loopback
+  redirect on a port it holds (`http://127.0.0.1:<port>/callback`, RFC 8252), and opens the consent
+  screen with PKCE (S256), a fresh `state`, and `--scope` (default `development`) as the preset the
+  screen starts from. The person chooses what it may do there, as for any MCP client; a person's
+  login waits for an admin the same way (`approve_people`).
+- The answer's `state` and `iss` (RFC 9207) are checked before the code is exchanged.
+- `--no-browser` (over SSH, in a container) prints the address to open on any machine; the person
+  pastes back the address the browser ends on.
+- The login is kept in `$XDG_CONFIG_HOME/roll/logins.json` (else `~/.config`), 0600 in a 0700
+  directory, one entry per API URL. Commands use it only when no credential is set for the run
+  (`ROLL_TOKEN`, `ROLL_IDENTITY`, `ROLL_ADMIN_TOKEN`, `ROLL_API_KEY`, `roll code`'s and `roll
+  tasks`' own tokens), refreshing it within a minute of its access token's end under a lock
+  (`logins.lock`), so two commands never spend one refresh token. A login that can't be refreshed
+  says so once (`run roll login`) and the command goes on without it.
+- Logging in again revokes the login it replaces; `roll logout` revokes the connection (its refresh
+  token) and forgets it.
 
 Grants are made by the operator: the operator's token, or a signed-in admin (docs/accounts.md:
 an admin's session acts as the operator). The grant records who made it (`created_by`: the admin's

@@ -456,6 +456,7 @@ previews are listed once those products are on.
 | `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_plan` | How roll would build and run a repo, before making a service (a dry run). | `POST /v1/apps/plan` |
 | `apps_import` | What a roll.toml or compose file would make, making nothing (apps-next). | `POST /v1/apps/import` |
+| `apps_export_project` | A project as a roll.toml, variables by name only (apps #26). | `POST /v1/apps/projects/{project}/export` |
 | `apps_get_environment` | One environment: URL, state, live deploy, branch, size. | `GET /v1/apps/services/{id}/environments/{env}` |
 | `apps_delete_environment` | Delete an environment with its deploys and domains. | `DELETE /v1/apps/services/{id}/environments/{env}` |
 | `apps_link` | Give a service a roll resource's connection variables (reveal on the resource). | `PUT /v1/apps/services/{id}/links/{kind}/{ref}` |
@@ -511,15 +512,16 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+1. **`apps_export_project`** (apps #26's `POST /v1/apps/projects/{project}/export`, read: a
+   project's `roll.toml`, variables by name only), next to `apps_import`, on #24 once the route is
+   on apps-next; checked with `sibling-auth.sh` against its head.
+2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25), and compare each product's routes with its tools
-   (an everyday route with no tool is a gap: apps' were found this way).
-2. *Waits on secrets' `feature/roll-secrets-landing-access` (landing #62 plus #30, a branch of its own so #62 lands without #25; they'll send its head once their suites and rolld's route check pass):* rebuild the integration branch as #25 plus that (landing's 86 catalogue rows merge cleanly; 14 roll-secrets files conflict between #30's swap and landing, which are theirs). Until then: **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
-   lands after #20, #25 and #30): kept merged both ways (secrets' head of 2026-11-14 merged: a
-   forgotten project's credentials revoked first and retried by the sweeper, with the integration's
-   `identity_logins` kept in what's forgotten). The canvas check costs nothing measurable
-   (`gate_latency`, release, pinned, A/B twice: 83–115 µs p50 with it, 105–116 µs without).
+   (an everyday route with no tool is a gap: apps' were found this way). Keep
+   **`feature/mcp-on-landing`** (#25 with secrets' `feature/roll-secrets-landing-access`; it
+   replaces `feature/mcp-on-secrets`) merged after either side moves: roll-access, roll-mcp and
+   roll-secrets tests, rolld's route test and clippy before each push.
 3. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
    `.index("name")` on the per-key routes and `Scope.key` in their own check (`GrantGrants` sets
    `id` since #30's fix). The tools and the builder's key picker are in; check both live once the
@@ -537,7 +539,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: approving or denying a person's token is audited and keeps who decided (`decided_by`; GitHub's `personal_access_token.request_approved`), and the token row says "approved … by …" (#25); a waiting token answers 403 `pending_approval`, not 401 (a 401 sent an OAuth MCP client
+Done lately: `roll login` and `roll logout` (#25): the CLI signs in through the browser (`gh auth login`'s flow: RFC 7591 registration, a loopback redirect, PKCE, `state` and `iss` checked, `--no-browser` to paste the answer back), keeps the login 0600 per API URL, uses it only when no credential is set, refreshes it under a lock, and logout revokes it; revoking a refresh token now revokes its connection (RFC 7009 2.1: a client's sign-out left the grant listed as live with no secrets) (#25); the integration with secrets' landing branch built as `feature/mcp-on-landing` (#25 + 43cb35162) and every sibling head route-checked with #25; approving or denying a person's token is audited and keeps who decided (`decided_by`; GitHub's `personal_access_token.request_approved`), and the token row says "approved … by …" (#25); a waiting token answers 403 `pending_approval`, not 401 (a 401 sent an OAuth MCP client
 back through sign-in and consent for a connection that was only waiting) (#25); a person is told
 before making a token or connecting a client that it will wait for an admin (GitHub's "this token
 will require approval"; `approve_people` in `GET /v1/access`) (#25); the sixteenth review's #25

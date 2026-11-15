@@ -1809,10 +1809,26 @@ impl Store {
         }
     }
 
-    /// RFC 7009: forget one access or refresh token (whatever it is, the answer is the same).
+    /// RFC 7009: revoke an access token, or a refresh token and with it its connection (the answer
+    /// is the same whatever the token was).
     pub fn revoke_secret(&self, token: &str) -> Result<()> {
         let h = hash(token);
-        self.db.write(|c| c.execute("DELETE FROM grant_secrets WHERE hash = ? AND kind IN ('access', 'refresh')", [&h]))?;
+        let now = code_sql::now_ms();
+        self.db.write(|c| {
+            // A refresh token is the connection: revoking it ends the grant and every access token
+            // it gave (RFC 7009 2.1), so a client's sign-out leaves nothing listed as live.
+            let grant: Option<String> = c.query_row("SELECT grant_id FROM grant_secrets WHERE hash = ? AND kind = 'refresh'", [&h], |r| r.get(0)).optional()?;
+            match grant {
+                Some(g) => {
+                    c.execute("UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND revoked_at IS NULL", params![now, "its client revoked it", g])?;
+                    c.execute("DELETE FROM grant_secrets WHERE grant_id = ?", [&g])?;
+                }
+                None => {
+                    c.execute("DELETE FROM grant_secrets WHERE hash = ? AND kind = 'access'", [&h])?;
+                }
+            }
+            Ok::<_, Error>(())
+        })?;
         Ok(())
     }
 }
