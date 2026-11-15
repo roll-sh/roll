@@ -1024,8 +1024,9 @@ type Settings = {
     run a second one, in the service's network and locked down the same way, takes the first page
     in each, stilled as Chromium's capture is (`browsers.js`), with its errors counted; each is a
     page of its own (`browser:firefox`), compared with main's in that browser and reviewed like a
-    page. Best effort: a browser that fails leaves Chromium's screenshot as it is (live: Firefox's
-    page compared with main's).
+    page. Best effort: a browser that fails leaves Chromium's screenshot as it is, and a build of
+    the image that fails (a node without npm's registry) isn't tried again for an hour, so
+    screenshots don't each wait on it (live: Firefox's page compared with main's).
     A page that moves by itself (Argos's and Chromatic's flake detection): after each page's
     capture the session waits a second and captures it again, stilled as before; Chrome encodes
     the same pixels the same way, so different data is a page that changed with nobody touching
