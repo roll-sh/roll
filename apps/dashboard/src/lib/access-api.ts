@@ -204,9 +204,11 @@ export function approvableTogether(shown: Approval[]): { grant_id: string; grant
 export interface AuditEvent {
   id: string;
   at: number;
+  /** A request's grant (`null`: the operator's); for a change (`source: "access"`), the token it's about. */
   grant_id: string | null;
   grant_name: string | null;
-  source: "api" | "mcp";
+  /** A request (`api`, `mcp`), a change to tokens and access (`access`: who in `args.by`), or roll's own act (`leak`, `workload`). */
+  source: "api" | "mcp" | "access" | "leak" | "workload";
   tool: string | null;
   method: string;
   /** The route pattern, never the path. */
@@ -214,7 +216,8 @@ export interface AuditEvent {
   product: string | null;
   action: Action | null;
   resource: string | null;
-  decision: "allow" | "deny" | "ask";
+  /** A request's `allow`, `deny` or `ask`; a change's name (`create`, `change`, `rotate`, `revoke`, `connect`, `approve`, `policy`, …). */
+  decision: string;
   approval: string | null;
   status: number;
   args: unknown;
@@ -426,6 +429,19 @@ export const accessApi = {
 };
 
 // ── pure helpers (tested in access-api.test.ts) ──
+
+/** Who an audit row is by: a change's person (`args.by`), else a request's grant, else the operator. */
+export function auditWho(e: AuditEvent): string {
+  const by = e.source === "access" && e.args && typeof e.args === "object" ? (e.args as { by?: unknown }).by : undefined;
+  if (typeof by === "string") return by;
+  return e.source === "access" ? "operator" : (e.grant_name ?? "operator");
+}
+
+/** What an audit row did: a tool, a request's route, or a change and the token it's about. */
+export function auditWhat(e: AuditEvent): string {
+  if (e.tool) return e.tool;
+  return e.source === "access" && e.grant_name ? `${e.method} ${e.route} · ${e.grant_name}` : `${e.method} ${e.route}`;
+}
 
 /** A preset's rules for a project (`project` → that project; none picked → every resource). */
 export function presetRules(p: Preset, project?: string): Rule[] {

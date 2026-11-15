@@ -45,7 +45,96 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/oauth/clients/{id}", get(client))
         .route("/v1/access/oauth/authorize", post(crate::oauth::authorize))
         .route("/v1/access/oauth/devices/{code}", get(crate::oauth::device_view).post(crate::oauth::device_approve).delete(crate::oauth::device_deny))
+        .route_layer(axum::middleware::from_fn_with_state(access.clone(), audit_changes))
         .with_state(access)
+}
+
+/// The grant a change made or touched, for its audit row, when the path doesn't name it (a new
+/// token, a client connected): set on the answer by the handler.
+#[derive(Clone)]
+pub(crate) struct Changed(pub String);
+
+/// What a change is called in the audit log (`decision`), by its route and method: GitHub's
+/// `personal_access_token.create`, `oauth_authorization.create` and the like.
+fn change_name(method: &axum::http::Method, route: &str) -> String {
+    use axum::http::Method;
+    let last = route.rsplit('/').next().unwrap_or_default();
+    match (method, route) {
+        (&Method::POST, "/v1/access/tokens") => "create".into(),
+        (&Method::PATCH, "/v1/access/tokens/{id}") => "change".into(),
+        (&Method::DELETE, "/v1/access/tokens/{id}") => "revoke".into(),
+        (&Method::DELETE, "/v1/access/tokens/{id}/temporary/{approval}") => "forget".into(),
+        (&Method::POST, "/v1/access/oauth/authorize") => "connect".into(),
+        (&Method::POST, "/v1/access/oauth/devices/{code}") => "connect".into(),
+        (&Method::DELETE, "/v1/access/oauth/devices/{code}") => "refuse".into(),
+        (&Method::PUT, "/v1/access/policy") => "policy".into(),
+        (&Method::PUT, "/v1/access/notify") => "notify".into(),
+        (&Method::POST, "/v1/access/audit/sinks") => "add_sink".into(),
+        (&Method::DELETE, "/v1/access/audit/sinks/{id}") => "remove_sink".into(),
+        // …/rotate, …/approve, …/deny, …/tighten, …/retry.
+        _ => last.trim_matches(|c| c == '{' || c == '}').to_string(),
+    }
+}
+
+/// Every change made from a session or with the operator's token, in the audit log (source
+/// `access`): who made, changed, rotated, revoked or approved a token, connected a client, or set
+/// the policy, from where. A grant's own requests are the gate's rows already, and reads aren't
+/// changes. The row's `grant_id` is the token the change is about (so a token's log tells its
+/// story), `resource` what else it names, `args.by` who.
+async fn audit_changes(State(a): S, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let method = req.method().clone();
+    let route = req.extensions().get::<axum::extract::MatchedPath>().map(|m| m.as_str().to_string()).unwrap_or_default();
+    if method == axum::http::Method::GET || req.extensions().get::<roll_auth::Grant>().is_some() || route == "/v1/access/check" {
+        return next.run(req).await;
+    }
+    // The path's own ids, where the route names them: `{id}` (a token, an approval, a sink) and
+    // `{approval}`. A device's code isn't kept: it's a short secret, and the grant is in the answer.
+    let named: Vec<(String, String)> = route.split('/').zip(req.uri().path().split('/')).filter(|(p, _)| p.starts_with('{') && *p != "{code}").map(|(p, v)| (p.to_string(), v.to_string())).collect();
+    let (by, ip) = (actor(req.extensions()), req.extensions().get::<roll_auth::ClientIp>().map(|c| c.0.to_string()));
+    let res = next.run(req).await;
+    if !res.status().is_success() {
+        return res;
+    }
+    let id = named.iter().find(|(p, _)| p == "{id}").map(|(_, v)| v.clone());
+    let about_token = route.starts_with("/v1/access/tokens/");
+    let grant_id = res.extensions().get::<Changed>().map(|c| c.0.clone()).or_else(|| id.clone().filter(|_| about_token));
+    let resource = if about_token { named.iter().find(|(p, _)| p == "{approval}").map(|(_, v)| v.clone()) } else { id };
+    let status = res.status().as_u16();
+    let a2 = a.clone();
+    tokio::spawn(async move {
+        let name = match grant_id.clone() {
+            Some(g) => blocking(a2.clone(), move |a| a.store.get(&g)).await.ok().map(|g| g.name),
+            None => None,
+        };
+        let e = crate::store::AuditEvent {
+            id: crate::new_id("aud"),
+            at: code_sql::now_ms(),
+            grant_id,
+            grant_name: name,
+            source: "access".into(),
+            tool: None,
+            method: method.to_string(),
+            decision: change_name(&method, &route),
+            route,
+            product: Some("access".into()),
+            action: Some("admin".into()),
+            resource,
+            approval: None,
+            status,
+            args: Some(json!({ "by": by })),
+            ip,
+            duration_ms: 0,
+            client: None,
+        };
+        if let Some(e) = a2.store.queue_audit(e) {
+            let _ = blocking(a2, move |a| {
+                a.store.audit(&e);
+                Ok(())
+            })
+            .await;
+        }
+    });
+    res
 }
 
 async fn blocking<T: Send + 'static>(a: Arc<Access>, f: impl FnOnce(&Access) -> crate::Result<T> + Send + 'static) -> crate::Result<T> {
@@ -420,7 +509,10 @@ async fn apply_tighten(State(a): S, ext: Extensions, Path(id): Path<String>, Jso
 async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate::Result<Response> {
     let new: NewGrant = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
     let (grant, token) = a.create_for(&ext, new).await?;
-    Ok((StatusCode::CREATED, Json(json!({ "grant": grant, "token": token }))).into_response())
+    let id = grant.id.clone();
+    let mut res = (StatusCode::CREATED, Json(json!({ "grant": grant, "token": token }))).into_response();
+    res.extensions_mut().insert(Changed(id));
+    Ok(res)
 }
 
 impl Access {
@@ -614,28 +706,8 @@ async fn decide_token(a: Arc<Access>, ext: &Extensions, id: String, approve: boo
     let by = actor(ext);
     let (by2, id2) = (by.clone(), id.clone());
     let g = blocking(a.clone(), move |a| a.store.decide_pending(&id2, approve, &by2)).await?;
-    // In the audit log, as GitHub's organizations log a token request approved or denied: who,
-    // which token, from where.
-    a.store.audit(&crate::store::AuditEvent {
-        id: crate::new_id("aud"),
-        at: code_sql::now_ms(),
-        grant_id: Some(g.id.clone()),
-        grant_name: Some(g.name.clone()),
-        source: "access".into(),
-        tool: None,
-        method: "POST".into(),
-        route: format!("/v1/access/tokens/{{id}}/{}", if approve { "approve" } else { "deny" }),
-        product: Some("access".into()),
-        action: Some("admin".into()),
-        resource: Some(id),
-        decision: if approve { "approve" } else { "deny" }.into(),
-        approval: None,
-        status: 200,
-        args: Some(json!({ "by": by })),
-        ip: ext.get::<roll_auth::ClientIp>().map(|c| c.0.to_string()),
-        duration_ms: 0,
-        client: None,
-    });
+    // Its audit row (who decided, as GitHub's organizations log a token request approved or
+    // denied) is `audit_changes`'s, as every change's is.
     if let Some(user) = g.user.as_deref() {
         let name = crate::mail_name(&g.name);
         let (subject, text) = if approve {

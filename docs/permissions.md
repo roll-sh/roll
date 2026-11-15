@@ -523,17 +523,18 @@ Approvals can also go to a Slack or Discord channel, through roll code's chat op
 
 ## Audit
 
-Every request made with a grant, and every MCP tool call by anyone, writes one audit row:
+Every request made with a grant, every MCP tool call by anyone, and every change to tokens and
+access made from a session or with the operator's token writes one audit row:
 
 ```ts
 type AuditEvent = {
   id: string; at: number;
-  grant_id: string | null; grant_name: string | null; // null: the operator
-  source: "api" | "mcp";
+  grant_id: string | null; grant_name: string | null; // null: the operator; a change's: the token it's about
+  source: "api" | "mcp" | "access" | "leak" | "workload";
   tool: string | null;
   method: string; route: string;      // the route pattern, never the path
   product: Product | null; action: Action | null; resource: string | null;
-  decision: "allow" | "deny" | "ask";
+  decision: string;                    // a request's "allow" | "deny" | "ask"; a change's name
   approval: string | null;
   status: number;                      // the HTTP status the call ended with
   args: Json | null;                   // MCP arguments, redacted
@@ -545,6 +546,17 @@ type AuditEvent = {
 };
 ```
 
+- **Changes** (`source: "access"`, as GitHub's audit log has `personal_access_token.create` and
+  Stripe a key's history): a token made (`create`), changed, rotated, revoked, approved, denied or
+  tightened, a remembered approval forgotten, a request's approval decided, a client connected
+  (`connect`, by the consent screen or a device's code) or a device refused, the policy, where
+  approvals go, and audit sinks. One layer on `/v1/access` writes them (`api::audit_changes`), so a
+  new route's changes are recorded without anyone remembering to. `args.by` is who (`operator` or
+  the person's `usr_…`), `grant_id` the token it's about (so a token's own log tells who made,
+  widened and revoked it), `resource` what else it names (an approval, a sink). Only what worked is
+  recorded; a grant's own requests are already the gate's rows, so they aren't written twice. A
+  device's code is never kept. roll's own acts have rows too: a leaked token revoked (`leak`), a
+  workload's token revoked (`workload`).
 - The resource id is recorded (the user needs to know which database was dropped); paths, query
   strings and headers are not.
 - Arguments are redacted before they're stored: any field named like a password, secret, token,

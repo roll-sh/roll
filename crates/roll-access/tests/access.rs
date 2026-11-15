@@ -912,6 +912,44 @@ async fn the_audit_log_streams_to_a_sink() {
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/audit/sinks/{id}"), None).await.0, StatusCode::NO_CONTENT);
 }
 
+/// Changes are in the audit log as well as requests (GitHub's `personal_access_token.create`,
+/// Stripe's key history): a token's log tells who made, changed and revoked it, a person's own
+/// change names them, the policy's says who set it, and a grant's own request isn't written twice.
+#[tokio::test(flavor = "multi_thread")]
+async fn changes_are_in_the_audit_log() {
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    let read = json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]);
+    let (_, made) = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "ci", "rules": read }))).await;
+    let id = made["grant"]["id"].as_str().unwrap().to_string();
+    assert_eq!(d.call(OPERATOR, Method::PATCH, &format!("/v1/access/tokens/{id}"), Some(json!({ "name": "ci-2" }))).await.0, StatusCode::OK);
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{id}"), None).await.0, StatusCode::OK);
+    let story = |log: &Value| log.as_array().unwrap().iter().filter(|e| e["source"] == "access").map(|e| (e["decision"].as_str().unwrap().to_string(), e["args"]["by"].as_str().unwrap_or_default().to_string())).collect::<Vec<_>>();
+    let log = d.audit_until(&format!("/v1/access/audit?grant={id}"), |l| story(l).len() >= 3).await;
+    let mut got = story(&log);
+    got.sort();
+    assert_eq!(got, [("change", "operator"), ("create", "operator"), ("revoke", "operator")].map(|(a, b)| (a.to_string(), b.to_string())), "{log}");
+
+    let (_, hers) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "mine", "rules": [{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }] }))).await;
+    let hers = hers["grant"]["id"].as_str().unwrap().to_string();
+    let log = d.audit_until(&format!("/v1/access/audit?grant={hers}"), |l| !story(l).is_empty()).await;
+    assert_eq!(story(&log), [("create".to_string(), "usr_alice".to_string())], "{log}");
+
+    // A grant that manages tokens: its request is the gate's row, not a second one.
+    let (admin, admin_id) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "admin": "allow" } }]), json!({})).await;
+    let (s, sub) = d.call(&admin, Method::POST, "/v1/access/tokens", Some(json!({ "name": "sub", "rules": read }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{sub}");
+    let log = d.audit_until(&format!("/v1/access/audit?grant={admin_id}"), |l| l.as_array().unwrap().iter().any(|e| e["source"] == "api" && e["route"] == "/v1/access/tokens")).await;
+    assert!(log.as_array().unwrap().iter().any(|e| e["source"] == "api" && e["status"] == 201), "the gate's row: {log}");
+    let sub_id = sub["grant"]["id"].as_str().unwrap();
+    let (_, sub_log) = d.call(OPERATOR, Method::GET, &format!("/v1/access/audit?grant={sub_id}"), None).await;
+    assert!(sub_log.as_array().unwrap().iter().all(|e| e["source"] != "access"), "{sub_log}");
+
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "max_days": 90 }))).await.0, StatusCode::OK);
+    let log = d.audit_until("/v1/access/audit", |l| l.as_array().unwrap().iter().any(|e| e["decision"] == "policy")).await;
+    assert!(log.as_array().unwrap().iter().any(|e| e["decision"] == "policy" && e["args"]["by"] == "operator"), "{log}");
+}
+
 /// A person's token that reaches what the policy has an admin approve waits for one (GitHub's
 /// organization approval of fine-grained tokens): it doesn't work, says why, and only an admin
 /// decides; widening an approved one waits again.

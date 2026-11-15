@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { accessApi, describeRule, productName, RISKY, statusOf, type AgentSees, type Approval, type AuditEvent, type Grant, type Tightened } from "@/lib/access-api";
+import { accessApi, auditWho, describeRule, productName, RISKY, statusOf, type AgentSees, type Approval, type AuditEvent, type Grant, type Tightened } from "@/lib/access-api";
 import { loadInventory, resourcesByProduct } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { Link } from "../link";
@@ -332,10 +332,11 @@ function Requests({ id, events }: { id: string; events: AuditEvent[] | null }) {
         <ul className="divide-y divide-line">
           {events.map((e) => (
             <li key={e.id} className="flex flex-wrap items-center gap-3 px-5 py-2 font-mono text-[11px]">
-              <span className={`w-12 shrink-0 ${e.decision === "deny" ? "text-danger" : e.decision === "ask" ? "text-accent" : "text-subtle"}`}>{e.decision}</span>
+              <span className={`w-12 shrink-0 ${e.decision === "deny" || e.decision === "revoke" ? "text-danger" : e.decision === "ask" ? "text-accent" : "text-subtle"}`}>{e.decision}</span>
               <span className="min-w-0 flex-1 truncate text-muted">
                 {e.tool ?? `${e.method} ${e.route}`}
                 {e.resource ? ` · ${e.resource}` : ""}
+                {e.source === "access" ? ` · by ${auditWho(e)}` : ""}
               </span>
               <span className="shrink-0 text-subtle">
                 {e.status} · {relative(e.at)}
