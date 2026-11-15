@@ -41,7 +41,7 @@ x-node: &node
     ROLL_CLUSTER_SECRET: roll-cloud-e2e-cluster-secret-0123456789
     ROLL_API: 0.0.0.0:7070
     ROLL_SYSTEM_DATABASE: postgres://roll:roll@postgres:5432/roll?sslmode=disable
-    ROLL_PRODUCTS: redis,streams,tasks,storage,nosql,queues,code
+    ROLL_PRODUCTS: redis,streams,tasks,storage,nosql,queues,code,search
     ROLL_S3_BUCKET: roll-cloud-e2e
     ROLL_S3_ENDPOINT: http://minio:9000
     AWS_REGION: us-east-1

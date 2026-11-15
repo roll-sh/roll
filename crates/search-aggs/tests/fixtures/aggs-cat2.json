@@ -1,0 +1,6485 @@
+{
+ "suite": "cat2",
+ "shards": 2,
+ "mapping": {
+  "properties": {
+   "msg": {
+    "type": "text"
+   },
+   "kmsg": {
+    "type": "keyword"
+   },
+   "g": {
+    "type": "keyword"
+   },
+   "n": {
+    "type": "long"
+   },
+   "other": {
+    "type": "text"
+   }
+  }
+ },
+ "docs": [
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "Request GET /api/v1/items/432 completed in 432ms",
+   "kmsg": "Request GET /api/v1/items/432 completed in 432ms"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "Out of memory: killed process 498 (items) score 498",
+   "kmsg": "Out of memory: killed process 498 (items) score 498"
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": "\n  \nRequest GET /api/v1/items/294 completed in 294ms\n\tat com.example.Foo.bar(Foo.java:74)\n\tat com.example.Main",
+   "kmsg": "\n  \nRequest GET /api/v1/items/294 completed in 294ms\n\tat com.example.Foo.bar(Foo.java:74)\n\tat com.example.Main",
+   "other": "User alice logging on"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "User carol logging on",
+   "kmsg": "User carol logging on",
+   "other": "Request GET /api/v1/items/46 completed in 46ms"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "Request GET /api/v1/items/337 completed in 337ms",
+   "kmsg": "Request GET /api/v1/items/337 completed in 337ms",
+   "other": "Node 297 starting"
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": "User Foo logging off",
+   "kmsg": "User Foo logging off"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "Connection from 10.20.100.153 accepted",
+   "kmsg": "Connection from 10.20.100.153 accepted"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "error: cannot open file C:\\logs\\app317.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app317.log: access denied"
+  },
+  {
+   "g": "g2",
+   "n": 8
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "User Foo logging on",
+   "kmsg": "User Foo logging on"
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": "Request POST /api/v1/orders completed in 484ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 484ms with status 201",
+   "other": "Node 58 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 4,
+   "msg": "Node 346 starting",
+   "kmsg": "Node 346 starting"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "other": "Failed to connect to 10.125.83.57:443 after 231 attempts"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "\n  \nUser alice logging on\n\tat com.example.Foo.bar(Foo.java:81)\n\tat com.example.Main",
+   "kmsg": "\n  \nUser alice logging on\n\tat com.example.Foo.bar(Foo.java:81)\n\tat com.example.Main",
+   "other": "Node 471 starting"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Disk usage at 334% on /dev/sdb",
+   "kmsg": "Disk usage at 334% on /dev/sdb",
+   "other": "Failed to connect to 10.207.185.148:443 after 222 attempts"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Request GET /api/v1/items/228 completed in 228ms",
+   "kmsg": "Request GET /api/v1/items/228 completed in 228ms"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": [
+    "Transaction 9a5cfcb6 rolled back due to deadlock on table payments",
+    "Transaction ca4c3b57 committed"
+   ]
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "\n  \nUser bob logging on\n\tat com.example.Foo.bar(Foo.java:18)\n\tat com.example.Main",
+   "kmsg": "\n  \nUser bob logging on\n\tat com.example.Foo.bar(Foo.java:18)\n\tat com.example.Main"
+  },
+  {
+   "g": "g0",
+   "n": 8,
+   "msg": "Shutting down service users gracefully, 249 requests in flight",
+   "kmsg": "Shutting down service users gracefully, 249 requests in flight",
+   "other": "Node 244 starting"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "Failed to connect to 10.230.154.80:80 after 266 attempts",
+   "kmsg": "Failed to connect to 10.230.154.80:80 after 266 attempts"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "Node 490 starting",
+   "kmsg": "Node 490 starting",
+   "other": "User bob logging on"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Node 432 stopping",
+   "kmsg": "Node 432 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 5,
+   "msg": "error: cannot open file C:\\logs\\app497.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app497.log: access denied",
+   "other": "Transaction fdf131b7 rolled back due to deadlock on table items"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "\n  \nCache miss for key session_6085155c in region eu-west-476\n\tat com.example.Foo.bar(Foo.java:81)\n\tat com.example.Main",
+   "kmsg": "\n  \nCache miss for key session_6085155c in region eu-west-476\n\tat com.example.Foo.bar(Foo.java:81)\n\tat com.example.Main"
+  },
+  {
+   "g": "g0",
+   "n": 6,
+   "msg": "Connection from 10.183.43.207 accepted",
+   "kmsg": "Connection from 10.183.43.207 accepted"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "User bob logging on",
+   "kmsg": "User bob logging on"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "Disk usage at 127% on /dev/sdc",
+   "kmsg": "Disk usage at 127% on /dev/sdc"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Request GET /api/v1/items/330 completed in 330ms",
+   "kmsg": "Request GET /api/v1/items/330 completed in 330ms"
+  },
+  {
+   "g": "g1",
+   "n": 5,
+   "msg": "Node 356 stopping",
+   "kmsg": "Node 356 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": "User mallory logging on",
+   "kmsg": "User mallory logging on"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Transaction 012c4e19 rolled back due to deadlock on table orders",
+   "kmsg": "Transaction 012c4e19 rolled back due to deadlock on table orders"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "Scheduled job eve-403 finished on Monday at 403:00 UTC",
+   "kmsg": "Scheduled job eve-403 finished on Monday at 403:00 UTC"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "User Foo logging on",
+   "kmsg": "User Foo logging on"
+  },
+  {
+   "g": "g0",
+   "n": 8,
+   "msg": "User bob logging off",
+   "kmsg": "User bob logging off"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "Node 305 starting",
+   "kmsg": "Node 305 starting"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "Connection from 10.219.241.102 accepted",
+   "kmsg": "Connection from 10.219.241.102 accepted"
+  },
+  {
+   "g": "g0",
+   "n": 8,
+   "msg": "Request POST /api/v1/orders completed in 142ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 142ms with status 201",
+   "other": "User Foo logging on"
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": "12345 67890 ---",
+   "other": "error: cannot open file C:\\logs\\app428.log: access denied"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Shutting down service orders gracefully, 466 requests in flight",
+   "kmsg": "Shutting down service orders gracefully, 466 requests in flight",
+   "other": "Failed to connect to 10.153.83.78:9200 after 216 attempts"
+  },
+  {
+   "g": "g0",
+   "n": 8
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "Out of memory: killed process 432 (items) score 432",
+   "kmsg": "Out of memory: killed process 432 (items) score 432"
+  },
+  {
+   "g": "g2",
+   "n": 1
+  },
+  {
+   "g": "g0",
+   "n": 0,
+   "msg": "Node 222 starting",
+   "kmsg": "Node 222 starting",
+   "other": "Shutting down service payments gracefully, 21 requests in flight"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "User bob logging off",
+   "kmsg": "User bob logging off"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "Request POST /api/v1/orders completed in 45ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 45ms with status 201"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "User carol logging off",
+   "kmsg": "User carol logging off"
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": "Disk usage at 446% on /dev/sdb",
+   "kmsg": "Disk usage at 446% on /dev/sdb"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Node 488 stopping",
+   "kmsg": "Node 488 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 1,
+   "msg": "Disk usage at 89% on /dev/sdb",
+   "kmsg": "Disk usage at 89% on /dev/sdb",
+   "other": "Request GET /api/v1/items/439 completed in 439ms"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "User bob logging on",
+   "kmsg": "User bob logging on",
+   "other": "Transaction 35724c1c committed"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "User bob logging off",
+   "kmsg": "User bob logging off"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "User dave logging on",
+   "kmsg": "User dave logging on",
+   "other": "User Foo logging off"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "Node 353 stopping",
+   "kmsg": "Node 353 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "GC pause young generation 80ms, heap 80MB->80MB",
+   "kmsg": "GC pause young generation 80ms, heap 80MB->80MB",
+   "other": "Transaction e169f2e6 rolled back due to deadlock on table users"
+  },
+  {
+   "g": "g0",
+   "n": 9
+  },
+  {
+   "g": "g1",
+   "n": 3
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Heartbeat received from worker eve@host27.example.com",
+   "kmsg": "Heartbeat received from worker eve@host27.example.com"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Node 173 stopping",
+   "kmsg": "Node 173 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 5,
+   "msg": "Node 299 stopping",
+   "kmsg": "Node 299 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "Shutting down service users gracefully, 165 requests in flight",
+   "kmsg": "Shutting down service users gracefully, 165 requests in flight"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "Transaction 760945b3 rolled back due to deadlock on table payments",
+   "kmsg": "Transaction 760945b3 rolled back due to deadlock on table payments"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g2",
+   "n": 4,
+   "msg": "Node 142 stopping",
+   "kmsg": "Node 142 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "Node 481 stopping",
+   "kmsg": "Node 481 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "User eve logging off",
+   "kmsg": "User eve logging off",
+   "other": "User dave logging on"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "Request GET /api/v1/items/14 completed in 14ms",
+   "kmsg": "Request GET /api/v1/items/14 completed in 14ms",
+   "other": "Connection from 10.106.135.192 accepted"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": [
+    "Request GET /api/v1/items/213 completed in 213ms",
+    "User alice logging off"
+   ]
+  },
+  {
+   "g": "g1",
+   "n": 7,
+   "msg": "Request GET /api/v1/items/105 completed in 105ms",
+   "kmsg": "Request GET /api/v1/items/105 completed in 105ms",
+   "other": "Failed to connect to 10.214.10.129:443 after 31 attempts"
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "User eve logging on",
+   "kmsg": "User eve logging on"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "Request GET /api/v1/items/331 completed in 331ms",
+   "kmsg": "Request GET /api/v1/items/331 completed in 331ms",
+   "other": "Heartbeat received from worker Foo@host426.example.com"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "\n  \nDisk usage at 429% on /dev/sdc\n\tat com.example.Foo.bar(Foo.java:83)\n\tat com.example.Main",
+   "kmsg": "\n  \nDisk usage at 429% on /dev/sdc\n\tat com.example.Foo.bar(Foo.java:83)\n\tat com.example.Main"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Node 276 stopping",
+   "kmsg": "Node 276 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "GC pause young generation 75ms, heap 75MB->75MB",
+   "kmsg": "GC pause young generation 75ms, heap 75MB->75MB"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "Transaction 1957999b committed",
+   "kmsg": "Transaction 1957999b committed"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": [
+    "Scheduled job bob-202 finished on Monday at 202:00 UTC",
+    "Node 254 starting"
+   ],
+   "other": "Cache miss for key session_0c3a706c in region eu-west-395"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "Shutting down service items gracefully, 146 requests in flight",
+   "kmsg": "Shutting down service items gracefully, 146 requests in flight"
+  },
+  {
+   "g": "g1",
+   "n": 5,
+   "msg": "Cache miss for key session_4b5291e3 in region eu-west-104",
+   "kmsg": "Cache miss for key session_4b5291e3 in region eu-west-104"
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": "Node 452 starting",
+   "kmsg": "Node 452 starting",
+   "other": "Disk usage at 452% on /dev/sda"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": [
+    "Starting service items version 9.9.9",
+    "Out of memory: killed process 112 (items) score 112"
+   ]
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "Disk usage at 34% on /dev/sdc",
+   "kmsg": "Disk usage at 34% on /dev/sdc"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "Node 406 starting",
+   "kmsg": "Node 406 starting"
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": [
+    "Connection from 10.156.56.19 accepted",
+    "Out of memory: killed process 247 (users) score 247"
+   ]
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "\n  \nNode 214 stopping\n\tat com.example.Foo.bar(Foo.java:52)\n\tat com.example.Main",
+   "kmsg": "\n  \nNode 214 stopping\n\tat com.example.Foo.bar(Foo.java:52)\n\tat com.example.Main",
+   "other": "User eve logging on"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "Shutting down service users gracefully, 425 requests in flight",
+   "kmsg": "Shutting down service users gracefully, 425 requests in flight"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "Node 43 stopping",
+   "kmsg": "Node 43 stopping",
+   "other": "Node 403 starting"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "User Foo logging on",
+   "kmsg": "User Foo logging on"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "Node 88 starting",
+   "kmsg": "Node 88 starting"
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "Failed to connect to 10.64.95.86:80 after 477 attempts",
+   "kmsg": "Failed to connect to 10.64.95.86:80 after 477 attempts",
+   "other": "Transaction 7e186932 rolled back due to deadlock on table users"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Starting service users version 402.402.402",
+   "kmsg": "Starting service users version 402.402.402"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "Scheduled job eve-430 finished on Monday at 430:00 UTC",
+   "kmsg": "Scheduled job eve-430 finished on Monday at 430:00 UTC"
+  },
+  {
+   "g": "g2",
+   "n": 4,
+   "msg": "Node 288 starting",
+   "kmsg": "Node 288 starting"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": [
+    "Request POST /api/v1/orders completed in 64ms with status 201",
+    "Connection from 10.165.101.151 accepted"
+   ]
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": [
+    "Transaction f3ff3c88 rolled back due to deadlock on table items",
+    "User eve logging off"
+   ]
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Node 366 starting",
+   "kmsg": "Node 366 starting",
+   "other": "Disk usage at 263% on /dev/sdb"
+  },
+  {
+   "g": "g0",
+   "n": 0,
+   "msg": "\n  \nUser alice logging on\n\tat com.example.Foo.bar(Foo.java:92)\n\tat com.example.Main",
+   "kmsg": "\n  \nUser alice logging on\n\tat com.example.Foo.bar(Foo.java:92)\n\tat com.example.Main"
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": "User mallory logging on",
+   "kmsg": "User mallory logging on"
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "Scheduled job Foo-85 finished on Monday at 85:00 UTC",
+   "kmsg": "Scheduled job Foo-85 finished on Monday at 85:00 UTC"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "error: cannot open file C:\\logs\\app141.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app141.log: access denied",
+   "other": "Connection from 10.208.159.82 accepted"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "Scheduled job Foo-334 finished on Monday at 334:00 UTC",
+   "kmsg": "Scheduled job Foo-334 finished on Monday at 334:00 UTC",
+   "other": "Transaction def42f7d rolled back due to deadlock on table items"
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "Node 243 starting",
+   "kmsg": "Node 243 starting",
+   "other": "Cache miss for key session_b524c186 in region eu-west-183"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Node 406 starting",
+   "kmsg": "Node 406 starting",
+   "other": "Scheduled job eve-165 finished on Monday at 165:00 UTC"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "User eve logging on",
+   "kmsg": "User eve logging on"
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "Node 270 starting",
+   "kmsg": "Node 270 starting",
+   "other": "Out of memory: killed process 131 (users) score 131"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "User dave logging on",
+   "kmsg": "User dave logging on"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "Connection from 10.193.207.246 accepted",
+   "kmsg": "Connection from 10.193.207.246 accepted"
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "Cache miss for key session_d250fb69 in region eu-west-472",
+   "kmsg": "Cache miss for key session_d250fb69 in region eu-west-472"
+  },
+  {
+   "g": "g0",
+   "n": 1
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "Node 288 stopping",
+   "kmsg": "Node 288 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Node 209 stopping",
+   "kmsg": "Node 209 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "other": "Transaction e65c86a5 rolled back due to deadlock on table orders"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "Node 164 stopping",
+   "kmsg": "Node 164 stopping",
+   "other": "User eve logging off"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "Failed to connect to 10.247.112.76:5432 after 306 attempts",
+   "kmsg": "Failed to connect to 10.247.112.76:5432 after 306 attempts"
+  },
+  {
+   "g": "g0",
+   "n": 8,
+   "msg": "Transaction dd45d4ae rolled back due to deadlock on table items",
+   "kmsg": "Transaction dd45d4ae rolled back due to deadlock on table items"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "User bob logging on",
+   "kmsg": "User bob logging on"
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "Request GET /api/v1/items/337 completed in 337ms",
+   "kmsg": "Request GET /api/v1/items/337 completed in 337ms"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Disk usage at 262% on /dev/sdb",
+   "kmsg": "Disk usage at 262% on /dev/sdb"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "Transaction 86b80253 rolled back due to deadlock on table orders",
+   "kmsg": "Transaction 86b80253 rolled back due to deadlock on table orders",
+   "other": "Request GET /api/v1/items/353 completed in 353ms"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "Node 465 stopping",
+   "kmsg": "Node 465 stopping",
+   "other": "Node 374 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": [
+    "Scheduled job eve-496 finished on Monday at 496:00 UTC",
+    "User alice logging on"
+   ],
+   "other": "Connection from 10.51.2.22 accepted"
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "Shutting down service items gracefully, 401 requests in flight",
+   "kmsg": "Shutting down service items gracefully, 401 requests in flight"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "other": "Scheduled job eve-34 finished on Monday at 34:00 UTC"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "Cache miss for key session_3d4790fe in region eu-west-62",
+   "kmsg": "Cache miss for key session_3d4790fe in region eu-west-62"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "\n  \nConnection from 10.243.245.216 accepted\n\tat com.example.Foo.bar(Foo.java:88)\n\tat com.example.Main",
+   "kmsg": "\n  \nConnection from 10.243.245.216 accepted\n\tat com.example.Foo.bar(Foo.java:88)\n\tat com.example.Main"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "Failed to connect to 10.186.111.172:5432 after 374 attempts",
+   "kmsg": "Failed to connect to 10.186.111.172:5432 after 374 attempts",
+   "other": "User eve logging on"
+  },
+  {
+   "g": "g2",
+   "n": 4,
+   "msg": "Request POST /api/v1/orders completed in 137ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 137ms with status 201"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "Failed to connect to 10.86.253.31:9200 after 270 attempts",
+   "kmsg": "Failed to connect to 10.86.253.31:9200 after 270 attempts"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "Failed to connect to 10.250.200.166:80 after 95 attempts",
+   "kmsg": "Failed to connect to 10.250.200.166:80 after 95 attempts",
+   "other": "Disk usage at 10% on /dev/sda"
+  },
+  {
+   "g": "g2",
+   "n": 4,
+   "msg": "Connection from 10.61.78.250 accepted",
+   "kmsg": "Connection from 10.61.78.250 accepted"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": [
+    "Connection from 10.32.212.57 accepted",
+    "Request POST /api/v1/orders completed in 494ms with status 201"
+   ]
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "Node 52 starting",
+   "kmsg": "Node 52 starting",
+   "other": "GC pause young generation 434ms, heap 434MB->434MB"
+  },
+  {
+   "g": "g2",
+   "n": 8
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "User Foo logging off",
+   "kmsg": "User Foo logging off"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "Node 102 stopping",
+   "kmsg": "Node 102 stopping",
+   "other": "User carol logging off"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "Failed to connect to 10.40.240.108:5432 after 299 attempts",
+   "kmsg": "Failed to connect to 10.40.240.108:5432 after 299 attempts",
+   "other": "Disk usage at 89% on /dev/sda"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "Node 246 starting",
+   "kmsg": "Node 246 starting",
+   "other": "Shutting down service orders gracefully, 41 requests in flight"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "Node 347 starting",
+   "kmsg": "Node 347 starting",
+   "other": "Request POST /api/v1/orders completed in 117ms with status 201"
+  },
+  {
+   "g": "g2",
+   "n": 4,
+   "msg": "error: cannot open file C:\\logs\\app371.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app371.log: access denied"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "\n  \nNode 438 stopping\n\tat com.example.Foo.bar(Foo.java:7)\n\tat com.example.Main",
+   "kmsg": "\n  \nNode 438 stopping\n\tat com.example.Foo.bar(Foo.java:7)\n\tat com.example.Main",
+   "other": "User mallory logging off"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "Node 450 stopping",
+   "kmsg": "Node 450 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Node 352 stopping",
+   "kmsg": "Node 352 stopping",
+   "other": "Node 303 starting"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Failed to connect to 10.185.13.4:5432 after 188 attempts",
+   "kmsg": "Failed to connect to 10.185.13.4:5432 after 188 attempts"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "Connection from 10.179.166.244 accepted",
+   "kmsg": "Connection from 10.179.166.244 accepted"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "Disk usage at 4% on /dev/sda",
+   "kmsg": "Disk usage at 4% on /dev/sda",
+   "other": "Starting service users version 341.341.341"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "\n  \nDisk usage at 353% on /dev/sda\n\tat com.example.Foo.bar(Foo.java:80)\n\tat com.example.Main",
+   "kmsg": "\n  \nDisk usage at 353% on /dev/sda\n\tat com.example.Foo.bar(Foo.java:80)\n\tat com.example.Main"
+  },
+  {
+   "g": "g1",
+   "n": 7,
+   "msg": "User mallory logging off",
+   "kmsg": "User mallory logging off"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "Node 318 starting",
+   "kmsg": "Node 318 starting"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "Request GET /api/v1/items/444 completed in 444ms",
+   "kmsg": "Request GET /api/v1/items/444 completed in 444ms"
+  },
+  {
+   "g": "g1",
+   "n": 7,
+   "msg": "Payment of 283.283 EUR authorised for customer bob",
+   "kmsg": "Payment of 283.283 EUR authorised for customer bob"
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "Node 136 starting",
+   "kmsg": "Node 136 starting",
+   "other": "error: cannot open file C:\\logs\\app146.log: access denied"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "Connection from 10.32.76.17 accepted",
+   "kmsg": "Connection from 10.32.76.17 accepted",
+   "other": "Transaction 98113efc committed"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "\n  \nGC pause young generation 158ms, heap 158MB->158MB\n\tat com.example.Foo.bar(Foo.java:47)\n\tat com.example.Main",
+   "kmsg": "\n  \nGC pause young generation 158ms, heap 158MB->158MB\n\tat com.example.Foo.bar(Foo.java:47)\n\tat com.example.Main",
+   "other": "Transaction 04ad175b committed"
+  },
+  {
+   "g": "g2",
+   "n": 4,
+   "msg": "User carol logging off",
+   "kmsg": "User carol logging off"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Disk usage at 71% on /dev/sda",
+   "kmsg": "Disk usage at 71% on /dev/sda"
+  },
+  {
+   "g": "g1",
+   "n": 7
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "User Foo logging on",
+   "kmsg": "User Foo logging on",
+   "other": "Shutting down service payments gracefully, 157 requests in flight"
+  },
+  {
+   "g": "g0",
+   "n": 1,
+   "msg": "Node 497 starting",
+   "kmsg": "Node 497 starting"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "GC pause young generation 149ms, heap 149MB->149MB",
+   "kmsg": "GC pause young generation 149ms, heap 149MB->149MB"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "error: cannot open file C:\\logs\\app271.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app271.log: access denied"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Node 348 starting",
+   "kmsg": "Node 348 starting"
+  },
+  {
+   "g": "g1",
+   "n": 0
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "User eve logging off",
+   "kmsg": "User eve logging off",
+   "other": "Node 422 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Starting service items version 228.228.228",
+   "kmsg": "Starting service items version 228.228.228"
+  },
+  {
+   "g": "g1",
+   "n": 2
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": "Failed to connect to 10.161.187.147:80 after 386 attempts",
+   "kmsg": "Failed to connect to 10.161.187.147:80 after 386 attempts",
+   "other": "Shutting down service users gracefully, 256 requests in flight"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Scheduled job dave-430 finished on Monday at 430:00 UTC",
+   "kmsg": "Scheduled job dave-430 finished on Monday at 430:00 UTC",
+   "other": "Node 58 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "Cache miss for key session_0a0fe6bc in region eu-west-289",
+   "kmsg": "Cache miss for key session_0a0fe6bc in region eu-west-289"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": [
+    "User dave logging on",
+    "Transaction 73557455 committed"
+   ]
+  },
+  {
+   "g": "g0",
+   "n": 8,
+   "msg": "Request POST /api/v1/orders completed in 169ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 169ms with status 201"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "User eve logging on",
+   "kmsg": "User eve logging on"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "Scheduled job eve-114 finished on Monday at 114:00 UTC",
+   "kmsg": "Scheduled job eve-114 finished on Monday at 114:00 UTC"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Request GET /api/v1/items/43 completed in 43ms",
+   "kmsg": "Request GET /api/v1/items/43 completed in 43ms"
+  },
+  {
+   "g": "g1",
+   "n": 7,
+   "msg": "Node 254 stopping",
+   "kmsg": "Node 254 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "GC pause young generation 319ms, heap 319MB->319MB",
+   "kmsg": "GC pause young generation 319ms, heap 319MB->319MB",
+   "other": "Payment of 33.33 EUR authorised for customer dave"
+  },
+  {
+   "g": "g0",
+   "n": 6,
+   "msg": "Transaction b87ac625 rolled back due to deadlock on table items",
+   "kmsg": "Transaction b87ac625 rolled back due to deadlock on table items"
+  },
+  {
+   "g": "g1",
+   "n": 7,
+   "msg": "User Foo logging on",
+   "kmsg": "User Foo logging on"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "Payment of 263.263 EUR authorised for customer alice",
+   "kmsg": "Payment of 263.263 EUR authorised for customer alice"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "\n  \nStarting service orders version 418.418.418\n\tat com.example.Foo.bar(Foo.java:60)\n\tat com.example.Main",
+   "kmsg": "\n  \nStarting service orders version 418.418.418\n\tat com.example.Foo.bar(Foo.java:60)\n\tat com.example.Main"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": [
+    "Node 444 stopping",
+    "Disk usage at 227% on /dev/sdc"
+   ]
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Transaction a3992e6a committed",
+   "kmsg": "Transaction a3992e6a committed"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": [
+    "Request POST /api/v1/orders completed in 167ms with status 201",
+    "Transaction 83621313 committed"
+   ],
+   "other": "Out of memory: killed process 313 (orders) score 313"
+  },
+  {
+   "g": "g1",
+   "n": 3
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": [
+    "Scheduled job Foo-20 finished on Monday at 20:00 UTC",
+    "Transaction 408b124e rolled back due to deadlock on table users"
+   ]
+  },
+  {
+   "g": "g0",
+   "n": 8,
+   "msg": "User mallory logging on",
+   "kmsg": "User mallory logging on",
+   "other": "Disk usage at 200% on /dev/sdb"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "Node 251 stopping",
+   "kmsg": "Node 251 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "User Foo logging off",
+   "kmsg": "User Foo logging off"
+  },
+  {
+   "g": "g0",
+   "n": 1,
+   "msg": "Node 249 stopping",
+   "kmsg": "Node 249 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 8,
+   "msg": "Request POST /api/v1/orders completed in 138ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 138ms with status 201",
+   "other": "Node 248 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 4,
+   "msg": "Node 38 starting",
+   "kmsg": "Node 38 starting"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "User eve logging off",
+   "kmsg": "User eve logging off"
+  },
+  {
+   "g": "g1",
+   "n": 8,
+   "msg": "Connection from 10.82.222.35 accepted",
+   "kmsg": "Connection from 10.82.222.35 accepted"
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "other": "Node 254 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "Request POST /api/v1/orders completed in 282ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 282ms with status 201"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "Failed to connect to 10.146.189.98:80 after 359 attempts",
+   "kmsg": "Failed to connect to 10.146.189.98:80 after 359 attempts",
+   "other": "Transaction 529d42ab committed"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Node 124 starting",
+   "kmsg": "Node 124 starting",
+   "other": "Transaction 5ac407ed rolled back due to deadlock on table items"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "Disk usage at 455% on /dev/sdb",
+   "kmsg": "Disk usage at 455% on /dev/sdb"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "GC pause young generation 259ms, heap 259MB->259MB",
+   "kmsg": "GC pause young generation 259ms, heap 259MB->259MB",
+   "other": "Node 97 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "Failed to connect to 10.219.3.68:9200 after 41 attempts",
+   "kmsg": "Failed to connect to 10.219.3.68:9200 after 41 attempts"
+  },
+  {
+   "g": "g0",
+   "n": 0,
+   "msg": "Failed to connect to 10.160.163.82:443 after 414 attempts",
+   "kmsg": "Failed to connect to 10.160.163.82:443 after 414 attempts"
+  },
+  {
+   "g": "g1",
+   "n": 3
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "Node 29 stopping",
+   "kmsg": "Node 29 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 1
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": "Node 426 stopping",
+   "kmsg": "Node 426 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 0
+  },
+  {
+   "g": "g0",
+   "n": 0,
+   "msg": "User bob logging on",
+   "kmsg": "User bob logging on"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "Out of memory: killed process 457 (items) score 457",
+   "kmsg": "Out of memory: killed process 457 (items) score 457"
+  },
+  {
+   "g": "g2",
+   "n": 4
+  },
+  {
+   "g": "g0",
+   "n": 0,
+   "msg": "User eve logging on",
+   "kmsg": "User eve logging on"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "GC pause young generation 353ms, heap 353MB->353MB",
+   "kmsg": "GC pause young generation 353ms, heap 353MB->353MB"
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "error: cannot open file C:\\logs\\app369.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app369.log: access denied",
+   "other": "User eve logging off"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "Node 461 starting",
+   "kmsg": "Node 461 starting",
+   "other": "Node 139 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "\n  \nFailed to connect to 10.97.52.104:443 after 75 attempts\n\tat com.example.Foo.bar(Foo.java:90)\n\tat com.example.Main",
+   "kmsg": "\n  \nFailed to connect to 10.97.52.104:443 after 75 attempts\n\tat com.example.Foo.bar(Foo.java:90)\n\tat com.example.Main",
+   "other": "Starting service orders version 175.175.175"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "\n  \nConnection from 10.185.42.219 accepted\n\tat com.example.Foo.bar(Foo.java:28)\n\tat com.example.Main",
+   "kmsg": "\n  \nConnection from 10.185.42.219 accepted\n\tat com.example.Foo.bar(Foo.java:28)\n\tat com.example.Main"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "Heartbeat received from worker Foo@host256.example.com",
+   "kmsg": "Heartbeat received from worker Foo@host256.example.com"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "Cache miss for key session_0d8321f4 in region eu-west-421",
+   "kmsg": "Cache miss for key session_0d8321f4 in region eu-west-421"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Transaction 2234ca52 committed",
+   "kmsg": "Transaction 2234ca52 committed"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Out of memory: killed process 102 (users) score 102",
+   "kmsg": "Out of memory: killed process 102 (users) score 102"
+  },
+  {
+   "g": "g1",
+   "n": 5,
+   "msg": "User alice logging on",
+   "kmsg": "User alice logging on"
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g0",
+   "n": 8,
+   "msg": "Node 77 stopping",
+   "kmsg": "Node 77 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": "Node 418 stopping",
+   "kmsg": "Node 418 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": "User mallory logging on",
+   "kmsg": "User mallory logging on"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "Node 307 starting",
+   "kmsg": "Node 307 starting"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "Connection from 10.204.231.68 accepted",
+   "kmsg": "Connection from 10.204.231.68 accepted"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "error: cannot open file C:\\logs\\app354.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app354.log: access denied",
+   "other": "Node 233 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "Node 75 starting",
+   "kmsg": "Node 75 starting"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Payment of 82.82 EUR authorised for customer alice",
+   "kmsg": "Payment of 82.82 EUR authorised for customer alice"
+  },
+  {
+   "g": "g0",
+   "n": 1,
+   "msg": [
+    "Node 209 starting",
+    "Disk usage at 51% on /dev/sda"
+   ]
+  },
+  {
+   "g": "g1",
+   "n": 7,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "User alice logging off",
+   "kmsg": "User alice logging off"
+  },
+  {
+   "g": "g0",
+   "n": 1,
+   "msg": "error: cannot open file C:\\logs\\app405.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app405.log: access denied"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "\n  \nTransaction 1b183c28 committed\n\tat com.example.Foo.bar(Foo.java:95)\n\tat com.example.Main",
+   "kmsg": "\n  \nTransaction 1b183c28 committed\n\tat com.example.Foo.bar(Foo.java:95)\n\tat com.example.Main",
+   "other": "Connection from 10.178.223.74 accepted"
+  },
+  {
+   "g": "g2",
+   "n": 4,
+   "msg": [
+    "Node 246 stopping",
+    "Request GET /api/v1/items/119 completed in 119ms"
+   ]
+  },
+  {
+   "g": "g0",
+   "n": 0,
+   "msg": "Node 466 stopping",
+   "kmsg": "Node 466 stopping",
+   "other": "User Foo logging on"
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": "Cache miss for key session_3a975e28 in region eu-west-174",
+   "kmsg": "Cache miss for key session_3a975e28 in region eu-west-174"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "\n  \nDisk usage at 271% on /dev/sda\n\tat com.example.Foo.bar(Foo.java:26)\n\tat com.example.Main",
+   "kmsg": "\n  \nDisk usage at 271% on /dev/sda\n\tat com.example.Foo.bar(Foo.java:26)\n\tat com.example.Main"
+  },
+  {
+   "g": "g0",
+   "n": 6,
+   "msg": "\n  \nUser mallory logging off\n\tat com.example.Foo.bar(Foo.java:40)\n\tat com.example.Main",
+   "kmsg": "\n  \nUser mallory logging off\n\tat com.example.Foo.bar(Foo.java:40)\n\tat com.example.Main"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": [
+    "Failed to connect to 10.200.65.41:5432 after 183 attempts",
+    "Shutting down service payments gracefully, 343 requests in flight"
+   ]
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": [
+    "Failed to connect to 10.245.31.191:443 after 47 attempts",
+    "User mallory logging off"
+   ]
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "Request POST /api/v1/orders completed in 272ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 272ms with status 201"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Node 85 starting",
+   "kmsg": "Node 85 starting"
+  },
+  {
+   "g": "g0",
+   "n": 6,
+   "msg": "error: cannot open file C:\\logs\\app282.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app282.log: access denied",
+   "other": "GC pause young generation 28ms, heap 28MB->28MB"
+  },
+  {
+   "g": "g1",
+   "n": 0
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": "User dave logging off",
+   "kmsg": "User dave logging off",
+   "other": "Connection from 10.83.112.242 accepted"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "Cache miss for key session_5e024edc in region eu-west-494",
+   "kmsg": "Cache miss for key session_5e024edc in region eu-west-494"
+  },
+  {
+   "g": "g1",
+   "n": 8,
+   "msg": "Node 141 stopping",
+   "kmsg": "Node 141 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": "Connection from 10.127.18.225 accepted",
+   "kmsg": "Connection from 10.127.18.225 accepted"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "Connection from 10.129.73.97 accepted",
+   "kmsg": "Connection from 10.129.73.97 accepted",
+   "other": "Connection from 10.223.184.59 accepted"
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": [
+    "Request GET /api/v1/items/342 completed in 342ms",
+    "Transaction 149185ce rolled back due to deadlock on table payments"
+   ]
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "error: cannot open file C:\\logs\\app245.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app245.log: access denied"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "\n  \nUser eve logging off\n\tat com.example.Foo.bar(Foo.java:81)\n\tat com.example.Main",
+   "kmsg": "\n  \nUser eve logging off\n\tat com.example.Foo.bar(Foo.java:81)\n\tat com.example.Main",
+   "other": "Node 478 starting"
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": "Node 364 starting",
+   "kmsg": "Node 364 starting"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": [
+    "Transaction 94e880a7 committed",
+    "Node 121 stopping"
+   ],
+   "other": "User Foo logging off"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": [
+    "Disk usage at 358% on /dev/sdb",
+    "Cache miss for key session_26d1cb54 in region eu-west-204"
+   ]
+  },
+  {
+   "g": "g1",
+   "n": 7,
+   "msg": "User Foo logging off",
+   "kmsg": "User Foo logging off"
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": "Node 157 starting",
+   "kmsg": "Node 157 starting"
+  },
+  {
+   "g": "g0",
+   "n": 6,
+   "msg": "\n  \nRequest POST /api/v1/orders completed in 116ms with status 201\n\tat com.example.Foo.bar(Foo.java:93)\n\tat com.example.Main",
+   "kmsg": "\n  \nRequest POST /api/v1/orders completed in 116ms with status 201\n\tat com.example.Foo.bar(Foo.java:93)\n\tat com.example.Main"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "Transaction 06de75fd committed",
+   "kmsg": "Transaction 06de75fd committed"
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "User carol logging on",
+   "kmsg": "User carol logging on",
+   "other": "Transaction 67e460a8 rolled back due to deadlock on table payments"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "Node 300 starting",
+   "kmsg": "Node 300 starting"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "Out of memory: killed process 307 (payments) score 307",
+   "kmsg": "Out of memory: killed process 307 (payments) score 307"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "Connection from 10.236.115.233 accepted",
+   "kmsg": "Connection from 10.236.115.233 accepted"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "Node 46 starting",
+   "kmsg": "Node 46 starting"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "Node 435 starting",
+   "kmsg": "Node 435 starting"
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": "Cache miss for key session_bd0625b0 in region eu-west-429",
+   "kmsg": "Cache miss for key session_bd0625b0 in region eu-west-429"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "Transaction c062b304 rolled back due to deadlock on table users",
+   "kmsg": "Transaction c062b304 rolled back due to deadlock on table users"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "Transaction b1ca2df5 committed",
+   "kmsg": "Transaction b1ca2df5 committed"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "Node 264 starting",
+   "kmsg": "Node 264 starting"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "Connection from 10.34.241.247 accepted",
+   "kmsg": "Connection from 10.34.241.247 accepted",
+   "other": "Request GET /api/v1/items/132 completed in 132ms"
+  },
+  {
+   "g": "g1",
+   "n": 5,
+   "msg": "Disk usage at 280% on /dev/sdb",
+   "kmsg": "Disk usage at 280% on /dev/sdb"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "12345 67890 ---",
+   "other": "error: cannot open file C:\\logs\\app311.log: access denied"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "Connection from 10.240.89.101 accepted",
+   "kmsg": "Connection from 10.240.89.101 accepted"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Node 420 stopping",
+   "kmsg": "Node 420 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 6,
+   "msg": "Request GET /api/v1/items/468 completed in 468ms",
+   "kmsg": "Request GET /api/v1/items/468 completed in 468ms",
+   "other": "Disk usage at 261% on /dev/sda"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "Node 335 starting",
+   "kmsg": "Node 335 starting"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Starting service items version 102.102.102",
+   "kmsg": "Starting service items version 102.102.102",
+   "other": "User alice logging off"
+  },
+  {
+   "g": "g0",
+   "n": 1,
+   "msg": "Transaction d8087249 committed",
+   "kmsg": "Transaction d8087249 committed"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "error: cannot open file C:\\logs\\app261.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app261.log: access denied",
+   "other": "Heartbeat received from worker alice@host316.example.com"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Heartbeat received from worker mallory@host192.example.com",
+   "kmsg": "Heartbeat received from worker mallory@host192.example.com",
+   "other": "error: cannot open file C:\\logs\\app169.log: access denied"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "User eve logging on",
+   "kmsg": "User eve logging on"
+  },
+  {
+   "g": "g1",
+   "n": 8,
+   "msg": "error: cannot open file C:\\logs\\app467.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app467.log: access denied"
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": "Node 276 stopping",
+   "kmsg": "Node 276 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 6,
+   "msg": "Node 123 starting",
+   "kmsg": "Node 123 starting",
+   "other": "Node 153 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "Transaction 6327c6cc committed",
+   "kmsg": "Transaction 6327c6cc committed"
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "User alice logging off",
+   "kmsg": "User alice logging off",
+   "other": "Request GET /api/v1/items/406 completed in 406ms"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "User Foo logging on",
+   "kmsg": "User Foo logging on",
+   "other": "GC pause young generation 277ms, heap 277MB->277MB"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": [
+    "User eve logging off",
+    "Shutting down service items gracefully, 271 requests in flight"
+   ],
+   "other": "Node 220 starting"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "GC pause young generation 319ms, heap 319MB->319MB",
+   "kmsg": "GC pause young generation 319ms, heap 319MB->319MB",
+   "other": "Connection from 10.1.142.37 accepted"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "User eve logging off",
+   "kmsg": "User eve logging off"
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "User Foo logging on",
+   "kmsg": "User Foo logging on",
+   "other": "Failed to connect to 10.223.47.220:5432 after 224 attempts"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "Node 431 starting",
+   "kmsg": "Node 431 starting"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "Request POST /api/v1/orders completed in 190ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 190ms with status 201"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "Heartbeat received from worker dave@host47.example.com",
+   "kmsg": "Heartbeat received from worker dave@host47.example.com"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "other": "Node 490 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "Node 124 stopping",
+   "kmsg": "Node 124 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "\n  \nTransaction 63417dcb rolled back due to deadlock on table payments\n\tat com.example.Foo.bar(Foo.java:67)\n\tat com.example.Main",
+   "kmsg": "\n  \nTransaction 63417dcb rolled back due to deadlock on table payments\n\tat com.example.Foo.bar(Foo.java:67)\n\tat com.example.Main"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "Disk usage at 233% on /dev/sdc",
+   "kmsg": "Disk usage at 233% on /dev/sdc"
+  },
+  {
+   "g": "g1",
+   "n": 8,
+   "msg": "Node 219 starting",
+   "kmsg": "Node 219 starting"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Scheduled job mallory-425 finished on Monday at 425:00 UTC",
+   "kmsg": "Scheduled job mallory-425 finished on Monday at 425:00 UTC"
+  },
+  {
+   "g": "g0",
+   "n": 1,
+   "msg": "User mallory logging off",
+   "kmsg": "User mallory logging off"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "Transaction a659c325 rolled back due to deadlock on table orders",
+   "kmsg": "Transaction a659c325 rolled back due to deadlock on table orders",
+   "other": "Request GET /api/v1/items/128 completed in 128ms"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "Node 474 starting",
+   "kmsg": "Node 474 starting",
+   "other": "Node 467 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "Transaction 579b4945 committed",
+   "kmsg": "Transaction 579b4945 committed"
+  },
+  {
+   "g": "g1",
+   "n": 8,
+   "msg": "\n  \nUser bob logging off\n\tat com.example.Foo.bar(Foo.java:80)\n\tat com.example.Main",
+   "kmsg": "\n  \nUser bob logging off\n\tat com.example.Foo.bar(Foo.java:80)\n\tat com.example.Main",
+   "other": "GC pause young generation 152ms, heap 152MB->152MB"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "Node 146 starting",
+   "kmsg": "Node 146 starting",
+   "other": "Failed to connect to 10.119.97.51:443 after 83 attempts"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Connection from 10.237.167.182 accepted",
+   "kmsg": "Connection from 10.237.167.182 accepted",
+   "other": "Transaction 97686543 committed"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "Node 41 stopping",
+   "kmsg": "Node 41 stopping",
+   "other": "User bob logging off"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Node 365 starting",
+   "kmsg": "Node 365 starting"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Node 202 starting",
+   "kmsg": "Node 202 starting",
+   "other": "User alice logging off"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "Request POST /api/v1/orders completed in 392ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 392ms with status 201"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "error: cannot open file C:\\logs\\app80.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app80.log: access denied"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": "Out of memory: killed process 185 (orders) score 185",
+   "kmsg": "Out of memory: killed process 185 (orders) score 185",
+   "other": "Connection from 10.231.87.178 accepted"
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": [
+    "Transaction ac9f3f6f rolled back due to deadlock on table payments",
+    "Heartbeat received from worker eve@host262.example.com"
+   ]
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "\n  \nConnection from 10.119.82.101 accepted\n\tat com.example.Foo.bar(Foo.java:67)\n\tat com.example.Main",
+   "kmsg": "\n  \nConnection from 10.119.82.101 accepted\n\tat com.example.Foo.bar(Foo.java:67)\n\tat com.example.Main"
+  },
+  {
+   "g": "g1",
+   "n": 8,
+   "msg": "Request GET /api/v1/items/371 completed in 371ms",
+   "kmsg": "Request GET /api/v1/items/371 completed in 371ms"
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": [
+    "Node 449 starting",
+    "User bob logging off"
+   ]
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "\n  \nNode 344 stopping\n\tat com.example.Foo.bar(Foo.java:28)\n\tat com.example.Main",
+   "kmsg": "\n  \nNode 344 stopping\n\tat com.example.Foo.bar(Foo.java:28)\n\tat com.example.Main",
+   "other": "Transaction a095472e committed"
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": "Node 253 starting",
+   "kmsg": "Node 253 starting"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Node 358 stopping",
+   "kmsg": "Node 358 stopping",
+   "other": "User bob logging on"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "Failed to connect to 10.239.101.57:5432 after 84 attempts",
+   "kmsg": "Failed to connect to 10.239.101.57:5432 after 84 attempts",
+   "other": "Node 440 starting"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "\n  \nUser alice logging off\n\tat com.example.Foo.bar(Foo.java:47)\n\tat com.example.Main",
+   "kmsg": "\n  \nUser alice logging off\n\tat com.example.Foo.bar(Foo.java:47)\n\tat com.example.Main"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Request GET /api/v1/items/184 completed in 184ms",
+   "kmsg": "Request GET /api/v1/items/184 completed in 184ms"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "User Foo logging off",
+   "kmsg": "User Foo logging off"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "User bob logging off",
+   "kmsg": "User bob logging off"
+  },
+  {
+   "g": "g2",
+   "n": 4,
+   "msg": "Node 399 stopping",
+   "kmsg": "Node 399 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "User dave logging on",
+   "kmsg": "User dave logging on"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "Node 122 starting",
+   "kmsg": "Node 122 starting"
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": "Payment of 481.481 EUR authorised for customer Foo",
+   "kmsg": "Payment of 481.481 EUR authorised for customer Foo"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "GC pause young generation 57ms, heap 57MB->57MB",
+   "kmsg": "GC pause young generation 57ms, heap 57MB->57MB"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": [
+    "User carol logging on",
+    "error: cannot open file C:\\logs\\app290.log: access denied"
+   ],
+   "other": "Node 157 starting"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "User alice logging on",
+   "kmsg": "User alice logging on",
+   "other": "Disk usage at 471% on /dev/sdb"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "GC pause young generation 278ms, heap 278MB->278MB",
+   "kmsg": "GC pause young generation 278ms, heap 278MB->278MB"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "User bob logging off",
+   "kmsg": "User bob logging off"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "Disk usage at 284% on /dev/sdb",
+   "kmsg": "Disk usage at 284% on /dev/sdb"
+  },
+  {
+   "g": "g0",
+   "n": 1,
+   "msg": "Node 129 starting",
+   "kmsg": "Node 129 starting"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "Node 343 starting",
+   "kmsg": "Node 343 starting"
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": "12345 67890 ---",
+   "other": "Node 228 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "Heartbeat received from worker carol@host452.example.com",
+   "kmsg": "Heartbeat received from worker carol@host452.example.com"
+  },
+  {
+   "g": "g1",
+   "n": 7,
+   "msg": "Node 484 starting",
+   "kmsg": "Node 484 starting"
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": "Transaction 5236fded committed",
+   "kmsg": "Transaction 5236fded committed"
+  },
+  {
+   "g": "g0",
+   "n": 8,
+   "msg": "User alice logging off",
+   "kmsg": "User alice logging off",
+   "other": "Request GET /api/v1/items/186 completed in 186ms"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "\n  \nHeartbeat received from worker carol@host108.example.com\n\tat com.example.Foo.bar(Foo.java:72)\n\tat com.example.Main",
+   "kmsg": "\n  \nHeartbeat received from worker carol@host108.example.com\n\tat com.example.Foo.bar(Foo.java:72)\n\tat com.example.Main",
+   "other": "Node 483 starting"
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": "Node 132 starting",
+   "kmsg": "Node 132 starting"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "\n  \nFailed to connect to 10.98.108.101:9200 after 479 attempts\n\tat com.example.Foo.bar(Foo.java:6)\n\tat com.example.Main",
+   "kmsg": "\n  \nFailed to connect to 10.98.108.101:9200 after 479 attempts\n\tat com.example.Foo.bar(Foo.java:6)\n\tat com.example.Main",
+   "other": "Node 343 starting"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "User carol logging on",
+   "kmsg": "User carol logging on"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Disk usage at 339% on /dev/sda",
+   "kmsg": "Disk usage at 339% on /dev/sda"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Node 305 stopping",
+   "kmsg": "Node 305 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "Disk usage at 242% on /dev/sdb",
+   "kmsg": "Disk usage at 242% on /dev/sdb"
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": [
+    "Cache miss for key session_0c578c2c in region eu-west-192",
+    "Node 32 stopping"
+   ]
+  },
+  {
+   "g": "g0",
+   "n": 0,
+   "msg": "User carol logging off",
+   "kmsg": "User carol logging off",
+   "other": "Node 194 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 2
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "Request GET /api/v1/items/85 completed in 85ms",
+   "kmsg": "Request GET /api/v1/items/85 completed in 85ms"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Node 253 stopping",
+   "kmsg": "Node 253 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "Node 459 starting",
+   "kmsg": "Node 459 starting"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": [
+    "Node 334 stopping",
+    "Shutting down service orders gracefully, 282 requests in flight"
+   ],
+   "other": "Scheduled job bob-103 finished on Monday at 103:00 UTC"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Failed to connect to 10.9.102.16:443 after 371 attempts",
+   "kmsg": "Failed to connect to 10.9.102.16:443 after 371 attempts",
+   "other": "Node 312 starting"
+  },
+  {
+   "g": "g1",
+   "n": 8,
+   "msg": "Disk usage at 191% on /dev/sda",
+   "kmsg": "Disk usage at 191% on /dev/sda"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "\n  \nNode 440 stopping\n\tat com.example.Foo.bar(Foo.java:78)\n\tat com.example.Main",
+   "kmsg": "\n  \nNode 440 stopping\n\tat com.example.Foo.bar(Foo.java:78)\n\tat com.example.Main",
+   "other": "Out of memory: killed process 337 (orders) score 337"
+  },
+  {
+   "g": "g0",
+   "n": 1,
+   "msg": "error: cannot open file C:\\logs\\app261.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app261.log: access denied"
+  },
+  {
+   "g": "g1",
+   "n": 8,
+   "msg": "Failed to connect to 10.130.115.113:5432 after 332 attempts",
+   "kmsg": "Failed to connect to 10.130.115.113:5432 after 332 attempts"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "\n  \nRequest GET /api/v1/items/60 completed in 60ms\n\tat com.example.Foo.bar(Foo.java:43)\n\tat com.example.Main",
+   "kmsg": "\n  \nRequest GET /api/v1/items/60 completed in 60ms\n\tat com.example.Foo.bar(Foo.java:43)\n\tat com.example.Main",
+   "other": "Node 341 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 4
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "Starting service payments version 470.470.470",
+   "kmsg": "Starting service payments version 470.470.470"
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "Scheduled job dave-127 finished on Monday at 127:00 UTC",
+   "kmsg": "Scheduled job dave-127 finished on Monday at 127:00 UTC"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "Node 219 stopping",
+   "kmsg": "Node 219 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "Node 15 stopping",
+   "kmsg": "Node 15 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "\n  \nUser mallory logging on\n\tat com.example.Foo.bar(Foo.java:58)\n\tat com.example.Main",
+   "kmsg": "\n  \nUser mallory logging on\n\tat com.example.Foo.bar(Foo.java:58)\n\tat com.example.Main"
+  },
+  {
+   "g": "g0",
+   "n": 4
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": [
+    "Heartbeat received from worker mallory@host389.example.com",
+    "Transaction b072b4c3 rolled back due to deadlock on table payments"
+   ]
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "\n  \nNode 256 stopping\n\tat com.example.Foo.bar(Foo.java:99)\n\tat com.example.Main",
+   "kmsg": "\n  \nNode 256 stopping\n\tat com.example.Foo.bar(Foo.java:99)\n\tat com.example.Main"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Connection from 10.87.19.41 accepted",
+   "kmsg": "Connection from 10.87.19.41 accepted"
+  },
+  {
+   "g": "g1",
+   "n": 8,
+   "msg": "Request GET /api/v1/items/82 completed in 82ms",
+   "kmsg": "Request GET /api/v1/items/82 completed in 82ms"
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "\n  \nUser dave logging off\n\tat com.example.Foo.bar(Foo.java:40)\n\tat com.example.Main",
+   "kmsg": "\n  \nUser dave logging off\n\tat com.example.Foo.bar(Foo.java:40)\n\tat com.example.Main",
+   "other": "User Foo logging off"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "Node 378 starting",
+   "kmsg": "Node 378 starting"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "User carol logging on",
+   "kmsg": "User carol logging on",
+   "other": "Request POST /api/v1/orders completed in 346ms with status 201"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": [
+    "Failed to connect to 10.216.5.59:80 after 431 attempts",
+    "Node 345 stopping"
+   ],
+   "other": "User mallory logging on"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Node 356 starting",
+   "kmsg": "Node 356 starting"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "Out of memory: killed process 57 (payments) score 57",
+   "kmsg": "Out of memory: killed process 57 (payments) score 57"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "User eve logging off",
+   "kmsg": "User eve logging off"
+  },
+  {
+   "g": "g0",
+   "n": 8
+  },
+  {
+   "g": "g1",
+   "n": 8,
+   "msg": "12345 67890 ---",
+   "other": "Shutting down service orders gracefully, 192 requests in flight"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Shutting down service users gracefully, 471 requests in flight",
+   "kmsg": "Shutting down service users gracefully, 471 requests in flight",
+   "other": "GC pause young generation 65ms, heap 65MB->65MB"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "Request POST /api/v1/orders completed in 272ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 272ms with status 201"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": [
+    "Scheduled job eve-429 finished on Monday at 429:00 UTC",
+    "error: cannot open file C:\\logs\\app492.log: access denied"
+   ]
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": "Transaction e2b8d11b rolled back due to deadlock on table orders",
+   "kmsg": "Transaction e2b8d11b rolled back due to deadlock on table orders"
+  },
+  {
+   "g": "g0",
+   "n": 8,
+   "msg": "\n  \nerror: cannot open file C:\\logs\\app433.log: access denied\n\tat com.example.Foo.bar(Foo.java:45)\n\tat com.example.Main",
+   "kmsg": "\n  \nerror: cannot open file C:\\logs\\app433.log: access denied\n\tat com.example.Foo.bar(Foo.java:45)\n\tat com.example.Main",
+   "other": "Disk usage at 127% on /dev/sdc"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "Node 275 starting",
+   "kmsg": "Node 275 starting"
+  },
+  {
+   "g": "g2",
+   "n": 4,
+   "msg": "\n  \nCache miss for key session_17c2abd2 in region eu-west-409\n\tat com.example.Foo.bar(Foo.java:56)\n\tat com.example.Main",
+   "kmsg": "\n  \nCache miss for key session_17c2abd2 in region eu-west-409\n\tat com.example.Foo.bar(Foo.java:56)\n\tat com.example.Main"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Node 132 starting",
+   "kmsg": "Node 132 starting",
+   "other": "Heartbeat received from worker Foo@host208.example.com"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "Node 112 stopping",
+   "kmsg": "Node 112 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "User eve logging off",
+   "kmsg": "User eve logging off"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Request POST /api/v1/orders completed in 419ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 419ms with status 201",
+   "other": "error: cannot open file C:\\logs\\app76.log: access denied"
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": "User bob logging on",
+   "kmsg": "User bob logging on"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Request GET /api/v1/items/464 completed in 464ms",
+   "kmsg": "Request GET /api/v1/items/464 completed in 464ms"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "Heartbeat received from worker carol@host55.example.com",
+   "kmsg": "Heartbeat received from worker carol@host55.example.com"
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": "User dave logging off",
+   "kmsg": "User dave logging off"
+  },
+  {
+   "g": "g2",
+   "n": 4,
+   "msg": "User carol logging off",
+   "kmsg": "User carol logging off"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": [
+    "Out of memory: killed process 447 (items) score 447",
+    "Node 236 stopping"
+   ]
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "Node 110 stopping",
+   "kmsg": "Node 110 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "Node 147 stopping",
+   "kmsg": "Node 147 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 6,
+   "msg": "Cache miss for key session_5c66521c in region eu-west-9",
+   "kmsg": "Cache miss for key session_5c66521c in region eu-west-9"
+  },
+  {
+   "g": "g1",
+   "n": 0
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "Transaction 5ef419fb rolled back due to deadlock on table items",
+   "kmsg": "Transaction 5ef419fb rolled back due to deadlock on table items",
+   "other": "Shutting down service users gracefully, 341 requests in flight"
+  },
+  {
+   "g": "g0",
+   "n": 6,
+   "msg": "Request POST /api/v1/orders completed in 66ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 66ms with status 201"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "User mallory logging on",
+   "kmsg": "User mallory logging on",
+   "other": "User mallory logging on"
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "Node 104 starting",
+   "kmsg": "Node 104 starting",
+   "other": "Failed to connect to 10.221.145.140:80 after 108 attempts"
+  },
+  {
+   "g": "g0",
+   "n": 8
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "User bob logging on",
+   "kmsg": "User bob logging on"
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": "Failed to connect to 10.83.158.185:9200 after 282 attempts",
+   "kmsg": "Failed to connect to 10.83.158.185:9200 after 282 attempts"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "GC pause young generation 275ms, heap 275MB->275MB",
+   "kmsg": "GC pause young generation 275ms, heap 275MB->275MB"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": [
+    "Cache miss for key session_d896f8f0 in region eu-west-309",
+    "Node 361 starting"
+   ],
+   "other": "Connection from 10.83.162.209 accepted"
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": "Failed to connect to 10.83.209.112:80 after 247 attempts",
+   "kmsg": "Failed to connect to 10.83.209.112:80 after 247 attempts"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Failed to connect to 10.30.199.196:80 after 295 attempts",
+   "kmsg": "Failed to connect to 10.30.199.196:80 after 295 attempts"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "Node 480 stopping",
+   "kmsg": "Node 480 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "User dave logging on",
+   "kmsg": "User dave logging on",
+   "other": "Payment of 228.228 EUR authorised for customer mallory"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "Heartbeat received from worker Foo@host117.example.com",
+   "kmsg": "Heartbeat received from worker Foo@host117.example.com"
+  },
+  {
+   "g": "g1",
+   "n": 7,
+   "msg": "Connection from 10.220.140.148 accepted",
+   "kmsg": "Connection from 10.220.140.148 accepted"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Heartbeat received from worker Foo@host140.example.com",
+   "kmsg": "Heartbeat received from worker Foo@host140.example.com",
+   "other": "Node 464 starting"
+  },
+  {
+   "g": "g0",
+   "n": 0,
+   "msg": "User mallory logging off",
+   "kmsg": "User mallory logging off"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "User eve logging off",
+   "kmsg": "User eve logging off"
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "Node 453 stopping",
+   "kmsg": "Node 453 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "Node 143 stopping",
+   "kmsg": "Node 143 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "Node 241 stopping",
+   "kmsg": "Node 241 stopping",
+   "other": "Disk usage at 346% on /dev/sdc"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Request GET /api/v1/items/456 completed in 456ms",
+   "kmsg": "Request GET /api/v1/items/456 completed in 456ms"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "User eve logging on",
+   "kmsg": "User eve logging on"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "GC pause young generation 228ms, heap 228MB->228MB",
+   "kmsg": "GC pause young generation 228ms, heap 228MB->228MB"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Node 281 stopping",
+   "kmsg": "Node 281 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "Node 417 stopping",
+   "kmsg": "Node 417 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "Transaction eff66c90 committed",
+   "kmsg": "Transaction eff66c90 committed",
+   "other": "error: cannot open file C:\\logs\\app234.log: access denied"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Node 130 stopping",
+   "kmsg": "Node 130 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Failed to connect to 10.163.10.38:443 after 49 attempts",
+   "kmsg": "Failed to connect to 10.163.10.38:443 after 49 attempts"
+  },
+  {
+   "g": "g1",
+   "n": 8,
+   "other": "Shutting down service items gracefully, 463 requests in flight"
+  },
+  {
+   "g": "g2",
+   "n": 4,
+   "msg": "Out of memory: killed process 455 (payments) score 455",
+   "kmsg": "Out of memory: killed process 455 (payments) score 455",
+   "other": "Failed to connect to 10.147.230.116:80 after 217 attempts"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "\n  \nRequest GET /api/v1/items/415 completed in 415ms\n\tat com.example.Foo.bar(Foo.java:6)\n\tat com.example.Main",
+   "kmsg": "\n  \nRequest GET /api/v1/items/415 completed in 415ms\n\tat com.example.Foo.bar(Foo.java:6)\n\tat com.example.Main"
+  },
+  {
+   "g": "g1",
+   "n": 8,
+   "msg": "User mallory logging on",
+   "kmsg": "User mallory logging on"
+  },
+  {
+   "g": "g2",
+   "n": 3
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "other": "Starting service payments version 190.190.190"
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": "User Foo logging off",
+   "kmsg": "User Foo logging off",
+   "other": "Scheduled job bob-133 finished on Monday at 133:00 UTC"
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": "Node 12 stopping",
+   "kmsg": "Node 12 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 0,
+   "msg": "User Foo logging on",
+   "kmsg": "User Foo logging on"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "User eve logging off",
+   "kmsg": "User eve logging off"
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "Node 315 stopping",
+   "kmsg": "Node 315 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "User dave logging on",
+   "kmsg": "User dave logging on"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "Node 45 stopping",
+   "kmsg": "Node 45 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "error: cannot open file C:\\logs\\app453.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app453.log: access denied",
+   "other": "Request POST /api/v1/orders completed in 251ms with status 201"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "Disk usage at 187% on /dev/sda",
+   "kmsg": "Disk usage at 187% on /dev/sda",
+   "other": "Failed to connect to 10.120.146.89:443 after 479 attempts"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "\n  \nTransaction e6a1f9d1 committed\n\tat com.example.Foo.bar(Foo.java:55)\n\tat com.example.Main",
+   "kmsg": "\n  \nTransaction e6a1f9d1 committed\n\tat com.example.Foo.bar(Foo.java:55)\n\tat com.example.Main"
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "Node 359 stopping",
+   "kmsg": "Node 359 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 0,
+   "msg": "User mallory logging on",
+   "kmsg": "User mallory logging on"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "Request POST /api/v1/orders completed in 369ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 369ms with status 201"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": [
+    "Connection from 10.147.39.237 accepted",
+    "Node 391 starting"
+   ]
+  },
+  {
+   "g": "g0",
+   "n": 6,
+   "msg": "Connection from 10.193.2.45 accepted",
+   "kmsg": "Connection from 10.193.2.45 accepted"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "Connection from 10.254.18.106 accepted",
+   "kmsg": "Connection from 10.254.18.106 accepted"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "Node 427 starting",
+   "kmsg": "Node 427 starting"
+  },
+  {
+   "g": "g0",
+   "n": 1,
+   "msg": "Node 221 starting",
+   "kmsg": "Node 221 starting"
+  },
+  {
+   "g": "g1",
+   "n": 7
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "Connection from 10.215.245.106 accepted",
+   "kmsg": "Connection from 10.215.245.106 accepted",
+   "other": "Request POST /api/v1/orders completed in 332ms with status 201"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Scheduled job eve-123 finished on Monday at 123:00 UTC",
+   "kmsg": "Scheduled job eve-123 finished on Monday at 123:00 UTC"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "Transaction ec803d85 committed",
+   "kmsg": "Transaction ec803d85 committed"
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": "Starting service users version 464.464.464",
+   "kmsg": "Starting service users version 464.464.464"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "Node 296 starting",
+   "kmsg": "Node 296 starting"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "User bob logging on",
+   "kmsg": "User bob logging on"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Transaction 150bd5a5 committed",
+   "kmsg": "Transaction 150bd5a5 committed"
+  },
+  {
+   "g": "g0",
+   "n": 8,
+   "msg": "User mallory logging on",
+   "kmsg": "User mallory logging on"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "Request POST /api/v1/orders completed in 129ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 129ms with status 201",
+   "other": "User Foo logging on"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Payment of 93.93 EUR authorised for customer mallory",
+   "kmsg": "Payment of 93.93 EUR authorised for customer mallory"
+  },
+  {
+   "g": "g0",
+   "n": 0,
+   "msg": "\n  \nNode 347 stopping\n\tat com.example.Foo.bar(Foo.java:98)\n\tat com.example.Main",
+   "kmsg": "\n  \nNode 347 stopping\n\tat com.example.Foo.bar(Foo.java:98)\n\tat com.example.Main"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "User alice logging on",
+   "kmsg": "User alice logging on"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "Request POST /api/v1/orders completed in 329ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 329ms with status 201"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Disk usage at 171% on /dev/sdc",
+   "kmsg": "Disk usage at 171% on /dev/sdc"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "Scheduled job Foo-59 finished on Monday at 59:00 UTC",
+   "kmsg": "Scheduled job Foo-59 finished on Monday at 59:00 UTC",
+   "other": "User alice logging on"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "Transaction 4b861808 committed",
+   "kmsg": "Transaction 4b861808 committed"
+  },
+  {
+   "g": "g0",
+   "n": 8,
+   "msg": "User mallory logging off",
+   "kmsg": "User mallory logging off"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "GC pause young generation 245ms, heap 245MB->245MB",
+   "kmsg": "GC pause young generation 245ms, heap 245MB->245MB"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g0",
+   "n": 6,
+   "msg": "Failed to connect to 10.3.143.151:5432 after 350 attempts",
+   "kmsg": "Failed to connect to 10.3.143.151:5432 after 350 attempts"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "GC pause young generation 154ms, heap 154MB->154MB",
+   "kmsg": "GC pause young generation 154ms, heap 154MB->154MB"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "Connection from 10.201.220.167 accepted",
+   "kmsg": "Connection from 10.201.220.167 accepted"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": [
+    "Cache miss for key session_beaa5aeb in region eu-west-62",
+    "GC pause young generation 430ms, heap 430MB->430MB"
+   ],
+   "other": "Node 274 starting"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "\n  \nScheduled job bob-181 finished on Monday at 181:00 UTC\n\tat com.example.Foo.bar(Foo.java:69)\n\tat com.example.Main",
+   "kmsg": "\n  \nScheduled job bob-181 finished on Monday at 181:00 UTC\n\tat com.example.Foo.bar(Foo.java:69)\n\tat com.example.Main",
+   "other": "Transaction d85b46f6 committed"
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": [
+    "Cache miss for key session_d2559e2f in region eu-west-386",
+    "GC pause young generation 322ms, heap 322MB->322MB"
+   ]
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Node 347 stopping",
+   "kmsg": "Node 347 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "Request POST /api/v1/orders completed in 138ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 138ms with status 201",
+   "other": "Cache miss for key session_8c18fd05 in region eu-west-228"
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "Node 418 starting",
+   "kmsg": "Node 418 starting",
+   "other": "User eve logging on"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Disk usage at 64% on /dev/sdb",
+   "kmsg": "Disk usage at 64% on /dev/sdb",
+   "other": "Connection from 10.159.60.18 accepted"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "User eve logging on",
+   "kmsg": "User eve logging on"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "Node 271 stopping",
+   "kmsg": "Node 271 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "GC pause young generation 183ms, heap 183MB->183MB",
+   "kmsg": "GC pause young generation 183ms, heap 183MB->183MB"
+  },
+  {
+   "g": "g1",
+   "n": 5,
+   "msg": "Out of memory: killed process 302 (orders) score 302",
+   "kmsg": "Out of memory: killed process 302 (orders) score 302"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "error: cannot open file C:\\logs\\app59.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app59.log: access denied"
+  },
+  {
+   "g": "g0",
+   "n": 6,
+   "msg": "Shutting down service users gracefully, 81 requests in flight",
+   "kmsg": "Shutting down service users gracefully, 81 requests in flight"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": "Out of memory: killed process 388 (users) score 388",
+   "kmsg": "Out of memory: killed process 388 (users) score 388"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "Out of memory: killed process 252 (items) score 252",
+   "kmsg": "Out of memory: killed process 252 (items) score 252"
+  },
+  {
+   "g": "g0",
+   "n": 5
+  },
+  {
+   "g": "g1",
+   "n": 7,
+   "msg": [
+    "Request GET /api/v1/items/105 completed in 105ms",
+    "Scheduled job Foo-336 finished on Monday at 336:00 UTC"
+   ],
+   "other": "Node 12 starting"
+  },
+  {
+   "g": "g2",
+   "n": 4,
+   "msg": "Node 247 stopping",
+   "kmsg": "Node 247 stopping",
+   "other": "Node 55 starting"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Node 499 starting",
+   "kmsg": "Node 499 starting",
+   "other": "Request POST /api/v1/orders completed in 236ms with status 201"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "\n  \nShutting down service users gracefully, 353 requests in flight\n\tat com.example.Foo.bar(Foo.java:10)\n\tat com.example.Main",
+   "kmsg": "\n  \nShutting down service users gracefully, 353 requests in flight\n\tat com.example.Foo.bar(Foo.java:10)\n\tat com.example.Main"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "\n  \nNode 174 stopping\n\tat com.example.Foo.bar(Foo.java:28)\n\tat com.example.Main",
+   "kmsg": "\n  \nNode 174 stopping\n\tat com.example.Foo.bar(Foo.java:28)\n\tat com.example.Main",
+   "other": "Scheduled job dave-489 finished on Monday at 489:00 UTC"
+  },
+  {
+   "g": "g0",
+   "n": 0,
+   "msg": "Node 67 stopping",
+   "kmsg": "Node 67 stopping",
+   "other": "Request GET /api/v1/items/44 completed in 44ms"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "Disk usage at 24% on /dev/sdc",
+   "kmsg": "Disk usage at 24% on /dev/sdc"
+  },
+  {
+   "g": "g2",
+   "n": 0,
+   "msg": "User alice logging off",
+   "kmsg": "User alice logging off"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Request GET /api/v1/items/143 completed in 143ms",
+   "kmsg": "Request GET /api/v1/items/143 completed in 143ms"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "User mallory logging on",
+   "kmsg": "User mallory logging on"
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": "Payment of 485.485 EUR authorised for customer dave",
+   "kmsg": "Payment of 485.485 EUR authorised for customer dave"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "other": "Request POST /api/v1/orders completed in 19ms with status 201"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "Failed to connect to 10.56.56.0:80 after 28 attempts",
+   "kmsg": "Failed to connect to 10.56.56.0:80 after 28 attempts"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "Node 385 stopping",
+   "kmsg": "Node 385 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "Node 229 stopping",
+   "kmsg": "Node 229 stopping",
+   "other": "Node 474 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "Request POST /api/v1/orders completed in 160ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 160ms with status 201"
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": "GC pause young generation 310ms, heap 310MB->310MB",
+   "kmsg": "GC pause young generation 310ms, heap 310MB->310MB"
+  },
+  {
+   "g": "g0",
+   "n": 8,
+   "msg": "Transaction a849cd8f rolled back due to deadlock on table items",
+   "kmsg": "Transaction a849cd8f rolled back due to deadlock on table items"
+  },
+  {
+   "g": "g1",
+   "n": 7,
+   "msg": [
+    "User carol logging on",
+    "Node 189 stopping"
+   ],
+   "other": "Connection from 10.186.26.51 accepted"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "Request GET /api/v1/items/486 completed in 486ms",
+   "kmsg": "Request GET /api/v1/items/486 completed in 486ms",
+   "other": "Starting service orders version 63.63.63"
+  },
+  {
+   "g": "g0",
+   "n": 0,
+   "msg": "Request POST /api/v1/orders completed in 56ms with status 201",
+   "kmsg": "Request POST /api/v1/orders completed in 56ms with status 201"
+  },
+  {
+   "g": "g1",
+   "n": 8,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "User Foo logging on",
+   "kmsg": "User Foo logging on"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "\n  \nUser carol logging on\n\tat com.example.Foo.bar(Foo.java:37)\n\tat com.example.Main",
+   "kmsg": "\n  \nUser carol logging on\n\tat com.example.Foo.bar(Foo.java:37)\n\tat com.example.Main"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "other": "Node 159 starting"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": "Out of memory: killed process 31 (users) score 31",
+   "kmsg": "Out of memory: killed process 31 (users) score 31"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "other": "Shutting down service items gracefully, 201 requests in flight"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "Transaction 7dff39cb committed",
+   "kmsg": "Transaction 7dff39cb committed"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "User carol logging on",
+   "kmsg": "User carol logging on"
+  },
+  {
+   "g": "g0",
+   "n": 9,
+   "msg": "Node 416 starting",
+   "kmsg": "Node 416 starting"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "Heartbeat received from worker dave@host465.example.com",
+   "kmsg": "Heartbeat received from worker dave@host465.example.com"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": [
+    "Disk usage at 439% on /dev/sda",
+    "Node 374 stopping"
+   ],
+   "other": "User dave logging off"
+  },
+  {
+   "g": "g0",
+   "n": 7
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": "Node 322 stopping",
+   "kmsg": "Node 322 stopping",
+   "other": "Heartbeat received from worker mallory@host114.example.com"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "User Foo logging on",
+   "kmsg": "User Foo logging on"
+  },
+  {
+   "g": "g0",
+   "n": 7,
+   "msg": "Request GET /api/v1/items/99 completed in 99ms",
+   "kmsg": "Request GET /api/v1/items/99 completed in 99ms"
+  },
+  {
+   "g": "g1",
+   "n": 5,
+   "msg": "Request GET /api/v1/items/238 completed in 238ms",
+   "kmsg": "Request GET /api/v1/items/238 completed in 238ms",
+   "other": "Connection from 10.137.225.247 accepted"
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "Node 109 stopping",
+   "kmsg": "Node 109 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Connection from 10.252.141.177 accepted",
+   "kmsg": "Connection from 10.252.141.177 accepted"
+  },
+  {
+   "g": "g1",
+   "n": 5,
+   "msg": "Disk usage at 84% on /dev/sdc",
+   "kmsg": "Disk usage at 84% on /dev/sdc",
+   "other": "Cache miss for key session_ef382507 in region eu-west-194"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "\n  \nDisk usage at 438% on /dev/sdb\n\tat com.example.Foo.bar(Foo.java:32)\n\tat com.example.Main",
+   "kmsg": "\n  \nDisk usage at 438% on /dev/sdb\n\tat com.example.Foo.bar(Foo.java:32)\n\tat com.example.Main",
+   "other": "Node 357 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 3,
+   "msg": "Scheduled job carol-47 finished on Monday at 47:00 UTC",
+   "kmsg": "Scheduled job carol-47 finished on Monday at 47:00 UTC"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g0",
+   "n": 4,
+   "msg": "Node 53 stopping",
+   "kmsg": "Node 53 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "Transaction d411243a committed",
+   "kmsg": "Transaction d411243a committed"
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "Transaction 714f8c90 rolled back due to deadlock on table items",
+   "kmsg": "Transaction 714f8c90 rolled back due to deadlock on table items",
+   "other": "Request POST /api/v1/orders completed in 226ms with status 201"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "Starting service items version 473.473.473",
+   "kmsg": "Starting service items version 473.473.473"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "User alice logging on",
+   "kmsg": "User alice logging on"
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": "Node 173 stopping",
+   "kmsg": "Node 173 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 1,
+   "msg": "Connection from 10.191.85.238 accepted",
+   "kmsg": "Connection from 10.191.85.238 accepted",
+   "other": "Node 60 stopping"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "Node 440 stopping",
+   "kmsg": "Node 440 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "Failed to connect to 10.249.1.90:443 after 96 attempts",
+   "kmsg": "Failed to connect to 10.249.1.90:443 after 96 attempts"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "Node 269 starting",
+   "kmsg": "Node 269 starting",
+   "other": "Out of memory: killed process 254 (users) score 254"
+  },
+  {
+   "g": "g2",
+   "n": 1,
+   "msg": [
+    "Shutting down service orders gracefully, 164 requests in flight",
+    "Node 459 stopping"
+   ]
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g1",
+   "n": 7,
+   "msg": "GC pause young generation 434ms, heap 434MB->434MB",
+   "kmsg": "GC pause young generation 434ms, heap 434MB->434MB"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Shutting down service users gracefully, 179 requests in flight",
+   "kmsg": "Shutting down service users gracefully, 179 requests in flight"
+  },
+  {
+   "g": "g0",
+   "n": 0,
+   "msg": "Transaction 36b44aec committed",
+   "kmsg": "Transaction 36b44aec committed"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": [
+    "Failed to connect to 10.197.46.79:443 after 234 attempts",
+    "Node 161 stopping"
+   ]
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "User mallory logging off",
+   "kmsg": "User mallory logging off"
+  },
+  {
+   "g": "g0",
+   "n": 6,
+   "msg": "Failed to connect to 10.207.99.168:80 after 221 attempts",
+   "kmsg": "Failed to connect to 10.207.99.168:80 after 221 attempts"
+  },
+  {
+   "g": "g1",
+   "n": 8,
+   "msg": "User bob logging off",
+   "kmsg": "User bob logging off"
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "12345 67890 ---"
+  },
+  {
+   "g": "g0",
+   "n": 1,
+   "msg": "User mallory logging off",
+   "kmsg": "User mallory logging off"
+  },
+  {
+   "g": "g1",
+   "n": 6,
+   "msg": "Node 52 stopping",
+   "kmsg": "Node 52 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "Payment of 47.47 EUR authorised for customer dave",
+   "kmsg": "Payment of 47.47 EUR authorised for customer dave",
+   "other": "User dave logging on"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "User Foo logging off",
+   "kmsg": "User Foo logging off"
+  },
+  {
+   "g": "g1",
+   "n": 2,
+   "msg": "GC pause young generation 235ms, heap 235MB->235MB",
+   "kmsg": "GC pause young generation 235ms, heap 235MB->235MB"
+  },
+  {
+   "g": "g2",
+   "n": 6,
+   "msg": "Failed to connect to 10.121.198.147:80 after 297 attempts",
+   "kmsg": "Failed to connect to 10.121.198.147:80 after 297 attempts"
+  },
+  {
+   "g": "g0",
+   "n": 6,
+   "msg": "\n  \nShutting down service orders gracefully, 54 requests in flight\n\tat com.example.Foo.bar(Foo.java:2)\n\tat com.example.Main",
+   "kmsg": "\n  \nShutting down service orders gracefully, 54 requests in flight\n\tat com.example.Foo.bar(Foo.java:2)\n\tat com.example.Main",
+   "other": "Node 243 starting"
+  },
+  {
+   "g": "g1",
+   "n": 3,
+   "msg": "User eve logging off",
+   "kmsg": "User eve logging off"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "User bob logging off",
+   "kmsg": "User bob logging off"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "Node 362 starting",
+   "kmsg": "Node 362 starting"
+  },
+  {
+   "g": "g1",
+   "n": 5,
+   "msg": "Node 83 starting",
+   "kmsg": "Node 83 starting",
+   "other": "Out of memory: killed process 320 (payments) score 320"
+  },
+  {
+   "g": "g2",
+   "n": 7,
+   "msg": "Node 84 stopping",
+   "kmsg": "Node 84 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 8,
+   "msg": "Disk usage at 198% on /dev/sdc",
+   "kmsg": "Disk usage at 198% on /dev/sdc"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "error: cannot open file C:\\logs\\app412.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app412.log: access denied",
+   "other": "Heartbeat received from worker carol@host408.example.com"
+  },
+  {
+   "g": "g2",
+   "n": 3,
+   "msg": "Disk usage at 395% on /dev/sdb",
+   "kmsg": "Disk usage at 395% on /dev/sdb"
+  },
+  {
+   "g": "g0",
+   "n": 5,
+   "msg": "User carol logging on",
+   "kmsg": "User carol logging on"
+  },
+  {
+   "g": "g1",
+   "n": 1,
+   "msg": "\n  \nNode 288 starting\n\tat com.example.Foo.bar(Foo.java:62)\n\tat com.example.Main",
+   "kmsg": "\n  \nNode 288 starting\n\tat com.example.Foo.bar(Foo.java:62)\n\tat com.example.Main"
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": "User mallory logging off",
+   "kmsg": "User mallory logging off"
+  },
+  {
+   "g": "g0",
+   "n": 6,
+   "msg": "Node 273 starting",
+   "kmsg": "Node 273 starting",
+   "other": "User mallory logging off"
+  },
+  {
+   "g": "g1",
+   "n": 8
+  },
+  {
+   "g": "g2",
+   "n": 9,
+   "msg": "error: cannot open file C:\\logs\\app422.log: access denied",
+   "kmsg": "error: cannot open file C:\\logs\\app422.log: access denied"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "Node 112 starting",
+   "kmsg": "Node 112 starting"
+  },
+  {
+   "g": "g1",
+   "n": 4,
+   "msg": "Node 302 stopping",
+   "kmsg": "Node 302 stopping"
+  },
+  {
+   "g": "g2",
+   "n": 8,
+   "msg": "Connection from 10.2.89.48 accepted",
+   "kmsg": "Connection from 10.2.89.48 accepted"
+  },
+  {
+   "g": "g0",
+   "n": 0,
+   "msg": "Disk usage at 477% on /dev/sdb",
+   "kmsg": "Disk usage at 477% on /dev/sdb"
+  },
+  {
+   "g": "g1",
+   "n": 9,
+   "msg": "User eve logging on",
+   "kmsg": "User eve logging on"
+  },
+  {
+   "g": "g2",
+   "n": 4,
+   "msg": "Node 330 stopping",
+   "kmsg": "Node 330 stopping"
+  },
+  {
+   "g": "g0",
+   "n": 2,
+   "msg": "Transaction 9387fd3c committed",
+   "kmsg": "Transaction 9387fd3c committed"
+  },
+  {
+   "g": "g1",
+   "n": 5,
+   "msg": "\n  \nTransaction 4097739d committed\n\tat com.example.Foo.bar(Foo.java:67)\n\tat com.example.Main",
+   "kmsg": "\n  \nTransaction 4097739d committed\n\tat com.example.Foo.bar(Foo.java:67)\n\tat com.example.Main",
+   "other": "Node 486 starting"
+  },
+  {
+   "g": "g2",
+   "n": 2,
+   "msg": "Node 377 starting",
+   "kmsg": "Node 377 starting"
+  },
+  {
+   "g": "g0",
+   "n": 8,
+   "msg": "Request GET /api/v1/items/41 completed in 41ms",
+   "kmsg": "Request GET /api/v1/items/41 completed in 41ms"
+  },
+  {
+   "g": "g1",
+   "n": 0,
+   "msg": [
+    "Failed to connect to 10.44.44.103:5432 after 460 attempts",
+    "Transaction a9bd48f1 rolled back due to deadlock on table users"
+   ]
+  },
+  {
+   "g": "g2",
+   "n": 5,
+   "msg": "Transaction 39c55dbe rolled back due to deadlock on table users",
+   "kmsg": "Transaction 39c55dbe rolled back due to deadlock on table users"
+  }
+ ],
+ "placement": [
+  [
+   0,
+   3,
+   7,
+   8,
+   9,
+   12,
+   14,
+   16,
+   17,
+   19,
+   20,
+   22,
+   23,
+   26,
+   27,
+   30,
+   31,
+   34,
+   35,
+   37,
+   38,
+   39,
+   42,
+   43,
+   45,
+   49,
+   51,
+   61,
+   62,
+   63,
+   64,
+   66,
+   70,
+   77,
+   78,
+   81,
+   82,
+   83,
+   86,
+   87,
+   90,
+   93,
+   94,
+   95,
+   100,
+   101,
+   103,
+   104,
+   105,
+   107,
+   109,
+   112,
+   114,
+   115,
+   120,
+   121,
+   122,
+   124,
+   125,
+   126,
+   127,
+   129,
+   134,
+   136,
+   137,
+   139,
+   140,
+   141,
+   143,
+   144,
+   145,
+   146,
+   148,
+   149,
+   150,
+   151,
+   152,
+   156,
+   157,
+   158,
+   159,
+   160,
+   163,
+   164,
+   168,
+   169,
+   170,
+   171,
+   172,
+   174,
+   175,
+   177,
+   180,
+   181,
+   184,
+   187,
+   191,
+   192,
+   193,
+   195,
+   196,
+   197,
+   198,
+   199,
+   206,
+   207,
+   209,
+   210,
+   211,
+   212,
+   214,
+   216,
+   217,
+   219,
+   220,
+   223,
+   224,
+   227,
+   229,
+   230,
+   233,
+   236,
+   237,
+   238,
+   241,
+   245,
+   246,
+   248,
+   249,
+   251,
+   252,
+   254,
+   256,
+   257,
+   259,
+   260,
+   261,
+   262,
+   263,
+   264,
+   265,
+   266,
+   267,
+   268,
+   270,
+   273,
+   274,
+   275,
+   276,
+   282,
+   284,
+   288,
+   290,
+   291,
+   294,
+   295,
+   296,
+   298,
+   301,
+   302,
+   303,
+   304,
+   305,
+   306,
+   309,
+   310,
+   311,
+   313,
+   314,
+   318,
+   321,
+   322,
+   323,
+   325,
+   326,
+   331,
+   332,
+   334,
+   335,
+   336,
+   337,
+   342,
+   343,
+   345,
+   348,
+   349,
+   351,
+   358,
+   360,
+   361,
+   362,
+   363,
+   364,
+   365,
+   366,
+   368,
+   370,
+   371,
+   374,
+   377,
+   379,
+   381,
+   383,
+   384,
+   387,
+   389,
+   390,
+   391,
+   393,
+   394,
+   399,
+   400,
+   402,
+   403,
+   405,
+   406,
+   407,
+   410,
+   411,
+   412,
+   413,
+   415,
+   416,
+   418,
+   419,
+   420,
+   421,
+   423,
+   425,
+   426,
+   427,
+   428,
+   429,
+   432,
+   434,
+   435,
+   436,
+   437,
+   438,
+   441,
+   443,
+   444,
+   447,
+   449,
+   450,
+   451,
+   452,
+   455,
+   456,
+   457,
+   458,
+   462,
+   463,
+   466,
+   468,
+   469,
+   472,
+   475,
+   476,
+   481,
+   482,
+   483,
+   484,
+   486,
+   487,
+   490,
+   491,
+   492,
+   495,
+   496,
+   497,
+   500,
+   502,
+   506,
+   507,
+   514,
+   515,
+   516,
+   519,
+   526,
+   527,
+   540,
+   541,
+   542,
+   544,
+   546,
+   549,
+   551,
+   552,
+   555,
+   556,
+   557,
+   558,
+   560,
+   561,
+   562,
+   564,
+   565,
+   573,
+   577,
+   579,
+   584,
+   585,
+   586,
+   587,
+   589,
+   592,
+   593,
+   594,
+   596,
+   597
+  ],
+  [
+   1,
+   2,
+   4,
+   5,
+   6,
+   10,
+   11,
+   13,
+   15,
+   18,
+   21,
+   24,
+   25,
+   28,
+   29,
+   32,
+   33,
+   36,
+   40,
+   41,
+   44,
+   46,
+   47,
+   48,
+   50,
+   52,
+   53,
+   54,
+   55,
+   56,
+   57,
+   58,
+   59,
+   60,
+   65,
+   67,
+   68,
+   69,
+   71,
+   72,
+   73,
+   74,
+   75,
+   76,
+   79,
+   80,
+   84,
+   85,
+   88,
+   89,
+   91,
+   92,
+   96,
+   97,
+   98,
+   99,
+   102,
+   106,
+   108,
+   110,
+   111,
+   113,
+   116,
+   117,
+   118,
+   119,
+   123,
+   128,
+   130,
+   131,
+   132,
+   133,
+   135,
+   138,
+   142,
+   147,
+   153,
+   154,
+   155,
+   161,
+   162,
+   165,
+   166,
+   167,
+   173,
+   176,
+   178,
+   179,
+   182,
+   183,
+   185,
+   186,
+   188,
+   189,
+   190,
+   194,
+   200,
+   201,
+   202,
+   203,
+   204,
+   205,
+   208,
+   213,
+   215,
+   218,
+   221,
+   222,
+   225,
+   226,
+   228,
+   231,
+   232,
+   234,
+   235,
+   239,
+   240,
+   242,
+   243,
+   244,
+   247,
+   250,
+   253,
+   255,
+   258,
+   269,
+   271,
+   272,
+   277,
+   278,
+   279,
+   280,
+   281,
+   283,
+   285,
+   286,
+   287,
+   289,
+   292,
+   293,
+   297,
+   299,
+   300,
+   307,
+   308,
+   312,
+   315,
+   316,
+   317,
+   319,
+   320,
+   324,
+   327,
+   328,
+   329,
+   330,
+   333,
+   338,
+   339,
+   340,
+   341,
+   344,
+   346,
+   347,
+   350,
+   352,
+   353,
+   354,
+   355,
+   356,
+   357,
+   359,
+   367,
+   369,
+   372,
+   373,
+   375,
+   376,
+   378,
+   380,
+   382,
+   385,
+   386,
+   388,
+   392,
+   395,
+   396,
+   397,
+   398,
+   401,
+   404,
+   408,
+   409,
+   414,
+   417,
+   422,
+   424,
+   430,
+   431,
+   433,
+   439,
+   440,
+   442,
+   445,
+   446,
+   448,
+   453,
+   454,
+   459,
+   460,
+   461,
+   464,
+   465,
+   467,
+   470,
+   471,
+   473,
+   474,
+   477,
+   478,
+   479,
+   480,
+   485,
+   488,
+   489,
+   493,
+   494,
+   498,
+   499,
+   501,
+   503,
+   504,
+   505,
+   508,
+   509,
+   510,
+   511,
+   512,
+   513,
+   517,
+   518,
+   520,
+   521,
+   522,
+   523,
+   524,
+   525,
+   528,
+   529,
+   530,
+   531,
+   532,
+   533,
+   534,
+   535,
+   536,
+   537,
+   538,
+   539,
+   543,
+   545,
+   547,
+   548,
+   550,
+   553,
+   554,
+   559,
+   563,
+   566,
+   567,
+   568,
+   569,
+   570,
+   571,
+   572,
+   574,
+   575,
+   576,
+   578,
+   580,
+   581,
+   582,
+   583,
+   588,
+   590,
+   591,
+   595,
+   598,
+   599
+  ]
+ ],
+ "cases": [
+  {
+   "name": "cat_basic",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\"}}}}",
+   "typed_keys": false,
+   "response": {
+    "c": {
+     "buckets": [
+      {
+       "doc_count": 83,
+       "key": "Node stopping",
+       "regex": ".*?Node.+?stopping.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 69,
+       "key": "Node starting",
+       "regex": ".*?Node.+?starting.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 58,
+       "key": "User logging on",
+       "regex": ".*?User.+?logging.+?on.*?",
+       "max_matching_length": 85
+      },
+      {
+       "doc_count": 50,
+       "key": "User logging off",
+       "regex": ".*?User.+?logging.+?off.*?",
+       "max_matching_length": 86
+      },
+      {
+       "doc_count": 31,
+       "key": "Connection from accepted",
+       "regex": ".*?Connection.+?from.+?accepted.*?",
+       "max_matching_length": 101
+      },
+      {
+       "doc_count": 31,
+       "key": "Disk usage at on",
+       "regex": ".*?Disk.+?usage.+?at.+?on.*?",
+       "max_matching_length": 92
+      },
+      {
+       "doc_count": 31,
+       "key": "Failed to connect to after attempts",
+       "regex": ".*?Failed.+?to.+?connect.+?to.+?after.+?attempts.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 29,
+       "key": "Request GET completed in",
+       "regex": ".*?Request.+?GET.+?completed.+?in.*?",
+       "max_matching_length": 121
+      },
+      {
+       "doc_count": 24,
+       "key": "Transaction committed",
+       "regex": ".*?Transaction.+?committed.*?",
+       "max_matching_length": 92
+      },
+      {
+       "doc_count": 23,
+       "key": "Request POST /api/v1/orders completed in with status",
+       "regex": ".*?Request.+?POST.+?/api/v1/orders.+?completed.+?in.+?with.+?status.*?",
+       "max_matching_length": 136
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "cat_size",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"size\":25}},\"s\":{\"categorize_text\":{\"field\":\"msg\",\"size\":3,\"shard_size\":4}}}}",
+   "typed_keys": false,
+   "response": {
+    "s": {
+     "buckets": [
+      {
+       "doc_count": 83,
+       "key": "Node stopping",
+       "regex": ".*?Node.+?stopping.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 69,
+       "key": "Node starting",
+       "regex": ".*?Node.+?starting.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 58,
+       "key": "User logging on",
+       "regex": ".*?User.+?logging.+?on.*?",
+       "max_matching_length": 85
+      }
+     ]
+    },
+    "c": {
+     "buckets": [
+      {
+       "doc_count": 83,
+       "key": "Node stopping",
+       "regex": ".*?Node.+?stopping.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 69,
+       "key": "Node starting",
+       "regex": ".*?Node.+?starting.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 58,
+       "key": "User logging on",
+       "regex": ".*?User.+?logging.+?on.*?",
+       "max_matching_length": 85
+      },
+      {
+       "doc_count": 50,
+       "key": "User logging off",
+       "regex": ".*?User.+?logging.+?off.*?",
+       "max_matching_length": 86
+      },
+      {
+       "doc_count": 31,
+       "key": "Connection from accepted",
+       "regex": ".*?Connection.+?from.+?accepted.*?",
+       "max_matching_length": 101
+      },
+      {
+       "doc_count": 31,
+       "key": "Disk usage at on",
+       "regex": ".*?Disk.+?usage.+?at.+?on.*?",
+       "max_matching_length": 92
+      },
+      {
+       "doc_count": 31,
+       "key": "Failed to connect to after attempts",
+       "regex": ".*?Failed.+?to.+?connect.+?to.+?after.+?attempts.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 29,
+       "key": "Request GET completed in",
+       "regex": ".*?Request.+?GET.+?completed.+?in.*?",
+       "max_matching_length": 121
+      },
+      {
+       "doc_count": 24,
+       "key": "Transaction committed",
+       "regex": ".*?Transaction.+?committed.*?",
+       "max_matching_length": 92
+      },
+      {
+       "doc_count": 23,
+       "key": "Request POST /api/v1/orders completed in with status",
+       "regex": ".*?Request.+?POST.+?/api/v1/orders.+?completed.+?in.+?with.+?status.*?",
+       "max_matching_length": 136
+      },
+      {
+       "doc_count": 21,
+       "key": "error cannot open file access denied",
+       "regex": ".*?error.+?cannot.+?open.+?file.+?access.+?denied.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 20,
+       "key": "GC pause young generation heap",
+       "regex": ".*?GC.+?pause.+?young.+?generation.+?heap.*?",
+       "max_matching_length": 123
+      },
+      {
+       "doc_count": 20,
+       "key": "Transaction rolled back due to deadlock on table",
+       "regex": ".*?Transaction.+?rolled.+?back.+?due.+?to.+?deadlock.+?on.+?table.*?",
+       "max_matching_length": 140
+      },
+      {
+       "doc_count": 17,
+       "key": "Scheduled job finished on at",
+       "regex": ".*?Scheduled.+?job.+?finished.+?on.+?at.*?",
+       "max_matching_length": 127
+      },
+      {
+       "doc_count": 16,
+       "key": "Cache miss for key in region",
+       "regex": ".*?Cache.+?miss.+?for.+?key.+?in.+?region.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 15,
+       "key": "Out of memory killed process score",
+       "regex": ".*?Out.+?of.+?memory.+?killed.+?process.+?score.*?",
+       "max_matching_length": 59
+      },
+      {
+       "doc_count": 15,
+       "key": "Shutting down service gracefully requests in flight",
+       "regex": ".*?Shutting.+?down.+?service.+?gracefully.+?requests.+?in.+?flight.*?",
+       "max_matching_length": 136
+      },
+      {
+       "doc_count": 12,
+       "key": "Heartbeat received from worker",
+       "regex": ".*?Heartbeat.+?received.+?from.+?worker.*?",
+       "max_matching_length": 129
+      },
+      {
+       "doc_count": 5,
+       "key": "Payment of EUR authorised for customer",
+       "regex": ".*?Payment.+?of.+?EUR.+?authorised.+?for.+?customer.*?",
+       "max_matching_length": 57
+      },
+      {
+       "doc_count": 4,
+       "key": "Starting service items version",
+       "regex": ".*?Starting.+?service.+?items.+?version.*?",
+       "max_matching_length": 46
+      },
+      {
+       "doc_count": 2,
+       "key": "Starting service users version",
+       "regex": ".*?Starting.+?service.+?users.+?version.*?",
+       "max_matching_length": 46
+      },
+      {
+       "doc_count": 1,
+       "key": "Payment of EUR authorised for customer Foo",
+       "regex": ".*?Payment.+?of.+?EUR.+?authorised.+?for.+?customer.+?Foo.*?",
+       "max_matching_length": 55
+      },
+      {
+       "doc_count": 1,
+       "key": "Payment of EUR authorised for customer bob",
+       "regex": ".*?Payment.+?of.+?EUR.+?authorised.+?for.+?customer.+?bob.*?",
+       "max_matching_length": 55
+      },
+      {
+       "doc_count": 1,
+       "key": "Starting service orders version",
+       "regex": ".*?Starting.+?service.+?orders.+?version.*?",
+       "max_matching_length": 115
+      },
+      {
+       "doc_count": 1,
+       "key": "Starting service payments version",
+       "regex": ".*?Starting.+?service.+?payments.+?version.*?",
+       "max_matching_length": 49
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "cat_threshold",
+   "body": "{\"aggs\":{\"t11\":{\"categorize_text\":{\"field\":\"msg\",\"similarity_threshold\":11,\"size\":20}},\"t50\":{\"categorize_text\":{\"field\":\"msg\",\"similarity_threshold\":50,\"size\":20}},\"t95\":{\"categorize_text\":{\"field\":\"msg\",\"similarity_threshold\":95,\"size\":30}},\"t100\":{\"categorize_text\":{\"field\":\"msg\",\"similarity_threshold\":100,\"size\":30}}}}",
+   "typed_keys": false,
+   "response": {
+    "t100": {
+     "buckets": [
+      {
+       "doc_count": 76,
+       "key": "Node stopping",
+       "regex": ".*?Node.+?stopping.*?",
+       "max_matching_length": 18
+      },
+      {
+       "doc_count": 68,
+       "key": "Node starting",
+       "regex": ".*?Node.+?starting.*?",
+       "max_matching_length": 18
+      },
+      {
+       "doc_count": 29,
+       "key": "Failed to connect to after attempts",
+       "regex": ".*?Failed.+?to.+?connect.+?to.+?after.+?attempts.*?",
+       "max_matching_length": 64
+      },
+      {
+       "doc_count": 28,
+       "key": "Connection from accepted",
+       "regex": ".*?Connection.+?from.+?accepted.*?",
+       "max_matching_length": 42
+      },
+      {
+       "doc_count": 22,
+       "key": "Request POST /api/v1/orders completed in with status",
+       "regex": ".*?Request.+?POST.+?/api/v1/orders.+?completed.+?in.+?with.+?status.*?",
+       "max_matching_length": 68
+      },
+      {
+       "doc_count": 21,
+       "key": "Transaction committed",
+       "regex": ".*?Transaction.+?committed.*?",
+       "max_matching_length": 33
+      },
+      {
+       "doc_count": 19,
+       "key": "GC pause young generation heap",
+       "regex": ".*?GC.+?pause.+?young.+?generation.+?heap.*?",
+       "max_matching_length": 55
+      },
+      {
+       "doc_count": 12,
+       "key": "Disk usage at on /dev/sdb",
+       "regex": ".*?Disk.+?usage.+?at.+?on.+?/dev/sdb.*?",
+       "max_matching_length": 33
+      },
+      {
+       "doc_count": 10,
+       "key": "User Foo logging on",
+       "regex": ".*?User.+?Foo.+?logging.+?on.*?",
+       "max_matching_length": 20
+      },
+      {
+       "doc_count": 9,
+       "key": "Disk usage at on /dev/sdc",
+       "regex": ".*?Disk.+?usage.+?at.+?on.+?/dev/sdc.*?",
+       "max_matching_length": 101
+      },
+      {
+       "doc_count": 9,
+       "key": "User mallory logging on",
+       "regex": ".*?User.+?mallory.+?logging.+?on.*?",
+       "max_matching_length": 25
+      },
+      {
+       "doc_count": 8,
+       "key": "User bob logging off",
+       "regex": ".*?User.+?bob.+?logging.+?off.*?",
+       "max_matching_length": 22
+      },
+      {
+       "doc_count": 8,
+       "key": "User bob logging on",
+       "regex": ".*?User.+?bob.+?logging.+?on.*?",
+       "max_matching_length": 89
+      },
+      {
+       "doc_count": 8,
+       "key": "User carol logging on",
+       "regex": ".*?User.+?carol.+?logging.+?on.*?",
+       "max_matching_length": 23
+      },
+      {
+       "doc_count": 8,
+       "key": "User eve logging on",
+       "regex": ".*?User.+?eve.+?logging.+?on.*?",
+       "max_matching_length": 20
+      },
+      {
+       "doc_count": 7,
+       "key": "Node stopping",
+       "regex": ".*?Node.+?stopping.*?",
+       "max_matching_length": 86
+      },
+      {
+       "doc_count": 6,
+       "key": "Disk usage at on /dev/sda",
+       "regex": ".*?Disk.+?usage.+?at.+?on.+?/dev/sda.*?",
+       "max_matching_length": 101
+      },
+      {
+       "doc_count": 6,
+       "key": "Out of memory killed process items score",
+       "regex": ".*?Out.+?of.+?memory.+?killed.+?process.+?items.+?score.*?",
+       "max_matching_length": 56
+      },
+      {
+       "doc_count": 6,
+       "key": "Shutting down service users gracefully requests in flight",
+       "regex": ".*?Shutting.+?down.+?service.+?users.+?gracefully.+?requests.+?in.+?flight.*?",
+       "max_matching_length": 68
+      },
+      {
+       "doc_count": 6,
+       "key": "User Foo logging off",
+       "regex": ".*?User.+?Foo.+?logging.+?off.*?",
+       "max_matching_length": 22
+      },
+      {
+       "doc_count": 6,
+       "key": "User dave logging on",
+       "regex": ".*?User.+?dave.+?logging.+?on.*?",
+       "max_matching_length": 22
+      },
+      {
+       "doc_count": 6,
+       "key": "User eve logging off",
+       "regex": ".*?User.+?eve.+?logging.+?off.*?",
+       "max_matching_length": 22
+      },
+      {
+       "doc_count": 6,
+       "key": "User eve logging off",
+       "regex": ".*?User.+?eve.+?logging.+?off.*?",
+       "max_matching_length": 90
+      },
+      {
+       "doc_count": 5,
+       "key": "Transaction rolled back due to deadlock on table items",
+       "regex": ".*?Transaction.+?rolled.+?back.+?due.+?to.+?deadlock.+?on.+?table.+?items.*?",
+       "max_matching_length": 69
+      },
+      {
+       "doc_count": 5,
+       "key": "Transaction rolled back due to deadlock on table payments",
+       "regex": ".*?Transaction.+?rolled.+?back.+?due.+?to.+?deadlock.+?on.+?table.+?payments.*?",
+       "max_matching_length": 72
+      },
+      {
+       "doc_count": 5,
+       "key": "User mallory logging off",
+       "regex": ".*?User.+?mallory.+?logging.+?off.*?",
+       "max_matching_length": 94
+      },
+      {
+       "doc_count": 4,
+       "key": "Transaction rolled back due to deadlock on table orders",
+       "regex": ".*?Transaction.+?rolled.+?back.+?due.+?to.+?deadlock.+?on.+?table.+?orders.*?",
+       "max_matching_length": 70
+      },
+      {
+       "doc_count": 4,
+       "key": "User alice logging off",
+       "regex": ".*?User.+?alice.+?logging.+?off.*?",
+       "max_matching_length": 24
+      },
+      {
+       "doc_count": 4,
+       "key": "User alice logging on",
+       "regex": ".*?User.+?alice.+?logging.+?on.*?",
+       "max_matching_length": 91
+      },
+      {
+       "doc_count": 4,
+       "key": "User mallory logging off",
+       "regex": ".*?User.+?mallory.+?logging.+?off.*?",
+       "max_matching_length": 26
+      }
+     ]
+    },
+    "t95": {
+     "buckets": [
+      {
+       "doc_count": 83,
+       "key": "Node stopping",
+       "regex": ".*?Node.+?stopping.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 69,
+       "key": "Node starting",
+       "regex": ".*?Node.+?starting.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 31,
+       "key": "Connection from accepted",
+       "regex": ".*?Connection.+?from.+?accepted.*?",
+       "max_matching_length": 101
+      },
+      {
+       "doc_count": 31,
+       "key": "Disk usage at on",
+       "regex": ".*?Disk.+?usage.+?at.+?on.*?",
+       "max_matching_length": 92
+      },
+      {
+       "doc_count": 31,
+       "key": "Failed to connect to after attempts",
+       "regex": ".*?Failed.+?to.+?connect.+?to.+?after.+?attempts.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 29,
+       "key": "Request GET completed in",
+       "regex": ".*?Request.+?GET.+?completed.+?in.*?",
+       "max_matching_length": 121
+      },
+      {
+       "doc_count": 24,
+       "key": "Transaction committed",
+       "regex": ".*?Transaction.+?committed.*?",
+       "max_matching_length": 92
+      },
+      {
+       "doc_count": 23,
+       "key": "Request POST /api/v1/orders completed in with status",
+       "regex": ".*?Request.+?POST.+?/api/v1/orders.+?completed.+?in.+?with.+?status.*?",
+       "max_matching_length": 136
+      },
+      {
+       "doc_count": 21,
+       "key": "error cannot open file access denied",
+       "regex": ".*?error.+?cannot.+?open.+?file.+?access.+?denied.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 20,
+       "key": "GC pause young generation heap",
+       "regex": ".*?GC.+?pause.+?young.+?generation.+?heap.*?",
+       "max_matching_length": 123
+      },
+      {
+       "doc_count": 17,
+       "key": "Scheduled job finished on at",
+       "regex": ".*?Scheduled.+?job.+?finished.+?on.+?at.*?",
+       "max_matching_length": 127
+      },
+      {
+       "doc_count": 12,
+       "key": "Heartbeat received from worker",
+       "regex": ".*?Heartbeat.+?received.+?from.+?worker.*?",
+       "max_matching_length": 129
+      },
+      {
+       "doc_count": 12,
+       "key": "User eve logging off",
+       "regex": ".*?User.+?eve.+?logging.+?off.*?",
+       "max_matching_length": 82
+      },
+      {
+       "doc_count": 10,
+       "key": "User Foo logging on",
+       "regex": ".*?User.+?Foo.+?logging.+?on.*?",
+       "max_matching_length": 20
+      },
+      {
+       "doc_count": 10,
+       "key": "User mallory logging on",
+       "regex": ".*?User.+?mallory.+?logging.+?on.*?",
+       "max_matching_length": 85
+      },
+      {
+       "doc_count": 9,
+       "key": "User bob logging off",
+       "regex": ".*?User.+?bob.+?logging.+?off.*?",
+       "max_matching_length": 82
+      },
+      {
+       "doc_count": 9,
+       "key": "User carol logging on",
+       "regex": ".*?User.+?carol.+?logging.+?on.*?",
+       "max_matching_length": 83
+      },
+      {
+       "doc_count": 9,
+       "key": "User mallory logging off",
+       "regex": ".*?User.+?mallory.+?logging.+?off.*?",
+       "max_matching_length": 86
+      },
+      {
+       "doc_count": 8,
+       "key": "User bob logging on",
+       "regex": ".*?User.+?bob.+?logging.+?on.*?",
+       "max_matching_length": 89
+      },
+      {
+       "doc_count": 8,
+       "key": "User eve logging on",
+       "regex": ".*?User.+?eve.+?logging.+?on.*?",
+       "max_matching_length": 20
+      },
+      {
+       "doc_count": 7,
+       "key": "Shutting down service users gracefully requests in flight",
+       "regex": ".*?Shutting.+?down.+?service.+?users.+?gracefully.+?requests.+?in.+?flight.*?",
+       "max_matching_length": 136
+      },
+      {
+       "doc_count": 7,
+       "key": "User Foo logging off",
+       "regex": ".*?User.+?Foo.+?logging.+?off.*?",
+       "max_matching_length": 22
+      },
+      {
+       "doc_count": 7,
+       "key": "User alice logging on",
+       "regex": ".*?User.+?alice.+?logging.+?on.*?",
+       "max_matching_length": 83
+      },
+      {
+       "doc_count": 6,
+       "key": "Out of memory killed process items score",
+       "regex": ".*?Out.+?of.+?memory.+?killed.+?process.+?items.+?score.*?",
+       "max_matching_length": 56
+      },
+      {
+       "doc_count": 6,
+       "key": "Transaction rolled back due to deadlock on table items",
+       "regex": ".*?Transaction.+?rolled.+?back.+?due.+?to.+?deadlock.+?on.+?table.+?items.*?",
+       "max_matching_length": 69
+      },
+      {
+       "doc_count": 6,
+       "key": "Transaction rolled back due to deadlock on table payments",
+       "regex": ".*?Transaction.+?rolled.+?back.+?due.+?to.+?deadlock.+?on.+?table.+?payments.*?",
+       "max_matching_length": 140
+      },
+      {
+       "doc_count": 6,
+       "key": "User alice logging off",
+       "regex": ".*?User.+?alice.+?logging.+?off.*?",
+       "max_matching_length": 84
+      },
+      {
+       "doc_count": 6,
+       "key": "User dave logging on",
+       "regex": ".*?User.+?dave.+?logging.+?on.*?",
+       "max_matching_length": 22
+      },
+      {
+       "doc_count": 5,
+       "key": "Payment of EUR authorised for customer",
+       "regex": ".*?Payment.+?of.+?EUR.+?authorised.+?for.+?customer.*?",
+       "max_matching_length": 57
+      },
+      {
+       "doc_count": 4,
+       "key": "Shutting down service orders gracefully requests in flight",
+       "regex": ".*?Shutting.+?down.+?service.+?orders.+?gracefully.+?requests.+?in.+?flight.*?",
+       "max_matching_length": 135
+      }
+     ]
+    },
+    "t11": {
+     "buckets": [
+      {
+       "doc_count": 152,
+       "key": "Node",
+       "regex": ".*?Node.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 99,
+       "key": "on",
+       "regex": ".*?on.*?",
+       "max_matching_length": 128
+      },
+      {
+       "doc_count": 83,
+       "key": "in",
+       "regex": ".*?in.*?",
+       "max_matching_length": 124
+      },
+      {
+       "doc_count": 77,
+       "key": "User logging",
+       "regex": ".*?User.+?logging.*?",
+       "max_matching_length": 86
+      },
+      {
+       "doc_count": 43,
+       "key": "from",
+       "regex": ".*?from.*?",
+       "max_matching_length": 118
+      },
+      {
+       "doc_count": 31,
+       "key": "Failed to connect to after attempts",
+       "regex": ".*?Failed.+?to.+?connect.+?to.+?after.+?attempts.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 24,
+       "key": "Transaction committed",
+       "regex": ".*?Transaction.+?committed.*?",
+       "max_matching_length": 92
+      },
+      {
+       "doc_count": 21,
+       "key": "error cannot open file access denied",
+       "regex": ".*?error.+?cannot.+?open.+?file.+?access.+?denied.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 20,
+       "key": "GC pause young generation heap",
+       "regex": ".*?GC.+?pause.+?young.+?generation.+?heap.*?",
+       "max_matching_length": 123
+      },
+      {
+       "doc_count": 10,
+       "key": "items",
+       "regex": ".*?items.*?",
+       "max_matching_length": 56
+      },
+      {
+       "doc_count": 7,
+       "key": "Payment of EUR authorised for customer",
+       "regex": ".*?Payment.+?of.+?EUR.+?authorised.+?for.+?customer.*?",
+       "max_matching_length": 57
+      },
+      {
+       "doc_count": 6,
+       "key": "Out of memory killed process score",
+       "regex": ".*?Out.+?of.+?memory.+?killed.+?process.+?score.*?",
+       "max_matching_length": 59
+      },
+      {
+       "doc_count": 5,
+       "key": "users",
+       "regex": ".*?users.*?",
+       "max_matching_length": 56
+      },
+      {
+       "doc_count": 2,
+       "key": "Starting service version",
+       "regex": ".*?Starting.+?service.+?version.*?",
+       "max_matching_length": 115
+      }
+     ]
+    },
+    "t50": {
+     "buckets": [
+      {
+       "doc_count": 83,
+       "key": "Node stopping",
+       "regex": ".*?Node.+?stopping.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 69,
+       "key": "Node starting",
+       "regex": ".*?Node.+?starting.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 58,
+       "key": "User logging on",
+       "regex": ".*?User.+?logging.+?on.*?",
+       "max_matching_length": 85
+      },
+      {
+       "doc_count": 50,
+       "key": "User logging off",
+       "regex": ".*?User.+?logging.+?off.*?",
+       "max_matching_length": 86
+      },
+      {
+       "doc_count": 31,
+       "key": "Connection from accepted",
+       "regex": ".*?Connection.+?from.+?accepted.*?",
+       "max_matching_length": 101
+      },
+      {
+       "doc_count": 31,
+       "key": "Disk usage at on",
+       "regex": ".*?Disk.+?usage.+?at.+?on.*?",
+       "max_matching_length": 92
+      },
+      {
+       "doc_count": 31,
+       "key": "Failed to connect to after attempts",
+       "regex": ".*?Failed.+?to.+?connect.+?to.+?after.+?attempts.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 29,
+       "key": "Request GET completed in",
+       "regex": ".*?Request.+?GET.+?completed.+?in.*?",
+       "max_matching_length": 121
+      },
+      {
+       "doc_count": 24,
+       "key": "Transaction committed",
+       "regex": ".*?Transaction.+?committed.*?",
+       "max_matching_length": 92
+      },
+      {
+       "doc_count": 23,
+       "key": "Request POST /api/v1/orders completed in with status",
+       "regex": ".*?Request.+?POST.+?/api/v1/orders.+?completed.+?in.+?with.+?status.*?",
+       "max_matching_length": 136
+      },
+      {
+       "doc_count": 21,
+       "key": "error cannot open file access denied",
+       "regex": ".*?error.+?cannot.+?open.+?file.+?access.+?denied.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 20,
+       "key": "GC pause young generation heap",
+       "regex": ".*?GC.+?pause.+?young.+?generation.+?heap.*?",
+       "max_matching_length": 123
+      },
+      {
+       "doc_count": 20,
+       "key": "Transaction rolled back due to deadlock on table",
+       "regex": ".*?Transaction.+?rolled.+?back.+?due.+?to.+?deadlock.+?on.+?table.*?",
+       "max_matching_length": 140
+      },
+      {
+       "doc_count": 17,
+       "key": "Scheduled job finished on at",
+       "regex": ".*?Scheduled.+?job.+?finished.+?on.+?at.*?",
+       "max_matching_length": 127
+      },
+      {
+       "doc_count": 16,
+       "key": "Cache miss for key in region",
+       "regex": ".*?Cache.+?miss.+?for.+?key.+?in.+?region.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 15,
+       "key": "Out of memory killed process score",
+       "regex": ".*?Out.+?of.+?memory.+?killed.+?process.+?score.*?",
+       "max_matching_length": 59
+      },
+      {
+       "doc_count": 15,
+       "key": "Shutting down service gracefully requests in flight",
+       "regex": ".*?Shutting.+?down.+?service.+?gracefully.+?requests.+?in.+?flight.*?",
+       "max_matching_length": 136
+      },
+      {
+       "doc_count": 12,
+       "key": "Heartbeat received from worker",
+       "regex": ".*?Heartbeat.+?received.+?from.+?worker.*?",
+       "max_matching_length": 129
+      },
+      {
+       "doc_count": 8,
+       "key": "Starting service version",
+       "regex": ".*?Starting.+?service.+?version.*?",
+       "max_matching_length": 105
+      },
+      {
+       "doc_count": 7,
+       "key": "Payment of EUR authorised for customer",
+       "regex": ".*?Payment.+?of.+?EUR.+?authorised.+?for.+?customer.*?",
+       "max_matching_length": 57
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "cat_min_doc_count",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"min_doc_count\":20,\"size\":50}},\"z\":{\"categorize_text\":{\"field\":\"msg\",\"min_doc_count\":0,\"size\":50}}}}",
+   "typed_keys": false,
+   "response": {
+    "z": {
+     "buckets": [
+      {
+       "doc_count": 83,
+       "key": "Node stopping",
+       "regex": ".*?Node.+?stopping.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 69,
+       "key": "Node starting",
+       "regex": ".*?Node.+?starting.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 58,
+       "key": "User logging on",
+       "regex": ".*?User.+?logging.+?on.*?",
+       "max_matching_length": 85
+      },
+      {
+       "doc_count": 50,
+       "key": "User logging off",
+       "regex": ".*?User.+?logging.+?off.*?",
+       "max_matching_length": 86
+      },
+      {
+       "doc_count": 31,
+       "key": "Connection from accepted",
+       "regex": ".*?Connection.+?from.+?accepted.*?",
+       "max_matching_length": 101
+      },
+      {
+       "doc_count": 31,
+       "key": "Disk usage at on",
+       "regex": ".*?Disk.+?usage.+?at.+?on.*?",
+       "max_matching_length": 92
+      },
+      {
+       "doc_count": 31,
+       "key": "Failed to connect to after attempts",
+       "regex": ".*?Failed.+?to.+?connect.+?to.+?after.+?attempts.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 29,
+       "key": "Request GET completed in",
+       "regex": ".*?Request.+?GET.+?completed.+?in.*?",
+       "max_matching_length": 121
+      },
+      {
+       "doc_count": 24,
+       "key": "Transaction committed",
+       "regex": ".*?Transaction.+?committed.*?",
+       "max_matching_length": 92
+      },
+      {
+       "doc_count": 23,
+       "key": "Request POST /api/v1/orders completed in with status",
+       "regex": ".*?Request.+?POST.+?/api/v1/orders.+?completed.+?in.+?with.+?status.*?",
+       "max_matching_length": 136
+      },
+      {
+       "doc_count": 21,
+       "key": "error cannot open file access denied",
+       "regex": ".*?error.+?cannot.+?open.+?file.+?access.+?denied.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 20,
+       "key": "GC pause young generation heap",
+       "regex": ".*?GC.+?pause.+?young.+?generation.+?heap.*?",
+       "max_matching_length": 123
+      },
+      {
+       "doc_count": 20,
+       "key": "Transaction rolled back due to deadlock on table",
+       "regex": ".*?Transaction.+?rolled.+?back.+?due.+?to.+?deadlock.+?on.+?table.*?",
+       "max_matching_length": 140
+      },
+      {
+       "doc_count": 17,
+       "key": "Scheduled job finished on at",
+       "regex": ".*?Scheduled.+?job.+?finished.+?on.+?at.*?",
+       "max_matching_length": 127
+      },
+      {
+       "doc_count": 16,
+       "key": "Cache miss for key in region",
+       "regex": ".*?Cache.+?miss.+?for.+?key.+?in.+?region.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 15,
+       "key": "Out of memory killed process score",
+       "regex": ".*?Out.+?of.+?memory.+?killed.+?process.+?score.*?",
+       "max_matching_length": 59
+      },
+      {
+       "doc_count": 15,
+       "key": "Shutting down service gracefully requests in flight",
+       "regex": ".*?Shutting.+?down.+?service.+?gracefully.+?requests.+?in.+?flight.*?",
+       "max_matching_length": 136
+      },
+      {
+       "doc_count": 12,
+       "key": "Heartbeat received from worker",
+       "regex": ".*?Heartbeat.+?received.+?from.+?worker.*?",
+       "max_matching_length": 129
+      },
+      {
+       "doc_count": 5,
+       "key": "Payment of EUR authorised for customer",
+       "regex": ".*?Payment.+?of.+?EUR.+?authorised.+?for.+?customer.*?",
+       "max_matching_length": 57
+      },
+      {
+       "doc_count": 4,
+       "key": "Starting service items version",
+       "regex": ".*?Starting.+?service.+?items.+?version.*?",
+       "max_matching_length": 46
+      },
+      {
+       "doc_count": 2,
+       "key": "Starting service users version",
+       "regex": ".*?Starting.+?service.+?users.+?version.*?",
+       "max_matching_length": 46
+      },
+      {
+       "doc_count": 1,
+       "key": "Payment of EUR authorised for customer Foo",
+       "regex": ".*?Payment.+?of.+?EUR.+?authorised.+?for.+?customer.+?Foo.*?",
+       "max_matching_length": 55
+      },
+      {
+       "doc_count": 1,
+       "key": "Payment of EUR authorised for customer bob",
+       "regex": ".*?Payment.+?of.+?EUR.+?authorised.+?for.+?customer.+?bob.*?",
+       "max_matching_length": 55
+      },
+      {
+       "doc_count": 1,
+       "key": "Starting service orders version",
+       "regex": ".*?Starting.+?service.+?orders.+?version.*?",
+       "max_matching_length": 115
+      },
+      {
+       "doc_count": 1,
+       "key": "Starting service payments version",
+       "regex": ".*?Starting.+?service.+?payments.+?version.*?",
+       "max_matching_length": 49
+      }
+     ]
+    },
+    "c": {
+     "buckets": [
+      {
+       "doc_count": 83,
+       "key": "Node stopping",
+       "regex": ".*?Node.+?stopping.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 69,
+       "key": "Node starting",
+       "regex": ".*?Node.+?starting.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 58,
+       "key": "User logging on",
+       "regex": ".*?User.+?logging.+?on.*?",
+       "max_matching_length": 85
+      },
+      {
+       "doc_count": 50,
+       "key": "User logging off",
+       "regex": ".*?User.+?logging.+?off.*?",
+       "max_matching_length": 86
+      },
+      {
+       "doc_count": 31,
+       "key": "Connection from accepted",
+       "regex": ".*?Connection.+?from.+?accepted.*?",
+       "max_matching_length": 101
+      },
+      {
+       "doc_count": 31,
+       "key": "Disk usage at on",
+       "regex": ".*?Disk.+?usage.+?at.+?on.*?",
+       "max_matching_length": 92
+      },
+      {
+       "doc_count": 31,
+       "key": "Failed to connect to after attempts",
+       "regex": ".*?Failed.+?to.+?connect.+?to.+?after.+?attempts.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 29,
+       "key": "Request GET completed in",
+       "regex": ".*?Request.+?GET.+?completed.+?in.*?",
+       "max_matching_length": 121
+      },
+      {
+       "doc_count": 24,
+       "key": "Transaction committed",
+       "regex": ".*?Transaction.+?committed.*?",
+       "max_matching_length": 92
+      },
+      {
+       "doc_count": 23,
+       "key": "Request POST /api/v1/orders completed in with status",
+       "regex": ".*?Request.+?POST.+?/api/v1/orders.+?completed.+?in.+?with.+?status.*?",
+       "max_matching_length": 136
+      },
+      {
+       "doc_count": 21,
+       "key": "error cannot open file access denied",
+       "regex": ".*?error.+?cannot.+?open.+?file.+?access.+?denied.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 20,
+       "key": "GC pause young generation heap",
+       "regex": ".*?GC.+?pause.+?young.+?generation.+?heap.*?",
+       "max_matching_length": 123
+      },
+      {
+       "doc_count": 20,
+       "key": "Transaction rolled back due to deadlock on table",
+       "regex": ".*?Transaction.+?rolled.+?back.+?due.+?to.+?deadlock.+?on.+?table.*?",
+       "max_matching_length": 140
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "cat_keyword",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"kmsg\",\"size\":15}}}}",
+   "typed_keys": false,
+   "response": {
+    "c": {
+     "buckets": [
+      {
+       "doc_count": 72,
+       "key": "Node stopping",
+       "regex": ".*?Node.+?stopping.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 64,
+       "key": "Node starting",
+       "regex": ".*?Node.+?starting.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 54,
+       "key": "User logging on",
+       "regex": ".*?User.+?logging.+?on.*?",
+       "max_matching_length": 85
+      },
+      {
+       "doc_count": 45,
+       "key": "User logging off",
+       "regex": ".*?User.+?logging.+?off.*?",
+       "max_matching_length": 86
+      },
+      {
+       "doc_count": 27,
+       "key": "Connection from accepted",
+       "regex": ".*?Connection.+?from.+?accepted.*?",
+       "max_matching_length": 101
+      },
+      {
+       "doc_count": 27,
+       "key": "Disk usage at on",
+       "regex": ".*?Disk.+?usage.+?at.+?on.*?",
+       "max_matching_length": 92
+      },
+      {
+       "doc_count": 26,
+       "key": "Failed to connect to after attempts",
+       "regex": ".*?Failed.+?to.+?connect.+?to.+?after.+?attempts.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 25,
+       "key": "Request GET completed in",
+       "regex": ".*?Request.+?GET.+?completed.+?in.*?",
+       "max_matching_length": 121
+      },
+      {
+       "doc_count": 20,
+       "key": "Request POST /api/v1/orders completed in with status",
+       "regex": ".*?Request.+?POST.+?/api/v1/orders.+?completed.+?in.+?with.+?status.*?",
+       "max_matching_length": 136
+      },
+      {
+       "doc_count": 20,
+       "key": "Transaction committed",
+       "regex": ".*?Transaction.+?committed.*?",
+       "max_matching_length": 92
+      },
+      {
+       "doc_count": 19,
+       "key": "error cannot open file access denied",
+       "regex": ".*?error.+?cannot.+?open.+?file.+?access.+?denied.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 18,
+       "key": "GC pause young generation heap",
+       "regex": ".*?GC.+?pause.+?young.+?generation.+?heap.*?",
+       "max_matching_length": 123
+      },
+      {
+       "doc_count": 13,
+       "key": "Transaction rolled back due to deadlock on table",
+       "regex": ".*?Transaction.+?rolled.+?back.+?due.+?to.+?deadlock.+?on.+?table.*?",
+       "max_matching_length": 140
+      },
+      {
+       "doc_count": 12,
+       "key": "Out of memory killed process score",
+       "regex": ".*?Out.+?of.+?memory.+?killed.+?process.+?score.*?",
+       "max_matching_length": 59
+      },
+      {
+       "doc_count": 12,
+       "key": "Scheduled job finished on at",
+       "regex": ".*?Scheduled.+?job.+?finished.+?on.+?at.*?",
+       "max_matching_length": 127
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "cat_subs",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"size\":6},\"aggs\":{\"g\":{\"terms\":{\"field\":\"g\"}},\"a\":{\"avg\":{\"field\":\"n\"}}}}}}",
+   "typed_keys": false,
+   "response": {
+    "c": {
+     "buckets": [
+      {
+       "doc_count": 83,
+       "key": "Node stopping",
+       "regex": ".*?Node.+?stopping.*?",
+       "max_matching_length": 79,
+       "a": {
+        "value": 4.554216867469879
+       },
+       "g": {
+        "doc_count_error_upper_bound": 0,
+        "sum_other_doc_count": 0,
+        "buckets": [
+         {
+          "key": "g2",
+          "doc_count": 36
+         },
+         {
+          "key": "g1",
+          "doc_count": 27
+         },
+         {
+          "key": "g0",
+          "doc_count": 20
+         }
+        ]
+       }
+      },
+      {
+       "doc_count": 69,
+       "key": "Node starting",
+       "regex": ".*?Node.+?starting.*?",
+       "max_matching_length": 79,
+       "a": {
+        "value": 3.8405797101449277
+       },
+       "g": {
+        "doc_count_error_upper_bound": 0,
+        "sum_other_doc_count": 0,
+        "buckets": [
+         {
+          "key": "g0",
+          "doc_count": 25
+         },
+         {
+          "key": "g2",
+          "doc_count": 25
+         },
+         {
+          "key": "g1",
+          "doc_count": 19
+         }
+        ]
+       }
+      },
+      {
+       "doc_count": 58,
+       "key": "User logging on",
+       "regex": ".*?User.+?logging.+?on.*?",
+       "max_matching_length": 85,
+       "a": {
+        "value": 4.5344827586206895
+       },
+       "g": {
+        "doc_count_error_upper_bound": 0,
+        "sum_other_doc_count": 0,
+        "buckets": [
+         {
+          "key": "g1",
+          "doc_count": 25
+         },
+         {
+          "key": "g0",
+          "doc_count": 18
+         },
+         {
+          "key": "g2",
+          "doc_count": 15
+         }
+        ]
+       }
+      },
+      {
+       "doc_count": 50,
+       "key": "User logging off",
+       "regex": ".*?User.+?logging.+?off.*?",
+       "max_matching_length": 86,
+       "a": {
+        "value": 4.78
+       },
+       "g": {
+        "doc_count_error_upper_bound": 0,
+        "sum_other_doc_count": 0,
+        "buckets": [
+         {
+          "key": "g0",
+          "doc_count": 17
+         },
+         {
+          "key": "g2",
+          "doc_count": 17
+         },
+         {
+          "key": "g1",
+          "doc_count": 16
+         }
+        ]
+       }
+      },
+      {
+       "doc_count": 31,
+       "key": "Connection from accepted",
+       "regex": ".*?Connection.+?from.+?accepted.*?",
+       "max_matching_length": 101,
+       "a": {
+        "value": 4.290322580645161
+       },
+       "g": {
+        "doc_count_error_upper_bound": 0,
+        "sum_other_doc_count": 0,
+        "buckets": [
+         {
+          "key": "g0",
+          "doc_count": 14
+         },
+         {
+          "key": "g2",
+          "doc_count": 9
+         },
+         {
+          "key": "g1",
+          "doc_count": 8
+         }
+        ]
+       }
+      },
+      {
+       "doc_count": 31,
+       "key": "Disk usage at on",
+       "regex": ".*?Disk.+?usage.+?at.+?on.*?",
+       "max_matching_length": 92,
+       "a": {
+        "value": 3.806451612903226
+       },
+       "g": {
+        "doc_count_error_upper_bound": 0,
+        "sum_other_doc_count": 0,
+        "buckets": [
+         {
+          "key": "g0",
+          "doc_count": 13
+         },
+         {
+          "key": "g2",
+          "doc_count": 10
+         },
+         {
+          "key": "g1",
+          "doc_count": 8
+         }
+        ]
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "cat_under_terms",
+   "body": "{\"aggs\":{\"t\":{\"terms\":{\"field\":\"g\"},\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"size\":4}}}}}}",
+   "typed_keys": false,
+   "response": {
+    "t": {
+     "doc_count_error_upper_bound": 0,
+     "sum_other_doc_count": 0,
+     "buckets": [
+      {
+       "key": "g0",
+       "doc_count": 200,
+       "c": {
+        "buckets": [
+         {
+          "doc_count": 25,
+          "key": "Node starting",
+          "regex": ".*?Node.+?starting.*?",
+          "max_matching_length": 18
+         },
+         {
+          "doc_count": 20,
+          "key": "Node stopping",
+          "regex": ".*?Node.+?stopping.*?",
+          "max_matching_length": 79
+         },
+         {
+          "doc_count": 17,
+          "key": "User logging off",
+          "regex": ".*?User.+?logging.+?off.*?",
+          "max_matching_length": 86
+         },
+         {
+          "doc_count": 14,
+          "key": "Connection from accepted",
+          "regex": ".*?Connection.+?from.+?accepted.*?",
+          "max_matching_length": 101
+         }
+        ]
+       }
+      },
+      {
+       "key": "g1",
+       "doc_count": 200,
+       "c": {
+        "buckets": [
+         {
+          "doc_count": 27,
+          "key": "Node stopping",
+          "regex": ".*?Node.+?stopping.*?",
+          "max_matching_length": 18
+         },
+         {
+          "doc_count": 25,
+          "key": "User logging on",
+          "regex": ".*?User.+?logging.+?on.*?",
+          "max_matching_length": 91
+         },
+         {
+          "doc_count": 19,
+          "key": "Node starting",
+          "regex": ".*?Node.+?starting.*?",
+          "max_matching_length": 79
+         },
+         {
+          "doc_count": 16,
+          "key": "User logging off",
+          "regex": ".*?User.+?logging.+?off.*?",
+          "max_matching_length": 92
+         }
+        ]
+       }
+      },
+      {
+       "key": "g2",
+       "doc_count": 200,
+       "c": {
+        "buckets": [
+         {
+          "doc_count": 36,
+          "key": "Node stopping",
+          "regex": ".*?Node.+?stopping.*?",
+          "max_matching_length": 79
+         },
+         {
+          "doc_count": 25,
+          "key": "Node starting",
+          "regex": ".*?Node.+?starting.*?",
+          "max_matching_length": 18
+         },
+         {
+          "doc_count": 17,
+          "key": "User logging off",
+          "regex": ".*?User.+?logging.+?off.*?",
+          "max_matching_length": 83
+         },
+         {
+          "doc_count": 15,
+          "key": "User logging on",
+          "regex": ".*?User.+?logging.+?on.*?",
+          "max_matching_length": 93
+         }
+        ]
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "cat_query",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"size\":10}}},\"query\":{\"range\":{\"n\":{\"gte\":6}}}}",
+   "typed_keys": false,
+   "response": {
+    "c": {
+     "buckets": [
+      {
+       "doc_count": 31,
+       "key": "Node stopping",
+       "regex": ".*?Node.+?stopping.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 22,
+       "key": "User logging off",
+       "regex": ".*?User.+?logging.+?off.*?",
+       "max_matching_length": 86
+      },
+      {
+       "doc_count": 20,
+       "key": "Node starting",
+       "regex": ".*?Node.+?starting.*?",
+       "max_matching_length": 18
+      },
+      {
+       "doc_count": 15,
+       "key": "User logging on",
+       "regex": ".*?User.+?logging.+?on.*?",
+       "max_matching_length": 83
+      },
+      {
+       "doc_count": 14,
+       "key": "Request GET completed in",
+       "regex": ".*?Request.+?GET.+?completed.+?in.*?",
+       "max_matching_length": 121
+      },
+      {
+       "doc_count": 13,
+       "key": "Failed to connect to after attempts",
+       "regex": ".*?Failed.+?to.+?connect.+?to.+?after.+?attempts.*?",
+       "max_matching_length": 130
+      },
+      {
+       "doc_count": 11,
+       "key": "Connection from accepted",
+       "regex": ".*?Connection.+?from.+?accepted.*?",
+       "max_matching_length": 42
+      },
+      {
+       "doc_count": 10,
+       "key": "GC pause young generation heap",
+       "regex": ".*?GC.+?pause.+?young.+?generation.+?heap.*?",
+       "max_matching_length": 55
+      },
+      {
+       "doc_count": 10,
+       "key": "Transaction rolled back due to deadlock on table",
+       "regex": ".*?Transaction.+?rolled.+?back.+?due.+?to.+?deadlock.+?on.+?table.*?",
+       "max_matching_length": 140
+      },
+      {
+       "doc_count": 10,
+       "key": "User logging on",
+       "regex": ".*?User.+?logging.+?on.*?",
+       "max_matching_length": 25
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "cat_empty",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\"}}},\"query\":{\"term\":{\"g\":\"zzz\"}}}",
+   "typed_keys": false,
+   "response": {
+    "c": {
+     "buckets": []
+    }
+   }
+  },
+  {
+   "name": "cat_unmapped",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"nope\"}}}}",
+   "typed_keys": false,
+   "response": {
+    "c": {
+     "buckets": []
+    }
+   }
+  },
+  {
+   "name": "cat_other",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"other\",\"size\":30}}}}",
+   "typed_keys": false,
+   "response": {
+    "c": {
+     "buckets": [
+      {
+       "doc_count": 19,
+       "key": "Node starting",
+       "regex": ".*?Node.+?starting.*?",
+       "max_matching_length": 18
+      },
+      {
+       "doc_count": 18,
+       "key": "Node stopping",
+       "regex": ".*?Node.+?stopping.*?",
+       "max_matching_length": 18
+      },
+      {
+       "doc_count": 14,
+       "key": "User logging on",
+       "regex": ".*?User.+?logging.+?on.*?",
+       "max_matching_length": 25
+      },
+      {
+       "doc_count": 12,
+       "key": "Connection from accepted",
+       "regex": ".*?Connection.+?from.+?accepted.*?",
+       "max_matching_length": 42
+      },
+      {
+       "doc_count": 12,
+       "key": "User logging off",
+       "regex": ".*?User.+?logging.+?off.*?",
+       "max_matching_length": 26
+      },
+      {
+       "doc_count": 9,
+       "key": "Disk usage at on",
+       "regex": ".*?Disk.+?usage.+?at.+?on.*?",
+       "max_matching_length": 33
+      },
+      {
+       "doc_count": 9,
+       "key": "Failed to connect to after attempts",
+       "regex": ".*?Failed.+?to.+?connect.+?to.+?after.+?attempts.*?",
+       "max_matching_length": 63
+      },
+      {
+       "doc_count": 8,
+       "key": "Request GET completed in",
+       "regex": ".*?Request.+?GET.+?completed.+?in.*?",
+       "max_matching_length": 52
+      },
+      {
+       "doc_count": 8,
+       "key": "Shutting down service gracefully requests in flight",
+       "regex": ".*?Shutting.+?down.+?service.+?gracefully.+?requests.+?in.+?flight.*?",
+       "max_matching_length": 71
+      },
+      {
+       "doc_count": 7,
+       "key": "Request POST /api/v1/orders completed in with status",
+       "regex": ".*?Request.+?POST.+?/api/v1/orders.+?completed.+?in.+?with.+?status.*?",
+       "max_matching_length": 68
+      },
+      {
+       "doc_count": 7,
+       "key": "Transaction committed",
+       "regex": ".*?Transaction.+?committed.*?",
+       "max_matching_length": 33
+      },
+      {
+       "doc_count": 7,
+       "key": "Transaction rolled back due to deadlock on table",
+       "regex": ".*?Transaction.+?rolled.+?back.+?due.+?to.+?deadlock.+?on.+?table.*?",
+       "max_matching_length": 72
+      },
+      {
+       "doc_count": 6,
+       "key": "error cannot open file access denied",
+       "regex": ".*?error.+?cannot.+?open.+?file.+?access.+?denied.*?",
+       "max_matching_length": 62
+      },
+      {
+       "doc_count": 5,
+       "key": "GC pause young generation heap",
+       "regex": ".*?GC.+?pause.+?young.+?generation.+?heap.*?",
+       "max_matching_length": 55
+      },
+      {
+       "doc_count": 5,
+       "key": "Heartbeat received from worker",
+       "regex": ".*?Heartbeat.+?received.+?from.+?worker.*?",
+       "max_matching_length": 63
+      },
+      {
+       "doc_count": 5,
+       "key": "Out of memory killed process score",
+       "regex": ".*?Out.+?of.+?memory.+?killed.+?process.+?score.*?",
+       "max_matching_length": 59
+      },
+      {
+       "doc_count": 5,
+       "key": "Scheduled job finished on at",
+       "regex": ".*?Scheduled.+?job.+?finished.+?on.+?at.*?",
+       "max_matching_length": 60
+      },
+      {
+       "doc_count": 4,
+       "key": "Cache miss for key in region",
+       "regex": ".*?Cache.+?miss.+?for.+?key.+?in.+?region.*?",
+       "max_matching_length": 62
+      },
+      {
+       "doc_count": 2,
+       "key": "Payment of EUR authorised for customer",
+       "regex": ".*?Payment.+?of.+?EUR.+?authorised.+?for.+?customer.*?",
+       "max_matching_length": 59
+      },
+      {
+       "doc_count": 2,
+       "key": "Starting service orders version",
+       "regex": ".*?Starting.+?service.+?orders.+?version.*?",
+       "max_matching_length": 47
+      },
+      {
+       "doc_count": 1,
+       "key": "Starting service payments version",
+       "regex": ".*?Starting.+?service.+?payments.+?version.*?",
+       "max_matching_length": 49
+      },
+      {
+       "doc_count": 1,
+       "key": "Starting service users version",
+       "regex": ".*?Starting.+?service.+?users.+?version.*?",
+       "max_matching_length": 46
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "cat_pipeline",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"size\":5},\"aggs\":{\"a\":{\"avg\":{\"field\":\"n\"}}}},\"m\":{\"max_bucket\":{\"buckets_path\":\"c>a\"}},\"b\":{\"avg_bucket\":{\"buckets_path\":\"c>_count\"}}}}",
+   "typed_keys": false,
+   "response": {
+    "c": {
+     "buckets": [
+      {
+       "doc_count": 83,
+       "key": "Node stopping",
+       "regex": ".*?Node.+?stopping.*?",
+       "max_matching_length": 79,
+       "a": {
+        "value": 4.554216867469879
+       }
+      },
+      {
+       "doc_count": 69,
+       "key": "Node starting",
+       "regex": ".*?Node.+?starting.*?",
+       "max_matching_length": 79,
+       "a": {
+        "value": 3.8405797101449277
+       }
+      },
+      {
+       "doc_count": 58,
+       "key": "User logging on",
+       "regex": ".*?User.+?logging.+?on.*?",
+       "max_matching_length": 85,
+       "a": {
+        "value": 4.5344827586206895
+       }
+      },
+      {
+       "doc_count": 50,
+       "key": "User logging off",
+       "regex": ".*?User.+?logging.+?off.*?",
+       "max_matching_length": 86,
+       "a": {
+        "value": 4.78
+       }
+      },
+      {
+       "doc_count": 31,
+       "key": "Connection from accepted",
+       "regex": ".*?Connection.+?from.+?accepted.*?",
+       "max_matching_length": 101,
+       "a": {
+        "value": 4.290322580645161
+       }
+      }
+     ]
+    },
+    "m": {
+     "value": 4.78,
+     "keys": [
+      "User logging off"
+     ]
+    },
+    "b": {
+     "value": 58.2
+    }
+   }
+  },
+  {
+   "name": "cat_deprecated_params",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"max_unique_tokens\":10,\"max_matched_tokens\":5,\"size\":5}}}}",
+   "typed_keys": false,
+   "response": {
+    "c": {
+     "buckets": [
+      {
+       "doc_count": 83,
+       "key": "Node stopping",
+       "regex": ".*?Node.+?stopping.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 69,
+       "key": "Node starting",
+       "regex": ".*?Node.+?starting.*?",
+       "max_matching_length": 79
+      },
+      {
+       "doc_count": 58,
+       "key": "User logging on",
+       "regex": ".*?User.+?logging.+?on.*?",
+       "max_matching_length": 85
+      },
+      {
+       "doc_count": 50,
+       "key": "User logging off",
+       "regex": ".*?User.+?logging.+?off.*?",
+       "max_matching_length": 86
+      },
+      {
+       "doc_count": 31,
+       "key": "Connection from accepted",
+       "regex": ".*?Connection.+?from.+?accepted.*?",
+       "max_matching_length": 101
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "cat_err_threshold_zero",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"similarity_threshold\":0}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "status_exception",
+      "reason": "[similarity_threshold] must be in the range [1, 100]. Found [0] in [c]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:71] [categorize_text] failed to parse field [similarity_threshold]",
+    "caused_by": {
+     "type": "status_exception",
+     "reason": "[similarity_threshold] must be in the range [1, 100]. Found [0] in [c]"
+    }
+   }
+  },
+  {
+   "name": "cat_err_threshold_big",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"similarity_threshold\":101}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "status_exception",
+      "reason": "[similarity_threshold] must be in the range [1, 100]. Found [101] in [c]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:71] [categorize_text] failed to parse field [similarity_threshold]",
+    "caused_by": {
+     "type": "status_exception",
+     "reason": "[similarity_threshold] must be in the range [1, 100]. Found [101] in [c]"
+    }
+   }
+  },
+  {
+   "name": "cat_err_size",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"size\":0}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "status_exception",
+      "reason": "[size] must be greater than 0. Found [0] in [c]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:55] [categorize_text] failed to parse field [size]",
+    "caused_by": {
+     "type": "status_exception",
+     "reason": "[size] must be greater than 0. Found [0] in [c]"
+    }
+   }
+  },
+  {
+   "name": "cat_err_shard_size",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"shard_size\":-1}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "status_exception",
+      "reason": "[shard_size] must be greater than 0. Found [-1] in [c]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:61] [categorize_text] failed to parse field [shard_size]",
+    "caused_by": {
+     "type": "status_exception",
+     "reason": "[shard_size] must be greater than 0. Found [-1] in [c]"
+    }
+   }
+  },
+  {
+   "name": "cat_err_min_doc_count",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"min_doc_count\":-1}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "status_exception",
+      "reason": "[min_doc_count] must be greater than or equal to 0. Found [-1] in [c]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:64] [categorize_text] failed to parse field [min_doc_count]",
+    "caused_by": {
+     "type": "status_exception",
+     "reason": "[min_doc_count] must be greater than or equal to 0. Found [-1] in [c]"
+    }
+   }
+  },
+  {
+   "name": "cat_err_shard_min_doc_count",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"shard_min_doc_count\":-2}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "status_exception",
+      "reason": "[shard_min_doc_count] must be greater than or equal to 0. Found [-2] in [c]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:70] [categorize_text] failed to parse field [shard_min_doc_count]",
+    "caused_by": {
+     "type": "status_exception",
+     "reason": "[shard_min_doc_count] must be greater than or equal to 0. Found [-2] in [c]"
+    }
+   }
+  },
+  {
+   "name": "cat_err_filters_and_analyzer",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"categorization_filters\":[\"foo\"],\"categorization_analyzer\":\"english\"}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "status_exception",
+      "reason": "[categorization_filters] cannot be used with [categorization_analyzer] - instead specify them as pattern_replace char_filters in the analyzer"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:107] [categorize_text] failed to parse field [categorization_analyzer]",
+    "caused_by": {
+     "type": "status_exception",
+     "reason": "[categorization_filters] cannot be used with [categorization_analyzer] - instead specify them as pattern_replace char_filters in the analyzer"
+    }
+   }
+  },
+  {
+   "name": "cat_err_analyzer_and_filters",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"categorization_analyzer\":\"english\",\"categorization_filters\":[\"foo\"]}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "status_exception",
+      "reason": "[categorization_filters] cannot be used with [categorization_analyzer] - instead specify them as pattern_replace char_filters in the analyzer"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:115] [categorize_text] failed to parse field [categorization_filters]",
+    "caused_by": {
+     "type": "status_exception",
+     "reason": "[categorization_filters] cannot be used with [categorization_analyzer] - instead specify them as pattern_replace char_filters in the analyzer"
+    }
+   }
+  },
+  {
+   "name": "cat_err_filters_dup",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"categorization_filters\":[\"a\",\"a\"]}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "status_exception",
+      "reason": "categorization_filters contain duplicates"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:81] [categorize_text] failed to parse field [categorization_filters]",
+    "caused_by": {
+     "type": "status_exception",
+     "reason": "categorization_filters contain duplicates"
+    }
+   }
+  },
+  {
+   "name": "cat_err_filters_empty",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"categorization_filters\":[\"a\",\"\"]}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "status_exception",
+      "reason": "categorization_filters are not allowed to contain empty strings"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:80] [categorize_text] failed to parse field [categorization_filters]",
+    "caused_by": {
+     "type": "status_exception",
+     "reason": "categorization_filters are not allowed to contain empty strings"
+    }
+   }
+  },
+  {
+   "name": "cat_err_filters_regex",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"categorization_filters\":[\"(unclosed\"]}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "status_exception",
+      "reason": "categorization_filters contains invalid regular expression '(unclosed'"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:85] [categorize_text] failed to parse field [categorization_filters]",
+    "caused_by": {
+     "type": "status_exception",
+     "reason": "categorization_filters contains invalid regular expression '(unclosed'"
+    }
+   }
+  },
+  {
+   "name": "cat_err_numeric",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"n\"}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "categorize_text agg [c] only works on text and keyword fields. Cannot aggregate field type [n] via [NumberFieldType]"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "aggs-fx-cat2",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "categorize_text agg [c] only works on text and keyword fields. Cannot aggregate field type [n] via [NumberFieldType]"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "categorize_text agg [c] only works on text and keyword fields. Cannot aggregate field type [n] via [NumberFieldType]",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "categorize_text agg [c] only works on text and keyword fields. Cannot aggregate field type [n] via [NumberFieldType]"
+     }
+    }
+   }
+  },
+  {
+   "name": "cat_err_no_field",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"size\":3}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "null_pointer_exception",
+      "reason": "Cannot invoke \"Object.hashCode()\" because \"pk\" is null"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "aggs-fx-cat2",
+      "node": "o1Ee0xQhTK6fIDX5rcZgzA",
+      "reason": {
+       "type": "null_pointer_exception",
+       "reason": "Cannot invoke \"Object.hashCode()\" because \"pk\" is null"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot invoke \"Object.hashCode()\" because \"pk\" is null",
+     "caused_by": {
+      "type": "null_pointer_exception",
+      "reason": "Cannot invoke \"Object.hashCode()\" because \"pk\" is null"
+     }
+    }
+   }
+  },
+  {
+   "name": "cat_err_unknown",
+   "body": "{\"aggs\":{\"c\":{\"categorize_text\":{\"field\":\"msg\",\"foo\":1}}}}",
+   "typed_keys": false,
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:48] [categorize_text] unknown field [foo]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:48] [categorize_text] unknown field [foo]"
+   }
+  }
+ ]
+}

@@ -1,0 +1,3129 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "PUT",
+      "path": "fxmx-a",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0,
+          "refresh_interval": -1
+        },
+        "mappings": {
+          "properties": {
+            "k": {
+              "type": "keyword"
+            },
+            "g": {
+              "type": "keyword"
+            },
+            "n": {
+              "type": "long"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxmx-a"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "fxmx-a",
+            "_id": "0"
+          }
+        },
+        {
+          "k": "a",
+          "g": "x",
+          "n": 1
+        },
+        {
+          "index": {
+            "_index": "fxmx-a",
+            "_id": "1"
+          }
+        },
+        {
+          "k": "a",
+          "g": "x",
+          "n": 2
+        },
+        {
+          "index": {
+            "_index": "fxmx-a",
+            "_id": "2"
+          }
+        },
+        {
+          "k": "b",
+          "g": "y",
+          "n": 3
+        },
+        {
+          "index": {
+            "_index": "fxmx-a",
+            "_id": "3"
+          }
+        },
+        {
+          "k": "a",
+          "g": "y",
+          "n": 4
+        },
+        {
+          "index": {
+            "_index": "fxmx-a",
+            "_id": "0"
+          }
+        },
+        {
+          "k": "b",
+          "g": "x",
+          "n": 9
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "fxmx-a",
+                "_id": "0",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxmx-a",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxmx-a",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxmx-a",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxmx-a",
+                "_id": "0",
+                "_version": 2,
+                "result": "updated",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 200
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-a/_search",
+      "body": {
+        "size": 0,
+        "query": {
+          "term": {
+            "g": "x"
+          }
+        },
+        "aggs": {
+          "s": {
+            "significant_terms": {
+              "field": "k",
+              "min_doc_count": 1
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "aggregations": {
+            "s": {
+              "doc_count": 2,
+              "bg_count": 5,
+              "buckets": [
+                {
+                  "key": "b",
+                  "doc_count": 1,
+                  "score": 0.12499999999999997,
+                  "bg_count": 2
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-a/_search?typed_keys=true",
+      "body": {
+        "size": 0,
+        "query": {
+          "term": {
+            "g": "x"
+          }
+        },
+        "aggs": {
+          "t": {
+            "terms": {
+              "field": "g"
+            },
+            "aggs": {
+              "s": {
+                "significant_terms": {
+                  "field": "k",
+                  "min_doc_count": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 3,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "aggregations": {
+            "sterms#t": {
+              "doc_count_error_upper_bound": 0,
+              "sum_other_doc_count": 0,
+              "buckets": [
+                {
+                  "key": "x",
+                  "doc_count": 2,
+                  "sigsterms#s": {
+                    "doc_count": 2,
+                    "bg_count": 5,
+                    "buckets": [
+                      {
+                        "key": "b",
+                        "doc_count": 1,
+                        "score": 0.12499999999999997,
+                        "bg_count": 2
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "fxmx-b",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "k": {
+              "type": "keyword"
+            },
+            "n": {
+              "type": "long"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxmx-b"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "fxmx-b",
+            "_id": "1"
+          }
+        },
+        {
+          "k": "a",
+          "n": 1
+        },
+        {
+          "index": {
+            "_index": "fxmx-b",
+            "_id": "2"
+          }
+        },
+        {
+          "n": 2
+        },
+        {
+          "index": {
+            "_index": "fxmx-b",
+            "_id": "3"
+          }
+        },
+        {
+          "n": 3
+        },
+        {
+          "index": {
+            "_index": "fxmx-b",
+            "_id": "4"
+          }
+        },
+        {
+          "k": "b",
+          "n": 4
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "fxmx-b",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxmx-b",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxmx-b",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxmx-b",
+                "_id": "4",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-b/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "d": {
+            "diversified_sampler": {
+              "field": "k"
+            },
+            "aggs": {
+              "s": {
+                "sum": {
+                  "field": "n"
+                }
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 4,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "aggregations": {
+            "d": {
+              "doc_count": 2,
+              "s": {
+                "value": 5.0
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-b/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "d": {
+            "diversified_sampler": {
+              "field": "k",
+              "max_docs_per_value": 2
+            },
+            "aggs": {
+              "s": {
+                "sum": {
+                  "field": "n"
+                }
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 4,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "aggregations": {
+            "d": {
+              "doc_count": 3,
+              "s": {
+                "value": 7.0
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-b/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "d": {
+            "diversified_sampler": {
+              "field": "n"
+            },
+            "aggs": {
+              "s": {
+                "sum": {
+                  "field": "n"
+                }
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 4,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "aggregations": {
+            "d": {
+              "doc_count": 4,
+              "s": {
+                "value": 10.0
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "fxmx-c",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0,
+          "refresh_interval": -1
+        },
+        "mappings": {
+          "properties": {
+            "t": {
+              "type": "text",
+              "term_vector": "with_positions_offsets"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxmx-c"
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/fxmx-c/_doc/1?refresh=true",
+      "body": {
+        "t": "quick fox"
+      },
+      "es": {
+        "status": 201,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "fxmx-c",
+          "_id": "1",
+          "_version": 1,
+          "result": "created",
+          "forced_refresh": true,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "_seq_no": 0,
+          "_primary_term": 1
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/fxmx-c/_doc/2",
+      "body": {
+        "t": "quick dog"
+      },
+      "es": {
+        "status": 201,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "fxmx-c",
+          "_id": "2",
+          "_version": 1,
+          "result": "created",
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "_seq_no": 1,
+          "_primary_term": 1
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-c/_termvectors/1",
+      "body": {
+        "term_statistics": true,
+        "field_statistics": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "fxmx-c",
+          "_id": "1",
+          "_version": 1,
+          "found": true,
+          "took": 0,
+          "term_vectors": {
+            "t": {
+              "field_statistics": {
+                "sum_doc_freq": 2,
+                "doc_count": 1,
+                "sum_ttf": 2
+              },
+              "terms": {
+                "fox": {
+                  "doc_freq": 1,
+                  "ttf": 1,
+                  "term_freq": 1,
+                  "tokens": [
+                    {
+                      "position": 1,
+                      "start_offset": 6,
+                      "end_offset": 9
+                    }
+                  ]
+                },
+                "quick": {
+                  "doc_freq": 1,
+                  "ttf": 1,
+                  "term_freq": 1,
+                  "tokens": [
+                    {
+                      "position": 0,
+                      "start_offset": 0,
+                      "end_offset": 5
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/fxmx-c/_doc/2",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "fxmx-c",
+          "_id": "2",
+          "_version": 1,
+          "_seq_no": 1,
+          "_primary_term": 1,
+          "found": true,
+          "_source": {
+            "t": "quick dog"
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-c/_termvectors/1",
+      "body": {
+        "term_statistics": true,
+        "field_statistics": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "fxmx-c",
+          "_id": "1",
+          "_version": 1,
+          "found": true,
+          "took": 0,
+          "term_vectors": {
+            "t": {
+              "field_statistics": {
+                "sum_doc_freq": 4,
+                "doc_count": 2,
+                "sum_ttf": 4
+              },
+              "terms": {
+                "fox": {
+                  "doc_freq": 1,
+                  "ttf": 1,
+                  "term_freq": 1,
+                  "tokens": [
+                    {
+                      "position": 1,
+                      "start_offset": 6,
+                      "end_offset": 9
+                    }
+                  ]
+                },
+                "quick": {
+                  "doc_freq": 2,
+                  "ttf": 2,
+                  "term_freq": 1,
+                  "tokens": [
+                    {
+                      "position": 0,
+                      "start_offset": 0,
+                      "end_offset": 5
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/fxmx-c/_doc/3",
+      "body": {
+        "t": "quick cat"
+      },
+      "es": {
+        "status": 201,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "fxmx-c",
+          "_id": "3",
+          "_version": 1,
+          "result": "created",
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "_seq_no": 2,
+          "_primary_term": 1
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_mget",
+      "body": {
+        "docs": [
+          {
+            "_index": "fxmx-c",
+            "_id": "3"
+          }
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "docs": [
+            {
+              "_index": "fxmx-c",
+              "_id": "3",
+              "_version": 1,
+              "_seq_no": 2,
+              "_primary_term": 1,
+              "found": true,
+              "_source": {
+                "t": "quick cat"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-c/_termvectors/1",
+      "body": {
+        "term_statistics": true,
+        "field_statistics": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "fxmx-c",
+          "_id": "1",
+          "_version": 1,
+          "found": true,
+          "took": 0,
+          "term_vectors": {
+            "t": {
+              "field_statistics": {
+                "sum_doc_freq": 4,
+                "doc_count": 2,
+                "sum_ttf": 4
+              },
+              "terms": {
+                "fox": {
+                  "doc_freq": 1,
+                  "ttf": 1,
+                  "term_freq": 1,
+                  "tokens": [
+                    {
+                      "position": 1,
+                      "start_offset": 6,
+                      "end_offset": 9
+                    }
+                  ]
+                },
+                "quick": {
+                  "doc_freq": 2,
+                  "ttf": 2,
+                  "term_freq": 1,
+                  "tokens": [
+                    {
+                      "position": 0,
+                      "start_offset": 0,
+                      "end_offset": 5
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "fxmx-d",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "k": {
+              "type": "keyword"
+            },
+            "v": {
+              "type": "dense_vector",
+              "dims": 3
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxmx-d"
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/fxmx-d/_doc/1?refresh=true",
+      "body": {
+        "k": "a",
+        "v": null
+      },
+      "es": {
+        "status": 201,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "fxmx-d",
+          "_id": "1",
+          "_version": 1,
+          "result": "created",
+          "forced_refresh": true,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "_seq_no": 0,
+          "_primary_term": 1
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/fxmx-d/_doc/2?refresh=true",
+      "body": {
+        "k": "b",
+        "v": [
+          1,
+          2,
+          3
+        ]
+      },
+      "es": {
+        "status": 201,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "fxmx-d",
+          "_id": "2",
+          "_version": 1,
+          "result": "created",
+          "forced_refresh": true,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "_seq_no": 1,
+          "_primary_term": 1
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-d/_search",
+      "body": {
+        "_source": {
+          "includes": [
+            "*"
+          ]
+        },
+        "sort": [
+          "k"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 3,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxmx-d",
+                "_id": "1",
+                "_score": null,
+                "_source": {
+                  "k": "a"
+                },
+                "sort": [
+                  "a"
+                ]
+              },
+              {
+                "_index": "fxmx-d",
+                "_id": "2",
+                "_score": null,
+                "_source": {
+                  "v": [
+                    1.0,
+                    2.0,
+                    3.0
+                  ],
+                  "k": "b"
+                },
+                "sort": [
+                  "b"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-d/_search",
+      "body": {
+        "sort": [
+          "k"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxmx-d",
+                "_id": "1",
+                "_score": null,
+                "_source": {
+                  "k": "a"
+                },
+                "sort": [
+                  "a"
+                ]
+              },
+              {
+                "_index": "fxmx-d",
+                "_id": "2",
+                "_score": null,
+                "_source": {
+                  "k": "b"
+                },
+                "sort": [
+                  "b"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/fxmx-d/_doc/1?_source_includes=*",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "fxmx-d",
+          "_id": "1",
+          "_version": 1,
+          "_seq_no": 0,
+          "_primary_term": 1,
+          "found": true,
+          "_source": {
+            "k": "a"
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/fxmx-d/_doc/1",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "fxmx-d",
+          "_id": "1",
+          "_version": 1,
+          "_seq_no": 0,
+          "_primary_term": 1,
+          "found": true,
+          "_source": {
+            "k": "a"
+          }
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "fxmx-e",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "c": {
+              "type": "completion"
+            },
+            "k": {
+              "type": "keyword"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxmx-e"
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/fxmx-e/_doc/1?refresh=true",
+      "body": {
+        "c": "foxtrot",
+        "k": "a"
+      },
+      "es": {
+        "status": 201,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "fxmx-e",
+          "_id": "1",
+          "_version": 1,
+          "result": "created",
+          "forced_refresh": true,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "_seq_no": 0,
+          "_primary_term": 1
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-e/_search",
+      "body": {
+        "script_fields": {
+          "x": {
+            "script": {
+              "source": "1+1"
+            }
+          }
+        },
+        "suggest": {
+          "s": {
+            "prefix": "fo",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "fo",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "foxtrot",
+                    "_index": "fxmx-e",
+                    "_id": "1",
+                    "_score": 1.0,
+                    "fields": {
+                      "x": [
+                        2
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-e/_search",
+      "body": {
+        "explain": true,
+        "suggest": {
+          "s": {
+            "prefix": "fo",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "fo",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "foxtrot",
+                    "_index": "fxmx-e",
+                    "_id": "1",
+                    "_score": 1.0,
+                    "_source": {
+                      "c": "foxtrot",
+                      "k": "a"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-e/_search",
+      "body": {
+        "docvalue_fields": [
+          "_id"
+        ],
+        "suggest": {
+          "s": {
+            "prefix": "fo",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxmx-e",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "illegal_argument_exception",
+                  "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+                }
+              }
+            ],
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+              "caused_by": {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-e/_search",
+      "body": {
+        "docvalue_fields": [
+          "k"
+        ],
+        "stored_fields": [
+          "_none_"
+        ],
+        "suggest": {
+          "s": {
+            "prefix": "fo",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "fo",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "foxtrot",
+                    "_index": "fxmx-e",
+                    "_score": 1.0,
+                    "fields": {
+                      "k": [
+                        "a"
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "fxmx-f",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "sf": {
+              "type": "scaled_float",
+              "scaling_factor": 100
+            },
+            "d": {
+              "type": "date_nanos"
+            },
+            "s": {
+              "type": "short"
+            },
+            "flat0": {
+              "type": "flattened"
+            },
+            "t": {
+              "type": "text"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxmx-f"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "fxmx-f",
+            "_id": "1"
+          }
+        },
+        {
+          "sf": 3.7,
+          "d": "2024-01-01T00:00:00.123456789Z",
+          "s": 0,
+          "flat0": {
+            "a": "x"
+          },
+          "t": "quick fox"
+        },
+        {
+          "index": {
+            "_index": "fxmx-f",
+            "_id": "2"
+          }
+        },
+        {
+          "sf": 3.2,
+          "d": "2024-01-02T00:00:00.123456789Z",
+          "s": 10,
+          "flat0": {
+            "a": "x"
+          },
+          "t": "quick fox"
+        },
+        {
+          "index": {
+            "_index": "fxmx-f",
+            "_id": "3"
+          }
+        },
+        {
+          "sf": -1.5,
+          "d": "2024-01-03T00:00:00.123456789Z",
+          "s": 20,
+          "flat0": {
+            "a": "x"
+          },
+          "t": "quick fox"
+        },
+        {
+          "index": {
+            "_index": "fxmx-f",
+            "_id": "4"
+          }
+        },
+        {
+          "sf": 3.9,
+          "d": "2024-01-04T00:00:00.123456789Z",
+          "s": 30,
+          "flat0": {
+            "a": "x"
+          },
+          "t": "quick fox"
+        },
+        {
+          "index": {
+            "_index": "fxmx-f",
+            "_id": "5"
+          }
+        },
+        {
+          "sf": -1.2,
+          "d": "2024-01-05T00:00:00.123456789Z",
+          "s": 40,
+          "flat0": {
+            "a": "x"
+          },
+          "t": "quick fox"
+        },
+        {
+          "index": {
+            "_index": "fxmx-f",
+            "_id": "6"
+          }
+        },
+        {
+          "sf": 145.36,
+          "d": "2024-01-06T00:00:00.123456789Z",
+          "s": 50,
+          "flat0": {
+            "a": "x"
+          },
+          "t": "quick fox"
+        },
+        {
+          "index": {
+            "_index": "fxmx-f",
+            "_id": "7"
+          }
+        },
+        {
+          "t": "none"
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "fxmx-f",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxmx-f",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxmx-f",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxmx-f",
+                "_id": "4",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxmx-f",
+                "_id": "5",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxmx-f",
+                "_id": "6",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 5,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxmx-f",
+                "_id": "7",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 6,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-f/_search",
+      "body": {
+        "sort": [
+          {
+            "sf": {
+              "numeric_type": "long"
+            }
+          }
+        ],
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 7,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxmx-f",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  -1
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  -1
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  3
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  3
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "4",
+                "_score": null,
+                "sort": [
+                  3
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "6",
+                "_score": null,
+                "sort": [
+                  145
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "7",
+                "_score": null,
+                "sort": [
+                  9223372036854775807
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-f/_search",
+      "body": {
+        "sort": [
+          {
+            "sf": {
+              "numeric_type": "date",
+              "order": "desc"
+            }
+          }
+        ],
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 7,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxmx-f",
+                "_id": "6",
+                "_score": null,
+                "sort": [
+                  145
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  3
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  3
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "4",
+                "_score": null,
+                "sort": [
+                  3
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  -1
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  -1
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "7",
+                "_score": null,
+                "sort": [
+                  -9223372036854775808
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-f/_search",
+      "body": {
+        "sort": [
+          {
+            "sf": {
+              "numeric_type": "long"
+            }
+          }
+        ],
+        "search_after": [
+          -1
+        ],
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 7,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxmx-f",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  3
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  3
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "4",
+                "_score": null,
+                "sort": [
+                  3
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "6",
+                "_score": null,
+                "sort": [
+                  145
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "7",
+                "_score": null,
+                "sort": [
+                  9223372036854775807
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-f/_search",
+      "body": {
+        "sort": [
+          {
+            "sf": {
+              "numeric_type": "long",
+              "order": "desc"
+            }
+          }
+        ],
+        "search_after": [
+          3
+        ],
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 7,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxmx-f",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  -1
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  -1
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "7",
+                "_score": null,
+                "sort": [
+                  -9223372036854775808
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-f/_search",
+      "body": {
+        "sort": [
+          {
+            "sf": {
+              "numeric_type": "double"
+            }
+          }
+        ],
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 7,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxmx-f",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  -1.5
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  -1.2
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  3.2
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  3.7
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "4",
+                "_score": null,
+                "sort": [
+                  3.9
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "6",
+                "_score": null,
+                "sort": [
+                  145.36
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "7",
+                "_score": null,
+                "sort": [
+                  "Infinity"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-f/_search",
+      "body": {
+        "sort": [
+          {
+            "d": {
+              "missing": "_first"
+            }
+          }
+        ],
+        "search_after": [
+          -5
+        ],
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 7,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxmx-f",
+                "_id": "7",
+                "_score": null,
+                "sort": [
+                  0
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  1704067200123456789
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  1704153600123456789
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  1704240000123456789
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "4",
+                "_score": null,
+                "sort": [
+                  1704326400123456789
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  1704412800123456789
+                ]
+              },
+              {
+                "_index": "fxmx-f",
+                "_id": "6",
+                "_score": null,
+                "sort": [
+                  1704499200123456789
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-f/_search",
+      "body": {
+        "terminate_after": 4,
+        "suggest": {},
+        "size": 0,
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-f/_search",
+      "body": {
+        "terminate_after": 4,
+        "size": 0,
+        "suggest": {
+          "s": {
+            "text": "quik",
+            "term": {
+              "field": "t"
+            }
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "quik",
+                "offset": 0,
+                "length": 4,
+                "options": [
+                  {
+                    "text": "quick",
+                    "score": 0.75,
+                    "freq": 6
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-f/_search",
+      "body": {
+        "size": 0,
+        "track_total_hits": true,
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 7,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-f/_search",
+      "body": {
+        "size": 0,
+        "track_total_hits": true,
+        "aggs": {},
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 7,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-f/_search?rest_total_hits_as_int=true",
+      "body": {
+        "size": 0
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": 7,
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-f/_validate/query?explain=true",
+      "body": {
+        "query": {
+          "exists": {
+            "field": "flat0"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "fxmx-f",
+              "valid": true,
+              "explanation": "ConstantScore(FieldExistsQuery [field=flat0._keyed])"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-f/_validate/query?explain=true",
+      "body": {
+        "query": {
+          "range": {
+            "s": {
+              "gte": 83
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "fxmx-f",
+              "valid": true,
+              "explanation": "IndexOrDocValuesQuery(indexQuery=s:[83 TO 2147483647], dvQuery=s:[83 TO 2147483647])"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-f/_search?search_type=dfs_query_then_fetch",
+      "body": {
+        "sort": [
+          {
+            "s": "asc"
+          }
+        ],
+        "rescore": {
+          "query": {
+            "rescore_query": {
+              "match_all": {}
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "illegal_argument_exception",
+                "reason": "Cannot use [sort] option in conjunction with [rescore]."
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxmx-f",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "illegal_argument_exception",
+                  "reason": "Cannot use [sort] option in conjunction with [rescore]."
+                }
+              }
+            ],
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Cannot use [sort] option in conjunction with [rescore].",
+              "caused_by": {
+                "type": "illegal_argument_exception",
+                "reason": "Cannot use [sort] option in conjunction with [rescore]."
+              }
+            }
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "fxmx-g",
+      "body": {
+        "settings": {
+          "number_of_shards": 2,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "c": {
+              "type": "completion"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxmx-g"
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/fxmx-g/_doc/1?refresh=true",
+      "body": {
+        "c": "foxtrot"
+      },
+      "es": {
+        "status": 201,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "fxmx-g",
+          "_id": "1",
+          "_version": 1,
+          "result": "created",
+          "forced_refresh": true,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "_seq_no": 0,
+          "_primary_term": 1
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "fxmx-h",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "c": {
+              "type": "keyword"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxmx-h"
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/fxmx-h/_doc/1?refresh=true",
+      "body": {
+        "c": "foxy"
+      },
+      "es": {
+        "status": 201,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "fxmx-h",
+          "_id": "1",
+          "_version": 1,
+          "result": "created",
+          "forced_refresh": true,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "_seq_no": 0,
+          "_primary_term": 1
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-g/_search",
+      "body": {
+        "docvalue_fields": [
+          "_id"
+        ],
+        "suggest": {
+          "s": {
+            "prefix": "fo",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 1,
+            "failures": [
+              {
+                "shard": 1,
+                "index": "fxmx-g",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "illegal_argument_exception",
+                  "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+                }
+              }
+            ]
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "fo",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "foxtrot",
+                    "score": 1.0
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-g/_search?allow_partial_search_results=false",
+      "body": {
+        "docvalue_fields": [
+          "_id"
+        ],
+        "suggest": {
+          "s": {
+            "prefix": "fo",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "Partial shards failure",
+            "phase": "fetch",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 1,
+                "index": "fxmx-g",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "illegal_argument_exception",
+                  "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-e/_search",
+      "body": {
+        "suggest": {
+          "s": {
+            "prefix": "fo",
+            "completion": {
+              "field": "k"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "illegal_argument_exception",
+                "reason": "Field [k] is not a completion suggest field"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxmx-e",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "illegal_argument_exception",
+                  "reason": "Field [k] is not a completion suggest field"
+                }
+              }
+            ],
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Field [k] is not a completion suggest field",
+              "caused_by": {
+                "type": "illegal_argument_exception",
+                "reason": "Field [k] is not a completion suggest field"
+              }
+            }
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-e,fxmx-h/_search",
+      "body": {
+        "suggest": {
+          "s": {
+            "prefix": "fo",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 1,
+            "failures": [
+              {
+                "shard": 0,
+                "index": "fxmx-h",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "illegal_argument_exception",
+                  "reason": "Field [c] is not a completion suggest field"
+                }
+              }
+            ]
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "fo",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "foxtrot",
+                    "_index": "fxmx-e",
+                    "_id": "1",
+                    "_score": 1.0,
+                    "_source": {
+                      "c": "foxtrot",
+                      "k": "a"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxmx-e,fxmx-h/_search?allow_partial_search_results=false",
+      "body": {
+        "suggest": {
+          "s": {
+            "prefix": "fo",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "illegal_argument_exception",
+                "reason": "Field [c] is not a completion suggest field"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "Partial shards failure",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxmx-h",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "illegal_argument_exception",
+                  "reason": "Field [c] is not a completion suggest field"
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/fxmx-a,fxmx-b,fxmx-c,fxmx-d,fxmx-e,fxmx-f,fxmx-g,fxmx-h",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

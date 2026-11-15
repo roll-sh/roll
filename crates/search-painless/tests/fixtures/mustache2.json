@@ -1,0 +1,2456 @@
+[
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{  s  }}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "str"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{l.-1}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{lm.n}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#m.b}}{{c}}{{/m.b}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "deep"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#ll}}[{{#.}}{{.}}{{/.}}]{{/ll}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "[12][3]"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{dbl}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "1.0E21"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{small}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "1.0E-7"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{neg0}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "-0.0"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#url}}{{l}}{{/url}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "%7B0%3Dx%2C+1%3Dy%2C+2%3Dz%7D"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#join}}lm{{/join}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "{k=1, n=one},{k=2, n=two}"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#join}}ll{{/join}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "[1, 2],[3]"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#join delimiter=' and '}}nums{{/join delimiter=' and '}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "1 and 2 and 3"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{> part}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "Cannot expand 'part' because partial templates are not supported",
+      "script_stack": [],
+      "script": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{> part}}\"}}}}}",
+      "lang": "mustache"
+     }
+    ],
+    "type": "script_exception",
+    "reason": "Cannot expand 'part' because partial templates are not supported",
+    "script_stack": [],
+    "script": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{> part}}\"}}}}}",
+    "lang": "mustache",
+    "caused_by": {
+     "type": "mustache_exception",
+     "reason": "Cannot expand 'part' because partial templates are not supported"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#s}}{{s}}{{/s}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "str"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{^l}}x{{/l}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#l}}{{^-first}},{{/-first}}{{.}}{{/l}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ",x,y,z"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#lm}}{{-index}}{{/lm}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#l}}{{@index}}{{/l}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{m.a.b}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{s.length}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{l.length}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{nums.1}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "2"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#nums}}{{#-last}}L{{/-last}}{{/nums}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#toJson}}ll{{/toJson}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "[[1,2],[3]]"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#m}}{{s}}{{/m}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "str"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#join}}m{{/join}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "m"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#url}}{{#toJson}}m{{/toJson}}{{/url}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "%7B%22a%22%3A1%2C%22b%22%3A%7B%22c%22%3A%22deep%22%7D%7D"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"a\": {{#toJson}}q{{/toJson}}, \"b\": \"{{q}}\"}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:7] Unrecognized token 'a': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"a\": a\"b\\c\nd\\u0009e/f<g>&'h é ☃ \\u0001   \\u007F, \"b\": \"a\\\"b\\\\c\\nd\\te/f<g>&'h é ☃ \\u0001   \\u007F\"}\"; line: 1, column: 7]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:7] Unrecognized token 'a': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"a\": a\"b\\c\nd\\u0009e/f<g>&'h é ☃ \\u0001   \\u007F, \"b\": \"a\\\"b\\\\c\\nd\\te/f<g>&'h é ☃ \\u0001   \\u007F\"}\"; line: 1, column: 7]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unrecognized token 'a': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"a\": a\"b\\c\nd\\u0009e/f<g>&'h é ☃ \\u0001   \\u007F, \"b\": \"a\\\"b\\\\c\\nd\\te/f<g>&'h é ☃ \\u0001   \\u007F\"}\"; line: 1, column: 7]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"a\":\n  {{#b}}\n  1\n  {{/b}}\n}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "parsing_exception",
+      "reason": "Unknown key for a VALUE_NUMBER in [a].",
+      "line": 2,
+      "col": 3
+     }
+    ],
+    "type": "parsing_exception",
+    "reason": "Unknown key for a VALUE_NUMBER in [a].",
+    "line": 2,
+    "col": 3
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"a\": \"{{#l}}\n{{.}}\n{{/l}}\"}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "parsing_exception",
+      "reason": "Unknown key for a VALUE_STRING in [a].",
+      "line": 1,
+      "col": 7
+     }
+    ],
+    "type": "parsing_exception",
+    "reason": "Unknown key for a VALUE_STRING in [a].",
+    "line": 1,
+    "col": 7
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"a\": \"{{s}\"}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "Improperly closed variable @[query-template:1]",
+      "script_stack": [],
+      "script": "{\"a\": \"{{s}\"}",
+      "lang": "mustache"
+     }
+    ],
+    "type": "script_exception",
+    "reason": "Improperly closed variable @[query-template:1]",
+    "script_stack": [],
+    "script": "{\"a\": \"{{s}\"}",
+    "lang": "mustache",
+    "caused_by": {
+     "type": "mustache_exception",
+     "reason": "Improperly closed variable @[query-template:1]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"a\": \"{{#l}}{{/m}}\"}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "Mismatched start/end tags: l != m in query-template:1 @[query-template:1]",
+      "script_stack": [],
+      "script": "{\"a\": \"{{#l}}{{/m}}\"}",
+      "lang": "mustache"
+     }
+    ],
+    "type": "script_exception",
+    "reason": "Mismatched start/end tags: l != m in query-template:1 @[query-template:1]",
+    "script_stack": [],
+    "script": "{\"a\": \"{{#l}}{{/m}}\"}",
+    "lang": "mustache",
+    "caused_by": {
+     "type": "mustache_exception",
+     "reason": "Mismatched start/end tags: l != m in query-template:1 @[query-template:1]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"a\": \"{{=| |=}}|s|\"}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "parsing_exception",
+      "reason": "Unknown key for a VALUE_STRING in [a].",
+      "line": 1,
+      "col": 7
+     }
+    ],
+    "type": "parsing_exception",
+    "reason": "Unknown key for a VALUE_STRING in [a].",
+    "line": 1,
+    "col": 7
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"a\": \"{{{s}}\"}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃ \u0001   ",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "ll": [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "dbl": 1e+21,
+    "small": 1e-07,
+    "neg0": -0.0
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "Improperly closed variable: s in query-template:1@13 @[query-template:1]",
+      "script_stack": [],
+      "script": "{\"a\": \"{{{s}}\"}",
+      "lang": "mustache"
+     }
+    ],
+    "type": "script_exception",
+    "reason": "Improperly closed variable: s in query-template:1@13 @[query-template:1]",
+    "script_stack": [],
+    "script": "{\"a\": \"{{{s}}\"}",
+    "lang": "mustache",
+    "caused_by": {
+     "type": "mustache_exception",
+     "reason": "Improperly closed variable: s in query-template:1@13 @[query-template:1]"
+    }
+   },
+   "status": 400
+  }
+ }
+]

@@ -1,0 +1,739 @@
+//! Collector composition, concurrent segment search and collapsing against sequential runs
+//! and brute-force models, on random multi-segment corpora.
+
+mod common;
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use common::{BODY, NUM, TAG, build, word};
+use rand::Rng;
+use search_codec::{DocValuesType, IndexOptions};
+use search_index::collector::{
+    CollapseCollector, CollapseField, CountManager, FieldSort, Missing, MultiCollector, SortKey, SortMode, SortType, SortValue,
+    TerminateAfter, TopFieldCollector, TopFieldManager, TopScoreCollector, TopScoreManager, TotalHitCountCollector,
+};
+use search_index::doc::{DocValue, IndexableDoc, IndexableField, PreToken};
+use search_index::query::{BooleanQuery, MatchAllQuery, PhraseQuery, TermQuery};
+use search_index::schema::FieldSchema;
+use search_index::search::{SearchControl, SearchLimits};
+use search_index::{Collector, IndexOp, QueryRef, Schema, Shard, ShardConfig};
+
+fn queries() -> Vec<QueryRef> {
+    vec![
+        Arc::new(TermQuery::new(BODY, word(0).into_bytes())),
+        Arc::new(TermQuery::new(BODY, word(7).into_bytes())),
+        Arc::new(
+            BooleanQuery::new()
+                .should(Arc::new(TermQuery::new(BODY, word(1).into_bytes())))
+                .should(Arc::new(TermQuery::new(BODY, word(3).into_bytes())))
+                .should(Arc::new(TermQuery::new(BODY, word(20).into_bytes()))),
+        ),
+        Arc::new(
+            BooleanQuery::new()
+                .must(Arc::new(TermQuery::new(BODY, word(0).into_bytes())))
+                .should(Arc::new(TermQuery::new(BODY, word(2).into_bytes())))
+                .filter(Arc::new(TermQuery::new(TAG, b"t1".to_vec()))),
+        ),
+        Arc::new(MatchAllQuery),
+        // Pure conjunctions: bounded batches when every match is visited.
+        Arc::new(
+            BooleanQuery::new()
+                .must(Arc::new(TermQuery::new(BODY, word(0).into_bytes())))
+                .must(Arc::new(TermQuery::new(BODY, word(1).into_bytes())))
+                .filter(Arc::new(TermQuery::new(TAG, b"t1".to_vec())))
+                .must_not(Arc::new(TermQuery::new(BODY, word(4).into_bytes()))),
+        ),
+        Arc::new(
+            BooleanQuery::new()
+                .filter(Arc::new(TermQuery::new(BODY, word(2).into_bytes())))
+                .filter(Arc::new(TermQuery::new(BODY, word(3).into_bytes()))),
+        ),
+        Arc::new(
+            BooleanQuery::new()
+                .must(Arc::new(TermQuery::new(BODY, word(0).into_bytes())))
+                .must(Arc::new(PhraseQuery::new(BODY, vec![word(1).into_bytes(), word(0).into_bytes()], 1))),
+        ),
+        // Two-phase: windows and partitions confirm only their own candidates.
+        Arc::new(PhraseQuery::new(BODY, vec![word(0).into_bytes(), word(1).into_bytes()], 0)),
+        Arc::new(PhraseQuery::new(BODY, vec![word(2).into_bytes(), word(0).into_bytes(), word(1).into_bytes()], 2)),
+        Arc::new(
+            BooleanQuery::new()
+                .should(Arc::new(PhraseQuery::new(BODY, vec![word(0).into_bytes(), word(0).into_bytes()], 0)))
+                .filter(Arc::new(TermQuery::new(TAG, b"t2".to_vec())))
+                .must_not(Arc::new(PhraseQuery::new(BODY, vec![word(1).into_bytes(), word(2).into_bytes()], 1))),
+        ),
+    ]
+}
+
+/// Searches with a deadline score in growing windows (to check the clock between them); the
+/// results equal unwindowed ones, two-phase queries included.
+#[test]
+fn windowed_scoring_equals_plain() {
+    for seed in 0..3u64 {
+        let corpus = build(seed + 50, 1500, ShardConfig { merge_threads: 0, ..Default::default() });
+        let s = corpus.shard.searcher();
+        let ctl = SearchControl { deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(3600)), cancelled: None, ext: None };
+        for (qi, q) in queries().iter().enumerate() {
+            for (n, threshold) in [(10usize, u64::MAX), (3, 5), (100, u64::MAX)] {
+                let mut a = TopScoreCollector::new(n, threshold);
+                s.search(q, &mut a).unwrap();
+                let mut b = TopScoreCollector::new(n, threshold);
+                s.search_with(q, &mut b, &ctl).unwrap();
+                let (a, b) = (a.top_docs(), b.top_docs());
+                assert_eq!(a.hits, b.hits, "seed {seed} q{qi} n {n}");
+                if threshold == u64::MAX {
+                    assert_eq!(a.total_hits, b.total_hits, "seed {seed} q{qi}");
+                }
+            }
+            let mut c = TotalHitCountCollector::default();
+            s.search_with(q, &mut c, &ctl).unwrap();
+            assert_eq!(c.total, s.count(q).unwrap(), "seed {seed} q{qi}");
+        }
+    }
+}
+
+fn num_sort(reverse: bool) -> SortKey {
+    SortKey::Field(FieldSort {
+        field: NUM,
+        kind: SortType::Long,
+        reverse,
+        missing: Missing::Last,
+        mode: if reverse { SortMode::Max } else { SortMode::Min },
+        nested: None,
+    })
+}
+
+#[test]
+fn concurrent_search_equals_sequential() {
+    for seed in 0..std::env::var("SWEEP_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(6u64) {
+        let corpus = build(seed, 1500, ShardConfig { merge_threads: 0, ..Default::default() });
+        if seed % 3 == 2 {
+            // One segment: the slices are partitions of it.
+            corpus.shard.force_merge(Some(1), false).unwrap();
+        }
+        let s = corpus.shard.searcher();
+        let par = s.with_limits(SearchLimits { parallel_min_docs: 64, parallelism: 4, ..SearchLimits::default() });
+        let slices = par.slices();
+        assert!(slices.len() > 1, "seed {seed}: {slices:?}");
+        // Every doc of every segment is in exactly one partition, and no slice holds two
+        // partitions of one segment.
+        for seg in s.segments() {
+            let mut ranges: Vec<(u32, u32)> =
+                slices.iter().flatten().filter(|p| p.seg.ord == seg.ord).map(|p| (p.min, p.max.min(seg.max_doc()))).collect();
+            ranges.sort();
+            assert_eq!(ranges.first().map(|r| r.0), Some(0));
+            assert!(ranges.windows(2).all(|w| w[0].1 == w[1].0), "seed {seed}: {ranges:?}");
+            assert_eq!(ranges.last().map(|r| r.1), Some(seg.max_doc()));
+        }
+        for sl in &slices {
+            let mut ords: Vec<u32> = sl.iter().map(|p| p.seg.ord).collect();
+            ords.dedup();
+            assert_eq!(ords.len(), sl.len(), "seed {seed}: {sl:?}");
+        }
+        let ctl = SearchControl::default();
+        for (qi, q) in queries().iter().enumerate() {
+            for (n, threshold) in [(10usize, u64::MAX), (5, 20), (0, u64::MAX), (50, 100)] {
+                let mut c = TopScoreCollector::new(n, threshold);
+                s.search(q, &mut c).unwrap();
+                let seq = c.top_docs();
+                let m = TopScoreManager { n, threshold, after: None, min_score: None };
+                let got = par.search_concurrent(q, &m, &ctl).unwrap();
+                assert_eq!(got.hits, seq.hits, "seed {seed} q{qi} n {n} threshold {threshold}");
+                if threshold == u64::MAX {
+                    assert_eq!(got.total_hits, seq.total_hits);
+                } else {
+                    assert!(got.total_hits >= threshold.min(seq.total_hits));
+                }
+            }
+            for reverse in [false, true] {
+                let keys = vec![num_sort(reverse), SortKey::Score { reverse: false }];
+                let mut c = TopFieldCollector::new(keys.clone(), 15, u64::MAX, true).with_searcher(&s);
+                s.search(q, &mut c).unwrap();
+                let seq = c.top_docs();
+                let m = TopFieldManager { keys, n: 15, threshold: u64::MAX, track_scores: true, after: None, searcher: par.clone() };
+                let got = par.search_concurrent(q, &m, &ctl).unwrap();
+                assert_eq!(got.hits, seq.hits, "seed {seed} q{qi} sorted reverse {reverse}");
+                assert_eq!(got.total_hits, seq.total_hits);
+                assert_eq!(got.max_score, seq.max_score);
+            }
+            let count = s.count(q).unwrap();
+            assert_eq!(par.search_concurrent(q, &CountManager, &ctl).unwrap(), count);
+            assert_eq!(par.count(q).unwrap(), count, "seed {seed} q{qi} concurrent count");
+        }
+    }
+}
+
+/// Concurrent searches started on pool workers (the shards of one request running in
+/// parallel) split into slices too, and give the sequential results; many at once don't
+/// deadlock even when every worker is busy.
+#[test]
+fn concurrent_search_inside_pool_workers_equals_sequential() {
+    use search_index::search::pool;
+    let corpus = build(9, 3000, ShardConfig { merge_threads: 0, ..Default::default() });
+    let s = corpus.shard.searcher();
+    let par = s.with_limits(SearchLimits { parallel_min_docs: 64, parallelism: 4, ..SearchLimits::default() });
+    assert!(par.slices().len() > 1);
+    let qs = queries();
+    let want: Vec<_> = qs
+        .iter()
+        .map(|q| {
+            let mut c = TopScoreCollector::new(10, u64::MAX);
+            s.search(q, &mut c).unwrap();
+            let td = c.top_docs();
+            let keys = vec![num_sort(true), SortKey::Score { reverse: false }];
+            let mut f = TopFieldCollector::new(keys, 15, u64::MAX, true).with_searcher(&s);
+            s.search(q, &mut f).unwrap();
+            (td, f.top_docs())
+        })
+        .collect();
+    // More jobs than workers, each a concurrent search: workers split their own searches.
+    let jobs = qs.len() * 8;
+    let ok = std::sync::atomic::AtomicUsize::new(0);
+    pool::for_each_index(jobs, jobs, &|i| {
+        let qi = i % qs.len();
+        let m = TopScoreManager { n: 10, threshold: u64::MAX, after: None, min_score: None };
+        let got = par.search_concurrent(&qs[qi], &m, &SearchControl::default()).unwrap();
+        assert_eq!(got.hits, want[qi].0.hits, "q{qi}");
+        assert_eq!(got.total_hits, want[qi].0.total_hits, "q{qi}");
+        let keys = vec![num_sort(true), SortKey::Score { reverse: false }];
+        let m = TopFieldManager { keys, n: 15, threshold: u64::MAX, track_scores: true, after: None, searcher: par.clone() };
+        let got = par.search_concurrent(&qs[qi], &m, &SearchControl::default()).unwrap();
+        assert_eq!(got.hits, want[qi].1.hits, "q{qi} sorted");
+        assert_eq!(got.total_hits, want[qi].1.total_hits, "q{qi} sorted");
+        ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    });
+    assert_eq!(ok.into_inner(), jobs);
+}
+
+#[test]
+fn multi_collector_matches_separate_runs() {
+    let corpus = build(42, 1200, ShardConfig { merge_threads: 0, ..Default::default() });
+    let s = corpus.shard.searcher();
+    for q in queries() {
+        let mut a = TopScoreCollector::new(10, 50);
+        let mut b = TotalHitCountCollector::default();
+        let mut f = TopFieldCollector::new(vec![num_sort(false)], 7, u64::MAX, false).with_searcher(&s);
+        {
+            let mut m = MultiCollector::new(vec![&mut a as &mut dyn Collector, &mut b, &mut f]);
+            s.search(&q, &mut m).unwrap();
+        }
+        let mut a1 = TopScoreCollector::new(10, 50);
+        s.search(&q, &mut a1).unwrap();
+        let mut f1 = TopFieldCollector::new(vec![num_sort(false)], 7, u64::MAX, false).with_searcher(&s);
+        s.search(&q, &mut f1).unwrap();
+        assert_eq!(a.top_docs().hits, a1.top_docs().hits);
+        assert_eq!(b.total, s.count(&q).unwrap());
+        let dv = |h: Vec<search_index::collector::FieldDoc>| h.into_iter().map(|h| (h.doc, h.values)).collect::<Vec<_>>();
+        assert_eq!(dv(f.top_docs().hits), dv(f1.top_docs().hits));
+        // Two top-score collectors: pruning uses the lower bar, both stay exact.
+        let mut x = TopScoreCollector::new(3, 0);
+        let mut y = TopScoreCollector::new(12, 0);
+        {
+            let mut m = MultiCollector::new(vec![&mut x as &mut dyn Collector, &mut y]);
+            s.search(&q, &mut m).unwrap();
+        }
+        let mut x1 = TopScoreCollector::new(3, u64::MAX);
+        s.search(&q, &mut x1).unwrap();
+        let mut y1 = TopScoreCollector::new(12, u64::MAX);
+        s.search(&q, &mut y1).unwrap();
+        assert_eq!(x.top_docs().hits, x1.top_docs().hits);
+        assert_eq!(y.top_docs().hits, y1.top_docs().hits);
+    }
+}
+
+#[test]
+fn terminate_after_stops_at_the_limit() {
+    let corpus = build(7, 900, ShardConfig { merge_threads: 0, ..Default::default() });
+    let s = corpus.shard.searcher();
+    let q: QueryRef = Arc::new(MatchAllQuery);
+    let total = s.count(&q).unwrap();
+    for max in [0u64, 1, 5, 64, total, total + 10] {
+        let mut c = TerminateAfter::new(TotalHitCountCollector::default(), max);
+        s.search(&q, &mut c).unwrap();
+        assert_eq!(c.count(), max.min(total));
+        assert_eq!(c.inner.total, max.min(total));
+        assert_eq!(c.terminated_early, max < total, "max {max} total {total}");
+    }
+}
+
+/// Elasticsearch's `QueryPhaseCollector` counts only the hits that pass the post filter (and
+/// `min_score`); the other matches still reach the collector until the limit is passed.
+#[test]
+fn terminate_after_counts_filtered_hits_only() {
+    let corpus = build(7, 900, ShardConfig { merge_threads: 0, ..Default::default() });
+    let s = corpus.shard.searcher();
+    let q: QueryRef = Arc::new(MatchAllQuery);
+    let filter: QueryRef = Arc::new(TermQuery::new(TAG, b"t1".to_vec()));
+    let filtered = s.count(&filter).unwrap();
+    assert!(filtered > 3);
+    for max in [1u64, 3, filtered, filtered + 5] {
+        let mut c = TerminateAfter::new(TotalHitCountCollector::default(), max).counting(&s, None, Some(&filter)).unwrap();
+        s.search(&q, &mut c).unwrap();
+        assert_eq!(c.count(), max.min(filtered), "max {max}");
+        assert_eq!(c.terminated_early, max < filtered, "max {max} filtered {filtered}");
+        // Every match up to the one that passed the limit was collected, filtered or not.
+        assert!(c.inner.total >= c.count());
+    }
+    // A filter nothing matches never terminates.
+    let none: QueryRef = Arc::new(TermQuery::new(TAG, b"nope".to_vec()));
+    let mut c = TerminateAfter::new(TotalHitCountCollector::default(), 1).counting(&s, None, Some(&none)).unwrap();
+    s.search(&q, &mut c).unwrap();
+    assert!(!c.terminated_early);
+    assert_eq!(c.inner.total, s.count(&q).unwrap());
+    // `min_score` above every score: nothing counts either.
+    let mut c = TerminateAfter::new(TotalHitCountCollector::default(), 1).counting(&s, Some(f32::MAX), None).unwrap();
+    s.search(&q, &mut c).unwrap();
+    assert_eq!((c.count(), c.terminated_early), (0, false));
+}
+
+const GRP: u32 = 30;
+const LBL: u32 = 31;
+
+/// Per `_id`: words, group, number and label.
+type Model = HashMap<String, (Vec<String>, Option<String>, i64, Option<String>)>;
+
+fn collapse_shard(seed: u64) -> (Shard, Model) {
+    let schema = Schema::new()
+        .with_field(FieldSchema::new(BODY, "body").indexed(IndexOptions::DocsAndFreqsAndPositions, true))
+        .unwrap()
+        .with_field(FieldSchema::new(GRP, "grp").indexed(IndexOptions::Docs, false).with_doc_values(DocValuesType::Sorted))
+        .unwrap()
+        .with_field(FieldSchema::new(NUM, "num").with_doc_values(DocValuesType::Numeric))
+        .unwrap()
+        .with_field(FieldSchema::new(LBL, "lbl").indexed(IndexOptions::Docs, false).with_doc_values(DocValuesType::Sorted))
+        .unwrap();
+    let shard = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema, Vec::new()).unwrap();
+    let mut rng = common::rng(seed);
+    let mut model = HashMap::new();
+    for i in 0..700 {
+        let id = format!("c{}", rng.gen_range(0..500));
+        let words: Vec<String> = (0..rng.gen_range(1..12)).map(|_| word(common::zipf(&mut rng, 15))).collect();
+        let grp = rng.gen_bool(0.9).then(|| format!("g{}", rng.gen_range(0..25)));
+        let num = rng.gen_range(-100..100);
+        let mut d = IndexableDoc::new(id.clone().into_bytes());
+        let mut off = 0u32;
+        let toks = words
+            .iter()
+            .map(|w| {
+                let t = PreToken::new(w.clone().into_bytes(), 1, off, off + w.len() as u32);
+                off += w.len() as u32 + 1;
+                t
+            })
+            .collect();
+        d.fields.push(IndexableField::Tokens { field: BODY, tokens: toks });
+        if let Some(g) = &grp {
+            d.fields.push(IndexableField::DocValue { field: GRP, value: DocValue::Sorted(g.clone().into_bytes().into()) });
+        }
+        d.fields.push(IndexableField::DocValue { field: NUM, value: DocValue::Numeric(num) });
+        // Labels: few distinct values, so heads tie on them and per-segment ordinals differ.
+        let lbl = rng.gen_bool(0.8).then(|| format!("l{:02}", rng.gen_range(0..40)));
+        if let Some(l) = &lbl {
+            d.fields.push(IndexableField::DocValue { field: LBL, value: DocValue::Sorted(l.clone().into_bytes().into()) });
+        }
+        shard.index(IndexOp::new(d)).unwrap();
+        model.insert(id, (words, grp, num, lbl));
+        if i % 97 == 0 {
+            shard.refresh().unwrap();
+        }
+    }
+    shard.refresh().unwrap();
+    (shard, model)
+}
+
+#[test]
+fn collapse_matches_brute_force() {
+    for seed in 0..std::env::var("SWEEP_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(4u64) {
+        let (shard, model) = collapse_shard(seed);
+        let s = shard.searcher();
+        let ids = common::ids(&s);
+        for w in [0usize, 1, 4] {
+            let q: QueryRef = Arc::new(TermQuery::new(BODY, word(w).into_bytes()));
+            let mut all = TopScoreCollector::new(s.num_docs() as usize, u64::MAX);
+            s.search(&q, &mut all).unwrap();
+            let all = all.top_docs();
+            for by_num in [false, true] {
+                for n in [1usize, 5, 30] {
+                    let keys = if by_num { vec![num_sort(false)] } else { Vec::new() };
+                    let mut c = CollapseCollector::new(CollapseField::Keyword(GRP), keys, n, u64::MAX, false);
+                    s.search(&q, &mut c).unwrap();
+                    let got = c.top_docs();
+                    assert_eq!(got.total_hits, all.total_hits);
+                    // Model: the best doc per group, then the best n groups.
+                    let num = |d: u32| model[&ids[&d]].2;
+                    let better = |a: (u32, f32), b: (u32, f32)| -> bool {
+                        if by_num {
+                            let (x, y) = (num(a.0), num(b.0));
+                            x < y || (x == y && a.0 < b.0)
+                        } else {
+                            a.1 > b.1 || (a.1 == b.1 && a.0 < b.0)
+                        }
+                    };
+                    let mut best: HashMap<Option<String>, (u32, f32)> = HashMap::new();
+                    for h in &all.hits {
+                        let g = model[&ids[&h.doc]].1.clone();
+                        let cand = (h.doc, h.score);
+                        match best.get(&g) {
+                            Some(&cur) if !better(cand, cur) => {}
+                            _ => {
+                                best.insert(g, cand);
+                            }
+                        }
+                    }
+                    let mut heads: Vec<(Option<String>, (u32, f32))> = best.into_iter().collect();
+                    heads.sort_by(|a, b| if better(a.1, b.1) { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater });
+                    heads.truncate(n);
+                    let want: Vec<(u32, SortValue)> = heads
+                        .into_iter()
+                        .map(|(g, (d, _))| (d, g.map_or(SortValue::Null, |g| SortValue::Bytes(g.into_bytes()))))
+                        .collect();
+                    let have: Vec<(u32, SortValue)> = got.hits.iter().map(|h| (h.doc, h.group.clone())).collect();
+                    assert_eq!(have, want, "seed {seed} word {w} by_num {by_num} n {n}");
+                    if by_num {
+                        for h in &got.hits {
+                            assert_eq!(h.values, vec![SortValue::Long(num(h.doc))]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn lbl_sort(reverse: bool, missing: Missing) -> SortKey {
+    SortKey::Field(FieldSort { field: LBL, kind: SortType::Keyword, reverse, missing, mode: SortMode::Min, nested: None })
+}
+
+/// Collapsing with keyword and multi-key sorts (heads from earlier segments compare through
+/// translated ordinals) and on a numeric field, against a brute-force model.
+#[test]
+fn collapse_with_keyword_and_multi_key_sorts_matches_brute_force() {
+    use std::cmp::Ordering;
+    for seed in 0..std::env::var("SWEEP_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(4u64) {
+        let (shard, model) = collapse_shard(seed + 100);
+        let s = shard.searcher();
+        assert!(s.segments().len() > 3, "several segments");
+        let ids = common::ids(&s);
+        // (keys, model comparator over (doc, score)) per variant.
+        type Cmp = Box<dyn Fn(&Model, &HashMap<u32, String>, (u32, f32), (u32, f32)) -> Ordering>;
+        let lbl_cmp = |reverse: bool, first: bool| {
+            move |m: &Model, ids: &HashMap<u32, String>, a: u32, b: u32| -> Ordering {
+                match (&m[&ids[&a]].3, &m[&ids[&b]].3) {
+                    (None, None) => Ordering::Equal,
+                    (None, _) => if first { Ordering::Less } else { Ordering::Greater },
+                    (_, None) => if first { Ordering::Greater } else { Ordering::Less },
+                    (Some(x), Some(y)) => if reverse { y.cmp(x) } else { x.cmp(y) },
+                }
+            }
+        };
+        let num_cmp = |reverse: bool| move |m: &Model, ids: &HashMap<u32, String>, a: u32, b: u32| -> Ordering {
+            let o = m[&ids[&a]].2.cmp(&m[&ids[&b]].2);
+            if reverse { o.reverse() } else { o }
+        };
+        let variants: Vec<(Vec<SortKey>, Cmp)> = vec![
+            (vec![lbl_sort(false, Missing::Last)], {
+                let l = lbl_cmp(false, false);
+                Box::new(move |m, ids, a, b| l(m, ids, a.0, b.0))
+            }),
+            (vec![lbl_sort(true, Missing::First), num_sort(false)], {
+                let (l, n) = (lbl_cmp(true, true), num_cmp(false));
+                Box::new(move |m, ids, a, b| l(m, ids, a.0, b.0).then_with(|| n(m, ids, a.0, b.0)))
+            }),
+            (vec![lbl_sort(false, Missing::Value(SortValue::Bytes(b"l20x".to_vec()))), SortKey::Score { reverse: false }], {
+                // A custom missing value sorts as that term.
+                Box::new(move |m: &Model, ids: &HashMap<u32, String>, a: (u32, f32), b: (u32, f32)| {
+                    let v = |d: u32| m[&ids[&d]].3.clone().unwrap_or_else(|| "l20x".into());
+                    v(a.0).cmp(&v(b.0)).then(b.1.total_cmp(&a.1))
+                })
+            }),
+            (vec![num_sort(true), lbl_sort(false, Missing::Last)], {
+                let (n, l) = (num_cmp(true), lbl_cmp(false, false));
+                Box::new(move |m, ids, a, b| n(m, ids, a.0, b.0).then_with(|| l(m, ids, a.0, b.0)))
+            }),
+        ];
+        for w in [0usize, 1, 4] {
+            let q: QueryRef = Arc::new(TermQuery::new(BODY, word(w).into_bytes()));
+            let mut all = TopScoreCollector::new(s.num_docs() as usize, u64::MAX);
+            s.search(&q, &mut all).unwrap();
+            let all = all.top_docs();
+            for (vi, (keys, cmp)) in variants.iter().enumerate() {
+                for field in [CollapseField::Keyword(GRP), CollapseField::Numeric(NUM)] {
+                    for n in [1usize, 5, 30] {
+                        let mut c = CollapseCollector::new(field, keys.clone(), n, u64::MAX, true);
+                        s.search(&q, &mut c).unwrap();
+                        let got = c.top_docs();
+                        assert_eq!(got.total_hits, all.total_hits);
+                        let group = |d: u32| match field {
+                            CollapseField::Keyword(_) => model[&ids[&d]].1.clone().map_or(SortValue::Null, |g| SortValue::Bytes(g.into_bytes())),
+                            CollapseField::Numeric(_) => SortValue::Long(model[&ids[&d]].2),
+                        };
+                        let order = |a: (u32, f32), b: (u32, f32)| cmp(&model, &ids, a, b).then(a.0.cmp(&b.0));
+                        let mut best: Vec<(SortValue, (u32, f32))> = Vec::new();
+                        for h in &all.hits {
+                            let g = group(h.doc);
+                            let cand = (h.doc, h.score);
+                            match best.iter_mut().find(|(k, _)| *k == g) {
+                                Some((_, cur)) => {
+                                    if order(cand, *cur) == Ordering::Less {
+                                        *cur = cand;
+                                    }
+                                }
+                                None => best.push((g, cand)),
+                            }
+                        }
+                        best.sort_by(|a, b| order(a.1, b.1));
+                        best.truncate(n);
+                        let want: Vec<(u32, SortValue)> = best.into_iter().map(|(g, (d, _))| (d, g)).collect();
+                        let have: Vec<(u32, SortValue)> = got.hits.iter().map(|h| (h.doc, h.group.clone())).collect();
+                        assert_eq!(have, want, "seed {seed} word {w} variant {vi} field {field:?} n {n}");
+                        for h in &got.hits {
+                            let lbl = model[&ids[&h.doc]].3.clone();
+                            let want_lbl = match (lbl, &keys[0], keys.get(1)) {
+                                (Some(l), _, _) => SortValue::Bytes(l.into_bytes()),
+                                (None, SortKey::Field(FieldSort { missing: Missing::Value(v), .. }), _) if vi == 2 => v.clone(),
+                                (None, _, _) => SortValue::Null,
+                            };
+                            let at = keys.iter().position(|k| matches!(k, SortKey::Field(f) if f.field == LBL)).unwrap();
+                            assert_eq!(h.values[at], want_lbl, "label value of doc {}", h.doc);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn filter_cache_reuses_doc_sets_and_stays_correct() {
+    use search_index::DeleteOp;
+    use search_index::query::{PointRangeQuery, TermQuery};
+    let mut rng = common::rng(77);
+    let s = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, common::schema(), Vec::new()).unwrap();
+    let mut ids = Vec::new();
+    for i in 0..30_000 {
+        let d = common::random_doc(&mut rng, i);
+        ids.push(d.id.clone());
+        s.index(IndexOp::new(common::to_indexable(&d))).unwrap();
+    }
+    s.refresh().unwrap();
+    s.force_merge(Some(1), false).unwrap();
+    let q = |lo: i64, hi: i64| -> QueryRef {
+        Arc::new(
+            BooleanQuery::new()
+                .must(Arc::new(TermQuery::new(BODY, word(1).into_bytes())))
+                .filter(Arc::new(PointRangeQuery::long(NUM, lo, hi)))
+                .must_not(Arc::new(search_index::query::MultiTermQuery::prefix(TAG, b"t7".to_vec()))),
+        )
+    };
+    let run = |se: &search_index::Searcher, q: &QueryRef| {
+        let mut c = TopScoreCollector::new(50, u64::MAX);
+        se.search(q, &mut c).unwrap();
+        let td = c.top_docs();
+        (td.total_hits, td.hits)
+    };
+    let before = s.stats().segment_heap_bytes;
+    let se = s.searcher();
+    let plain = se.with_query_cache(None);
+    for round in 0..4 {
+        for (lo, hi) in [(-20, 10), (0, 49), (-50, -10)] {
+            let a = run(&se, &q(lo, hi));
+            let b = run(&plain, &q(lo, hi));
+            assert_eq!(a, b, "round {round} range {lo}..{hi}");
+            assert_eq!(se.count(&q(lo, hi)).unwrap(), plain.count(&q(lo, hi)).unwrap());
+        }
+    }
+    assert!(s.stats().segment_heap_bytes > before, "nothing was cached");
+    // Deletions after caching are applied on top of the cached sets.
+    for id in ids.iter().step_by(3) {
+        s.delete(DeleteOp::new(id.clone().into_bytes())).unwrap();
+    }
+    s.refresh().unwrap();
+    let se = s.searcher();
+    let plain = se.with_query_cache(None);
+    for (lo, hi) in [(-20, 10), (0, 49), (-50, -10)] {
+        assert_eq!(run(&se, &q(lo, hi)), run(&plain, &q(lo, hi)));
+        assert_eq!(se.count(&q(lo, hi)).unwrap(), plain.count(&q(lo, hi)).unwrap());
+    }
+}
+
+/// Compound filters (bool over a phrase, dis_max) are cached after recurring like Lucene's
+/// policy says (four uses for compounds), and cached results equal uncached ones, with
+/// scoring clauses next to them and deletions applied afterwards.
+#[test]
+fn filter_cache_handles_compound_filters() {
+    use search_index::DeleteOp;
+    use search_index::query::{DisMaxQuery, PhraseQuery, PointRangeQuery};
+    let mut rng = common::rng(91);
+    let s = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, common::schema(), Vec::new()).unwrap();
+    let mut ids = Vec::new();
+    for i in 0..30_000 {
+        let d = common::random_doc(&mut rng, i);
+        ids.push(d.id.clone());
+        s.index(IndexOp::new(common::to_indexable(&d))).unwrap();
+    }
+    s.refresh().unwrap();
+    s.force_merge(Some(1), false).unwrap();
+    let filter = |k: usize| -> QueryRef {
+        let ph: QueryRef = Arc::new(PhraseQuery::new(BODY, vec![word(k).into_bytes(), word(k + 1).into_bytes()], 1));
+        let dm: QueryRef = Arc::new(DisMaxQuery::new(
+            vec![Arc::new(TermQuery::new(BODY, word(k + 2).into_bytes())), Arc::new(PointRangeQuery::long(NUM, -10, 10))],
+            0.0,
+        ));
+        Arc::new(BooleanQuery::new().should(ph).should(dm))
+    };
+    let q = |k: usize| -> QueryRef { Arc::new(BooleanQuery::new().should(Arc::new(TermQuery::new(BODY, word(3).into_bytes()))).filter(filter(k))) };
+    let run = |se: &search_index::Searcher, q: &QueryRef| {
+        let mut c = TopScoreCollector::new(30, u64::MAX);
+        se.search(q, &mut c).unwrap();
+        let td = c.top_docs();
+        (td.total_hits, td.hits)
+    };
+    let before = s.stats().segment_heap_bytes;
+    let se = s.searcher();
+    let plain = se.with_query_cache(None);
+    for round in 0..3 {
+        for k in [0, 1, 2] {
+            assert_eq!(run(&se, &q(k)), run(&plain, &q(k)), "round {round} k {k}");
+        }
+    }
+    // Three uses each: below the compound threshold.
+    assert_eq!(s.stats().segment_heap_bytes, before, "cached too early");
+    for k in [0, 1, 2] {
+        assert_eq!(run(&se, &q(k)), run(&plain, &q(k)));
+        assert_eq!(se.count(&q(k)).unwrap(), plain.count(&q(k)).unwrap());
+    }
+    assert!(s.stats().segment_heap_bytes > before, "nothing was cached");
+    for id in ids.iter().step_by(4) {
+        s.delete(DeleteOp::new(id.clone().into_bytes())).unwrap();
+    }
+    s.refresh().unwrap();
+    let se = s.searcher();
+    let plain = se.with_query_cache(None);
+    for k in [0, 1, 2] {
+        assert_eq!(run(&se, &q(k)), run(&plain, &q(k)));
+        assert_eq!(se.count(&q(k)).unwrap(), plain.count(&q(k)).unwrap());
+    }
+}
+
+/// `post_filter`: top hits of `q AND filter` (scores of `q` alone) while a counter beside it
+/// sees every match of `q`.
+#[test]
+fn post_filter_limits_only_the_wrapped_collector() {
+    use search_index::collector::PostFilter;
+    use search_index::query::PhraseQuery;
+    let corpus = build(11, 1500, ShardConfig { merge_threads: 0, ..Default::default() });
+    let s = corpus.shard.searcher();
+    let filters: Vec<QueryRef> = vec![
+        Arc::new(TermQuery::new(TAG, "t1")),
+        Arc::new(PhraseQuery::new(BODY, vec![word(1).into_bytes(), word(2).into_bytes()], 1)),
+        Arc::new(BooleanQuery::new().should(Arc::new(TermQuery::new(TAG, "t0"))).should(Arc::new(TermQuery::new(TAG, "t2")))),
+    ];
+    for q in queries() {
+        for f in &filters {
+            let mut count = TotalHitCountCollector::default();
+            let mut top = PostFilter::new(&s, f, TopScoreCollector::new(15, u64::MAX)).unwrap();
+            {
+                let mut m = MultiCollector::new(vec![&mut count as &mut dyn Collector, &mut top]);
+                s.search(&q, &mut m).unwrap();
+            }
+            assert_eq!(count.total, s.count(&q).unwrap());
+            // Expected: hits of q whose docs match the filter, with q's scores.
+            let mut all = TopScoreCollector::new(s.num_docs() as usize + 1, u64::MAX);
+            s.search(&q, &mut all).unwrap();
+            let both: QueryRef = Arc::new(BooleanQuery::new().must(q.clone()).filter(f.clone()));
+            let mut fb = TopScoreCollector::new(s.num_docs() as usize + 1, u64::MAX);
+            s.search(&both, &mut fb).unwrap();
+            let keep: std::collections::HashSet<u32> = fb.top_docs().hits.iter().map(|h| h.doc).collect();
+            let want: Vec<(u32, f32)> = all.top_docs().hits.into_iter().filter(|h| keep.contains(&h.doc)).take(15).map(|h| (h.doc, h.score)).collect();
+            let td = top.inner.top_docs();
+            assert_eq!(td.total_hits as usize, keep.len());
+            assert_eq!(td.hits.iter().map(|h| (h.doc, h.score)).collect::<Vec<_>>(), want);
+        }
+    }
+}
+
+/// Profiling: the query tree of the rewritten query with Lucene's class names, timings that
+/// add up, and unchanged results.
+#[test]
+fn profiled_searches_report_the_query_tree() {
+    use search_index::query::{ConstantScoreQuery, DisMaxQuery, MultiTermQuery};
+    use search_index::search::profile::{ProfileCollector, Profiler};
+    let corpus = build(5, 600, ShardConfig { merge_threads: 0, ..Default::default() });
+    let s = corpus.shard.searcher();
+    let q: QueryRef = Arc::new(
+        BooleanQuery::new()
+            .must(Arc::new(TermQuery::new(BODY, word(1))))
+            .should(Arc::new(DisMaxQuery::new(vec![Arc::new(TermQuery::new(BODY, word(2))), Arc::new(MultiTermQuery::prefix(BODY, b"w1".to_vec()))], 0.1)))
+            .filter(Arc::new(ConstantScoreQuery::new(Arc::new(TermQuery::new(TAG, "t1"))))),
+    );
+    let p = Profiler::new();
+    let ps = s.with_profiler(Some(p.clone()));
+    let mut c = ProfileCollector::new(TopScoreCollector::new(10, u64::MAX));
+    ps.search(&q, &mut c).unwrap();
+    let mut plain = TopScoreCollector::new(10, u64::MAX);
+    s.search(&q, &mut plain).unwrap();
+    assert!(c.time_in_nanos() > 0);
+    assert_eq!(c.inner.top_docs().hits, plain.top_docs().hits, "profiling changes no result");
+    let tree = p.tree();
+    assert_eq!(tree.len(), 1);
+    let root = &tree[0];
+    assert_eq!(root.kind, "BooleanQuery");
+    // The tree describes the rewritten query: the filter's constant score is gone.
+    assert_eq!(root.description, s.rewrite(&q).unwrap().lucene_string(s.schema()));
+    assert_eq!(root.description, "+body:w1 (body:w2 | body:w1*)~0.1 #tag:t1");
+    let kinds: Vec<&str> = root.children.iter().map(|n| n.kind.as_str()).collect();
+    assert_eq!(kinds, ["TermQuery", "DisjunctionMaxQuery", "TermQuery"]);
+    let dm = &root.children[1];
+    assert_eq!(dm.children.iter().map(|n| n.kind.as_str()).collect::<Vec<_>>(), ["TermQuery", "MultiTermQueryConstantScoreBlendedWrapper"]);
+    let get = |n: &search_index::search::profile::ProfileNode, k: &str| *n.breakdown.iter().find(|b| b.0 == k).unwrap();
+    assert_eq!(get(root, "create_weight").2, 1);
+    assert!(get(root, "build_scorer").2 >= 1);
+    assert!(get(root, "next_doc").2 + get(root, "advance").2 > 0);
+    assert_eq!(root.time_in_nanos, root.breakdown.iter().map(|b| b.1).sum::<u64>());
+    assert_eq!(root.breakdown.len(), 10);
+    // An unprofiled view of the same searcher records nothing more.
+    s.search(&q, &mut TopScoreCollector::new(10, u64::MAX)).unwrap();
+    assert_eq!(p.tree().len(), 1);
+}
+
+/// A `_script` sort key whose script the deadline stopped on the third document.
+struct StoppedOnThird;
+struct StoppedOnThirdLeaf(u32);
+
+impl search_index::collector::SortScript for StoppedOnThird {
+    fn leaf(&self, _seg: &search_index::SegmentContext) -> search_index::Result<Box<dyn search_index::collector::LeafSortScript>> {
+        Ok(Box::new(StoppedOnThirdLeaf(0)))
+    }
+}
+
+impl search_index::collector::LeafSortScript for StoppedOnThirdLeaf {
+    fn number(&mut self, doc: u32) -> search_index::Result<f64> {
+        self.0 += 1;
+        if self.0 == 3 {
+            search_index::search::note_interrupted(search_index::Error::TimeExceeded);
+            return Err(search_index::Error::illegal("script stopped"));
+        }
+        Ok(f64::from(doc))
+    }
+}
+
+/// A doc whose sort script was interrupted isn't collected (Elasticsearch never reports a
+/// hit without its sort value); the docs before it are the partial result.
+#[test]
+fn interrupted_sort_scripts_keep_partial_results_only() {
+    let schema = Schema::new().with_field(FieldSchema::new(NUM, "num").with_doc_values(DocValuesType::SortedNumeric)).unwrap();
+    let shard = Shard::in_memory(schema);
+    for i in 0..5 {
+        shard.index(IndexOp::new(IndexableDoc::new(format!("d{i}").into_bytes()).doc_value(NUM, DocValue::SortedNumeric(i)))).unwrap();
+    }
+    shard.refresh().unwrap();
+    let s = shard.searcher();
+    let key = SortKey::Script(search_index::collector::ScriptSort { script: Arc::new(StoppedOnThird), reverse: true, mode: SortMode::Min, nested: None });
+    let mut col = TopFieldCollector::new(vec![key], 10, u64::MAX, false).with_searcher(&s);
+    let q: QueryRef = Arc::new(MatchAllQuery);
+    let r = s.search(&q, &mut col);
+    assert!(matches!(r, Err(search_index::Error::TimeExceeded)), "{r:?}");
+    let hits = col.top_docs().hits;
+    assert_eq!(hits.iter().map(|h| h.values.clone()).collect::<Vec<_>>(), vec![vec![SortValue::Double(1.0)], vec![SortValue::Double(0.0)]]);
+    assert!(search_index::search::take_deferred_error().is_none());
+}

@@ -1,0 +1,1653 @@
+{
+  "description": "compat-es round 4: runtime fields read by scripts (doc[...], cycles, chain depth), docvalue_fields and sorts on runtime fields, on_script_error, runtime query explanations, multi-index runtime aggregations, _termStats, interval script filters, search timeouts cancelling scripts",
+  "steps": [
+    {
+      "req": "PUT /es-docs-compat-es-r4",
+      "body": {
+        "settings": {
+          "number_of_shards": 1
+        },
+        "mappings": {
+          "runtime": {
+            "dow": {
+              "type": "keyword",
+              "script": "emit(doc['ts'].value.dayOfWeekEnum.getDisplayName(TextStyle.FULL, Locale.ENGLISH))"
+            },
+            "dow_first": {
+              "type": "keyword",
+              "script": "for (String d : doc['dow']) { emit(d.substring(0, 1)); }"
+            },
+            "letters": {
+              "type": "keyword",
+              "script": "for (String d : doc['dow']) { for (int i = 0; i < d.length(); i++) { emit(d.charAt(i).toString()); } }"
+            },
+            "v10": {
+              "type": "long",
+              "script": "emit((long)(doc['v'].value * 10))"
+            },
+            "half": {
+              "type": "double",
+              "script": "emit(doc['v'].value / 2)"
+            },
+            "lenient": {
+              "type": "keyword",
+              "script": "emit(doc['name'].value.substring(0, 1))",
+              "on_script_error": "continue"
+            },
+            "strict": {
+              "type": "keyword",
+              "script": "emit(doc['name'].value.substring(0, 1))"
+            },
+            "loop": {
+              "type": "keyword",
+              "script": "emit(doc['loop'].value)"
+            },
+            "la": {
+              "type": "keyword",
+              "script": "emit(doc['lb'].value)"
+            },
+            "lb": {
+              "type": "keyword",
+              "script": "emit(doc['la'].value)"
+            },
+            "d1": {
+              "type": "keyword",
+              "script": "emit(doc['d2'].value)"
+            },
+            "d2": {
+              "type": "keyword",
+              "script": "emit(doc['d3'].value)"
+            },
+            "d3": {
+              "type": "keyword",
+              "script": "emit(doc['d4'].value)"
+            },
+            "d4": {
+              "type": "keyword",
+              "script": "emit(doc['d5'].value)"
+            },
+            "d5": {
+              "type": "keyword",
+              "script": "emit(doc['d6'].value)"
+            },
+            "d6": {
+              "type": "keyword",
+              "script": "emit('deep')"
+            }
+          },
+          "properties": {
+            "ts": {
+              "type": "date"
+            },
+            "v": {
+              "type": "double"
+            },
+            "name": {
+              "type": "keyword"
+            },
+            "title": {
+              "type": "text"
+            },
+            "genre": {
+              "type": "keyword"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-compat-es-r4"
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_bulk?refresh=true",
+      "raw": "{\"index\":{\"_id\":\"1\"}}\n{\"ts\":1516729294000,\"v\":5.2,\"name\":\"foo\",\"title\":\"star wars\",\"genre\":\"sci\"}\n{\"index\":{\"_id\":\"2\"}}\n{\"ts\":1516642894000,\"v\":5.8,\"name\":\"\",\"title\":\"star trek star\",\"genre\":\"sci\"}\n{\"index\":{\"_id\":\"3\"}}\n{\"ts\":1516556494000,\"v\":4.1,\"name\":\"bar\",\"title\":\"rambo\",\"genre\":\"war\"}\n",
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "errors": false,
+        "took": 0,
+        "items": [
+          {
+            "index": {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "1",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 0,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "2",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 1,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 2,
+              "_primary_term": 1,
+              "status": 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "sort": "ts",
+        "fields": [
+          "dow_first",
+          "letters"
+        ],
+        "docvalue_fields": [
+          "letters",
+          "v10",
+          "half"
+        ],
+        "_source": false
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 3,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "3",
+              "_score": null,
+              "fields": {
+                "half": [
+                  2.05
+                ],
+                "dow_first": [
+                  "S"
+                ],
+                "v10": [
+                  41
+                ],
+                "letters": [
+                  "S",
+                  "a",
+                  "d",
+                  "n",
+                  "u",
+                  "y"
+                ]
+              },
+              "sort": [
+                1516556494000
+              ]
+            },
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "2",
+              "_score": null,
+              "fields": {
+                "half": [
+                  2.9
+                ],
+                "dow_first": [
+                  "M"
+                ],
+                "v10": [
+                  58
+                ],
+                "letters": [
+                  "M",
+                  "a",
+                  "d",
+                  "n",
+                  "o",
+                  "y"
+                ]
+              },
+              "sort": [
+                1516642894000
+              ]
+            },
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "1",
+              "_score": null,
+              "fields": {
+                "half": [
+                  2.6
+                ],
+                "dow_first": [
+                  "T"
+                ],
+                "v10": [
+                  52
+                ],
+                "letters": [
+                  "T",
+                  "a",
+                  "d",
+                  "e",
+                  "s",
+                  "u",
+                  "y"
+                ]
+              },
+              "sort": [
+                1516729294000
+              ]
+            }
+          ]
+        }
+      },
+      "unordered": true
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "sort": [
+          {
+            "dow": "desc"
+          }
+        ],
+        "_source": false
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 1,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 3,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "1",
+              "_score": null,
+              "sort": [
+                "Tuesday"
+              ]
+            },
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "3",
+              "_score": null,
+              "sort": [
+                "Sunday"
+              ]
+            },
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "2",
+              "_score": null,
+              "sort": [
+                "Monday"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "sort": [
+          {
+            "v10": "asc"
+          }
+        ],
+        "_source": false
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 1,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 3,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "3",
+              "_score": null,
+              "sort": [
+                41
+              ]
+            },
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "1",
+              "_score": null,
+              "sort": [
+                52
+              ]
+            },
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "2",
+              "_score": null,
+              "sort": [
+                58
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "sort": [
+          {
+            "half": "desc"
+          }
+        ],
+        "_source": false
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 1,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 3,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "2",
+              "_score": null,
+              "sort": [
+                2.9
+              ]
+            },
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "1",
+              "_score": null,
+              "sort": [
+                2.6
+              ]
+            },
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "3",
+              "_score": null,
+              "sort": [
+                2.05
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search?explain=true",
+      "body": {
+        "query": {
+          "term": {
+            "dow": {
+              "value": "Monday",
+              "boost": 7
+            }
+          }
+        },
+        "_source": false
+      },
+      "mask": [
+        "_node",
+        "_shard",
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 1,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 7.0,
+          "hits": [
+            {
+              "_shard": "[es-docs-compat-es-r4][0]",
+              "_node": "Wd5KTQvfQ8uLkW_SG96dbA",
+              "_index": "es-docs-compat-es-r4",
+              "_id": "2",
+              "_score": 7.0,
+              "_explanation": {
+                "value": 7.0,
+                "description": "dow:Monday^7.0",
+                "details": [
+                  {
+                    "value": 7.0,
+                    "description": "boost * runtime_field_score",
+                    "details": [
+                      {
+                        "value": 7.0,
+                        "description": "boost",
+                        "details": []
+                      },
+                      {
+                        "value": 1.0,
+                        "description": "runtime_field_score is always 1",
+                        "details": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search?explain=true",
+      "body": {
+        "query": {
+          "range": {
+            "v10": {
+              "gte": 50,
+              "lt": 60
+            }
+          }
+        },
+        "_source": false
+      },
+      "mask": [
+        "_node",
+        "_shard",
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 1,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 2,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_shard": "[es-docs-compat-es-r4][0]",
+              "_node": "Wd5KTQvfQ8uLkW_SG96dbA",
+              "_index": "es-docs-compat-es-r4",
+              "_id": "1",
+              "_score": 1.0,
+              "_explanation": {
+                "value": 1.0,
+                "description": "v10:[50 TO 59]",
+                "details": [
+                  {
+                    "value": 1.0,
+                    "description": "boost * runtime_field_score",
+                    "details": [
+                      {
+                        "value": 1.0,
+                        "description": "boost",
+                        "details": []
+                      },
+                      {
+                        "value": 1.0,
+                        "description": "runtime_field_score is always 1",
+                        "details": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard": "[es-docs-compat-es-r4][0]",
+              "_node": "Wd5KTQvfQ8uLkW_SG96dbA",
+              "_index": "es-docs-compat-es-r4",
+              "_id": "2",
+              "_score": 1.0,
+              "_explanation": {
+                "value": 1.0,
+                "description": "v10:[50 TO 59]",
+                "details": [
+                  {
+                    "value": 1.0,
+                    "description": "boost * runtime_field_score",
+                    "details": [
+                      {
+                        "value": 1.0,
+                        "description": "boost",
+                        "details": []
+                      },
+                      {
+                        "value": 1.0,
+                        "description": "runtime_field_score is always 1",
+                        "details": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "query": {
+          "match": {
+            "lenient": "f"
+          }
+        },
+        "fields": [
+          "lenient"
+        ],
+        "_source": false
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "lenient": [
+                  "f"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "query": {
+          "match": {
+            "strict": "f"
+          }
+        }
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "script_exception",
+              "reason": "runtime error",
+              "script_stack": [
+                "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:55)",
+                "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:52)",
+                "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+                "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+                "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+                "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckFromToIndex(Preconditions.java:112)",
+                "java.base/jdk.internal.util.Preconditions.checkFromToIndex(Preconditions.java:349)",
+                "java.base/java.lang.String.checkBoundsBeginEnd(String.java:5312)",
+                "java.base/java.lang.String.substring(String.java:3274)",
+                "emit(doc['name'].value.substring(0, 1))",
+                "                      ^---- HERE"
+              ],
+              "script": "emit(doc['name'].value.substring(0, 1))",
+              "lang": "painless",
+              "position": {
+                "offset": 22,
+                "start": 0,
+                "end": 39
+              }
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "es-docs-compat-es-r4",
+              "node": "Wd5KTQvfQ8uLkW_SG96dbA",
+              "reason": {
+                "type": "script_exception",
+                "reason": "runtime error",
+                "script_stack": [
+                  "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:55)",
+                  "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:52)",
+                  "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+                  "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+                  "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+                  "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckFromToIndex(Preconditions.java:112)",
+                  "java.base/jdk.internal.util.Preconditions.checkFromToIndex(Preconditions.java:349)",
+                  "java.base/java.lang.String.checkBoundsBeginEnd(String.java:5312)",
+                  "java.base/java.lang.String.substring(String.java:3274)",
+                  "emit(doc['name'].value.substring(0, 1))",
+                  "                      ^---- HERE"
+                ],
+                "script": "emit(doc['name'].value.substring(0, 1))",
+                "lang": "painless",
+                "position": {
+                  "offset": 22,
+                  "start": 0,
+                  "end": 39
+                },
+                "caused_by": {
+                  "type": "string_index_out_of_bounds_exception",
+                  "reason": "Range [0, 1) out of bounds for length 0"
+                }
+              }
+            }
+          ]
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "l": {
+            "terms": {
+              "field": "lenient"
+            }
+          }
+        }
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 3,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": []
+        },
+        "aggregations": {
+          "l": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "b",
+                "doc_count": 1
+              },
+              {
+                "key": "f",
+                "doc_count": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "query": {
+          "match": {
+            "loop": "x"
+          }
+        }
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "script_exception",
+              "reason": "runtime error",
+              "script_stack": [
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.forkAndTrackFieldReferences(SearchLookup.java:131)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.lambda$getForField$1(SearchLookup.java:160)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.KeywordScriptFieldType.fielddataBuilder(KeywordScriptFieldType.java:164)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.KeywordScriptFieldType.fielddataBuilder(KeywordScriptFieldType.java:50)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.IndexFieldDataService.getForField(IndexFieldDataService.java:92)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.index.IndexService.loadFielddata(IndexService.java:1451)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.index.query.SearchExecutionContext.lambda$setLookupProviders$5(SearchExecutionContext.java:570)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.getForField(SearchLookup.java:160)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:156)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+                "emit(doc['loop'].value)",
+                "         ^---- HERE"
+              ],
+              "script": "emit(doc['loop'].value)",
+              "lang": "painless",
+              "position": {
+                "offset": 9,
+                "start": 0,
+                "end": 23
+              }
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "es-docs-compat-es-r4",
+              "node": "Wd5KTQvfQ8uLkW_SG96dbA",
+              "reason": {
+                "type": "script_exception",
+                "reason": "runtime error",
+                "script_stack": [
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.forkAndTrackFieldReferences(SearchLookup.java:131)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.lambda$getForField$1(SearchLookup.java:160)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.KeywordScriptFieldType.fielddataBuilder(KeywordScriptFieldType.java:164)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.KeywordScriptFieldType.fielddataBuilder(KeywordScriptFieldType.java:50)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.IndexFieldDataService.getForField(IndexFieldDataService.java:92)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.index.IndexService.loadFielddata(IndexService.java:1451)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.index.query.SearchExecutionContext.lambda$setLookupProviders$5(SearchExecutionContext.java:570)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.getForField(SearchLookup.java:160)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:156)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+                  "emit(doc['loop'].value)",
+                  "         ^---- HERE"
+                ],
+                "script": "emit(doc['loop'].value)",
+                "lang": "painless",
+                "position": {
+                  "offset": 9,
+                  "start": 0,
+                  "end": 23
+                },
+                "caused_by": {
+                  "type": "illegal_argument_exception",
+                  "reason": "Cyclic dependency detected while resolving runtime fields: loop -> loop"
+                }
+              }
+            }
+          ]
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "l": {
+            "terms": {
+              "field": "loop"
+            }
+          }
+        }
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "script_exception",
+              "reason": "runtime error",
+              "script_stack": [
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.forkAndTrackFieldReferences(SearchLookup.java:131)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.lambda$getForField$1(SearchLookup.java:160)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.KeywordScriptFieldType.fielddataBuilder(KeywordScriptFieldType.java:164)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.KeywordScriptFieldType.fielddataBuilder(KeywordScriptFieldType.java:50)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.IndexFieldDataService.getForField(IndexFieldDataService.java:92)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.index.IndexService.loadFielddata(IndexService.java:1451)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.index.query.SearchExecutionContext.lambda$setLookupProviders$5(SearchExecutionContext.java:570)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.getForField(SearchLookup.java:160)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:156)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+                "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+                "emit(doc['loop'].value)",
+                "         ^---- HERE"
+              ],
+              "script": "emit(doc['loop'].value)",
+              "lang": "painless",
+              "position": {
+                "offset": 9,
+                "start": 0,
+                "end": 23
+              }
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "es-docs-compat-es-r4",
+              "node": "Wd5KTQvfQ8uLkW_SG96dbA",
+              "reason": {
+                "type": "script_exception",
+                "reason": "runtime error",
+                "script_stack": [
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.forkAndTrackFieldReferences(SearchLookup.java:131)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.lambda$getForField$1(SearchLookup.java:160)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.KeywordScriptFieldType.fielddataBuilder(KeywordScriptFieldType.java:164)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.KeywordScriptFieldType.fielddataBuilder(KeywordScriptFieldType.java:50)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.IndexFieldDataService.getForField(IndexFieldDataService.java:92)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.index.IndexService.loadFielddata(IndexService.java:1451)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.index.query.SearchExecutionContext.lambda$setLookupProviders$5(SearchExecutionContext.java:570)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.getForField(SearchLookup.java:160)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:156)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+                  "emit(doc['loop'].value)",
+                  "         ^---- HERE"
+                ],
+                "script": "emit(doc['loop'].value)",
+                "lang": "painless",
+                "position": {
+                  "offset": 9,
+                  "start": 0,
+                  "end": 23
+                },
+                "caused_by": {
+                  "type": "illegal_argument_exception",
+                  "reason": "Cyclic dependency detected while resolving runtime fields: loop -> loop"
+                }
+              }
+            }
+          ]
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "fields": [
+          "d2"
+        ],
+        "_source": false,
+        "query": {
+          "ids": {
+            "values": [
+              "1"
+            ]
+          }
+        }
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 1,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "d2": [
+                  "deep"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "query": {
+          "script_score": {
+            "query": {
+              "match": {
+                "title": "star wars"
+              }
+            },
+            "script": {
+              "source": "_termStats.uniqueTermsCount() * 100 + _termStats.matchedTermsCount() * 10 + _termStats.termFreq().getSum()"
+            }
+          }
+        },
+        "_source": false
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 1,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 2,
+            "relation": "eq"
+          },
+          "max_score": 222.0,
+          "hits": [
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "1",
+              "_score": 222.0
+            },
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "2",
+              "_score": 212.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "query": {
+          "script_score": {
+            "query": {
+              "match": {
+                "title": "star wars"
+              }
+            },
+            "script": {
+              "source": "_termStats.docFreq().getMax() * 1000 + _termStats.totalTermFreq().getSum() * 10 + _termStats.termPositions().getAverage()"
+            }
+          }
+        },
+        "_source": false
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 1,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 2,
+            "relation": "eq"
+          },
+          "max_score": 2042.0,
+          "hits": [
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "2",
+              "_score": 2042.0
+            },
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "1",
+              "_score": 2041.5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "query": {
+          "function_score": {
+            "query": {
+              "bool": {
+                "must": {
+                  "match": {
+                    "title": "star"
+                  }
+                },
+                "should": {
+                  "term": {
+                    "genre": "sci"
+                  }
+                },
+                "must_not": {
+                  "term": {
+                    "genre": "war"
+                  }
+                }
+              }
+            },
+            "script_score": {
+              "script": {
+                "source": "_termStats.uniqueTermsCount() + _termStats.termPositions().getSum()"
+              }
+            },
+            "boost_mode": "replace"
+          }
+        },
+        "_source": false
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 2,
+            "relation": "eq"
+          },
+          "max_score": 6.0,
+          "hits": [
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "2",
+              "_score": 6.0
+            },
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "1",
+              "_score": 3.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "query": {
+          "intervals": {
+            "title": {
+              "match": {
+                "query": "star",
+                "filter": {
+                  "script": {
+                    "source": "interval.start > 0"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "_source": false
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 1,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 0.5,
+          "hits": [
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "2",
+              "_score": 0.5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "query": {
+          "intervals": {
+            "title": {
+              "match": {
+                "query": "star",
+                "filter": {
+                  "script": {
+                    "source": "interval.start + interval.end + interval.gaps == 0"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "_source": false
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 1,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 2,
+            "relation": "eq"
+          },
+          "max_score": 0.5,
+          "hits": [
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "1",
+              "_score": 0.5
+            },
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "2",
+              "_score": 0.5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search?timeout=100ms",
+      "body": {
+        "query": {
+          "script": {
+            "script": {
+              "source": "long s = System.currentTimeMillis(); while (System.currentTimeMillis() - s < 5000L) {} return true;"
+            }
+          }
+        }
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 1,
+        "timed_out": true,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 0,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": []
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search?timeout=100ms&allow_partial_search_results=false",
+      "body": {
+        "query": {
+          "script": {
+            "script": {
+              "source": "List a = []; for (int i = 0; i < 1000; i++) { a.add(i); } a.each(x -> a.each(y -> a.each(z -> z.hashCode()))); return true;"
+            }
+          }
+        }
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 429,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "search_timeout_exception",
+              "reason": "Time exceeded",
+              "timed_out": true
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "es-docs-compat-es-r4",
+              "node": "Wd5KTQvfQ8uLkW_SG96dbA",
+              "reason": {
+                "type": "search_timeout_exception",
+                "reason": "Time exceeded",
+                "timed_out": true
+              }
+            }
+          ]
+        },
+        "status": 429
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4/_search",
+      "body": {
+        "query": {
+          "script": {
+            "script": {
+              "source": "int x = 0; while (x < 2000000) { x++ } return true;"
+            }
+          }
+        },
+        "_source": false
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 16,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 3,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "1",
+              "_score": 1.0
+            },
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "2",
+              "_score": 1.0
+            },
+            {
+              "_index": "es-docs-compat-es-r4",
+              "_id": "3",
+              "_score": 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /_scripts/painless/_execute",
+      "body": {
+        "script": {
+          "source": "int x = 0; while (x < 2000000) { x++ } return x;"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "painless_error",
+              "reason": "The maximum number of statements that can be executed in a loop has been reached."
+            }
+          ],
+          "type": "script_exception",
+          "reason": "runtime error",
+          "script_stack": [
+            "while (x < 2000000) { ",
+            "^---- HERE"
+          ],
+          "script": "int x = 0; while (x < 2000000) { x++ } return x;",
+          "lang": "painless",
+          "position": {
+            "offset": 11,
+            "start": 11,
+            "end": 33
+          },
+          "caused_by": {
+            "type": "painless_error",
+            "reason": "The maximum number of statements that can be executed in a loop has been reached."
+          }
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "DELETE /es-docs-compat-es-r4",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-compat-es-r4-a",
+      "body": {
+        "mappings": {
+          "runtime": {
+            "v10": {
+              "type": "long",
+              "script": "emit((long)(doc['v'].value * 10))"
+            }
+          },
+          "properties": {
+            "v": {
+              "type": "double"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-compat-es-r4-a"
+      }
+    },
+    {
+      "req": "PUT /es-docs-compat-es-r4-b",
+      "body": {
+        "mappings": {
+          "properties": {
+            "v10": {
+              "type": "long"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-compat-es-r4-b"
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4-a/_doc?refresh=true",
+      "body": {
+        "v": 5.5
+      },
+      "mask": [
+        "_id",
+        "_seq_no",
+        "_primary_term"
+      ],
+      "status": 201,
+      "response": {
+        "_index": "es-docs-compat-es-r4-a",
+        "_id": "u8vPcKEBBP1I-5Ns74_c",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4-b/_doc?refresh=true",
+      "body": {
+        "v10": 55
+      },
+      "mask": [
+        "_id",
+        "_seq_no",
+        "_primary_term"
+      ],
+      "status": 201,
+      "response": {
+        "_index": "es-docs-compat-es-r4-b",
+        "_id": "vMvPcKEBBP1I-5Ns74_l",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "POST /es-docs-compat-es-r4-a,es-docs-compat-es-r4-b/_search?size=0",
+      "body": {
+        "aggs": {
+          "v": {
+            "terms": {
+              "field": "v10"
+            }
+          }
+        }
+      },
+      "mask": [
+        "node",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 2,
+          "successful": 2,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 2,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": []
+        },
+        "aggregations": {
+          "v": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": 55,
+                "doc_count": 2
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-compat-es-r4-a,es-docs-compat-es-r4-b",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    }
+  ]
+}

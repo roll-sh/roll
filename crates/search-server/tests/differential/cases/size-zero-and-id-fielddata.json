@@ -1,0 +1,448 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "PUT",
+      "path": "/szx",
+      "body": {
+        "settings": {
+          "number_of_replicas": 0,
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "szx"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk",
+      "lines": [
+        {
+          "index": {
+            "_index": "szx",
+            "_id": "1"
+          }
+        },
+        {
+          "n": 1
+        },
+        {
+          "index": {
+            "_index": "szx",
+            "_id": "2"
+          }
+        },
+        {
+          "n": 2
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 6603,
+          "items": [
+            {
+              "index": {
+                "_index": "szx",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "szx",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/szx/_refresh",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/szx/_search",
+      "body": {
+        "from": 4,
+        "size": 0
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/szx/_search",
+      "body": {
+        "from": 1,
+        "size": 0,
+        "query": {
+          "match_all": {}
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/szx/_search",
+      "body": {
+        "from": 1,
+        "size": 1
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "szx",
+                "_id": "2",
+                "_score": 1.0,
+                "_source": {
+                  "n": 2
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_msearch",
+      "lines": [
+        {
+          "index": "szx"
+        },
+        {
+          "from": 4,
+          "size": 0
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "responses": [
+            {
+              "took": 0,
+              "timed_out": false,
+              "_shards": {
+                "total": 1,
+                "successful": 1,
+                "skipped": 0,
+                "failed": 0
+              },
+              "hits": {
+                "total": {
+                  "value": 2,
+                  "relation": "eq"
+                },
+                "max_score": null,
+                "hits": []
+              },
+              "status": 200
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/szx/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "a": {
+            "value_count": {
+              "field": "_id"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "szx",
+                "node": "LQYzGNGJSaKKVGO8RlNtFg",
+                "reason": {
+                  "type": "illegal_argument_exception",
+                  "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+                }
+              }
+            ],
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+              "caused_by": {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/szx/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "a": {
+            "terms": {
+              "field": "_id"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "szx",
+                "node": "LQYzGNGJSaKKVGO8RlNtFg",
+                "reason": {
+                  "type": "illegal_argument_exception",
+                  "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+                }
+              }
+            ],
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+              "caused_by": {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/szx/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "a": {
+            "cardinality": {
+              "field": "_id"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "szx",
+                "node": "LQYzGNGJSaKKVGO8RlNtFg",
+                "reason": {
+                  "type": "illegal_argument_exception",
+                  "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+                }
+              }
+            ],
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+              "caused_by": {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/szx",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

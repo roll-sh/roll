@@ -1,0 +1,6742 @@
+{
+  "description" : "Round 7: review fixes (non-finite doubles, Java regex processors, suggester validation, search_after, scroll ids, request validations, cat counts)",
+  "steps" : [
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "convert" : {
+                "field" : "a",
+                "type" : "double"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "NaN"
+            }
+          },
+          {
+            "_source" : {
+              "a" : "-Infinity"
+            }
+          },
+          {
+            "_source" : {
+              "a" : "Infinity"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "NaN"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:39:57.931984961Z"
+              }
+            }
+          },
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "-Infinity"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:39:57.932024705Z"
+              }
+            }
+          },
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "Infinity"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:39:57.932040083Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "convert" : {
+                "field" : "a",
+                "type" : "float"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "NaN"
+            }
+          },
+          {
+            "_source" : {
+              "a" : "-Infinity"
+            }
+          },
+          {
+            "_source" : {
+              "a" : "Infinity"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "NaN"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:39:57.934984602Z"
+              }
+            }
+          },
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "-Infinity"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:39:57.935023314Z"
+              }
+            }
+          },
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "Infinity"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:39:57.935037881Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "convert" : {
+                "field" : "a",
+                "type" : "auto"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "NaN"
+            }
+          },
+          {
+            "_source" : {
+              "a" : "-Infinity"
+            }
+          },
+          {
+            "_source" : {
+              "a" : "Infinity"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "NaN"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:39:57.937747843Z"
+              }
+            }
+          },
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "-Infinity"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:39:57.937784511Z"
+              }
+            }
+          },
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "Infinity"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:39:57.937799128Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/es-docs-r7nan",
+      "body" : {
+        "processors" : [
+          {
+            "convert" : {
+              "field" : "a",
+              "type" : "double"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7nf",
+      "body" : {
+        "mappings" : {
+          "dynamic" : false
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r7nf"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7nf/_doc/1?pipeline=es-docs-r7nan&refresh=true",
+      "body" : {
+        "a" : "NaN"
+      },
+      "mask" : [
+        "_seq_no"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-r7nf",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "GET /es-docs-r7nf/_doc/1",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-r7nf",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "a" : "NaN"
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7nf/_bulk?pipeline=es-docs-r7nan&refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"2\"}}\n{\"a\":\"-Infinity\"}\n",
+      "mask" : [
+        "took",
+        "ingest_took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 0,
+        "ingest_took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-r7nf",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "GET /es-docs-r7nf/_doc/2",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-r7nf",
+        "_id" : "2",
+        "_version" : 1,
+        "_seq_no" : 1,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "a" : "-Infinity"
+        }
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7nd/_doc/1?pipeline=es-docs-r7nan&refresh=true",
+      "body" : {
+        "a" : "Infinity"
+      },
+      "mask" : [
+        "_seq_no"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-r7nd",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "GET /es-docs-r7nd/_mapping",
+      "status" : 200,
+      "response" : {
+        "es-docs-r7nd" : {
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "text",
+                "fields" : {
+                  "keyword" : {
+                    "type" : "keyword",
+                    "ignore_above" : 256
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "GET /es-docs-r7nd/_doc/1",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-r7nd",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "a" : "Infinity"
+        }
+      }
+    },
+    {
+      "req" : "POST /_reindex?refresh=true",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-r7nf"
+        },
+        "dest" : {
+          "index" : "es-docs-r7nr"
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 369,
+        "timed_out" : false,
+        "total" : 2,
+        "updated" : 0,
+        "created" : 2,
+        "deleted" : 0,
+        "batches" : 1,
+        "version_conflicts" : 0,
+        "noops" : 0,
+        "retries" : {
+          "bulk" : 0,
+          "search" : 0
+        },
+        "throttled_millis" : 0,
+        "requests_per_second" : -1.0,
+        "throttled_until_millis" : 0,
+        "failures" : [ ]
+      }
+    },
+    {
+      "req" : "GET /es-docs-r7nr/_doc/1",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-r7nr",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "a" : "NaN"
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r7nf,es-docs-r7nd,es-docs-r7nr",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/es-docs-r7nan",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "gsub" : {
+                "field" : "a",
+                "pattern" : "\\d",
+                "replacement" : "#"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "1٣２"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "#٣２"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.004527885Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "gsub" : {
+                "field" : "a",
+                "pattern" : "\\w+",
+                "replacement" : "W"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "héllo wörld"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "WéW WöW"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.007180491Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "gsub" : {
+                "field" : "a",
+                "pattern" : "\\s",
+                "replacement" : "_"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "a b c d"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "a_b c d"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.009555001Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "gsub" : {
+                "field" : "a",
+                "pattern" : "(a)\\1",
+                "replacement" : "X"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "aab"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "Xb"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.012005031Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "gsub" : {
+                "field" : "a",
+                "pattern" : "(?<=a)b",
+                "replacement" : "[$0]"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "abcb"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "a[b]cb"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.014440894Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "gsub" : {
+                "field" : "a",
+                "pattern" : "(?<x>b)",
+                "replacement" : "${x}${x}"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : [
+                "abc",
+                "bb"
+              ]
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : [
+                  "abbc",
+                  "bbbb"
+                ]
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.017105132Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "gsub" : {
+                "field" : "a",
+                "pattern" : "x*",
+                "replacement" : "-"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "abc"
+            }
+          },
+          {
+            "_source" : {
+              "a" : ""
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "-a-b-c-"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.019700852Z"
+              }
+            }
+          },
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "-"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.019745676Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "gsub" : {
+                "field" : "a",
+                "pattern" : "a",
+                "replacement" : "$5"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "abc"
+            }
+          },
+          {
+            "_source" : {
+              "a" : "xyz"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "index_out_of_bounds_exception",
+                  "reason" : "No group 5"
+                }
+              ],
+              "type" : "index_out_of_bounds_exception",
+              "reason" : "No group 5"
+            }
+          },
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "xyz"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.022301021Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "gsub" : {
+                "field" : "a",
+                "pattern" : "(",
+                "replacement" : "x"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "abc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[pattern] Invalid regex pattern. Unclosed group near index 1\n(",
+              "property_name" : "pattern",
+              "processor_type" : "gsub"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "[pattern] Invalid regex pattern. Unclosed group near index 1\n(",
+          "property_name" : "pattern",
+          "processor_type" : "gsub"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "gsub" : {
+                "field" : "a",
+                "pattern" : "[a-",
+                "replacement" : "x"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "abc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "skip" : "search-analysis jregex: Java reports [a- as 'Illegal character range near index 3'",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[pattern] Invalid regex pattern. Illegal character range near index 3\n[a-",
+              "property_name" : "pattern",
+              "processor_type" : "gsub"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "[pattern] Invalid regex pattern. Illegal character range near index 3\n[a-",
+          "property_name" : "pattern",
+          "processor_type" : "gsub"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "gsub" : {
+                "field" : "a",
+                "pattern" : "x",
+                "replacement" : "\\$y\\\\"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "axb"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "a$y\\b"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.029523443Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "gsub" : {
+                "field" : "a",
+                "pattern" : "$",
+                "replacement" : "!"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "ab\n"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "ab!\n!"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.031658047Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "split" : {
+                "field" : "a",
+                "separator" : "(?=b)",
+                "preserve_trailing" : false
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "abab"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : [
+                  "a",
+                  "ba",
+                  "b"
+                ]
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.034232929Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "split" : {
+                "field" : "a",
+                "separator" : "",
+                "preserve_trailing" : false
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "ab,"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : [
+                  "a",
+                  "b",
+                  ","
+                ]
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.036777805Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "split" : {
+                "field" : "a",
+                "separator" : "",
+                "preserve_trailing" : true
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "ab,"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : [
+                  "a",
+                  "b",
+                  ",",
+                  ""
+                ]
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.038922017Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "split" : {
+                "field" : "a",
+                "separator" : "x*",
+                "preserve_trailing" : false
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "abc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : [
+                  "a",
+                  "b",
+                  "c"
+                ]
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.041089391Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "split" : {
+                "field" : "a",
+                "separator" : ",",
+                "preserve_trailing" : false
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "a,b,,"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : [
+                  "a",
+                  "b"
+                ]
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.043308512Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "split" : {
+                "field" : "a",
+                "separator" : ",",
+                "preserve_trailing" : true
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "a,b,,"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : [
+                  "a",
+                  "b",
+                  "",
+                  ""
+                ]
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.045684544Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "split" : {
+                "field" : "a",
+                "separator" : ",",
+                "preserve_trailing" : false
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : ",a"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : [
+                  "",
+                  "a"
+                ]
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.048086124Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "split" : {
+                "field" : "a",
+                "separator" : ",",
+                "preserve_trailing" : false
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : ""
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : [
+                  ""
+                ]
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.050884731Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "split" : {
+                "field" : "a",
+                "separator" : ",",
+                "preserve_trailing" : false
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : ",,"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : [ ]
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.053675193Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "split" : {
+                "field" : "a",
+                "separator" : "\\s+",
+                "preserve_trailing" : false
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "a b c"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : [
+                  "a",
+                  "b c"
+                ]
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.056680024Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "split" : {
+                "field" : "a",
+                "separator" : "\\|",
+                "preserve_trailing" : false
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "a|b"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : [
+                  "a",
+                  "b"
+                ]
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.059756938Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "split" : {
+                "field" : "a",
+                "separator" : "(",
+                "preserve_trailing" : false
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "abc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "pattern_syntax_exception",
+                  "reason" : "Unclosed group near index 1\n("
+                }
+              ],
+              "type" : "pattern_syntax_exception",
+              "reason" : "Unclosed group near index 1\n("
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "split" : {
+                "field" : "a",
+                "separator" : ".",
+                "preserve_trailing" : false
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "a.b"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : [ ]
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.065025451Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "kv" : {
+                "field" : "a",
+                "field_split" : "\\s",
+                "value_split" : "=",
+                "trim_key" : "a-c",
+                "strip_brackets" : true
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "abxa=((v)) cd=\"w\" k==z u=<<x>>"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "x" : "(v)",
+                "a" : "abxa=((v)) cd=\"w\" k==z u=<<x>>",
+                "k" : "=z",
+                "d" : "w",
+                "u" : "<x>"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.067990527Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "kv" : {
+                "field" : "a",
+                "field_split" : "\\s",
+                "value_split" : "(?==)",
+                "trim_value" : "=x"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "p=xy= q==a"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "p" : "y",
+                "a" : "p=xy= q==a",
+                "q" : "a"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.070854746Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "kv" : {
+                "field" : "a",
+                "field_split" : "\\d",
+                "value_split" : "=",
+                "trim_key" : "\\s"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "a=1 b=2٣c=3"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "٣c" : "",
+                "a" : [
+                  "a=1 b=2٣c=3",
+                  ""
+                ],
+                "b" : ""
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.074280157Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "kv" : {
+                "field" : "a",
+                "field_split" : "&",
+                "value_split" : "="
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "a=1&b"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "field [a] does not contain value_split [=]"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "field [a] does not contain value_split [=]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "kv" : {
+                "field" : "a",
+                "field_split" : "(",
+                "value_split" : "="
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "a=1"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "pattern_syntax_exception",
+                  "reason" : "Unclosed group near index 1\n("
+                }
+              ],
+              "type" : "pattern_syntax_exception",
+              "reason" : "Unclosed group near index 1\n("
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "kv" : {
+                "field" : "a",
+                "field_split" : "(x",
+                "value_split" : "="
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "a=1"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "exception",
+              "reason" : "java.util.regex.PatternSyntaxException: Unclosed group near index 2\n(x",
+              "processor_type" : "kv"
+            }
+          ],
+          "type" : "exception",
+          "reason" : "java.util.regex.PatternSyntaxException: Unclosed group near index 2\n(x",
+          "processor_type" : "kv",
+          "caused_by" : {
+            "type" : "pattern_syntax_exception",
+            "reason" : "Unclosed group near index 2\n(x"
+          }
+        },
+        "status" : 500
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "kv" : {
+                "field" : "a",
+                "field_split" : "&",
+                "value_split" : "=",
+                "trim_key" : "[",
+                "tag" : "t7"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "a=1"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "exception",
+              "reason" : "java.util.regex.PatternSyntaxException: Unclosed character class near index 16\n(^([[]+))|([[]+$)\n                ^",
+              "processor_type" : "kv",
+              "processor_tag" : "t7"
+            }
+          ],
+          "type" : "exception",
+          "reason" : "java.util.regex.PatternSyntaxException: Unclosed character class near index 16\n(^([[]+))|([[]+$)\n                ^",
+          "processor_type" : "kv",
+          "processor_tag" : "t7",
+          "caused_by" : {
+            "type" : "pattern_syntax_exception",
+            "reason" : "Unclosed character class near index 16\n(^([[]+))|([[]+$)\n                ^"
+          }
+        },
+        "status" : 500
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "kv" : {
+                "field" : "a",
+                "field_split" : "&",
+                "value_split" : "=",
+                "strip_brackets" : true
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "a='x'&b=\"&c=)\n"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : [
+                  "a='x'&b=\"&c=)\n",
+                  "x"
+                ],
+                "b" : "",
+                "c" : "\n"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.090222172Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "dissect" : {
+                "field" : "a",
+                "pattern" : "%{a} %{?skip} %{&skip}",
+                "tag" : "t1"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "x y z"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "exception",
+              "reason" : "org.elasticsearch.dissect.DissectException$PatternParse: Unable to parse pattern: %{a} %{?skip} %{&skip} Reason: Found invalid key/reference associations: 'skip' Please ensure each '*<key>' is matched with a matching '&<key>",
+              "processor_type" : "dissect",
+              "processor_tag" : "t1"
+            }
+          ],
+          "type" : "exception",
+          "reason" : "org.elasticsearch.dissect.DissectException$PatternParse: Unable to parse pattern: %{a} %{?skip} %{&skip} Reason: Found invalid key/reference associations: 'skip' Please ensure each '*<key>' is matched with a matching '&<key>",
+          "processor_type" : "dissect",
+          "processor_tag" : "t1",
+          "caused_by" : {
+            "type" : "pattern_parse",
+            "reason" : "Unable to parse pattern: %{a} %{?skip} %{&skip} Reason: Found invalid key/reference associations: 'skip' Please ensure each '*<key>' is matched with a matching '&<key>"
+          }
+        },
+        "status" : 500
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "dissect" : {
+                "field" : "a",
+                "pattern" : "nokeys"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "x y z"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "exception",
+              "reason" : "org.elasticsearch.dissect.DissectException$PatternParse: Unable to parse pattern: nokeys Reason: Unable to find any keys or delimiters.",
+              "processor_type" : "dissect"
+            }
+          ],
+          "type" : "exception",
+          "reason" : "org.elasticsearch.dissect.DissectException$PatternParse: Unable to parse pattern: nokeys Reason: Unable to find any keys or delimiters.",
+          "processor_type" : "dissect",
+          "caused_by" : {
+            "type" : "pattern_parse",
+            "reason" : "Unable to parse pattern: nokeys Reason: Unable to find any keys or delimiters."
+          }
+        },
+        "status" : 500
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "urldecode" : {
+                "field" : "a"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "a%2"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "URLDecoder: Incomplete trailing escape (%) pattern"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "URLDecoder: Incomplete trailing escape (%) pattern"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "urldecode" : {
+                "field" : "a"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "a%zz"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "URLDecoder: Illegal hex characters in escape (%) pattern - not a hexadecimal digit: \"z\" = 122"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "URLDecoder: Illegal hex characters in escape (%) pattern - not a hexadecimal digit: \"z\" = 122"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "urldecode" : {
+                "field" : "a"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "a%"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "URLDecoder: Incomplete trailing escape (%) pattern"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "URLDecoder: Incomplete trailing escape (%) pattern"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "urldecode" : {
+                "field" : "a"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "%-1"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "URLDecoder: Illegal hex characters in escape (%) pattern - not a hexadecimal digit: \"-\" = 45"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "URLDecoder: Illegal hex characters in escape (%) pattern - not a hexadecimal digit: \"-\" = 45"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "urldecode" : {
+                "field" : "a"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "%C3%28+x"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "�( x"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.110502944Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "urldecode" : {
+                "field" : "a"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "%41%42c%"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "URLDecoder: Incomplete trailing escape (%) pattern"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "URLDecoder: Incomplete trailing escape (%) pattern"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "urldecode" : {
+                "field" : "a"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "%e9té"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "�té"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T22:40:03.115871704Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "urldecode" : {
+                "field" : "a"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "%%41"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "URLDecoder: Illegal hex characters in escape (%) pattern - not a hexadecimal digit: \"%\" = 37"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "URLDecoder: Illegal hex characters in escape (%) pattern - not a hexadecimal digit: \"%\" = 37"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "urldecode" : {
+                "field" : "a"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "%4"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "URLDecoder: Incomplete trailing escape (%) pattern"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "URLDecoder: Incomplete trailing escape (%) pattern"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "urldecode" : {
+                "field" : "a"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : "%é1"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "URLDecoder: Illegal hex characters in escape (%) pattern - not a hexadecimal digit: \"é\" = 233"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "URLDecoder: Illegal hex characters in escape (%) pattern - not a hexadecimal digit: \"é\" = 233"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7sg",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "text"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r7sg"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7sg/_doc/1?refresh=true",
+      "body" : {
+        "t" : "hello world"
+      },
+      "mask" : [
+        "_seq_no"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-r7sg",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "size" : -1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "size must be positive"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "size must be positive"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "size" : 0
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "size must be positive"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "size must be positive"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "shard_size" : "abc"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "number_format_exception",
+              "reason" : "For input string: \"abc\""
+            }
+          ],
+          "type" : "number_format_exception",
+          "reason" : "For input string: \"abc\""
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "prefix_length" : -1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "prefixLength must be positive"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "prefixLength must be positive"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "min_word_length" : 0
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "minWordLength must be greater or equal to 1"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "minWordLength must be greater or equal to 1"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "max_term_freq" : -2
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "maxTermFreq must be positive"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "maxTermFreq must be positive"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "max_term_freq" : 1.5
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "if maxTermFreq is greater than 1, it must not be a fraction"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "if maxTermFreq is greater than 1, it must not be a fraction"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "foo" : 1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "suggester[term] doesn't support field [foo]",
+              "line" : 1,
+              "col" : 58
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "suggester[term] doesn't support field [foo]",
+          "line" : 1,
+          "col" : 58
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "prefix_len" : 1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "suggester[term] doesn't support field [prefix_len]",
+              "line" : 1,
+              "col" : 65
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "suggester[term] doesn't support field [prefix_len]",
+          "line" : 1,
+          "col" : 65
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "analyzer" : {
+                "a" : 1
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "suggester[term] parsing failed on [analyzer]",
+              "line" : 1,
+              "col" : 63
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "suggester[term] parsing failed on [analyzer]",
+          "line" : 1,
+          "col" : 63
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "max_edits" : 5
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "maxEdits must be between 1 and 2"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "maxEdits must be between 1 and 2"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "max_edits" : "1.5"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "suggest" : {
+          "s" : [
+            {
+              "text" : "helo",
+              "offset" : 0,
+              "length" : 4,
+              "options" : [
+                {
+                  "text" : "hello",
+                  "score" : 0.75,
+                  "freq" : 1
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "max_inspections" : -1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "maxInspections must be positive"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "maxInspections must be positive"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "accuracy" : 2
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "accuracy must be between 0 and 1"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "accuracy must be between 0 and 1"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "min_doc_freq" : 1.5
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "if minDocFreq is greater than 1, it must not be a fraction"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "if minDocFreq is greater than 1, it must not be a fraction"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "sort" : "foo"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No enum constant org.elasticsearch.search.suggest.SortBy.FOO"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No enum constant org.elasticsearch.search.suggest.SortBy.FOO"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "suggest_mode" : "foo"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No enum constant org.elasticsearch.search.suggest.term.TermSuggestionBuilder.SuggestMode.FOO"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No enum constant org.elasticsearch.search.suggest.term.TermSuggestionBuilder.SuggestMode.FOO"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "string_distance" : "foo"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Illegal distance option foo"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Illegal distance option foo"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "size" : 3
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "the required field option [field] is missing"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "the required field option [field] is missing"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "term" : {
+              "field" : "t"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "The required text option is missing"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r7sg",
+              "node" : "kr7juJSjQwuBIg10NzqOpw",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "The required text option is missing"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "The required text option is missing",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "The required text option is missing"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo"
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "missing suggestion object"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "missing suggestion object"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "foo" : "x",
+            "term" : {
+              "field" : "t"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "suggestion does not support [foo]",
+              "line" : 1,
+              "col" : 38
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "suggestion does not support [foo]",
+          "line" : 1,
+          "col" : 38
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "foo" : 1,
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[suggest] does not support [foo]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[suggest] does not support [foo]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "phrase" : {
+              "field" : "t",
+              "size" : -1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "size must be positive"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "size must be positive"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "phrase" : {
+              "field" : "t",
+              "max_errors" : -1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "max_error must be > 0.0"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "max_error must be > 0.0"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "phrase" : {
+              "field" : "t",
+              "gram_size" : 0
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "gramSize must be >= 1"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "gramSize must be >= 1"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "phrase" : {
+              "field" : "t",
+              "confidence" : -1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "confidence must be >= 0.0"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "confidence must be >= 0.0"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "phrase" : {
+              "field" : "t",
+              "token_limit" : 0
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "token_limit must be >= 1"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "token_limit must be >= 1"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "phrase" : {
+              "field" : "t",
+              "foo" : 0
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "suggester[phrase] doesn't support field [foo]",
+              "line" : 1,
+              "col" : 60
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "suggester[phrase] doesn't support field [foo]",
+          "line" : 1,
+          "col" : 60
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "phrase" : {
+              "field" : "t",
+              "foo" : { }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "suggester[phrase]  doesn't support array field [foo]",
+              "line" : 1,
+              "col" : 60
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "suggester[phrase]  doesn't support array field [foo]",
+          "line" : 1,
+          "col" : 60
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "phrase" : {
+              "field" : "t",
+              "real_word_error_likelihood" : 0
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "real_word_error_likelihood must be > 0.0"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "real_word_error_likelihood must be > 0.0"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "phrase" : {
+              "field" : "t",
+              "highlight" : {
+                "pre_tag" : "x"
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Pre and post tag must both be null or both not be null."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Pre and post tag must both be null or both not be null."
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "s" : {
+            "text" : "helo",
+            "term" : {
+              "field" : "t",
+              "size" : 0
+            },
+            "phrase" : {
+              "field" : "t"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "size must be positive"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "size must be positive"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sg/_search",
+      "body" : {
+        "suggest" : {
+          "text" : "helo",
+          "s" : {
+            "term" : {
+              "field" : "t",
+              "size" : 2,
+              "min_word_length" : 1,
+              "prefix_length" : 0,
+              "max_term_freq" : 0.5
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "suggest" : {
+          "s" : [
+            {
+              "text" : "helo",
+              "offset" : 0,
+              "length" : 4,
+              "options" : [
+                {
+                  "text" : "hello",
+                  "score" : 0.75,
+                  "freq" : 1
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r7sg",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7c",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 2
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r7c"
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7c/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"t\":\"hello\"}\n{\"index\":{\"_id\":\"2\"}}\n{\"t\":\"hello\"}\n{\"index\":{\"_id\":\"3\"}}\n{\"t\":\"hello\"}\n{\"index\":{\"_id\":\"4\"}}\n{\"t\":\"x\"}\n{\"index\":{\"_id\":\"5\"}}\n{\"t\":\"hello\"}\n",
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 200,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-r7c",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r7c",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r7c",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r7c",
+              "_id" : "4",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r7c",
+              "_id" : "5",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 3,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r7c/_doc/4?refresh=true",
+      "mask" : [
+        "_seq_no"
+      ],
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-r7c",
+        "_id" : "4",
+        "_version" : 2,
+        "result" : "deleted",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 4,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "GET /_cat/indices/es-docs-r7c?h=index,pri,rep,docs.count&v",
+      "status" : 200
+    },
+    {
+      "req" : "GET /_cat/indices/es-docs-r7c?h=docs.count,indexing.index_total,indexing.delete_total,pri.indexing.index_total&format=json",
+      "status" : 200,
+      "response" : [
+        {
+          "docs.count" : "4",
+          "indexing.index_total" : "5",
+          "indexing.delete_total" : "1",
+          "pri.indexing.index_total" : "5"
+        }
+      ]
+    },
+    {
+      "req" : "GET /es-docs-r7c/_count?q=t:hello&terminate_after=1",
+      "status" : 200,
+      "response" : {
+        "terminated_early" : true,
+        "count" : 2,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        }
+      }
+    },
+    {
+      "req" : "GET /es-docs-r7c/_count?q=t:hello&terminate_after=100",
+      "status" : 200,
+      "response" : {
+        "terminated_early" : false,
+        "count" : 4,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7c/_count",
+      "body" : {
+        "query" : {
+          "match_all" : { }
+        },
+        "terminate_after" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "request does not support [terminate_after]",
+              "line" : 1,
+              "col" : 27
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "request does not support [terminate_after]",
+          "line" : 1,
+          "col" : 27
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /es-docs-r7c/_count?min_score=abc",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse float parameter [min_score] with value [abc]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse float parameter [min_score] with value [abc]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"abc\""
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r7c",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7sl",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "index.max_slices_per_scroll" : 4
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r7sl"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7sl/_doc/1?refresh=true",
+      "body" : {
+        "a" : 1
+      },
+      "mask" : [
+        "_seq_no"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-r7sl",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sl/_update_by_query?slices=5&filter_path=error.type,error.reason,error.root_cause,error.caused_by,error.failed_shards,status",
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r7sl",
+              "node" : "kr7juJSjQwuBIg10NzqOpw",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting.",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting."
+            }
+          },
+          "suppressed" : [
+            {
+              "type" : "search_phase_execution_exception",
+              "reason" : "all shards failed",
+              "phase" : "query",
+              "grouped" : true,
+              "failed_shards" : [
+                {
+                  "shard" : 0,
+                  "index" : "es-docs-r7sl",
+                  "node" : "kr7juJSjQwuBIg10NzqOpw",
+                  "reason" : {
+                    "type" : "illegal_argument_exception",
+                    "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting."
+                  }
+                }
+              ],
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting.",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting."
+                }
+              }
+            },
+            {
+              "type" : "search_phase_execution_exception",
+              "reason" : "all shards failed",
+              "phase" : "query",
+              "grouped" : true,
+              "failed_shards" : [
+                {
+                  "shard" : 0,
+                  "index" : "es-docs-r7sl",
+                  "node" : "kr7juJSjQwuBIg10NzqOpw",
+                  "reason" : {
+                    "type" : "illegal_argument_exception",
+                    "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting."
+                  }
+                }
+              ],
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting.",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting."
+                }
+              }
+            },
+            {
+              "type" : "search_phase_execution_exception",
+              "reason" : "all shards failed",
+              "phase" : "query",
+              "grouped" : true,
+              "failed_shards" : [
+                {
+                  "shard" : 0,
+                  "index" : "es-docs-r7sl",
+                  "node" : "kr7juJSjQwuBIg10NzqOpw",
+                  "reason" : {
+                    "type" : "illegal_argument_exception",
+                    "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting."
+                  }
+                }
+              ],
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting.",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting."
+                }
+              }
+            },
+            {
+              "type" : "search_phase_execution_exception",
+              "reason" : "all shards failed",
+              "phase" : "query",
+              "grouped" : true,
+              "failed_shards" : [
+                {
+                  "shard" : 0,
+                  "index" : "es-docs-r7sl",
+                  "node" : "kr7juJSjQwuBIg10NzqOpw",
+                  "reason" : {
+                    "type" : "illegal_argument_exception",
+                    "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting."
+                  }
+                }
+              ],
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting.",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting."
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sl/_update_by_query?slices=4&filter_path=total,updated,slices.slice_id",
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 200,
+      "response" : {
+        "total" : 1,
+        "updated" : 1,
+        "slices" : [
+          {
+            "slice_id" : 0
+          },
+          {
+            "slice_id" : 1
+          },
+          {
+            "slice_id" : 2
+          },
+          {
+            "slice_id" : 3
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sl/_update_by_query?filter_path=error.type,error.reason,error.root_cause,status",
+      "body" : {
+        "slice" : {
+          "id" : 0,
+          "max" : 5
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r7sl",
+              "node" : "kr7juJSjQwuBIg10NzqOpw",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting.",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "The number of slices [5] is too large. It must be less than [4]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting."
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sl/_update_by_query?scroll_size=-1",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[size] parameter cannot be negative, found [-1]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[size] parameter cannot be negative, found [-1]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sl/_delete_by_query?scroll_size=-1",
+      "body" : {
+        "query" : {
+          "match_none" : { }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[size] parameter cannot be negative, found [-1]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[size] parameter cannot be negative, found [-1]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sl/_update_by_query?scroll_size=0",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: [size] cannot be [0] in a scroll context;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: [size] cannot be [0] in a scroll context;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r7sl",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7sa",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "n" : {
+              "type" : "long"
+            },
+            "k" : {
+              "type" : "keyword"
+            },
+            "d" : {
+              "type" : "double"
+            },
+            "i" : {
+              "type" : "integer"
+            },
+            "b" : {
+              "type" : "boolean"
+            },
+            "dt" : {
+              "type" : "date"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r7sa"
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"2\"}}\n{\"n\":9007199254740992,\"k\":\"a\",\"d\":1.5,\"i\":1,\"b\":false,\"dt\":\"2020-01-01\"}\n{\"index\":{\"_id\":\"3\"}}\n{\"n\":9007199254740993,\"k\":\"b\",\"d\":2.5,\"i\":2,\"b\":true,\"dt\":\"2021-01-01\"}\n{\"index\":{\"_id\":\"4\"}}\n{\"n\":9007199254740994,\"k\":\"c\",\"i\":3}\n",
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 200,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-r7sa",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r7sa",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r7sa",
+              "_id" : "4",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "n"
+        ],
+        "search_after" : [
+          "9007199254740993"
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "4",
+              "sort" : [
+                9007199254740994
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "n"
+        ],
+        "search_after" : [
+          9007199254740993
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "4",
+              "sort" : [
+                9007199254740994
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "n"
+        ],
+        "search_after" : [
+          "9007199254740992.7"
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "3",
+              "sort" : [
+                9007199254740993
+              ]
+            },
+            {
+              "_id" : "4",
+              "sort" : [
+                9007199254740994
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "n"
+        ],
+        "search_after" : [
+          9.007199254740992E15
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "3",
+              "sort" : [
+                9007199254740993
+              ]
+            },
+            {
+              "_id" : "4",
+              "sort" : [
+                9007199254740994
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "n"
+        ],
+        "search_after" : [
+          null
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[search_after] value at position 0 cannot be null for sort field [n] of type [LONG]."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r7sa",
+              "node" : "kr7juJSjQwuBIg10NzqOpw",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "[search_after] value at position 0 cannot be null for sort field [n] of type [LONG]."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[search_after] value at position 0 cannot be null for sort field [n] of type [LONG].",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "[search_after] value at position 0 cannot be null for sort field [n] of type [LONG]."
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "d"
+        ],
+        "search_after" : [
+          null
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[search_after] value at position 0 cannot be null for sort field [d] of type [DOUBLE]."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r7sa",
+              "node" : "kr7juJSjQwuBIg10NzqOpw",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "[search_after] value at position 0 cannot be null for sort field [d] of type [DOUBLE]."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[search_after] value at position 0 cannot be null for sort field [d] of type [DOUBLE].",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "[search_after] value at position 0 cannot be null for sort field [d] of type [DOUBLE]."
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "i"
+        ],
+        "search_after" : [
+          null
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[search_after] value at position 0 cannot be null for sort field [i] of type [INT]."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r7sa",
+              "node" : "kr7juJSjQwuBIg10NzqOpw",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "[search_after] value at position 0 cannot be null for sort field [i] of type [INT]."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[search_after] value at position 0 cannot be null for sort field [i] of type [INT].",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "[search_after] value at position 0 cannot be null for sort field [i] of type [INT]."
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "_doc"
+        ],
+        "search_after" : [
+          null
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[search_after] value at position 0 cannot be null for sort field [null] of type [DOC]."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r7sa",
+              "node" : "kr7juJSjQwuBIg10NzqOpw",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "[search_after] value at position 0 cannot be null for sort field [null] of type [DOC]."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[search_after] value at position 0 cannot be null for sort field [null] of type [DOC].",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "[search_after] value at position 0 cannot be null for sort field [null] of type [DOC]."
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "k"
+        ],
+        "search_after" : [
+          null
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 200,
+      "response" : { }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "search_after" : [
+          1
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Sort must contain at least one field."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r7sa",
+              "node" : "kr7juJSjQwuBIg10NzqOpw",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Sort must contain at least one field."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Sort must contain at least one field.",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Sort must contain at least one field."
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "_score"
+        ],
+        "search_after" : [
+          1
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Sort must contain at least one field."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r7sa",
+              "node" : "kr7juJSjQwuBIg10NzqOpw",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Sort must contain at least one field."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Sort must contain at least one field.",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Sort must contain at least one field."
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "n"
+        ],
+        "search_after" : [
+          "abc"
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse search_after value for field [n]."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r7sa",
+              "node" : "kr7juJSjQwuBIg10NzqOpw",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Failed to parse search_after value for field [n].",
+                "caused_by" : {
+                  "type" : "number_format_exception",
+                  "reason" : "For input string: \"abc\""
+                }
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Failed to parse search_after value for field [n].",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse search_after value for field [n].",
+              "caused_by" : {
+                "type" : "number_format_exception",
+                "reason" : "For input string: \"abc\""
+              }
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "n"
+        ],
+        "search_after" : [
+          true
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse search_after value for field [n]."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r7sa",
+              "node" : "kr7juJSjQwuBIg10NzqOpw",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Failed to parse search_after value for field [n].",
+                "caused_by" : {
+                  "type" : "number_format_exception",
+                  "reason" : "For input string: \"true\""
+                }
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Failed to parse search_after value for field [n].",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse search_after value for field [n].",
+              "caused_by" : {
+                "type" : "number_format_exception",
+                "reason" : "For input string: \"true\""
+              }
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "d"
+        ],
+        "search_after" : [
+          "x"
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse search_after value for field [d]."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r7sa",
+              "node" : "kr7juJSjQwuBIg10NzqOpw",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Failed to parse search_after value for field [d].",
+                "caused_by" : {
+                  "type" : "number_format_exception",
+                  "reason" : "For input string: \"x\""
+                }
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Failed to parse search_after value for field [d].",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse search_after value for field [d].",
+              "caused_by" : {
+                "type" : "number_format_exception",
+                "reason" : "For input string: \"x\""
+              }
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "i"
+        ],
+        "search_after" : [
+          "1.5"
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse search_after value for field [i]."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r7sa",
+              "node" : "kr7juJSjQwuBIg10NzqOpw",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Failed to parse search_after value for field [i].",
+                "caused_by" : {
+                  "type" : "number_format_exception",
+                  "reason" : "For input string: \"1.5\""
+                }
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Failed to parse search_after value for field [i].",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse search_after value for field [i].",
+              "caused_by" : {
+                "type" : "number_format_exception",
+                "reason" : "For input string: \"1.5\""
+              }
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "i"
+        ],
+        "search_after" : [
+          9007199254740993
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 200,
+      "response" : { }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "b"
+        ],
+        "search_after" : [
+          "maybe"
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cannot parse boolean [maybe], expected either [true] or [false]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r7sa",
+              "node" : "kr7juJSjQwuBIg10NzqOpw",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Cannot parse boolean [maybe], expected either [true] or [false]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Cannot parse boolean [maybe], expected either [true] or [false]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cannot parse boolean [maybe], expected either [true] or [false]"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "b"
+        ],
+        "search_after" : [
+          "false"
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "3",
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_id" : "4",
+              "sort" : [
+                9223372036854775807
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "dt"
+        ],
+        "search_after" : [
+          "2020-06-01"
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "3",
+              "sort" : [
+                1609459200000
+              ]
+            },
+            {
+              "_id" : "4",
+              "sort" : [
+                9223372036854775807
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7sa/_search?filter_path=error,status,hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          "n",
+          "k"
+        ],
+        "search_after" : [
+          9007199254740992,
+          null
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "3",
+              "sort" : [
+                9007199254740993,
+                "b"
+              ]
+            },
+            {
+              "_id" : "4",
+              "sort" : [
+                9007199254740994,
+                "c"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r7sa",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7l",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "n" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r7l"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7l/_doc/1",
+      "body" : {
+        "n" : "9007199254740995.7"
+      },
+      "mask" : [
+        "_seq_no"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-r7l",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7l/_doc/2",
+      "body" : {
+        "n" : "9223372036854775807.5"
+      },
+      "mask" : [
+        "_seq_no"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-r7l",
+        "_id" : "2",
+        "_version" : 1,
+        "result" : "created",
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7l/_doc/3",
+      "body" : {
+        "n" : "9223372036854775808"
+      },
+      "mask" : [
+        "_seq_no"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:6] failed to parse field [n] of type [long] in document with id '3'. Preview of field's value: '9223372036854775808'"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [n] of type [long] in document with id '3'. Preview of field's value: '9223372036854775808'",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Value [9223372036854775808] is out of range for a long"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7l/_doc/4?refresh=true",
+      "body" : {
+        "n" : "-1.9e0"
+      },
+      "mask" : [
+        "_seq_no"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-r7l",
+        "_id" : "4",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 2,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7l/_search",
+      "body" : {
+        "sort" : [
+          "n"
+        ],
+        "_source" : false,
+        "docvalue_fields" : [
+          "n"
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r7l",
+              "_id" : "4",
+              "_score" : null,
+              "fields" : {
+                "n" : [
+                  -1
+                ]
+              },
+              "sort" : [
+                -1
+              ]
+            },
+            {
+              "_index" : "es-docs-r7l",
+              "_id" : "1",
+              "_score" : null,
+              "fields" : {
+                "n" : [
+                  9007199254740995
+                ]
+              },
+              "sort" : [
+                9007199254740995
+              ]
+            },
+            {
+              "_index" : "es-docs-r7l",
+              "_id" : "2",
+              "_score" : null,
+              "fields" : {
+                "n" : [
+                  9223372036854775807
+                ]
+              },
+              "sort" : [
+                9223372036854775807
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7l/_search",
+      "body" : {
+        "query" : {
+          "term" : {
+            "n" : "9007199254740995.9"
+          }
+        },
+        "_source" : false
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-r7l",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7l/_doc/11",
+      "raw" : "{\"a\":1,\"a\":2}",
+      "headers" : {
+        "Content-Type" : "application/json"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:6] failed to parse: [1:11] Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2}\"; line: 1, column: 11]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse: [1:11] Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2}\"; line: 1, column: 11]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:11] Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2}\"; line: 1, column: 11]",
+            "caused_by" : {
+              "type" : "json_parse_exception",
+              "reason" : "Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2}\"; line: 1, column: 11]"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7l/_doc/12",
+      "raw" : "{\"x\":{\"b\":\"q\",\"b\":[1]}}",
+      "headers" : {
+        "Content-Type" : "application/json"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:11] failed to parse: [1:18] Duplicate field 'b'\n at [Source: (byte[])\"{\"x\":{\"b\":\"q\",\"b\":[1]}}\"; line: 1, column: 18]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:11] failed to parse: [1:18] Duplicate field 'b'\n at [Source: (byte[])\"{\"x\":{\"b\":\"q\",\"b\":[1]}}\"; line: 1, column: 18]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:18] Duplicate field 'b'\n at [Source: (byte[])\"{\"x\":{\"b\":\"q\",\"b\":[1]}}\"; line: 1, column: 18]",
+            "caused_by" : {
+              "type" : "json_parse_exception",
+              "reason" : "Duplicate field 'b'\n at [Source: (byte[])\"{\"x\":{\"b\":\"q\",\"b\":[1]}}\"; line: 1, column: 18]"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7l/_doc/13",
+      "raw" : "{\n \"a\": {\"c\":1},\n \"a\": 2}",
+      "headers" : {
+        "Content-Type" : "application/json"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[2:13] failed to parse: [3:5] Duplicate field 'a'\n at [Source: (byte[])\"{\n \"a\": {\"c\":1},\n \"a\": 2}\"; line: 3, column: 5]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[2:13] failed to parse: [3:5] Duplicate field 'a'\n at [Source: (byte[])\"{\n \"a\": {\"c\":1},\n \"a\": 2}\"; line: 3, column: 5]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[3:5] Duplicate field 'a'\n at [Source: (byte[])\"{\n \"a\": {\"c\":1},\n \"a\": 2}\"; line: 3, column: 5]",
+            "caused_by" : {
+              "type" : "json_parse_exception",
+              "reason" : "Duplicate field 'a'\n at [Source: (byte[])\"{\n \"a\": {\"c\":1},\n \"a\": 2}\"; line: 3, column: 5]"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7l/_bulk",
+      "raw" : "{\"index\":{\"_id\":\"14\"}}\n{\"a\":1,\"a\":2}\n{\"index\":{\"_id\":\"15\"}}\n{\"z\":1}\n",
+      "mask" : [
+        "took",
+        "_seq_no"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : true,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-r7l",
+              "_id" : "14",
+              "status" : 400,
+              "error" : {
+                "type" : "document_parsing_exception",
+                "reason" : "[1:6] failed to parse: [1:11] Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2}\"; line: 1, column: 11]",
+                "caused_by" : {
+                  "type" : "x_content_parse_exception",
+                  "reason" : "[1:11] Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2}\"; line: 1, column: 11]",
+                  "caused_by" : {
+                    "type" : "json_parse_exception",
+                    "reason" : "Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2}\"; line: 1, column: 11]"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r7l",
+              "_id" : "15",
+              "_version" : 1,
+              "result" : "created",
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 3,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r7l",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /_search/scroll",
+      "body" : {
+        "scroll_id" : "abc"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cannot parse scroll id"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Cannot parse scroll id",
+          "caused_by" : {
+            "type" : "e_o_f_exception",
+            "reason" : "tried to read: 105 bytes but only 1 remaining"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_search/scroll",
+      "body" : {
+        "scroll_id" : "DXF1ZXJ5QW5kRmV0Y2gBAAAAAAAAAAEWdGVzdA=="
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cannot parse scroll id"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Cannot parse scroll id",
+          "caused_by" : {
+            "type" : "e_o_f_exception",
+            "reason" : "tried to read: 22 bytes but only 4 remaining"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_search/scroll",
+      "body" : {
+        "scroll_id" : ""
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cannot parse scroll id"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Cannot parse scroll id",
+          "caused_by" : {
+            "type" : "e_o_f_exception",
+            "reason" : null,
+            "caused_by" : {
+              "type" : "buffer_underflow_exception",
+              "reason" : null
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_search/scroll",
+      "body" : {
+        "scroll_id" : "a"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cannot parse scroll id"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Cannot parse scroll id",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Input byte[] should at least have 2 bytes for base64 bytes"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_search/scroll",
+      "body" : {
+        "scroll_id" : "ab$"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cannot parse scroll id"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Cannot parse scroll id",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Illegal base64 character 24"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /_search/scroll",
+      "body" : {
+        "scroll_id" : [
+          "abc"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cannot parse scroll id"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Cannot parse scroll id",
+          "caused_by" : {
+            "type" : "e_o_f_exception",
+            "reason" : "tried to read: 105 bytes but only 1 remaining"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /_search/scroll/abc",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cannot parse scroll id"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Cannot parse scroll id",
+          "caused_by" : {
+            "type" : "e_o_f_exception",
+            "reason" : "tried to read: 105 bytes but only 1 remaining"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_search",
+      "body" : {
+        "pit" : {
+          "id" : "abc"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unknown transport version [105] reading search context id"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unknown transport version [105] reading search context id"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /_pit",
+      "body" : {
+        "id" : "abc"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unknown transport version [105] reading search context id"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unknown transport version [105] reading search context id"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7v/_doc/1?refresh=true",
+      "body" : {
+        "a" : 1
+      },
+      "mask" : [
+        "_seq_no"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-r7v",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7v/_update/1?if_seq_no=0&if_primary_term=1&retry_on_conflict=3",
+      "body" : {
+        "doc" : {
+          "a" : 2
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: compare and write operations can not be retried;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: compare and write operations can not be retried;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7v/_update/1?if_seq_no=0&if_primary_term=1",
+      "body" : {
+        "doc" : {
+          "a" : 2
+        },
+        "doc_as_upsert" : true
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: compare and write operations can not be used with upsert;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: compare and write operations can not be used with upsert;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7v/_update/1?version=3",
+      "body" : {
+        "doc" : {
+          "a" : 2
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: internal versioning can not be used for optimistic concurrency control. Please use `if_seq_no` and `if_primary_term` instead;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: internal versioning can not be used for optimistic concurrency control. Please use `if_seq_no` and `if_primary_term` instead;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7v/_update/1?version_type=external",
+      "body" : {
+        "doc" : {
+          "a" : 2
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: internal versioning can not be used for optimistic concurrency control. Please use `if_seq_no` and `if_primary_term` instead;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: internal versioning can not be used for optimistic concurrency control. Please use `if_seq_no` and `if_primary_term` instead;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7v/_bulk",
+      "raw" : "{\"update\":{\"_id\":\"1\",\"if_seq_no\":0,\"if_primary_term\":1,\"retry_on_conflict\":3}}\n{\"doc\":{\"a\":3}}\n",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: compare and write operations can not be retried;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: compare and write operations can not be retried;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /es-docs-r7v/_search?max_concurrent_shard_requests=0&filter_path=error,status",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "maxConcurrentShardRequests must be >= 1"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "maxConcurrentShardRequests must be >= 1"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /es-docs-r7v/_search?max_concurrent_shard_requests=abc&filter_path=error,status",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse int parameter [max_concurrent_shard_requests] with value [abc]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse int parameter [max_concurrent_shard_requests] with value [abc]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"abc\""
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /es-docs-r7v/_search?max_concurrent_shard_requests=3&filter_path=hits.total",
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /_msearch?max_concurrent_searches=0",
+      "raw" : "{\"index\":\"es-docs-r7v\"}\n{}\n",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "maxConcurrentSearchRequests must be positive"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "maxConcurrentSearchRequests must be positive"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_msearch?max_concurrent_searches=abc",
+      "raw" : "{\"index\":\"es-docs-r7v\"}\n{}\n",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse int parameter [max_concurrent_searches] with value [abc]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse int parameter [max_concurrent_searches] with value [abc]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"abc\""
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_msearch/template?max_concurrent_searches=0",
+      "raw" : "{\"index\":\"es-docs-r7v\"}\n{\"source\":{\"query\":{\"match_all\":{}}}}\n",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "maxConcurrentSearchRequests must be positive"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "maxConcurrentSearchRequests must be positive"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /es-docs-r7v/_source/1?_source=false",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: fetching source can not be disabled;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: fetching source can not be disabled;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /es-docs-r7v/_source/1?_source=true",
+      "status" : 200,
+      "response" : {
+        "a" : 1
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7v/_doc/1?version=5&version_type=force",
+      "body" : {
+        "a" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No version type match [force]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No version type match [force]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r7v/_doc/1?version=5&version_type=force",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No version type match [force]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No version type match [force]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r7v",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r7col",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "g" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r7col"
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7col/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"g\":\"a\"}\n{\"index\":{\"_id\":\"2\"}}\n{\"g\":\"b\"}\n",
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-r7col",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r7col",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7col/_search",
+      "body" : {
+        "collapse" : {
+          "field" : "g",
+          "inner_hits" : {
+            "name" : "x",
+            "size" : 2147483647
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [ ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "failed to expand hits",
+          "phase" : "expand",
+          "grouped" : true,
+          "failed_shards" : [ ],
+          "caused_by" : {
+            "type" : "search_phase_execution_exception",
+            "reason" : "all shards failed",
+            "phase" : "query",
+            "grouped" : true,
+            "failed_shards" : [
+              {
+                "shard" : 0,
+                "index" : "es-docs-r7col",
+                "node" : "kr7juJSjQwuBIg10NzqOpw",
+                "reason" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Result window is too large, from + size must be less than or equal to: [10000] but was [2147483647]. See the scroll api for a more efficient way to request large data sets. This limit can be set by changing the [index.max_result_window] index level setting."
+                }
+              }
+            ],
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Result window is too large, from + size must be less than or equal to: [10000] but was [2147483647]. See the scroll api for a more efficient way to request large data sets. This limit can be set by changing the [index.max_result_window] index level setting.",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Result window is too large, from + size must be less than or equal to: [10000] but was [2147483647]. See the scroll api for a more efficient way to request large data sets. This limit can be set by changing the [index.max_result_window] index level setting."
+              }
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7col/_search",
+      "body" : {
+        "collapse" : {
+          "field" : "g",
+          "inner_hits" : {
+            "name" : "x",
+            "sort" : [
+              {
+                "nope" : "asc"
+              }
+            ]
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node",
+        "node",
+        "_shard"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [ ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "failed to expand hits",
+          "phase" : "expand",
+          "grouped" : true,
+          "failed_shards" : [ ],
+          "caused_by" : {
+            "type" : "search_phase_execution_exception",
+            "reason" : "all shards failed",
+            "phase" : "query",
+            "grouped" : true,
+            "failed_shards" : [
+              {
+                "shard" : 0,
+                "index" : "es-docs-r7col",
+                "node" : "kr7juJSjQwuBIg10NzqOpw",
+                "reason" : {
+                  "type" : "query_shard_exception",
+                  "reason" : "No mapping found for [nope] in order to sort on",
+                  "index_uuid" : "Y-z3VYUOTEuNDUkpdecMHg",
+                  "index" : "es-docs-r7col"
+                }
+              }
+            ]
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r7col",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /es-docs-r7rs/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"a\":1}\n{\"index\":{\"_id\":\"2\"}}\n{\"a\":2}\n{\"index\":{\"_id\":\"3\"}}\n{\"a\":3}\n",
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 200,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-r7rs",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r7rs",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r7rs",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_reindex?refresh=true",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-r7rs"
+        },
+        "dest" : {
+          "index" : "es-docs-r7rd",
+          "version_type" : "external"
+        },
+        "script" : {
+          "source" : "if (ctx._id == \"2\") { ctx.op = \"delete\" }"
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: internal versioning can not be used for optimistic concurrency control. Please use `if_seq_no` and `if_primary_term` instead;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: internal versioning can not be used for optimistic concurrency control. Please use `if_seq_no` and `if_primary_term` instead;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "HEAD /es-docs-r7rd",
+      "status" : 404
+    },
+    {
+      "req" : "POST /_reindex?refresh=true",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-r7rs"
+        },
+        "dest" : {
+          "index" : "es-docs-r7rd",
+          "version_type" : "internal"
+        },
+        "script" : {
+          "source" : "if (ctx._id == \"2\") { ctx.op = \"delete\" }"
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 357,
+        "timed_out" : false,
+        "total" : 3,
+        "updated" : 0,
+        "created" : 2,
+        "deleted" : 1,
+        "batches" : 1,
+        "version_conflicts" : 0,
+        "noops" : 0,
+        "retries" : {
+          "bulk" : 0,
+          "search" : 0
+        },
+        "throttled_millis" : 0,
+        "requests_per_second" : -1.0,
+        "throttled_until_millis" : 0,
+        "failures" : [ ]
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r7rs,es-docs-r7rd",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

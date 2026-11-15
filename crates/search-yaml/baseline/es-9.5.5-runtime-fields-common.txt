@@ -1,0 +1,251 @@
+# Tests of Elasticsearch 9.5.5's `runtime-fields-common` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+runtime-fields-common:runtime_fields/100_geo_point/bounds agg
+runtime-fields-common:runtime_fields/100_geo_point/distance_feature query
+runtime-fields-common:runtime_fields/100_geo_point/exists query
+runtime-fields-common:runtime_fields/100_geo_point/fetch fields from source
+runtime-fields-common:runtime_fields/100_geo_point/geo bounding box query
+runtime-fields-common:runtime_fields/100_geo_point/geo distance query
+runtime-fields-common:runtime_fields/100_geo_point/geo shape query
+runtime-fields-common:runtime_fields/100_geo_point/geo_distance sort
+runtime-fields-common:runtime_fields/100_geo_point/get mapping
+runtime-fields-common:runtime_fields/101_geo_point_from_source/bounds agg
+runtime-fields-common:runtime_fields/101_geo_point_from_source/distance_feature query
+runtime-fields-common:runtime_fields/101_geo_point_from_source/exists query
+runtime-fields-common:runtime_fields/101_geo_point_from_source/fetch fields from source
+runtime-fields-common:runtime_fields/101_geo_point_from_source/geo bounding box query
+runtime-fields-common:runtime_fields/101_geo_point_from_source/geo distance query
+runtime-fields-common:runtime_fields/101_geo_point_from_source/geo shape contains query
+runtime-fields-common:runtime_fields/101_geo_point_from_source/geo shape disjoint query
+runtime-fields-common:runtime_fields/101_geo_point_from_source/geo shape intersects query
+runtime-fields-common:runtime_fields/101_geo_point_from_source/geo shape within query
+runtime-fields-common:runtime_fields/101_geo_point_from_source/geo_distance sort
+runtime-fields-common:runtime_fields/101_geo_point_from_source/get mapping
+runtime-fields-common:runtime_fields/102_geo_point_source_in_query/bounds agg
+runtime-fields-common:runtime_fields/102_geo_point_source_in_query/distance_feature query
+runtime-fields-common:runtime_fields/102_geo_point_source_in_query/exists query
+runtime-fields-common:runtime_fields/102_geo_point_source_in_query/fetch fields from source
+runtime-fields-common:runtime_fields/102_geo_point_source_in_query/geo bounding box query
+runtime-fields-common:runtime_fields/102_geo_point_source_in_query/geo distance query
+runtime-fields-common:runtime_fields/102_geo_point_source_in_query/geo shape contains query
+runtime-fields-common:runtime_fields/102_geo_point_source_in_query/geo shape disjoint query
+runtime-fields-common:runtime_fields/102_geo_point_source_in_query/geo shape intersects query
+runtime-fields-common:runtime_fields/102_geo_point_source_in_query/geo shape within query
+runtime-fields-common:runtime_fields/102_geo_point_source_in_query/geo_distance sort
+runtime-fields-common:runtime_fields/103_geo_point_calculated_at_index/bounds agg
+runtime-fields-common:runtime_fields/103_geo_point_calculated_at_index/distance_feature query
+runtime-fields-common:runtime_fields/103_geo_point_calculated_at_index/exists query
+runtime-fields-common:runtime_fields/103_geo_point_calculated_at_index/fetch fields from source
+runtime-fields-common:runtime_fields/103_geo_point_calculated_at_index/geo bounding box query
+runtime-fields-common:runtime_fields/103_geo_point_calculated_at_index/geo distance query
+runtime-fields-common:runtime_fields/103_geo_point_calculated_at_index/geo shape query
+runtime-fields-common:runtime_fields/103_geo_point_calculated_at_index/geo_distance sort
+runtime-fields-common:runtime_fields/103_geo_point_calculated_at_index/get mapping
+runtime-fields-common:runtime_fields/10_keyword/docvalue_fields
+runtime-fields-common:runtime_fields/10_keyword/dynamic mapping update
+runtime-fields-common:runtime_fields/10_keyword/explain term query
+runtime-fields-common:runtime_fields/10_keyword/explain term query with boost
+runtime-fields-common:runtime_fields/10_keyword/explain term query wrapped in script score
+runtime-fields-common:runtime_fields/10_keyword/fetch defined on search request
+runtime-fields-common:runtime_fields/10_keyword/fetch fields
+runtime-fields-common:runtime_fields/10_keyword/fetch multiple stored fields
+runtime-fields-common:runtime_fields/10_keyword/get mapping
+runtime-fields-common:runtime_fields/10_keyword/highlight term query
+runtime-fields-common:runtime_fields/10_keyword/match defined on search request
+runtime-fields-common:runtime_fields/10_keyword/match query
+runtime-fields-common:runtime_fields/10_keyword/nested
+runtime-fields-common:runtime_fields/10_keyword/replace object field on search request
+runtime-fields-common:runtime_fields/10_keyword/search glob defined on search request
+runtime-fields-common:runtime_fields/10_keyword/term query
+runtime-fields-common:runtime_fields/10_keyword/terms agg
+runtime-fields-common:runtime_fields/110_composite/Field caps with composite runtime mappings section. Issue 76742
+runtime-fields-common:runtime_fields/110_composite/fetch
+runtime-fields-common:runtime_fields/110_composite/query
+runtime-fields-common:runtime_fields/110_composite/terms agg
+runtime-fields-common:runtime_fields/111_search_time_composite/search-time composite across multiple shards
+runtime-fields-common:runtime_fields/114_composite_errors/fetch
+runtime-fields-common:runtime_fields/114_composite_errors/query with continue on error
+runtime-fields-common:runtime_fields/114_composite_errors/query with fail on error
+runtime-fields-common:runtime_fields/114_composite_errors/query with search time field
+runtime-fields-common:runtime_fields/114_composite_errors/terms agg
+runtime-fields-common:runtime_fields/11_keyword_from_source/get mapping
+runtime-fields-common:runtime_fields/11_keyword_from_source/test matching
+runtime-fields-common:runtime_fields/12_keyword_source_in_query/test matching
+runtime-fields-common:runtime_fields/13_keyword_calculated_at_index/docvalue_fields
+runtime-fields-common:runtime_fields/13_keyword_calculated_at_index/fetch fields
+runtime-fields-common:runtime_fields/13_keyword_calculated_at_index/get mapping
+runtime-fields-common:runtime_fields/13_keyword_calculated_at_index/highlight term query
+runtime-fields-common:runtime_fields/13_keyword_calculated_at_index/match query
+runtime-fields-common:runtime_fields/13_keyword_calculated_at_index/term query
+runtime-fields-common:runtime_fields/13_keyword_calculated_at_index/terms agg
+runtime-fields-common:runtime_fields/14_keyword_errors/Aggregate on rtf with on_script_error continue
+runtime-fields-common:runtime_fields/14_keyword_errors/Aggregate on rtf with on_script_error fail
+runtime-fields-common:runtime_fields/14_keyword_errors/Change error behaviour for lenient runtime field
+runtime-fields-common:runtime_fields/14_keyword_errors/Fields retrieval with failing on error
+runtime-fields-common:runtime_fields/14_keyword_errors/Fields retrieval with ignoring error
+runtime-fields-common:runtime_fields/14_keyword_errors/Query rtf with on_script_error continue
+runtime-fields-common:runtime_fields/14_keyword_errors/Query rtf with on_script_error fail
+runtime-fields-common:runtime_fields/14_keyword_errors/Query search time rtf with on_script_error continue
+runtime-fields-common:runtime_fields/14_keyword_errors/Query search time rtf with on_script_error fail
+runtime-fields-common:runtime_fields/14_keyword_errors/Sorting with ignoring error
+runtime-fields-common:runtime_fields/14_keyword_errors/Sorting with with failing on error
+runtime-fields-common:runtime_fields/150_nested_runtime_fields/test docvalue loading
+runtime-fields-common:runtime_fields/20_long/docvalue_fields
+runtime-fields-common:runtime_fields/20_long/explain term query
+runtime-fields-common:runtime_fields/20_long/fetch fields
+runtime-fields-common:runtime_fields/20_long/get mapping
+runtime-fields-common:runtime_fields/20_long/nested
+runtime-fields-common:runtime_fields/20_long/term query
+runtime-fields-common:runtime_fields/20_long/terms agg
+runtime-fields-common:runtime_fields/21_long_from_source/get mapping
+runtime-fields-common:runtime_fields/21_long_from_source/test matching
+runtime-fields-common:runtime_fields/22_long_source_in_query/test matching
+runtime-fields-common:runtime_fields/23_long_calculated_at_index/docvalue_fields
+runtime-fields-common:runtime_fields/23_long_calculated_at_index/fetch fields
+runtime-fields-common:runtime_fields/23_long_calculated_at_index/get mapping
+runtime-fields-common:runtime_fields/23_long_calculated_at_index/term query
+runtime-fields-common:runtime_fields/23_long_calculated_at_index/terms agg
+runtime-fields-common:runtime_fields/24_long_errors/Aggregate on rtf with on_script_error continue
+runtime-fields-common:runtime_fields/24_long_errors/Aggregate on rtf with on_script_error fail
+runtime-fields-common:runtime_fields/24_long_errors/Fields retrieval with failing on error
+runtime-fields-common:runtime_fields/24_long_errors/Fields retrieval with ignoring error
+runtime-fields-common:runtime_fields/24_long_errors/Query rtf with on_script_error continue
+runtime-fields-common:runtime_fields/24_long_errors/Query rtf with on_script_error fail
+runtime-fields-common:runtime_fields/24_long_errors/Query search time rtf with on_script_error continue
+runtime-fields-common:runtime_fields/24_long_errors/Query search time rtf with on_script_error fail
+runtime-fields-common:runtime_fields/24_long_errors/Sorting with ignoring error
+runtime-fields-common:runtime_fields/24_long_errors/Sorting with with failing on error
+runtime-fields-common:runtime_fields/250_grok/fetch
+runtime-fields-common:runtime_fields/250_grok/mutable pattern
+runtime-fields-common:runtime_fields/250_grok/syntax error in pattern
+runtime-fields-common:runtime_fields/250_grok/warning in pattern
+runtime-fields-common:runtime_fields/260_dissect/fetch
+runtime-fields-common:runtime_fields/270_synthetic_source/doubles
+runtime-fields-common:runtime_fields/270_synthetic_source/keywords
+runtime-fields-common:runtime_fields/30_double/docvalue_fields
+runtime-fields-common:runtime_fields/30_double/explain term query
+runtime-fields-common:runtime_fields/30_double/fetch fields
+runtime-fields-common:runtime_fields/30_double/get mapping
+runtime-fields-common:runtime_fields/30_double/range query
+runtime-fields-common:runtime_fields/30_double/term query
+runtime-fields-common:runtime_fields/30_double/terms agg
+runtime-fields-common:runtime_fields/31_double_from_source/get mapping
+runtime-fields-common:runtime_fields/31_double_from_source/test matching
+runtime-fields-common:runtime_fields/32_double_source_in_query/test matching
+runtime-fields-common:runtime_fields/33_double_calculated_at_index/docvalue_fields
+runtime-fields-common:runtime_fields/33_double_calculated_at_index/fetch fields
+runtime-fields-common:runtime_fields/33_double_calculated_at_index/get mapping
+runtime-fields-common:runtime_fields/33_double_calculated_at_index/range query
+runtime-fields-common:runtime_fields/33_double_calculated_at_index/term query
+runtime-fields-common:runtime_fields/33_double_calculated_at_index/terms agg
+runtime-fields-common:runtime_fields/34_double_errors/Aggregate on rtf with on_script_error continue
+runtime-fields-common:runtime_fields/34_double_errors/Aggregate on rtf with on_script_error fail
+runtime-fields-common:runtime_fields/34_double_errors/Fields retrieval with failing on error
+runtime-fields-common:runtime_fields/34_double_errors/Fields retrieval with ignoring error
+runtime-fields-common:runtime_fields/34_double_errors/Query rtf with on_script_error continue
+runtime-fields-common:runtime_fields/34_double_errors/Query rtf with on_script_error fail
+runtime-fields-common:runtime_fields/34_double_errors/Query search time rtf with on_script_error continue
+runtime-fields-common:runtime_fields/34_double_errors/Query search time rtf with on_script_error fail
+runtime-fields-common:runtime_fields/34_double_errors/Sorting with ignoring error
+runtime-fields-common:runtime_fields/34_double_errors/Sorting with with failing on error
+runtime-fields-common:runtime_fields/40_date/docvalue_fields
+runtime-fields-common:runtime_fields/40_date/explain term query
+runtime-fields-common:runtime_fields/40_date/fetch fields
+runtime-fields-common:runtime_fields/40_date/get mapping
+runtime-fields-common:runtime_fields/40_date/term query
+runtime-fields-common:runtime_fields/40_date/terms agg
+runtime-fields-common:runtime_fields/40_runtime_mappings/Field caps with errors in runtime mappings section throws
+runtime-fields-common:runtime_fields/40_runtime_mappings/Field caps with runtime mappings section
+runtime-fields-common:runtime_fields/40_runtime_mappings/Field caps with runtime mappings section overwriting existing mapping
+runtime-fields-common:runtime_fields/41_date_from_source/get mapping
+runtime-fields-common:runtime_fields/41_date_from_source/test matching
+runtime-fields-common:runtime_fields/42_date_source_in_query/test matching
+runtime-fields-common:runtime_fields/43_date_calculated_at_index/docvalue_fields
+runtime-fields-common:runtime_fields/43_date_calculated_at_index/fetch fields
+runtime-fields-common:runtime_fields/43_date_calculated_at_index/get mapping
+runtime-fields-common:runtime_fields/43_date_calculated_at_index/term query
+runtime-fields-common:runtime_fields/43_date_calculated_at_index/terms agg
+runtime-fields-common:runtime_fields/44_date_errors/Aggregate on rtf with on_script_error continue
+runtime-fields-common:runtime_fields/44_date_errors/Aggregate on rtf with on_script_error fail
+runtime-fields-common:runtime_fields/44_date_errors/Fields retrieval with failing on error
+runtime-fields-common:runtime_fields/44_date_errors/Fields retrieval with ignoring error
+runtime-fields-common:runtime_fields/44_date_errors/Query rtf with on_script_error continue
+runtime-fields-common:runtime_fields/44_date_errors/Query rtf with on_script_error fail
+runtime-fields-common:runtime_fields/44_date_errors/Query search time rtf with on_script_error continue
+runtime-fields-common:runtime_fields/44_date_errors/Query search time rtf with on_script_error fail
+runtime-fields-common:runtime_fields/44_date_errors/Sorting with ignoring error
+runtime-fields-common:runtime_fields/44_date_errors/Sorting with with failing on error
+runtime-fields-common:runtime_fields/50_ip/docvalue_fields
+runtime-fields-common:runtime_fields/50_ip/explain term query
+runtime-fields-common:runtime_fields/50_ip/fetch fields
+runtime-fields-common:runtime_fields/50_ip/get mapping
+runtime-fields-common:runtime_fields/50_ip/term query
+runtime-fields-common:runtime_fields/50_ip/terms agg
+runtime-fields-common:runtime_fields/50_ip/use in scripts
+runtime-fields-common:runtime_fields/51_ip_from_source/get mapping
+runtime-fields-common:runtime_fields/51_ip_from_source/test matching
+runtime-fields-common:runtime_fields/52_ip_source_in_query/test matching
+runtime-fields-common:runtime_fields/53_ip_calculated_at_index/docvalue_fields
+runtime-fields-common:runtime_fields/53_ip_calculated_at_index/fetch fields
+runtime-fields-common:runtime_fields/53_ip_calculated_at_index/get mapping
+runtime-fields-common:runtime_fields/53_ip_calculated_at_index/term query
+runtime-fields-common:runtime_fields/53_ip_calculated_at_index/terms agg
+runtime-fields-common:runtime_fields/53_ip_calculated_at_index/use in scripts
+runtime-fields-common:runtime_fields/54_ip_errors/Aggregate on rtf with on_script_error continue
+runtime-fields-common:runtime_fields/54_ip_errors/Aggregate on rtf with on_script_error fail
+runtime-fields-common:runtime_fields/54_ip_errors/Fields retrieval with failing on error
+runtime-fields-common:runtime_fields/54_ip_errors/Fields retrieval with ignoring error
+runtime-fields-common:runtime_fields/54_ip_errors/Query rtf with on_script_error continue
+runtime-fields-common:runtime_fields/54_ip_errors/Query rtf with on_script_error fail
+runtime-fields-common:runtime_fields/54_ip_errors/Query search time rtf with on_script_error continue
+runtime-fields-common:runtime_fields/54_ip_errors/Query search time rtf with on_script_error fail
+runtime-fields-common:runtime_fields/54_ip_errors/Sorting with ignoring error
+runtime-fields-common:runtime_fields/54_ip_errors/Sorting with with failing on error
+runtime-fields-common:runtime_fields/60_boolean/docvalue_fields
+runtime-fields-common:runtime_fields/60_boolean/explain term query
+runtime-fields-common:runtime_fields/60_boolean/fetch fields
+runtime-fields-common:runtime_fields/60_boolean/get mapping
+runtime-fields-common:runtime_fields/60_boolean/term query
+runtime-fields-common:runtime_fields/60_boolean/terms agg
+runtime-fields-common:runtime_fields/61_boolean_from_source/get mapping
+runtime-fields-common:runtime_fields/61_boolean_from_source/test matching
+runtime-fields-common:runtime_fields/62_boolean_source_in_query/test matching
+runtime-fields-common:runtime_fields/63_boolean_calculated_at_index/docvalue_fields
+runtime-fields-common:runtime_fields/63_boolean_calculated_at_index/fetch fields
+runtime-fields-common:runtime_fields/63_boolean_calculated_at_index/get mapping
+runtime-fields-common:runtime_fields/63_boolean_calculated_at_index/term query
+runtime-fields-common:runtime_fields/63_boolean_calculated_at_index/terms agg
+runtime-fields-common:runtime_fields/64_boolean_errors/Aggregate on rtf with on_script_error continue
+runtime-fields-common:runtime_fields/64_boolean_errors/Aggregate on rtf with on_script_error fail
+runtime-fields-common:runtime_fields/64_boolean_errors/Fields retrieval with failing on error
+runtime-fields-common:runtime_fields/64_boolean_errors/Fields retrieval with ignoring error
+runtime-fields-common:runtime_fields/64_boolean_errors/Query rtf with on_script_error continue
+runtime-fields-common:runtime_fields/64_boolean_errors/Query rtf with on_script_error fail
+runtime-fields-common:runtime_fields/64_boolean_errors/Query search time rtf with on_script_error continue
+runtime-fields-common:runtime_fields/64_boolean_errors/Query search time rtf with on_script_error fail
+runtime-fields-common:runtime_fields/64_boolean_errors/Sorting with ignoring error
+runtime-fields-common:runtime_fields/64_boolean_errors/Sorting with with failing on error
+runtime-fields-common:runtime_fields/80_multiple_indices/field capabilities
+runtime-fields-common:runtime_fields/80_multiple_indices/match query - keyword
+runtime-fields-common:runtime_fields/80_multiple_indices/range query - double
+runtime-fields-common:runtime_fields/80_multiple_indices/range query - long
+runtime-fields-common:runtime_fields/80_multiple_indices/terms agg - double
+runtime-fields-common:runtime_fields/80_multiple_indices/terms agg - keyword
+runtime-fields-common:runtime_fields/80_multiple_indices/terms agg - long
+runtime-fields-common:runtime_fields/90_loops/Max chain depth - aggs
+runtime-fields-common:runtime_fields/90_loops/Max chain depth - direct references are not counted
+runtime-fields-common:runtime_fields/90_loops/Max chain depth - docvalue_fields
+runtime-fields-common:runtime_fields/90_loops/Max chain depth - query
+runtime-fields-common:runtime_fields/90_loops/Max chain depth - sort
+runtime-fields-common:runtime_fields/90_loops/Max chain depth for fetch - 5 is allowed
+runtime-fields-common:runtime_fields/90_loops/Max chain depth for query - 5 is allowed
+runtime-fields-common:runtime_fields/90_loops/loose loop - aggs
+runtime-fields-common:runtime_fields/90_loops/loose loop - begins within
+runtime-fields-common:runtime_fields/90_loops/loose loop - docvalue_fields
+runtime-fields-common:runtime_fields/90_loops/loose loop - queries
+runtime-fields-common:runtime_fields/90_loops/loose loop - sort
+runtime-fields-common:runtime_fields/90_loops/tight loop - aggs
+runtime-fields-common:runtime_fields/90_loops/tight loop - docvalue_fields
+runtime-fields-common:runtime_fields/90_loops/tight loop - queries
+runtime-fields-common:runtime_fields/90_loops/tight loop - sort

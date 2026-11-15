@@ -1,0 +1,1749 @@
+[
+  {
+    "mappings" : { },
+    "doc" : {
+      "s" : "hello",
+      "n" : 5,
+      "neg" : -3,
+      "f" : 1.5,
+      "b" : true,
+      "nul" : null,
+      "arr" : [
+        1,
+        2
+      ],
+      "e" : [ ],
+      "eo" : { },
+      "o" : {
+        "x" : 1
+      }
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "arr" : {
+          "type" : "long"
+        },
+        "b" : {
+          "type" : "boolean"
+        },
+        "eo" : {
+          "type" : "object"
+        },
+        "f" : {
+          "type" : "float"
+        },
+        "n" : {
+          "type" : "long"
+        },
+        "neg" : {
+          "type" : "long"
+        },
+        "o" : {
+          "properties" : {
+            "x" : {
+              "type" : "long"
+            }
+          }
+        },
+        "s" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      "big" : 18446744073709551615,
+      "huge" : 1.0E300,
+      "exp" : 1.0E10,
+      "zero" : 0,
+      "fzero" : 0.0
+    },
+    "status" : 400,
+    "error" : {
+      "root_cause" : [
+        {
+          "type" : "document_parsing_exception",
+          "reason" : "[1:8] failed to parse field [big] of type [long] in document with id '1'. Preview of field's value: '18446744073709551615'"
+        }
+      ],
+      "type" : "document_parsing_exception",
+      "reason" : "[1:8] failed to parse field [big] of type [long] in document with id '1'. Preview of field's value: '18446744073709551615'",
+      "caused_by" : {
+        "type" : "x_content_parse_exception",
+        "reason" : "[1:28] Numeric value (18446744073709551615) out of range of long (-9223372036854775808 - 9223372036854775807)\n at [Source: (byte[])\"{\"big\":18446744073709551615,\"huge\":1.0E300,\"exp\":1.0E10,\"zero\":0,\"fzero\":0.0}\"; line: 1, column: 28]",
+        "caused_by" : {
+          "type" : "input_coercion_exception",
+          "reason" : "Numeric value (18446744073709551615) out of range of long (-9223372036854775808 - 9223372036854775807)\n at [Source: (byte[])\"{\"big\":18446744073709551615,\"huge\":1.0E300,\"exp\":1.0E10,\"zero\":0,\"fzero\":0.0}\"; line: 1, column: 28]"
+        }
+      }
+    },
+    "mapping" : { }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      "d1" : "2015-01-01",
+      "d2" : "2015/01/01",
+      "d3" : "2015-01-01T12:10:30Z",
+      "d4" : "2015/01/01 12:10:30",
+      "d5" : "1420070400000",
+      "d6" : "not a date",
+      "d7" : "2015-01-01T12:10:30.123456789+05:00"
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "d1" : {
+          "type" : "date"
+        },
+        "d2" : {
+          "type" : "date",
+          "format" : "yyyy/MM/dd HH:mm:ss||yyyy/MM/dd||epoch_millis",
+          "locale" : ""
+        },
+        "d3" : {
+          "type" : "date"
+        },
+        "d4" : {
+          "type" : "date",
+          "format" : "yyyy/MM/dd HH:mm:ss||yyyy/MM/dd||epoch_millis",
+          "locale" : ""
+        },
+        "d5" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        },
+        "d6" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        },
+        "d7" : {
+          "type" : "date"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "date_detection" : false
+    },
+    "doc" : {
+      "d1" : "2015-01-01"
+    },
+    "status" : 201,
+    "mapping" : {
+      "date_detection" : false,
+      "properties" : {
+        "d1" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic_date_formats" : [
+        "MM/dd/yyyy"
+      ]
+    },
+    "doc" : {
+      "d1" : "01/31/2015",
+      "d2" : "2015-01-01"
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic_date_formats" : [
+        "MM/dd/yyyy"
+      ],
+      "properties" : {
+        "d1" : {
+          "type" : "date",
+          "format" : "MM/dd/yyyy"
+        },
+        "d2" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "numeric_detection" : true
+    },
+    "doc" : {
+      "i" : "12",
+      "f" : "1.5",
+      "s" : "x12",
+      "neg" : "-7",
+      "e" : "1e5"
+    },
+    "status" : 201,
+    "mapping" : {
+      "numeric_detection" : true,
+      "properties" : {
+        "e" : {
+          "type" : "float"
+        },
+        "f" : {
+          "type" : "float"
+        },
+        "i" : {
+          "type" : "long"
+        },
+        "neg" : {
+          "type" : "long"
+        },
+        "s" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      "a.b.c" : 1,
+      "a.b.d" : "x",
+      "x." : 1
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "a" : {
+          "properties" : {
+            "b" : {
+              "properties" : {
+                "c" : {
+                  "type" : "long"
+                },
+                "d" : {
+                  "type" : "text",
+                  "fields" : {
+                    "keyword" : {
+                      "type" : "keyword",
+                      "ignore_above" : 256
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x" : {
+          "type" : "long"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      "mixed" : [
+        null,
+        "x"
+      ],
+      "mixed2" : [
+        "x",
+        1
+      ],
+      "objs" : [
+        {
+          "a" : 1
+        },
+        {
+          "b" : "x"
+        }
+      ],
+      "nested_arr" : [
+        [
+          1,
+          2
+        ],
+        [
+          3
+        ]
+      ]
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "mixed" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        },
+        "mixed2" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        },
+        "nested_arr" : {
+          "type" : "long"
+        },
+        "objs" : {
+          "properties" : {
+            "a" : {
+              "type" : "long"
+            },
+            "b" : {
+              "type" : "text",
+              "fields" : {
+                "keyword" : {
+                  "type" : "keyword",
+                  "ignore_above" : 256
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic" : false
+    },
+    "doc" : {
+      "x" : 1,
+      "o" : {
+        "y" : 2
+      }
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic" : "false"
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic" : "strict"
+    },
+    "doc" : {
+      "x" : 1
+    },
+    "status" : 400,
+    "error" : {
+      "root_cause" : [
+        {
+          "type" : "strict_dynamic_mapping_exception",
+          "reason" : "[1:6] mapping set to strict, dynamic introduction of [x] within [_doc] is not allowed"
+        }
+      ],
+      "type" : "strict_dynamic_mapping_exception",
+      "reason" : "[1:6] mapping set to strict, dynamic introduction of [x] within [_doc] is not allowed"
+    },
+    "mapping" : {
+      "dynamic" : "strict"
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic" : "strict",
+      "properties" : {
+        "o" : {
+          "type" : "object",
+          "dynamic" : true
+        }
+      }
+    },
+    "doc" : {
+      "o" : {
+        "y" : {
+          "z" : 1
+        }
+      }
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic" : "strict",
+      "properties" : {
+        "o" : {
+          "dynamic" : "true",
+          "properties" : {
+            "y" : {
+              "properties" : {
+                "z" : {
+                  "type" : "long"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "properties" : {
+        "o" : {
+          "type" : "object",
+          "dynamic" : "strict"
+        }
+      }
+    },
+    "doc" : {
+      "o" : {
+        "y" : 1
+      }
+    },
+    "status" : 400,
+    "error" : {
+      "root_cause" : [
+        {
+          "type" : "strict_dynamic_mapping_exception",
+          "reason" : "[1:11] mapping set to strict, dynamic introduction of [y] within [o] is not allowed"
+        }
+      ],
+      "type" : "strict_dynamic_mapping_exception",
+      "reason" : "[1:11] mapping set to strict, dynamic introduction of [y] within [o] is not allowed"
+    },
+    "mapping" : {
+      "properties" : {
+        "o" : {
+          "type" : "object",
+          "dynamic" : "strict"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic" : "runtime"
+    },
+    "doc" : {
+      "s" : "x",
+      "n" : 1,
+      "f" : 1.5,
+      "b" : false,
+      "d" : "2015-01-01",
+      "o" : {
+        "x" : 1
+      }
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic" : "runtime",
+      "runtime" : {
+        "b" : {
+          "type" : "boolean"
+        },
+        "d" : {
+          "type" : "date"
+        },
+        "f" : {
+          "type" : "double"
+        },
+        "n" : {
+          "type" : "long"
+        },
+        "o.x" : {
+          "type" : "long"
+        },
+        "s" : {
+          "type" : "keyword"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic_templates" : [
+        {
+          "strings" : {
+            "match_mapping_type" : "string",
+            "mapping" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      ]
+    },
+    "doc" : {
+      "s" : "x",
+      "n" : 1
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic_templates" : [
+        {
+          "strings" : {
+            "match_mapping_type" : "string",
+            "mapping" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      ],
+      "properties" : {
+        "n" : {
+          "type" : "long"
+        },
+        "s" : {
+          "type" : "keyword"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic_templates" : [
+        {
+          "longs" : {
+            "match_mapping_type" : "long",
+            "mapping" : {
+              "type" : "integer"
+            }
+          }
+        },
+        {
+          "dbl" : {
+            "match_mapping_type" : "double",
+            "mapping" : {
+              "type" : "scaled_float",
+              "scaling_factor" : 100
+            }
+          }
+        }
+      ]
+    },
+    "doc" : {
+      "n" : 1,
+      "f" : 1.5
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic_templates" : [
+        {
+          "longs" : {
+            "match_mapping_type" : "long",
+            "mapping" : {
+              "type" : "integer"
+            }
+          }
+        },
+        {
+          "dbl" : {
+            "match_mapping_type" : "double",
+            "mapping" : {
+              "scaling_factor" : 100,
+              "type" : "scaled_float"
+            }
+          }
+        }
+      ],
+      "properties" : {
+        "f" : {
+          "type" : "scaled_float",
+          "scaling_factor" : 100.0
+        },
+        "n" : {
+          "type" : "integer"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic_templates" : [
+        {
+          "named" : {
+            "match" : "i_*",
+            "unmatch" : "*_text",
+            "mapping" : {
+              "type" : "integer"
+            }
+          }
+        }
+      ]
+    },
+    "doc" : {
+      "i_a" : 1,
+      "i_b_text" : 2,
+      "j" : 3
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic_templates" : [
+        {
+          "named" : {
+            "match" : "i_*",
+            "unmatch" : "*_text",
+            "mapping" : {
+              "type" : "integer"
+            }
+          }
+        }
+      ],
+      "properties" : {
+        "i_a" : {
+          "type" : "integer"
+        },
+        "i_b_text" : {
+          "type" : "long"
+        },
+        "j" : {
+          "type" : "long"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic_templates" : [
+        {
+          "paths" : {
+            "path_match" : "o.*",
+            "path_unmatch" : "o.skip",
+            "mapping" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      ]
+    },
+    "doc" : {
+      "o" : {
+        "a" : 1,
+        "skip" : 2
+      },
+      "a" : 3
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic_templates" : [
+        {
+          "paths" : {
+            "path_match" : "o.*",
+            "path_unmatch" : "o.skip",
+            "mapping" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      ],
+      "properties" : {
+        "a" : {
+          "type" : "long"
+        },
+        "o" : {
+          "properties" : {
+            "a" : {
+              "type" : "keyword"
+            },
+            "skip" : {
+              "type" : "long"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic_templates" : [
+        {
+          "rx" : {
+            "match_pattern" : "regex",
+            "match" : "^f\\d+$",
+            "mapping" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      ]
+    },
+    "doc" : {
+      "f1" : 1,
+      "fx" : 2
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic_templates" : [
+        {
+          "rx" : {
+            "match" : "^f\\d+$",
+            "match_pattern" : "regex",
+            "mapping" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      ],
+      "properties" : {
+        "f1" : {
+          "type" : "keyword"
+        },
+        "fx" : {
+          "type" : "long"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic_templates" : [
+        {
+          "ph" : {
+            "match_mapping_type" : "*",
+            "mapping" : {
+              "type" : "{dynamic_type}",
+              "meta" : {
+                "name" : "{name}"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "doc" : {
+      "s" : "x",
+      "n" : 1,
+      "b" : true
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic_templates" : [
+        {
+          "ph" : {
+            "match_mapping_type" : "*",
+            "mapping" : {
+              "meta" : {
+                "name" : "{name}"
+              },
+              "type" : "{dynamic_type}"
+            }
+          }
+        }
+      ],
+      "properties" : {
+        "b" : {
+          "type" : "boolean",
+          "meta" : {
+            "name" : "b"
+          }
+        },
+        "n" : {
+          "type" : "long",
+          "meta" : {
+            "name" : "n"
+          }
+        },
+        "s" : {
+          "type" : "text",
+          "meta" : {
+            "name" : "s"
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic_templates" : [
+        {
+          "rt" : {
+            "match_mapping_type" : "string",
+            "runtime" : { }
+          }
+        }
+      ]
+    },
+    "doc" : {
+      "s" : "x",
+      "n" : 1
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic_templates" : [
+        {
+          "rt" : {
+            "match_mapping_type" : "string",
+            "runtime" : { }
+          }
+        }
+      ],
+      "runtime" : {
+        "s" : {
+          "type" : "keyword"
+        }
+      },
+      "properties" : {
+        "n" : {
+          "type" : "long"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic_templates" : [
+        {
+          "obj" : {
+            "match_mapping_type" : "object",
+            "mapping" : {
+              "type" : "object",
+              "dynamic" : false
+            }
+          }
+        }
+      ]
+    },
+    "doc" : {
+      "o" : {
+        "x" : 1
+      }
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic_templates" : [
+        {
+          "obj" : {
+            "match_mapping_type" : "object",
+            "mapping" : {
+              "dynamic" : false,
+              "type" : "object"
+            }
+          }
+        }
+      ],
+      "properties" : {
+        "o" : {
+          "type" : "object",
+          "dynamic" : "false"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic_templates" : [
+        {
+          "dates" : {
+            "match_mapping_type" : "date",
+            "mapping" : {
+              "type" : "date",
+              "format" : "yyyy-MM-dd"
+            }
+          }
+        }
+      ]
+    },
+    "doc" : {
+      "d" : "2015-01-01",
+      "s" : "x"
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic_templates" : [
+        {
+          "dates" : {
+            "match_mapping_type" : "date",
+            "mapping" : {
+              "format" : "yyyy-MM-dd",
+              "type" : "date"
+            }
+          }
+        }
+      ],
+      "properties" : {
+        "d" : {
+          "type" : "date",
+          "format" : "yyyy-MM-dd"
+        },
+        "s" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic_templates" : [
+        {
+          "bools" : {
+            "match_mapping_type" : "boolean",
+            "mapping" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      ]
+    },
+    "doc" : {
+      "b" : true
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic_templates" : [
+        {
+          "bools" : {
+            "match_mapping_type" : "boolean",
+            "mapping" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      ],
+      "properties" : {
+        "b" : {
+          "type" : "keyword"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic_templates" : [
+        {
+          "multi" : {
+            "match_mapping_type" : [
+              "long",
+              "double"
+            ],
+            "mapping" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      ]
+    },
+    "doc" : {
+      "n" : 1,
+      "f" : 1.5,
+      "s" : "x"
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic_templates" : [
+        {
+          "multi" : {
+            "match_mapping_type" : [
+              "long",
+              "double"
+            ],
+            "mapping" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      ],
+      "properties" : {
+        "f" : {
+          "type" : "keyword"
+        },
+        "n" : {
+          "type" : "keyword"
+        },
+        "s" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "subobjects" : false
+    },
+    "doc" : {
+      "a.b" : 1,
+      "a.c" : "x",
+      "o" : {
+        "x" : 1
+      }
+    },
+    "status" : 201,
+    "mapping" : {
+      "subobjects" : false,
+      "properties" : {
+        "a.b" : {
+          "type" : "long"
+        },
+        "a.c" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        },
+        "o.x" : {
+          "type" : "long"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "properties" : {
+        "o" : {
+          "type" : "object",
+          "subobjects" : false
+        }
+      }
+    },
+    "doc" : {
+      "o" : {
+        "a.b" : 1,
+        "c" : {
+          "d" : 1
+        }
+      }
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "o" : {
+          "subobjects" : false,
+          "properties" : {
+            "a.b" : {
+              "type" : "long"
+            },
+            "c.d" : {
+              "type" : "long"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "properties" : {
+        "a" : {
+          "type" : "keyword"
+        }
+      }
+    },
+    "doc" : {
+      "a" : "x",
+      "b" : 1
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "a" : {
+          "type" : "keyword"
+        },
+        "b" : {
+          "type" : "long"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "properties" : {
+        "o" : {
+          "properties" : {
+            "x" : {
+              "type" : "long"
+            }
+          }
+        }
+      }
+    },
+    "doc" : {
+      "o" : {
+        "x" : 1,
+        "y" : "z"
+      }
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "o" : {
+          "properties" : {
+            "x" : {
+              "type" : "long"
+            },
+            "y" : {
+              "type" : "text",
+              "fields" : {
+                "keyword" : {
+                  "type" : "keyword",
+                  "ignore_above" : 256
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      "" : 1
+    },
+    "status" : 400,
+    "error" : {
+      "root_cause" : [
+        {
+          "type" : "document_parsing_exception",
+          "reason" : "[1:2] failed to parse: field name cannot be an empty string"
+        }
+      ],
+      "type" : "document_parsing_exception",
+      "reason" : "[1:2] failed to parse: field name cannot be an empty string",
+      "caused_by" : {
+        "type" : "illegal_argument_exception",
+        "reason" : "field name cannot be an empty string"
+      }
+    },
+    "mapping" : { }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      "a..b" : 1
+    },
+    "status" : 400,
+    "error" : {
+      "root_cause" : [
+        {
+          "type" : "document_parsing_exception",
+          "reason" : "[1:2] failed to parse: field name cannot contain only whitespace: ['a..b']"
+        }
+      ],
+      "type" : "document_parsing_exception",
+      "reason" : "[1:2] failed to parse: field name cannot contain only whitespace: ['a..b']",
+      "caused_by" : {
+        "type" : "illegal_argument_exception",
+        "reason" : "field name cannot contain only whitespace: ['a..b']"
+      }
+    },
+    "mapping" : { }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      "_id_field" : 1,
+      "_x" : "y"
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "_id_field" : {
+          "type" : "long"
+        },
+        "_x" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk" : 1
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk" : {
+          "type" : "long"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      "geo" : {
+        "lat" : 1.5,
+        "lon" : 2.5
+      },
+      "ip" : "192.168.0.1",
+      "ver" : "1.2.3"
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "geo" : {
+          "properties" : {
+            "lat" : {
+              "type" : "float"
+            },
+            "lon" : {
+              "type" : "float"
+            }
+          }
+        },
+        "ip" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        },
+        "ver" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "properties" : {
+        "n" : {
+          "type" : "nested"
+        }
+      }
+    },
+    "doc" : {
+      "n" : [
+        {
+          "a" : 1
+        },
+        {
+          "a" : 2,
+          "b" : "x"
+        }
+      ]
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "n" : {
+          "type" : "nested",
+          "properties" : {
+            "a" : {
+              "type" : "long"
+            },
+            "b" : {
+              "type" : "text",
+              "fields" : {
+                "keyword" : {
+                  "type" : "keyword",
+                  "ignore_above" : 256
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      "s" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "s" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "properties" : {
+        "t" : {
+          "type" : "text"
+        }
+      }
+    },
+    "doc" : {
+      "t" : {
+        "x" : 1
+      }
+    },
+    "status" : 400,
+    "error" : {
+      "root_cause" : [
+        {
+          "type" : "document_parsing_exception",
+          "reason" : "[1:12] failed to parse field [t] of type [text] in document with id '1'. Preview of field's value: '{x=1}'"
+        }
+      ],
+      "type" : "document_parsing_exception",
+      "reason" : "[1:12] failed to parse field [t] of type [text] in document with id '1'. Preview of field's value: '{x=1}'",
+      "caused_by" : {
+        "type" : "illegal_argument_exception",
+        "reason" : "Expected text at 1:6 but found START_OBJECT"
+      }
+    },
+    "mapping" : {
+      "properties" : {
+        "t" : {
+          "type" : "text"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic" : "true",
+      "properties" : {
+        "r" : {
+          "type" : "object",
+          "dynamic" : "runtime"
+        }
+      }
+    },
+    "doc" : {
+      "r" : {
+        "a" : 1,
+        "b" : {
+          "c" : "x"
+        }
+      }
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic" : "true",
+      "runtime" : {
+        "r.a" : {
+          "type" : "long"
+        },
+        "r.b.c" : {
+          "type" : "keyword"
+        }
+      },
+      "properties" : {
+        "r" : {
+          "type" : "object",
+          "dynamic" : "runtime"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      " " : 1
+    },
+    "status" : 400,
+    "error" : {
+      "root_cause" : [
+        {
+          "type" : "document_parsing_exception",
+          "reason" : "[1:2] Field name cannot contain only whitespace: [ ]"
+        }
+      ],
+      "type" : "document_parsing_exception",
+      "reason" : "[1:2] Field name cannot contain only whitespace: [ ]"
+    },
+    "mapping" : { }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      ".a" : 1
+    },
+    "status" : 400,
+    "error" : {
+      "root_cause" : [
+        {
+          "type" : "document_parsing_exception",
+          "reason" : "[1:2] failed to parse: field name cannot contain only whitespace: ['.a']"
+        }
+      ],
+      "type" : "document_parsing_exception",
+      "reason" : "[1:2] failed to parse: field name cannot contain only whitespace: ['.a']",
+      "caused_by" : {
+        "type" : "illegal_argument_exception",
+        "reason" : "field name cannot contain only whitespace: ['.a']"
+      }
+    },
+    "mapping" : { }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      "a. .b" : 1
+    },
+    "status" : 400,
+    "error" : {
+      "root_cause" : [
+        {
+          "type" : "document_parsing_exception",
+          "reason" : "[1:2] failed to parse: field name starting or ending with a [.] makes object resolution ambiguous: [a. .b]"
+        }
+      ],
+      "type" : "document_parsing_exception",
+      "reason" : "[1:2] failed to parse: field name starting or ending with a [.] makes object resolution ambiguous: [a. .b]",
+      "caused_by" : {
+        "type" : "illegal_argument_exception",
+        "reason" : "field name starting or ending with a [.] makes object resolution ambiguous: [a. .b]"
+      }
+    },
+    "mapping" : { }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      ".." : 1
+    },
+    "status" : 400,
+    "error" : {
+      "root_cause" : [
+        {
+          "type" : "document_parsing_exception",
+          "reason" : "[1:2] failed to parse: field name cannot contain only dots"
+        }
+      ],
+      "type" : "document_parsing_exception",
+      "reason" : "[1:2] failed to parse: field name cannot contain only dots",
+      "caused_by" : {
+        "type" : "illegal_argument_exception",
+        "reason" : "field name cannot contain only dots"
+      }
+    },
+    "mapping" : { }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      "a..." : 1
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "a" : {
+          "type" : "long"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      "a.b" : {
+        "c.d" : 1
+      }
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "a" : {
+          "properties" : {
+            "b" : {
+              "properties" : {
+                "c" : {
+                  "properties" : {
+                    "d" : {
+                      "type" : "long"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : { },
+    "doc" : {
+      "o" : {
+        "" : 1
+      }
+    },
+    "status" : 400,
+    "error" : {
+      "root_cause" : [
+        {
+          "type" : "document_parsing_exception",
+          "reason" : "[1:7] failed to parse: field name cannot be an empty string"
+        }
+      ],
+      "type" : "document_parsing_exception",
+      "reason" : "[1:7] failed to parse: field name cannot be an empty string",
+      "caused_by" : {
+        "type" : "illegal_argument_exception",
+        "reason" : "field name cannot be an empty string"
+      }
+    },
+    "mapping" : { }
+  },
+  {
+    "mappings" : {
+      "date_detection" : true,
+      "dynamic_date_formats" : [
+        "yyyy-MM-dd",
+        "dd/MM/yyyy"
+      ]
+    },
+    "doc" : {
+      "a" : "2015-02-03",
+      "b" : "03/02/2015"
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic_date_formats" : [
+        "yyyy-MM-dd",
+        "dd/MM/yyyy"
+      ],
+      "date_detection" : true,
+      "properties" : {
+        "a" : {
+          "type" : "date",
+          "format" : "yyyy-MM-dd"
+        },
+        "b" : {
+          "type" : "date",
+          "format" : "dd/MM/yyyy"
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "dynamic_templates" : [
+        {
+          "t" : {
+            "match" : "*",
+            "match_mapping_type" : "long",
+            "mapping" : {
+              "type" : "keyword",
+              "index" : false
+            }
+          }
+        }
+      ],
+      "properties" : {
+        "x" : {
+          "type" : "long"
+        }
+      }
+    },
+    "doc" : {
+      "x" : 1,
+      "y" : 2
+    },
+    "status" : 201,
+    "mapping" : {
+      "dynamic_templates" : [
+        {
+          "t" : {
+            "match" : "*",
+            "match_mapping_type" : "long",
+            "mapping" : {
+              "index" : false,
+              "type" : "keyword"
+            }
+          }
+        }
+      ],
+      "properties" : {
+        "x" : {
+          "type" : "long"
+        },
+        "y" : {
+          "type" : "keyword",
+          "index" : false
+        }
+      }
+    }
+  },
+  {
+    "mappings" : {
+      "properties" : {
+        "geo" : {
+          "type" : "geo_point"
+        }
+      }
+    },
+    "doc" : {
+      "geo" : {
+        "lat" : 1,
+        "lon" : 2
+      },
+      "other" : {
+        "lat" : 1,
+        "lon" : 2
+      }
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "geo" : {
+          "type" : "geo_point"
+        },
+        "other" : {
+          "properties" : {
+            "lat" : {
+              "type" : "long"
+            },
+            "lon" : {
+              "type" : "long"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "mappings" : { },
+    "settings" : {
+      "index.mapping.total_fields.limit" : 2
+    },
+    "doc" : {
+      "a" : 1,
+      "b" : 2,
+      "c" : 3
+    },
+    "status" : 400,
+    "error" : {
+      "root_cause" : [
+        {
+          "type" : "document_parsing_exception",
+          "reason" : "[1:18] failed to parse: Limit of total fields [2] has been exceeded while adding new fields [3]"
+        }
+      ],
+      "type" : "document_parsing_exception",
+      "reason" : "[1:18] failed to parse: Limit of total fields [2] has been exceeded while adding new fields [3]",
+      "caused_by" : {
+        "type" : "illegal_argument_exception",
+        "reason" : "Limit of total fields [2] has been exceeded while adding new fields [3]"
+      }
+    },
+    "mapping" : { }
+  },
+  {
+    "mappings" : { },
+    "settings" : {
+      "index.mapping.depth.limit" : 2
+    },
+    "doc" : {
+      "a" : {
+        "b" : {
+          "c" : 1
+        }
+      }
+    },
+    "status" : 400,
+    "error" : {
+      "root_cause" : [
+        {
+          "type" : "document_parsing_exception",
+          "reason" : "[1:11] failed to parse: Limit of mapping depth [2] has been exceeded due to object field [a.b]"
+        }
+      ],
+      "type" : "document_parsing_exception",
+      "reason" : "[1:11] failed to parse: Limit of mapping depth [2] has been exceeded due to object field [a.b]",
+      "caused_by" : {
+        "type" : "illegal_argument_exception",
+        "reason" : "Limit of mapping depth [2] has been exceeded due to object field [a.b]"
+      }
+    },
+    "mapping" : { }
+  },
+  {
+    "mappings" : {
+      "properties" : {
+        "n" : {
+          "type" : "nested"
+        }
+      }
+    },
+    "settings" : {
+      "index.mapping.nested_fields.limit" : 1
+    },
+    "doc" : {
+      "m" : [
+        {
+          "a" : 1
+        }
+      ]
+    },
+    "status" : 201,
+    "mapping" : {
+      "properties" : {
+        "m" : {
+          "properties" : {
+            "a" : {
+              "type" : "long"
+            }
+          }
+        },
+        "n" : {
+          "type" : "nested"
+        }
+      }
+    }
+  }
+]

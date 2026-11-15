@@ -1,0 +1,208 @@
+{
+  "description" : "streams: toggles and the write restrictions of an enabled stream",
+  "steps" : [
+    {
+      "req" : "GET /_streams/status",
+      "status" : 200,
+      "response" : {
+        "logs" : {
+          "enabled" : false
+        },
+        "logs.ecs" : {
+          "enabled" : false
+        },
+        "logs.otel" : {
+          "enabled" : false
+        }
+      }
+    },
+    {
+      "req" : "POST /_streams/bogus/_enable",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Unknown stream type [bogus]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Unknown stream type [bogus]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-x",
+      "body" : { },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-x"
+      }
+    },
+    {
+      "req" : "POST /_streams/logs.otel/_enable",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "GET /_streams/status",
+      "status" : 200,
+      "response" : {
+        "logs" : {
+          "enabled" : false
+        },
+        "logs.ecs" : {
+          "enabled" : false
+        },
+        "logs.otel" : {
+          "enabled" : true
+        }
+      }
+    },
+    {
+      "req" : "POST /_bulk",
+      "raw" : "{\"index\":{\"_index\":\"logs.otel.foo\"}}\n{\"foo\":\"bar\"}\n",
+      "mask" : [
+        "_id"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : true,
+        "took" : 200,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "logs.otel.foo",
+              "_id" : "auto-generated",
+              "status" : 400,
+              "error" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Direct writes to child streams are prohibited. Index directly into the [logs.otel] stream instead"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_bulk?routing=r",
+      "raw" : "{\"index\":{\"_index\":\"logs.otel\"}}\n{\"foo\":\"bar\"}\n",
+      "mask" : [
+        "_id"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : true,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "logs.otel",
+              "_id" : "auto-generated",
+              "status" : 400,
+              "error" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "When writing to a stream, only the following parameters are allowed: [pretty, include_source_on_error, index, refresh, serverlessRequest, operatorRequest, error_trace, require_data_stream, timeout, _slice, id, op_type, filter_path] however the following were used: [routing]"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_bulk",
+      "raw" : "{\"create\":{\"_index\":\"logs.otel\",\"pipeline\":\"noop\"}}\n{\"foo\":\"bar\"}\n",
+      "mask" : [
+        "_id"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : true,
+        "took" : 0,
+        "items" : [
+          {
+            "create" : {
+              "_index" : "logs.otel",
+              "_id" : "auto-generated",
+              "status" : 400,
+              "error" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Cannot provide a pipeline when writing to a stream however the [noop] pipeline was provided when writing to the [logs.otel] stream"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/compat-xpack-reroute",
+      "body" : {
+        "processors" : [
+          {
+            "reroute" : {
+              "destination" : "logs.otel.foo"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /_bulk?pipeline=compat-xpack-reroute",
+      "raw" : "{\"index\":{\"_index\":\"compat-xpack-x\"}}\n{\"foo\":\"bar\"}\n",
+      "mask" : [
+        "_id",
+        "ingest_took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : true,
+        "took" : 0,
+        "ingest_took" : 400,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "logs.otel.foo",
+              "_id" : "auto-generated",
+              "status" : 400,
+              "error" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Pipeline [compat-xpack-reroute] can't change the target index (from [compat-xpack-x] to [logs.otel] child stream [logs.otel.foo]) History: [compat-xpack-x]"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_streams/logs.otel/_disable",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/compat-xpack-reroute",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-x",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

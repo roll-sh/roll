@@ -1,0 +1,57 @@
+#defaults: {"doc": {"a": 1, "s": "x", "tags": ["t1"], "o": {"k": 2}}}
+ctx._source.a += 1
+----
+ctx._source.str = ctx.toString().replaceAll(/_now=[0-9]+/, m -> '_now=N'); ctx._source.keys = new ArrayList(ctx.keySet())
+----
+ctx._source.v = ctx._version; ctx._source.i = ctx._index; ctx._source.id = ctx._id; ctx._source.r = ctx._routing
+----
+ctx.op = 'noop'
+----
+ctx.op = 'delete'
+----
+ctx.op = 'bogus'
+----
+ctx.op = null
+----
+ctx.op = 'none'
+----
+ctx._index = 'x'
+----
+ctx._id = 'x'
+----
+ctx._version = 5
+----
+ctx._routing = 'r'
+----
+ctx._now = 1
+----
+ctx.foo = 1
+----
+ctx.remove('op')
+----
+ctx.remove('_routing')
+----
+ctx._source = ['n': 1]
+----
+ctx._source = 1
+----
+ctx._source.m = metadata().getIndex() + '/' + metadata().getId() + '/' + metadata().getRouting() + '/' + metadata().getVersion() + '/' + metadata().getOp()
+----
+metadata().setOp('noop')
+----
+metadata().setOp('bogus')
+----
+metadata().setIndex('x')
+----
+ctx._source.n = metadata().getNow()
+----
+field('o.k').set(9)
+----
+ctx._source.x = params.x
+----
+#params: {"x": 5}
+params.x = 6
+----
+ctx._source.c = (char) 'c'
+----
+throw new IllegalArgumentException('nope')

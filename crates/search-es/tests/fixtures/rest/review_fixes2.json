@@ -1,0 +1,2912 @@
+{
+  "description": "Review fixes 2: template alias {index} in simulate, regex dynamic templates, date math index names, date formats and locales, mapping validation, query edge cases, cluster setting cross-validation.",
+  "steps": [
+    {
+      "req": "PUT /_index_template/esm-rf2-t",
+      "body": {
+        "index_patterns": [
+          "esm-rf2-tp*"
+        ],
+        "template": {
+          "aliases": {
+            "esm-rf2-tal-{index}": {}
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /_index_template/_simulate/esm-rf2-t?filter_path=template.aliases",
+      "status": 200,
+      "response": {
+        "template": {
+          "aliases": {
+            "esm-rf2-tal-simulate_template_index_7zos9crltd2scskekpz9gq": {}
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /_index_template/_simulate?filter_path=template.aliases",
+      "body": {
+        "index_patterns": [
+          "esm-rf2-x*"
+        ],
+        "template": {
+          "aliases": {
+            "esm-rf2-a-{index}": {}
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "template": {
+          "aliases": {
+            "esm-rf2-a-simulate_template_index_cofuw7hbqj2r94desvm2oq": {}
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /_index_template/_simulate_index/esm-rf2-tp9?filter_path=template.aliases",
+      "status": 200,
+      "response": {
+        "template": {
+          "aliases": {
+            "esm-rf2-tal-esm-rf2-tp9": {}
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "DELETE /_index_template/esm-rf2-t",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-rx",
+      "body": {
+        "mappings": {
+          "dynamic_templates": [
+            {
+              "t": {
+                "match": "(",
+                "match_pattern": "regex",
+                "mapping": {
+                  "type": "keyword"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "mask": [
+        "caused_by.caused_by"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Pattern [(] of type [regex] is invalid. Cannot create dynamic template [t]."
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Pattern [(] of type [regex] is invalid. Cannot create dynamic template [t].",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Pattern [(] of type [regex] is invalid. Cannot create dynamic template [t].",
+            "caused_by": {
+              "type": "pattern_syntax_exception",
+              "reason": "Unclosed group near index 1\n("
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-rx",
+      "body": {
+        "mappings": {
+          "dynamic_templates": [
+            {
+              "t": {
+                "match": "*",
+                "match_pattern": "regex",
+                "mapping": {
+                  "type": "keyword"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "mask": [
+        "caused_by.caused_by"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Pattern [*] of type [regex] is invalid. Cannot create dynamic template [t]."
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Pattern [*] of type [regex] is invalid. Cannot create dynamic template [t].",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Pattern [*] of type [regex] is invalid. Cannot create dynamic template [t].",
+            "caused_by": {
+              "type": "pattern_syntax_exception",
+              "reason": "Dangling meta character '*' near index 0\n*\n^"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-rx",
+      "body": {
+        "mappings": {
+          "dynamic_templates": [
+            {
+              "t": {
+                "match": "a{2",
+                "match_pattern": "regex",
+                "mapping": {
+                  "type": "keyword"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "mask": [
+        "caused_by.caused_by"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Pattern [a{2] of type [regex] is invalid. Cannot create dynamic template [t]."
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Pattern [a{2] of type [regex] is invalid. Cannot create dynamic template [t].",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Pattern [a{2] of type [regex] is invalid. Cannot create dynamic template [t].",
+            "caused_by": {
+              "type": "pattern_syntax_exception",
+              "reason": "Unclosed counted closure near index 3\na{2"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-rx",
+      "body": {
+        "mappings": {
+          "dynamic_templates": [
+            {
+              "t": {
+                "match": "[a-",
+                "match_pattern": "regex",
+                "mapping": {
+                  "type": "keyword"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "mask": [
+        "caused_by.caused_by"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Pattern [[a-] of type [regex] is invalid. Cannot create dynamic template [t]."
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Pattern [[a-] of type [regex] is invalid. Cannot create dynamic template [t].",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Pattern [[a-] of type [regex] is invalid. Cannot create dynamic template [t].",
+            "caused_by": {
+              "type": "pattern_syntax_exception",
+              "reason": "Illegal character range near index 3\n[a-"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-rx",
+      "body": {
+        "mappings": {
+          "dynamic_templates": [
+            {
+              "t": {
+                "path_unmatch": "a)",
+                "match_pattern": "regex",
+                "mapping": {
+                  "type": "keyword"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "mask": [
+        "caused_by.caused_by"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Pattern [a)] of type [regex] is invalid. Cannot create dynamic template [t]."
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Pattern [a)] of type [regex] is invalid. Cannot create dynamic template [t].",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Pattern [a)] of type [regex] is invalid. Cannot create dynamic template [t].",
+            "caused_by": {
+              "type": "pattern_syntax_exception",
+              "reason": "Unmatched closing ')' near index 0\na)\n^"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-rx",
+      "body": {
+        "mappings": {
+          "dynamic_templates": [
+            {
+              "t": {
+                "match": "^(foo|bar)_.*$",
+                "match_pattern": "regex",
+                "mapping": {
+                  "type": "keyword"
+                }
+              }
+            },
+            {
+              "u": {
+                "match": "[ab]{2,3}",
+                "match_pattern": "regex",
+                "mapping": {
+                  "type": "long"
+                }
+              }
+            },
+            {
+              "v": {
+                "match": "(?<=a)b",
+                "match_pattern": "regex",
+                "mapping": {
+                  "type": "long"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-rx"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-rx/_mapping",
+      "body": {
+        "dynamic_templates": [
+          {
+            "t": {
+              "match": "(",
+              "match_pattern": "regex",
+              "mapping": {
+                "type": "keyword"
+              }
+            }
+          }
+        ]
+      },
+      "mask": [
+        "caused_by.caused_by"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Pattern [(] of type [regex] is invalid. Cannot create dynamic template [t]."
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Pattern [(] of type [regex] is invalid. Cannot create dynamic template [t].",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Pattern [(] of type [regex] is invalid. Cannot create dynamic template [t].",
+            "caused_by": {
+              "type": "pattern_syntax_exception",
+              "reason": "Unclosed group near index 1\n("
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "DELETE /esm-rf2-rx",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cx-%5C%7Bx%7D%3E/_settings",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "invalid dynamic name expression [x-\\{x}>]. invalid character at position [6]. `{` and `}` are reserved characters and should be escaped when used as part of the index name using `\\` (e.g. `\\{text\\}`)"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "invalid dynamic name expression [x-\\{x}>]. invalid character at position [6]. `{` and `}` are reserved characters and should be escaped when used as part of the index name using `\\` (e.g. `\\{text\\}`)"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cx-%7Bnow%3E/_settings",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "invalid dynamic name expression [x-{now>]. date math placeholder is open ended"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "invalid dynamic name expression [x-{now>]. date math placeholder is open ended"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3C%3E/_settings",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "nothing captured"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "nothing captured"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cx-%7Bnow%7B%7D%7D%3E/_settings",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "invalid dynamic name expression [now{}]. missing date format"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "invalid dynamic name expression [now{}]. missing date format"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cx-%7Bnow%7Bdd%7Cfoo%7D%7D%3E/_settings",
+      "status": 500,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "zone_rules_exception",
+              "reason": "Unknown time-zone ID: foo"
+            }
+          ],
+          "type": "zone_rules_exception",
+          "reason": "Unknown time-zone ID: foo"
+        },
+        "status": 500
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cx-%7Bnow%7Bdd%7CEurope%2FNowhere%7D%7D%3E/_settings",
+      "status": 500,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "zone_rules_exception",
+              "reason": "Unknown time-zone ID: Europe/Nowhere"
+            }
+          ],
+          "type": "zone_rules_exception",
+          "reason": "Unknown time-zone ID: Europe/Nowhere"
+        },
+        "status": 500
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cx-%7Bnow%7Bdd%7D%3E/_settings",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "invalid dynamic name expression [x-{now{dd}>]. date math placeholder is open ended"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "invalid dynamic name expression [x-{now{dd}>]. date math placeholder is open ended"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cx-%7Bnow%7D%7D%3E/_settings",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "invalid dynamic name expression [x-{now}}>]. invalid character at position [8]. `{` and `}` are reserved characters and should be escaped when used as part of the index name using `\\` (e.g. `\\{text\\}`)"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "invalid dynamic name expression [x-{now}}>]. invalid character at position [8]. `{` and `}` are reserved characters and should be escaped when used as part of the index name using `\\` (e.g. `\\{text\\}`)"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cx-%7Bnow%7Bd%7Bd%7D%7D%3E/_settings",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "invalid dynamic name expression [x-{now{d{d}}>]. invalid character in placeholder at position [9]"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "invalid dynamic name expression [x-{now{d{d}}>]. invalid character in placeholder at position [9]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cesm-rf2-%7B2026-02-01T05%3A06%3A07.089Z%7Bbasic_date%7D%7D%3E/_settings",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "failed to parse date field [2026-02-01T05:06:07.089Z] with format [basic_date]: [failed to parse date field [2026-02-01T05:06:07.089Z] with format [basic_date]]"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "failed to parse date field [2026-02-01T05:06:07.089Z] with format [basic_date]: [failed to parse date field [2026-02-01T05:06:07.089Z] with format [basic_date]]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "failed to parse date field [2026-02-01T05:06:07.089Z] with format [basic_date]",
+            "caused_by": {
+              "type": "date_time_parse_exception",
+              "reason": "Text '2026-02-01T05:06:07.089Z' could not be parsed at index 4"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cesm-rf2-%7B20260201%7Bbasic_date%7D%7D%3E/_settings",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "index_not_found_exception",
+              "reason": "no such index [esm-rf2-20260201]",
+              "resource.type": "index_or_alias",
+              "resource.id": "esm-rf2-20260201",
+              "index_uuid": "_na_",
+              "index": "esm-rf2-20260201"
+            }
+          ],
+          "type": "index_not_found_exception",
+          "reason": "no such index [esm-rf2-20260201]",
+          "resource.type": "index_or_alias",
+          "resource.id": "esm-rf2-20260201",
+          "index_uuid": "_na_",
+          "index": "esm-rf2-20260201"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cesm-rf2-%7B2026-10-21%7C%7C%2Fd%7BYYYY-QQQ%7D%7D%3E/_settings",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "failed to parse date field [2026-10-21] with format [YYYY-QQQ]: [failed to parse date field [2026-10-21] with format [YYYY-QQQ]]"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "failed to parse date field [2026-10-21] with format [YYYY-QQQ]: [failed to parse date field [2026-10-21] with format [YYYY-QQQ]]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "failed to parse date field [2026-10-21] with format [YYYY-QQQ]",
+            "caused_by": {
+              "type": "date_time_parse_exception",
+              "reason": "Text '2026-10-21' could not be parsed at index 5"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cesm-rf2-%7B2026-10-21%7C%7C%2Fd%7BYYYY-Q%7D%7D%3E/_settings",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "failed to parse date field [2026-10-21] with format [YYYY-Q]: [failed to parse date field [2026-10-21] with format [YYYY-Q]]"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "failed to parse date field [2026-10-21] with format [YYYY-Q]: [failed to parse date field [2026-10-21] with format [YYYY-Q]]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "failed to parse date field [2026-10-21] with format [YYYY-Q]",
+            "caused_by": {
+              "type": "date_time_parse_exception",
+              "reason": "Text '2026-10-21' could not be parsed, unparsed text found at index 7"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cesm-rf2-%7B2026-10-21T14%3A32%3A48.492Z%7BW-F-g-e-c-N%7D%7D%3E/_settings",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "failed to parse date field [2026-10-21T14:32:48.492Z] with format [W-F-g-e-c-N]: [failed to parse date field [2026-10-21T14:32:48.492Z] with format [W-F-g-e-c-N]]"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "failed to parse date field [2026-10-21T14:32:48.492Z] with format [W-F-g-e-c-N]: [failed to parse date field [2026-10-21T14:32:48.492Z] with format [W-F-g-e-c-N]]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "failed to parse date field [2026-10-21T14:32:48.492Z] with format [W-F-g-e-c-N]",
+            "caused_by": {
+              "type": "date_time_parse_exception",
+              "reason": "Text '2026-10-21T14:32:48.492Z' could not be parsed at index 1"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cesm-rf2-%7B2026-10-21%7BG%7D%7D%3E/_settings",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "failed to parse date field [2026-10-21] with format [G]: [failed to parse date field [2026-10-21] with format [G]]"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "failed to parse date field [2026-10-21] with format [G]: [failed to parse date field [2026-10-21] with format [G]]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "failed to parse date field [2026-10-21] with format [G]",
+            "caused_by": {
+              "type": "date_time_parse_exception",
+              "reason": "Text '2026-10-21' could not be parsed at index 0"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cesm-rf2-%7B2026-10-21%7BMMMMM%7D%7D%3E/_settings",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "failed to parse date field [2026-10-21] with format [MMMMM]: [failed to parse date field [2026-10-21] with format [MMMMM]]"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "failed to parse date field [2026-10-21] with format [MMMMM]: [failed to parse date field [2026-10-21] with format [MMMMM]]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "failed to parse date field [2026-10-21] with format [MMMMM]",
+            "caused_by": {
+              "type": "date_time_parse_exception",
+              "reason": "Text '2026-10-21' could not be parsed, unparsed text found at index 1"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /%3Cesm-rf2-%7B2026-10-21%7BO%7D%7D%3E/_settings",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "failed to parse date field [2026-10-21] with format [O]: [failed to parse date field [2026-10-21] with format [O]]"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "failed to parse date field [2026-10-21] with format [O]: [failed to parse date field [2026-10-21] with format [O]]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "failed to parse date field [2026-10-21] with format [O]",
+            "caused_by": {
+              "type": "date_time_parse_exception",
+              "reason": "Text '2026-10-21' could not be parsed at index 0"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d1",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "format": "MMM dd yyyy",
+              "null_value": "jan 01 2020"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Error parsing [null_value] on field [d]: failed to parse date field [jan 01 2020] with format [MMM dd yyyy]"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Error parsing [null_value] on field [d]: failed to parse date field [jan 01 2020] with format [MMM dd yyyy]",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Error parsing [null_value] on field [d]: failed to parse date field [jan 01 2020] with format [MMM dd yyyy]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse date field [jan 01 2020] with format [MMM dd yyyy]",
+              "caused_by": {
+                "type": "date_time_parse_exception",
+                "reason": "Text 'jan 01 2020' could not be parsed at index 0"
+              }
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d2",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "format": "MMM dd yyyy",
+              "null_value": "Jan 01 2020"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-d2"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d3",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "format": "MMM dd yyyy",
+              "null_value": "JAN 01 2020"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Error parsing [null_value] on field [d]: failed to parse date field [JAN 01 2020] with format [MMM dd yyyy]"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Error parsing [null_value] on field [d]: failed to parse date field [JAN 01 2020] with format [MMM dd yyyy]",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Error parsing [null_value] on field [d]: failed to parse date field [JAN 01 2020] with format [MMM dd yyyy]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse date field [JAN 01 2020] with format [MMM dd yyyy]",
+              "caused_by": {
+                "type": "date_time_parse_exception",
+                "reason": "Text 'JAN 01 2020' could not be parsed at index 0"
+              }
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d4",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "format": "EEE yyyy-MM-dd",
+              "null_value": "wed 2026-10-21"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Error parsing [null_value] on field [d]: failed to parse date field [wed 2026-10-21] with format [EEE yyyy-MM-dd]"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Error parsing [null_value] on field [d]: failed to parse date field [wed 2026-10-21] with format [EEE yyyy-MM-dd]",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Error parsing [null_value] on field [d]: failed to parse date field [wed 2026-10-21] with format [EEE yyyy-MM-dd]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse date field [wed 2026-10-21] with format [EEE yyyy-MM-dd]",
+              "caused_by": {
+                "type": "date_time_parse_exception",
+                "reason": "Text 'wed 2026-10-21' could not be parsed at index 0"
+              }
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d5",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date_nanos",
+              "null_value": "1969-12-31"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Error parsing [null_value] on field [d]: date[1969-12-31T00:00:00Z] is before the epoch in 1970 and cannot be stored in nanosecond resolution"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Error parsing [null_value] on field [d]: date[1969-12-31T00:00:00Z] is before the epoch in 1970 and cannot be stored in nanosecond resolution",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Error parsing [null_value] on field [d]: date[1969-12-31T00:00:00Z] is before the epoch in 1970 and cannot be stored in nanosecond resolution",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "date[1969-12-31T00:00:00Z] is before the epoch in 1970 and cannot be stored in nanosecond resolution"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d6",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date_nanos",
+              "null_value": "2262-04-12"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Error parsing [null_value] on field [d]: date[2262-04-12T00:00:00Z] is after 2262-04-11T23:47:16.854775807 and cannot be stored in nanosecond resolution"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Error parsing [null_value] on field [d]: date[2262-04-12T00:00:00Z] is after 2262-04-11T23:47:16.854775807 and cannot be stored in nanosecond resolution",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Error parsing [null_value] on field [d]: date[2262-04-12T00:00:00Z] is after 2262-04-11T23:47:16.854775807 and cannot be stored in nanosecond resolution",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "date[2262-04-12T00:00:00Z] is after 2262-04-11T23:47:16.854775807 and cannot be stored in nanosecond resolution"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d7",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date_nanos",
+              "null_value": "2262-04-11T23:47:16.854775807Z"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-d7"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d8",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date_nanos",
+              "null_value": "2262-04-11T23:47:16.854775808Z"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Error parsing [null_value] on field [d]: date[2262-04-11T23:47:16.854775808Z] is after 2262-04-11T23:47:16.854775807 and cannot be stored in nanosecond resolution"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Error parsing [null_value] on field [d]: date[2262-04-11T23:47:16.854775808Z] is after 2262-04-11T23:47:16.854775807 and cannot be stored in nanosecond resolution",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Error parsing [null_value] on field [d]: date[2262-04-11T23:47:16.854775808Z] is after 2262-04-11T23:47:16.854775807 and cannot be stored in nanosecond resolution",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "date[2262-04-11T23:47:16.854775808Z] is after 2262-04-11T23:47:16.854775807 and cannot be stored in nanosecond resolution"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d9",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "format": "strict_date||epoch_millis||"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Failed to parse mapping: Error parsing [format] on field [d]: Cannot have empty element in multi date format pattern: strict_date||epoch_millis||"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Error parsing [format] on field [d]: Cannot have empty element in multi date format pattern: strict_date||epoch_millis||",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Error parsing [format] on field [d]: Cannot have empty element in multi date format pattern: strict_date||epoch_millis||",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Cannot have empty element in multi date format pattern: strict_date||epoch_millis||"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d10",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "format": "||strict_date"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Failed to parse mapping: Error parsing [format] on field [d]: Cannot have empty element in multi date format pattern: ||strict_date"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Error parsing [format] on field [d]: Cannot have empty element in multi date format pattern: ||strict_date",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Error parsing [format] on field [d]: Cannot have empty element in multi date format pattern: ||strict_date",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Cannot have empty element in multi date format pattern: ||strict_date"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d11",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "format": "strict_date||||epoch_millis"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Failed to parse mapping: Error parsing [format] on field [d]: Cannot have empty element in multi date format pattern: strict_date||||epoch_millis"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Error parsing [format] on field [d]: Cannot have empty element in multi date format pattern: strict_date||||epoch_millis",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Error parsing [format] on field [d]: Cannot have empty element in multi date format pattern: strict_date||||epoch_millis",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Cannot have empty element in multi date format pattern: strict_date||||epoch_millis"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d12",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "locale": "xx"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Failed to parse mapping: Unknown language: xx"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Unknown language: xx",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Unknown language: xx",
+            "caused_by": {
+              "type": "missing_resource_exception",
+              "reason": "Couldn't find 3-letter language code for xx"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d13",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "locale": "en_YY"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Failed to parse mapping: Unknown country: YY"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Unknown country: YY",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Unknown country: YY",
+            "caused_by": {
+              "type": "missing_resource_exception",
+              "reason": "Couldn't find 3-letter country code for YY"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d14",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "locale": "e!"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Failed to parse mapping: Unknown language: e!"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Unknown language: e!",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Unknown language: e!",
+            "caused_by": {
+              "type": "missing_resource_exception",
+              "reason": "Couldn't find 3-letter language code for e!"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d15",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "locale": "en_US_POSIX_X"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Failed to parse mapping: Locales can have at most 3 parts but got 4: [en, US, POSIX, X]"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Locales can have at most 3 parts but got 4: [en, US, POSIX, X]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Locales can have at most 3 parts but got 4: [en, US, POSIX, X]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d16",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "locale": "de"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-d16"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d17",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "locale": "en-US"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-d17"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d18",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "locale": "en_US_POSIX"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-d18"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d19",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "null_value": "2020-02-30"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Error parsing [null_value] on field [d]: Invalid date 'FEBRUARY 30'"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Error parsing [null_value] on field [d]: Invalid date 'FEBRUARY 30'",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Error parsing [null_value] on field [d]: Invalid date 'FEBRUARY 30'",
+            "caused_by": {
+              "type": "date_time_exception",
+              "reason": "Invalid date 'FEBRUARY 30'"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d20",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "format": "strict_date",
+              "null_value": "2020-02-30"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-d20"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d21",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "format": "yyyy-MM-dd",
+              "null_value": "2021-04-31"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Error parsing [null_value] on field [d]: Invalid date 'APRIL 31'"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Error parsing [null_value] on field [d]: Invalid date 'APRIL 31'",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Error parsing [null_value] on field [d]: Invalid date 'APRIL 31'",
+            "caused_by": {
+              "type": "date_time_exception",
+              "reason": "Invalid date 'APRIL 31'"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d22",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "format": "yyyy-MM-dd",
+              "null_value": "2021-02-29"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Error parsing [null_value] on field [d]: Invalid date 'February 29' as '2021' is not a leap year"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Error parsing [null_value] on field [d]: Invalid date 'February 29' as '2021' is not a leap year",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Error parsing [null_value] on field [d]: Invalid date 'February 29' as '2021' is not a leap year",
+            "caused_by": {
+              "type": "date_time_exception",
+              "reason": "Invalid date 'February 29' as '2021' is not a leap year"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-d23",
+      "body": {
+        "mappings": {
+          "properties": {
+            "d": {
+              "type": "date",
+              "null_value": "2020-13-01"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Error parsing [null_value] on field [d]: failed to parse date field [2020-13-01] with format [strict_date_optional_time||epoch_millis]"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Error parsing [null_value] on field [d]: failed to parse date field [2020-13-01] with format [strict_date_optional_time||epoch_millis]",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Error parsing [null_value] on field [d]: failed to parse date field [2020-13-01] with format [strict_date_optional_time||epoch_millis]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse date field [2020-13-01] with format [strict_date_optional_time||epoch_millis]",
+              "caused_by": {
+                "type": "date_time_parse_exception",
+                "reason": "Failed to parse with all enclosed parsers"
+              }
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-m1",
+      "body": {
+        "mappings": {
+          "properties": {
+            "a.b": {
+              "type": "keyword"
+            },
+            "a": {
+              "properties": {
+                "b": {
+                  "type": "long"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-m1"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-rf2-m1/_mapping",
+      "status": 200,
+      "response": {
+        "esm-rf2-m1": {
+          "mappings": {
+            "properties": {
+              "a": {
+                "properties": {
+                  "b": {
+                    "type": "keyword"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-m2",
+      "body": {
+        "mappings": {
+          "properties": {
+            "a": {
+              "properties": {
+                "b": {
+                  "type": "long"
+                }
+              }
+            },
+            "a.b": {
+              "type": "keyword"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-m2"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-rf2-m2/_mapping",
+      "status": 200,
+      "response": {
+        "esm-rf2-m2": {
+          "mappings": {
+            "properties": {
+              "a": {
+                "properties": {
+                  "b": {
+                    "type": "keyword"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-m3",
+      "body": {
+        "mappings": {
+          "properties": {
+            "g": {
+              "type": "geo_point",
+              "null_value": "zzz"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-m3"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-rf2-m3/_mapping",
+      "status": 200,
+      "response": {
+        "esm-rf2-m3": {
+          "mappings": {
+            "properties": {
+              "g": {
+                "type": "geo_point",
+                "null_value": {
+                  "lat": 88.59375,
+                  "lon": 178.59375
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-m4",
+      "body": {
+        "mappings": {
+          "properties": {
+            "g": {
+              "type": "geo_point",
+              "null_value": "u"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-m4"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-rf2-m4/_mapping",
+      "status": 200,
+      "response": {
+        "esm-rf2-m4": {
+          "mappings": {
+            "properties": {
+              "g": {
+                "type": "geo_point",
+                "null_value": {
+                  "lat": 45.0,
+                  "lon": 0.0
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-m5",
+      "body": {
+        "mappings": {
+          "properties": {
+            "h": {
+              "type": "half_float",
+              "null_value": 70000
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Failed to parse mapping: [half_float] supports only finite values, but got [70000.0]"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: [half_float] supports only finite values, but got [70000.0]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "[half_float] supports only finite values, but got [70000.0]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-m6",
+      "body": {
+        "mappings": {
+          "properties": {
+            "h": {
+              "type": "half_float",
+              "null_value": 65504
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-m6"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-rf2-m6/_mapping",
+      "status": 200,
+      "response": {
+        "esm-rf2-m6": {
+          "mappings": {
+            "properties": {
+              "h": {
+                "type": "half_float",
+                "null_value": 65504.0
+              }
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-m7",
+      "body": {
+        "mappings": {
+          "properties": {
+            "u": {
+              "type": "unsigned_long",
+              "null_value": -1
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Error parsing [null_value] on field [u]: Value [-1] is out of range for unsigned long."
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Error parsing [null_value] on field [u]: Value [-1] is out of range for unsigned long.",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Error parsing [null_value] on field [u]: Value [-1] is out of range for unsigned long.",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Value [-1] is out of range for unsigned long."
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-m8",
+      "body": {
+        "mappings": {
+          "properties": {
+            "u": {
+              "type": "unsigned_long",
+              "null_value": 18446744073709551616
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Error parsing [null_value] on field [u]: Value [18446744073709551616] is out of range for unsigned long"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Error parsing [null_value] on field [u]: Value [18446744073709551616] is out of range for unsigned long",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "Error parsing [null_value] on field [u]: Value [18446744073709551616] is out of range for unsigned long",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Value [18446744073709551616] is out of range for unsigned long"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-m9",
+      "body": {
+        "mappings": {
+          "properties": {
+            "n": {
+              "type": "nested",
+              "include_in_parent": true,
+              "include_in_root": true
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-m9"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-rf2-m9/_mapping",
+      "status": 200,
+      "response": {
+        "esm-rf2-m9": {
+          "mappings": {
+            "properties": {
+              "n": {
+                "type": "nested",
+                "include_in_parent": true
+              }
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-m10",
+      "body": {
+        "mappings": {
+          "properties": {
+            "n": {
+              "type": "nested",
+              "include_in_parent": false,
+              "include_in_root": true
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-m10"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-rf2-m10/_mapping",
+      "status": 200,
+      "response": {
+        "esm-rf2-m10": {
+          "mappings": {
+            "properties": {
+              "n": {
+                "type": "nested",
+                "include_in_root": true
+              }
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-m11",
+      "body": {
+        "mappings": {
+          "properties": {
+            "t": {
+              "type": "text",
+              "position_increment_gap": -1
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "[position_increment_gap] must be positive, got [-1]"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: [position_increment_gap] must be positive, got [-1]",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "[position_increment_gap] must be positive, got [-1]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-m12",
+      "body": {
+        "mappings": {
+          "properties": {
+            "a": {
+              "type": "alias",
+              "path": "a"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Invalid [path] value [a] for field alias [a]: an alias cannot refer to itself."
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Invalid [path] value [a] for field alias [a]: an alias cannot refer to itself."
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-m13",
+      "body": {
+        "mappings": {
+          "properties": {
+            "v": {
+              "type": "dense_vector",
+              "element_type": "bit",
+              "dims": 7
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "The number of dimensions should be in the range [8, 32768] but was [7]"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: The number of dimensions should be in the range [8, 32768] but was [7]",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "The number of dimensions should be in the range [8, 32768] but was [7]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-m14",
+      "body": {
+        "mappings": {
+          "properties": {
+            "r": {
+              "type": "integer_range",
+              "format": "yyyy"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Failed to parse mapping: field [r] of type [range] should not define a dateTimeFormatter unless it is a DATE type"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: field [r] of type [range] should not define a dateTimeFormatter unless it is a DATE type",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "field [r] of type [range] should not define a dateTimeFormatter unless it is a DATE type"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-m15",
+      "body": {
+        "mappings": {
+          "properties": {
+            "c": {
+              "type": "completion",
+              "contexts": [
+                {
+                  "name": "x",
+                  "type": "category"
+                },
+                {
+                  "name": "y",
+                  "type": "geo",
+                  "precision": 4
+                }
+              ]
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-m15"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-rf2-m15/_mapping",
+      "status": 200,
+      "response": {
+        "esm-rf2-m15": {
+          "mappings": {
+            "properties": {
+              "c": {
+                "type": "completion",
+                "analyzer": "simple",
+                "preserve_separators": true,
+                "preserve_position_increments": true,
+                "max_input_length": 50,
+                "contexts": [
+                  {
+                    "name": "x",
+                    "type": "CATEGORY"
+                  },
+                  {
+                    "name": "y",
+                    "type": "GEO",
+                    "precision": 4
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-rt",
+      "body": {
+        "mappings": {
+          "runtime": {
+            "r": {
+              "type": "composite",
+              "fields": {
+                "a": {
+                  "type": "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Failed to parse mapping: composite runtime field [r] must declare a [script]"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: composite runtime field [r] must declare a [script]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "composite runtime field [r] must declare a [script]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-im",
+      "body": {
+        "mappings": {
+          "properties": {
+            "l": {
+              "type": "long"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-im"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-im/_mapping",
+      "body": {
+        "properties": {
+          "l": {
+            "type": "long",
+            "ignore_malformed": false
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-im/_mapping",
+      "body": {
+        "properties": {
+          "k": {
+            "type": "long",
+            "ignore_malformed": true
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-rf2-im/_mapping",
+      "status": 200,
+      "response": {
+        "esm-rf2-im": {
+          "mappings": {
+            "properties": {
+              "k": {
+                "type": "long",
+                "ignore_malformed": true
+              },
+              "l": {
+                "type": "long",
+                "ignore_malformed": false
+              }
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rf2-q",
+      "body": {
+        "mappings": {
+          "properties": {
+            "f": {
+              "type": "keyword"
+            },
+            "g": {
+              "type": "geo_shape"
+            },
+            "p": {
+              "type": "percolator"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rf2-q"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /_aliases",
+      "raw": "{\"actions\":[{\"add\":{\"index\":\"esm-rf2-q\",\"alias\":\"esm-rf2-b0\",\"filter\":{\"term\":{\"f\":{\"value\":\"x\",\"boost\":-0.0}}}}}]}",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse filter for alias [esm-rf2-b0]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse filter for alias [esm-rf2-b0]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "negative [boost] are not allowed in [{\n  \"term\" : {\n    \"f\" : {\n      \"value\" : \"x\"\n    }\n  }\n}], use a value between 0 and 1 to deboost"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /_aliases",
+      "raw": "{\"actions\":[{\"add\":{\"index\":\"esm-rf2-q\",\"alias\":\"esm-rf2-b1\",\"filter\":{\"term\":{\"f\":{\"value\":\"x\",\"boost\":0.0}}}}}]}",
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "errors": false
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /_aliases",
+      "raw": "{\"actions\":[{\"add\":{\"index\":\"esm-rf2-q\",\"alias\":\"esm-rf2-fz\",\"filter\":{\"match\":{\"f\":{\"query\":\"x\",\"fuzziness\":99999999999}}}}}]}",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse filter for alias [esm-rf2-fz]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse filter for alias [esm-rf2-fz]",
+          "caused_by": {
+            "type": "x_content_parse_exception",
+            "reason": "[1:51] Numeric value (99999999999) out of range of int (-2147483648 - 2147483647)\n at [Source: (String)\"{\"match\":{\"f\":{\"query\":\"x\",\"fuzziness\":99999999999}}}\"; line: 1, column: 51]",
+            "caused_by": {
+              "type": "input_coercion_exception",
+              "reason": "Numeric value (99999999999) out of range of int (-2147483648 - 2147483647)\n at [Source: (String)\"{\"match\":{\"f\":{\"query\":\"x\",\"fuzziness\":99999999999}}}\"; line: 1, column: 51]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /_aliases",
+      "raw": "{\"actions\":[{\"add\":{\"index\":\"esm-rf2-q\",\"alias\":\"esm-rf2-wr\",\"filter\":{\"wrapper\":{\"query\":\"!!!\"}}}}]}",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse filter for alias [esm-rf2-wr]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse filter for alias [esm-rf2-wr]",
+          "caused_by": {
+            "type": "x_content_parse_exception",
+            "reason": "[1:23] Failed to decode VALUE_STRING as base64 (MIME-NO-LINEFEEDS): Illegal character '!' (code 0x21) in base64 content\n at [Source: (String)\"{\"wrapper\":{\"query\":\"!!!\"}}\"; line: 1, column: 23]",
+            "caused_by": {
+              "type": "json_parse_exception",
+              "reason": "Failed to decode VALUE_STRING as base64 (MIME-NO-LINEFEEDS): Illegal character '!' (code 0x21) in base64 content\n at [Source: (String)\"{\"wrapper\":{\"query\":\"!!!\"}}\"; line: 1, column: 23]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /_aliases",
+      "raw": "{\"actions\":[{\"add\":{\"index\":\"esm-rf2-q\",\"alias\":\"esm-rf2-p3\",\"filter\":{\"geo_shape\":{\"g\":{\"shape\":{\"type\":\"polygon\",\"coordinates\":[[[1,2],[3,4],[1,2]]]}}}}}}]}",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse filter for alias [esm-rf2-p3]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse filter for alias [esm-rf2-p3]",
+          "caused_by": {
+            "type": "x_content_parse_exception",
+            "reason": "Failed to build [geojson] after last required field arrived",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "at least 4 polygon points required"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /_aliases",
+      "raw": "{\"actions\":[{\"add\":{\"index\":\"esm-rf2-q\",\"alias\":\"esm-rf2-pe\",\"filter\":{\"geo_shape\":{\"g\":{\"shape\":{\"type\":\"polygon\",\"coordinates\":[]}}}}}}]}",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse filter for alias [esm-rf2-pe]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse filter for alias [esm-rf2-pe]",
+          "caused_by": {
+            "type": "x_content_parse_exception",
+            "reason": "Failed to build [geojson] after last required field arrived",
+            "caused_by": {
+              "type": "index_out_of_bounds_exception",
+              "reason": "Index 0 out of bounds for length 0"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /_aliases",
+      "raw": "{\"actions\":[{\"add\":{\"index\":\"esm-rf2-q\",\"alias\":\"esm-rf2-wk\",\"filter\":{\"geo_shape\":{\"g\":{\"shape\":\"POINT (1 2 3 4)\"}}}}}]}",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse filter for alias [esm-rf2-wk]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse filter for alias [esm-rf2-wk]",
+          "caused_by": {
+            "type": "i_o_exception",
+            "reason": "java.text.ParseException: expected ) but found: 4",
+            "caused_by": {
+              "type": "parse_exception",
+              "reason": "expected ) but found: 4"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /_aliases",
+      "raw": "{\"actions\":[{\"add\":{\"index\":\"esm-rf2-q\",\"alias\":\"esm-rf2-wb\",\"filter\":{\"geo_shape\":{\"g\":{\"shape\":\"BBOX (1, 2, 3)\"}}}}}]}",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse filter for alias [esm-rf2-wb]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse filter for alias [esm-rf2-wb]",
+          "caused_by": {
+            "type": "i_o_exception",
+            "reason": "java.text.ParseException: expected , but found: ')'",
+            "caused_by": {
+              "type": "parse_exception",
+              "reason": "expected , but found: ')'"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /_aliases",
+      "raw": "{\"actions\":[{\"add\":{\"index\":\"esm-rf2-q\",\"alias\":\"esm-rf2-wb2\",\"filter\":{\"geo_shape\":{\"g\":{\"shape\":\"BBOX (1 2 3 4)\"}}}}}]}",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse filter for alias [esm-rf2-wb2]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse filter for alias [esm-rf2-wb2]",
+          "caused_by": {
+            "type": "i_o_exception",
+            "reason": "java.text.ParseException: expected , but found: 2",
+            "caused_by": {
+              "type": "parse_exception",
+              "reason": "expected , but found: 2"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /_aliases",
+      "raw": "{\"actions\":[{\"add\":{\"index\":\"esm-rf2-q\",\"alias\":\"esm-rf2-ci\",\"filter\":{\"geo_shape\":{\"g\":{\"shape\":{\"type\":\"circle\",\"coordinates\":[1,2],\"radius\":\"x\"}}}}}}]}",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse filter for alias [esm-rf2-ci]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse filter for alias [esm-rf2-ci]",
+          "caused_by": {
+            "type": "x_content_parse_exception",
+            "reason": "[1:74] [geojson] failed to parse field [radius]",
+            "caused_by": {
+              "type": "number_format_exception",
+              "reason": "For input string: \"x\""
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /_aliases",
+      "raw": "{\"actions\":[{\"add\":{\"index\":\"esm-rf2-q\",\"alias\":\"esm-rf2-pc\",\"filter\":{\"percolate\":{\"field\":\"p\"}}}}]}",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse filter for alias [esm-rf2-pc]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse filter for alias [esm-rf2-pc]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Required one of fields [document, documents, id], but none were specified."
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "DELETE /esm-rf2-q",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /_cluster/settings",
+      "body": {
+        "transient": {
+          "cluster.routing.allocation.disk.watermark.low": "95%",
+          "cluster.routing.allocation.disk.watermark.high": "90%"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "low disk watermark [95%] more than high disk watermark [90%]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "low disk watermark [95%] more than high disk watermark [90%]",
+          "suppressed": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "low disk watermark [95%] more than high disk watermark [90%]"
+            }
+          ]
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /_cluster/settings",
+      "body": {
+        "transient": {
+          "cluster.routing.allocation.disk.watermark.high": "99%",
+          "cluster.routing.allocation.disk.watermark.flood_stage": "98%"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "high disk watermark [99%] more than flood stage disk watermark [98%]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "high disk watermark [99%] more than flood stage disk watermark [98%]",
+          "suppressed": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "high disk watermark [99%] more than flood stage disk watermark [98%]"
+            }
+          ]
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /_cluster/settings",
+      "body": {
+        "transient": {
+          "cluster.routing.allocation.disk.watermark.low": "10gb",
+          "cluster.routing.allocation.disk.watermark.high": "20gb"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "unable to consistently parse [cluster.routing.allocation.disk.watermark.low=10gb], [cluster.routing.allocation.disk.watermark.high=20gb], and [cluster.routing.allocation.disk.watermark.flood_stage=95%] as percentage or bytes"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "unable to consistently parse [cluster.routing.allocation.disk.watermark.low=10gb], [cluster.routing.allocation.disk.watermark.high=20gb], and [cluster.routing.allocation.disk.watermark.flood_stage=95%] as percentage or bytes",
+          "suppressed": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "unable to consistently parse [cluster.routing.allocation.disk.watermark.low=10gb], [cluster.routing.allocation.disk.watermark.high=20gb], and [cluster.routing.allocation.disk.watermark.flood_stage=95%] as percentage or bytes"
+            }
+          ]
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /_cluster/settings",
+      "body": {
+        "transient": {
+          "cluster.max_shards_per_node": -5
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Failed to parse value [-5] for setting [cluster.max_shards_per_node] must be >= 1"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Failed to parse value [-5] for setting [cluster.max_shards_per_node] must be >= 1"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /_cluster/settings",
+      "body": {
+        "transient": {
+          "cluster.max_shards_per_node": 0
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Failed to parse value [0] for setting [cluster.max_shards_per_node] must be >= 1"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Failed to parse value [0] for setting [cluster.max_shards_per_node] must be >= 1"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /_cluster/settings",
+      "raw": "{\"transient\":{\"search.max_buckets\":9223372036854775808}}",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Failed to parse value [9223372036854775808] for setting [search.max_buckets] must be <= 2147483647"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Failed to parse value [9223372036854775808] for setting [search.max_buckets] must be <= 2147483647"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /_cluster/settings",
+      "body": {
+        "transient": {
+          "search.max_buckets": "2147483648"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Failed to parse value [2147483648] for setting [search.max_buckets] must be <= 2147483647"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Failed to parse value [2147483648] for setting [search.max_buckets] must be <= 2147483647"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /_cluster/settings",
+      "body": {
+        "transient": {
+          "indices.recovery.max_bytes_per_sec": "10zb"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse setting [indices.recovery.max_bytes_per_sec] with value [10zb]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse setting [indices.recovery.max_bytes_per_sec] with value [10zb]",
+          "caused_by": {
+            "type": "parse_exception",
+            "reason": "failed to parse setting [indices.recovery.max_bytes_per_sec] with value [10zb]",
+            "caused_by": {
+              "type": "number_format_exception",
+              "reason": "For input string: \"10z\""
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    }
+  ]
+}

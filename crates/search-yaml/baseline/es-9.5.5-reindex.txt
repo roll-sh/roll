@@ -1,0 +1,187 @@
+# Tests of Elasticsearch 9.5.5's `reindex` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+reindex:delete_by_query/10_basic/Basic response
+reindex:delete_by_query/10_basic/Can override scroll_size
+reindex:delete_by_query/10_basic/Limit by max_docs in URL
+reindex:delete_by_query/10_basic/Limit by max_docs in body
+reindex:delete_by_query/10_basic/Limit by query
+reindex:delete_by_query/10_basic/Response for version conflict (seq no powered)
+reindex:delete_by_query/10_basic/Response for version conflict with conflicts=proceed
+reindex:delete_by_query/10_basic/tsdb
+reindex:delete_by_query/10_basic/wait_for_completion=false
+reindex:delete_by_query/20_validation/Remote indices are not allowed in delete-by-query
+reindex:delete_by_query/20_validation/invalid conflicts fails
+reindex:delete_by_query/20_validation/invalid max_docs fails
+reindex:delete_by_query/20_validation/invalid scroll_size fails
+reindex:delete_by_query/20_validation/junk in slices fails
+reindex:delete_by_query/20_validation/max_docs shoule be greater than slices
+reindex:delete_by_query/20_validation/no body fails
+reindex:delete_by_query/20_validation/no query fails
+reindex:delete_by_query/20_validation/requests_per_second cannot be an empty string
+reindex:delete_by_query/20_validation/requests_per_second cannot be negative
+reindex:delete_by_query/20_validation/requests_per_second cannot be unlimited
+reindex:delete_by_query/20_validation/requests_per_second cannot be zero
+reindex:delete_by_query/20_validation/source fields may not be modified
+reindex:delete_by_query/20_validation/zero slices fails
+reindex:delete_by_query/50_wait_for_active_shards/can override wait_for_active_shards
+reindex:delete_by_query/70_throttle/Rethrottle but not unlimited
+reindex:delete_by_query/70_throttle/Rethrottle to -1 which turns off throttling
+reindex:delete_by_query/70_throttle/Throttle the request
+reindex:delete_by_query/70_throttle/requests_per_second supports -1 which turns off throttling
+reindex:delete_by_query/80_slices/Multiple slices
+reindex:delete_by_query/80_slices/Multiple slices with auto slice
+reindex:delete_by_query/80_slices/Multiple slices with rethrottle
+reindex:delete_by_query/80_slices/Multiple slices with wait_for_completion=false
+reindex:reindex/100_tsdb/from standard with random _id to tsdb
+reindex:reindex/100_tsdb/from standard with tsdb id to tsdb
+reindex:reindex/100_tsdb/from tsdb to standard
+reindex:reindex/100_tsdb/from tsdb to tsdb
+reindex:reindex/100_tsdb/from tsdb to tsdb created by template while modifying dimension
+reindex:reindex/100_tsdb/from tsdb to tsdb modifying dimension
+reindex:reindex/100_tsdb/from tsdb to tsdb modifying timestamp
+reindex:reindex/10_basic/Reindex with source filtering
+reindex:reindex/10_basic/Response format for created
+reindex:reindex/10_basic/Response format for updated
+reindex:reindex/10_basic/Response format for version conflict
+reindex:reindex/10_basic/Response format for version conflict with conflicts=proceed
+reindex:reindex/10_basic/Source document without any fields works
+reindex:reindex/10_basic/wait_for_completion=false
+reindex:reindex/110_synthetic_source/from standard
+reindex:reindex/110_synthetic_source/from synthetic
+reindex:reindex/20_validation/_source:false is rejected
+reindex:reindex/20_validation/bad conflicts is error
+reindex:reindex/20_validation/badly formatted remote host fails
+reindex:reindex/20_validation/broken connect timeout in remote fails
+reindex:reindex/20_validation/broken socket timeout in remote fails
+reindex:reindex/20_validation/inconsistent max_docs in body and max_docs in URL fails
+reindex:reindex/20_validation/invalid max_docs in URL fails
+reindex:reindex/20_validation/invalid max_docs in body fails
+reindex:reindex/20_validation/junk in body fails
+reindex:reindex/20_validation/junk in dest fails
+reindex:reindex/20_validation/junk in remote fails
+reindex:reindex/20_validation/junk in slices fails
+reindex:reindex/20_validation/junk in source fails
+reindex:reindex/20_validation/max_docs shoule be greater than slices
+reindex:reindex/20_validation/no body fails
+reindex:reindex/20_validation/no index on destination fails
+reindex:reindex/20_validation/op_type create with external version_type fails
+reindex:reindex/20_validation/overwriting version is not supported
+reindex:reindex/20_validation/reindex without source gives useful error message
+reindex:reindex/20_validation/requests_per_second cannot be an empty string
+reindex:reindex/20_validation/requests_per_second cannot be negative
+reindex:reindex/20_validation/requests_per_second cannot be unlimited
+reindex:reindex/20_validation/requests_per_second cannot be zero
+reindex:reindex/20_validation/search from is not supported
+reindex:reindex/20_validation/search size fails if not a number
+reindex:reindex/20_validation/source fields may not be modified
+reindex:reindex/20_validation/source size is accepted
+reindex:reindex/20_validation/specifying size fails
+reindex:reindex/20_validation/unwhitelisted remote host fails
+reindex:reindex/20_validation/zero slices fails
+reindex:reindex/25_no_auto_create/auto_create_index doesn't include new index
+reindex:reindex/25_no_auto_create/auto_create_index forbids new index
+reindex:reindex/25_no_auto_create/auto_create_index is false
+reindex:reindex/30_search/Can limit copied docs by specifying a query
+reindex:reindex/30_search/Sorting and max_docs in body combined
+reindex:reindex/30_search/Sorting deprecated wait_for_completion false
+reindex:reindex/30_search/max_docs in URL
+reindex:reindex/35_search_failures/Response format for search failures
+reindex:reindex/40_versioning/op_type can be set to create
+reindex:reindex/40_versioning/version_type=external has refresh semantics
+reindex:reindex/40_versioning/version_type=internal has overwrite semantics
+reindex:reindex/40_versioning/versioning defaults to overwrite
+reindex:reindex/50_routing/Discard routing
+reindex:reindex/50_routing/Set routing
+reindex:reindex/50_routing/Slice alias equals command
+reindex:reindex/50_routing/Slice alias keep command
+reindex:reindex/51_routing/Discard routing
+reindex:reindex/51_routing/Set routing
+reindex:reindex/60_wait_for_active_shards/can override wait_for_active_shards
+reindex:reindex/70_throttle/Rethrottle but not unlimited
+reindex:reindex/70_throttle/Rethrottle to -1 which turns off throttling
+reindex:reindex/70_throttle/Throttle the request
+reindex:reindex/70_throttle/requests_per_second supports -1 to turn off throttling
+reindex:reindex/80_slices/Multiple slices
+reindex:reindex/80_slices/Multiple slices with auto slice
+reindex:reindex/80_slices/Multiple slices with max_docs
+reindex:reindex/80_slices/Multiple slices with rethrottle
+reindex:reindex/80_slices/Multiple slices with wait_for_completion=false
+reindex:reindex/85_scripting/Add routing
+reindex:reindex/85_scripting/Add slice alias
+reindex:reindex/85_scripting/Change index to write to a different index
+reindex:reindex/85_scripting/Modify a document
+reindex:reindex/85_scripting/Modify a document based on id
+reindex:reindex/85_scripting/Noop all docs
+reindex:reindex/85_scripting/Noop one doc
+reindex:reindex/85_scripting/Reindex all docs with one doc deletion
+reindex:reindex/85_scripting/Script Write Field
+reindex:reindex/85_scripting/Set id to null to get an automatic id
+reindex:reindex/85_scripting/Set version to null to force an update
+reindex:reindex/85_scripting/Totally broken scripts report the error properly
+reindex:reindex/90_remote/Basic reindex from remote
+reindex:reindex/90_remote/Reindex from remote that you can't connect to
+reindex:reindex/90_remote/Reindex from remote with broken query
+reindex:reindex/90_remote/Reindex from remote with max_docs
+reindex:reindex/90_remote/Reindex from remote with query
+reindex:reindex/90_remote/Reindex from remote with rethrottle
+reindex:reindex/90_remote/Reindex from remote with routing
+reindex:reindex/90_remote/Reindex from remote with source filtering
+reindex:reindex/90_remote/Reindex from remote with timeouts
+reindex:reindex/95_parent_join/Reindex from remote with parent join field
+reindex:reindex/95_parent_join/Reindex with parent join field
+reindex:reindex/96_script_cancellation/Task cancellation interrupts a long-running reindex script loop
+reindex:update_by_query/100_synthetic_source/update
+reindex:update_by_query/10_basic/Basic response
+reindex:update_by_query/10_basic/Can override scroll_size
+reindex:update_by_query/10_basic/Limit by max_docs in URL
+reindex:update_by_query/10_basic/Limit by max_docs in body
+reindex:update_by_query/10_basic/Limit by query
+reindex:update_by_query/10_basic/Response for version conflict (seq no powered)
+reindex:update_by_query/10_basic/Response for version conflict with conflicts=proceed
+reindex:update_by_query/10_basic/Source document without any fields works
+reindex:update_by_query/10_basic/wait_for_completion=false
+reindex:update_by_query/20_validation/Remote indices are not allowed in update-by-query
+reindex:update_by_query/20_validation/inconsistent max_docs in body and max_docs in URL fails
+reindex:update_by_query/20_validation/invalid conflicts fails
+reindex:update_by_query/20_validation/invalid max_docs in URL fails
+reindex:update_by_query/20_validation/invalid max_docs in body fails
+reindex:update_by_query/20_validation/invalid scroll_size fails
+reindex:update_by_query/20_validation/junk in slices fails
+reindex:update_by_query/20_validation/max_docs shoule be greater than slices
+reindex:update_by_query/20_validation/requests_per_second cannot be an empty string
+reindex:update_by_query/20_validation/requests_per_second cannot be negative
+reindex:update_by_query/20_validation/requests_per_second cannot be unlimited
+reindex:update_by_query/20_validation/requests_per_second cannot be zero
+reindex:update_by_query/20_validation/source fields may not be modified
+reindex:update_by_query/20_validation/update_by_query without source gives useful error message
+reindex:update_by_query/20_validation/zero slices fails
+reindex:update_by_query/30_new_fields/Update-by-query picks up new fields
+reindex:update_by_query/35_search_failure/Response format for search failures
+reindex:update_by_query/40_versioning/update_by_query increments the version number
+reindex:update_by_query/50_consistency/can override wait_for_active_shards
+reindex:update_by_query/60_throttle/Rethrottle but not unlimited
+reindex:update_by_query/60_throttle/Rethrottle to -1 which turns off throttling
+reindex:update_by_query/60_throttle/Throttle the request
+reindex:update_by_query/60_throttle/requests_per_second supports -1 which turns off throttling
+reindex:update_by_query/70_slices/Multiple slices
+reindex:update_by_query/70_slices/Multiple slices with auto slice
+reindex:update_by_query/70_slices/Multiple slices with rethrottle
+reindex:update_by_query/70_slices/Multiple slices with wait_for_completion=false
+reindex:update_by_query/80_scripting/Can read version
+reindex:update_by_query/80_scripting/Can't change _id
+reindex:update_by_query/80_scripting/Noop all docs
+reindex:update_by_query/80_scripting/Noop one doc
+reindex:update_by_query/80_scripting/Script Write Field
+reindex:update_by_query/80_scripting/Set unsupported operation type
+reindex:update_by_query/80_scripting/Setting bogus context is an error
+reindex:update_by_query/80_scripting/Totally broken scripts report the error properly
+reindex:update_by_query/80_scripting/Update a document using update_by_query
+reindex:update_by_query/80_scripting/Update all docs with one deletion and one noop
+reindex:update_by_query/80_scripting/Update all docs with one deletion and one noop using a stored script
+reindex:update_by_query/80_scripting/Update all docs with one doc deletion
+reindex:update_by_query/80_scripting/Update document using short `script` form
+reindex:update_by_query/85_script_cancellation/Task cancellation interrupts a long-running update_by_query script loop
+reindex:update_by_query/90_tsdb/update dimension field
+reindex:update_by_query/90_tsdb/update tag field
+reindex:update_by_query/90_tsdb/update timestamp

@@ -1,0 +1,304 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "DELETE",
+      "path": "/hw-loc?ignore_unavailable=true",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/hw-loc",
+      "body": {
+        "mappings": {
+          "properties": {
+            "ip": {
+              "type": "ip"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "hw-loc"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-loc/_search",
+      "body": {
+        "aggs": {
+          "r": {
+            "ip_range": {
+              "field": "ip",
+              "ranges": [
+                {
+                  "mask": "10.0.0.0/33"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "x_content_parse_exception",
+                "reason": "[1:71] [ip_range] failed to parse field [ranges]"
+              }
+            ],
+            "type": "x_content_parse_exception",
+            "reason": "[1:71] [ip_range] failed to parse field [ranges]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Illegal prefix length [33] in [10.0.0.0/33]. Must be 0-32 for IPv4 ranges, 0-128 for IPv6 ranges"
+            }
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-loc/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "r": {
+            "ip_range": {
+              "field": "ip",
+              "ranges": [
+                {
+                  "from": "x"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "x_content_parse_exception",
+                "reason": "[1:61] [ip_range] failed to parse field [ranges]"
+              }
+            ],
+            "type": "x_content_parse_exception",
+            "reason": "[1:61] [ip_range] failed to parse field [ranges]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "'x' is not an IP string literal."
+            }
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-loc/_search",
+      "body": {
+        "size": 0,
+        "aggregations": {
+          "r": {
+            "terms": {
+              "field": "ip",
+              "bogus": 1
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "x_content_parse_exception",
+                "reason": "[1:32] [terms] unknown field [bogus]"
+              }
+            ],
+            "type": "x_content_parse_exception",
+            "reason": "[1:32] [terms] unknown field [bogus]"
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-loc/_search",
+      "body": {
+        "query": {
+          "match_all": {}
+        },
+        "aggs": {
+          "a": {
+            "avg": {
+              "field": "ip"
+            },
+            "aggs": {
+              "b": {
+                "max": {
+                  "field": "ip",
+                  "nope": 2
+                }
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "x_content_parse_exception",
+                "reason": "[1:48] [max] unknown field [nope]"
+              }
+            ],
+            "type": "x_content_parse_exception",
+            "reason": "[1:48] [max] unknown field [nope]"
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-loc/_search",
+      "body": {
+        "query": {
+          "pinned": {
+            "organic": {}
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "parsing_exception",
+                "reason": "[1:32] [pinned] failed to parse field [organic]",
+                "line": 1,
+                "col": 32
+              }
+            ],
+            "type": "parsing_exception",
+            "reason": "[1:32] [pinned] failed to parse field [organic]",
+            "line": 1,
+            "col": 32,
+            "caused_by": {
+              "type": "x_content_parse_exception",
+              "reason": "[1:32] [pinned] failed to parse field [organic]",
+              "caused_by": {
+                "type": "illegal_argument_exception",
+                "reason": "query malformed, empty clause found at [1:32]"
+              }
+            }
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-loc/_msearch",
+      "lines": [
+        {},
+        {
+          "aggs": {
+            "r": {
+              "terms": {
+                "field": "ip",
+                "bogus": 1
+              }
+            }
+          }
+        }
+      ],
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "x_content_parse_exception",
+                "reason": "[1:24] [terms] unknown field [bogus]"
+              }
+            ],
+            "type": "x_content_parse_exception",
+            "reason": "[1:24] [terms] unknown field [bogus]"
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/hw-loc",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

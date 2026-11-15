@@ -1,0 +1,223 @@
+{
+  "diff": {
+    "es": [
+      "text0.raw"
+    ],
+    "path": ".suggest.c[0].options[0]._ignored",
+    "roll": "<missing>"
+  },
+  "found": {
+    "case": 17,
+    "case_seed": 1000020,
+    "seed": 1
+  },
+  "roll": {
+    "body": {
+      "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 1,
+        "total": 1
+      },
+      "hits": {
+        "hits": [],
+        "max_score": null,
+        "total": {
+          "relation": "eq",
+          "value": 0
+        }
+      },
+      "suggest": {
+        "c": [
+          {
+            "length": 2,
+            "offset": 0,
+            "options": [
+              {
+                "_id": "11",
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "comp0": "Quick",
+                  "text0": "ran search search quick index index cats"
+                },
+                "text": "Quick"
+              }
+            ],
+            "text": "qu"
+          }
+        ]
+      },
+      "timed_out": false,
+      "took": 0
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "POST _search .suggest.c[].options[]._ignored",
+  "steps": [
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "comp0": {
+              "type": "completion"
+            },
+            "text0": {
+              "fields": {
+                "raw": {
+                  "ignore_above": 32,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            }
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m4-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m4-a"
+    },
+    {
+      "es": {
+        "body": {
+          "errors": false,
+          "items": [
+            {
+              "index": {
+                "_id": "11",
+                "_index": "diff-m4-a",
+                "_primary_term": 1,
+                "_seq_no": 0,
+                "_shards": {
+                  "failed": 0,
+                  "successful": 1,
+                  "total": 2
+                },
+                "_version": 1,
+                "result": "created",
+                "status": 201
+              }
+            }
+          ],
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "lines": [
+        {
+          "index": {
+            "_id": "11",
+            "_index": "diff-m4-a"
+          }
+        },
+        {
+          "comp0": "Quick",
+          "text0": "ran search search quick index index cats"
+        }
+      ],
+      "method": "POST",
+      "path": "/_bulk"
+    },
+    {
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "successful": 1,
+            "total": 2
+          }
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m4-a/_refresh"
+    },
+    {
+      "body": {
+        "suggest": {
+          "c": {
+            "completion": {
+              "field": "comp0"
+            },
+            "prefix": "qu"
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 1,
+            "total": 1
+          },
+          "hits": {
+            "hits": [],
+            "max_score": null,
+            "total": {
+              "relation": "eq",
+              "value": 0
+            }
+          },
+          "suggest": {
+            "c": [
+              {
+                "length": 2,
+                "offset": 0,
+                "options": [
+                  {
+                    "_id": "11",
+                    "_ignored": [
+                      "text0.raw"
+                    ],
+                    "_index": "diff-m4-a",
+                    "_score": 1.0,
+                    "_source": {
+                      "comp0": "Quick",
+                      "text0": "ran search search quick index index cats"
+                    },
+                    "text": "Quick"
+                  }
+                ],
+                "text": "qu"
+              }
+            ]
+          },
+          "timed_out": false,
+          "took": 3
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m4-a/_search"
+    }
+  ]
+}

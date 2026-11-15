@@ -1,0 +1,69 @@
+{
+ "found": {
+  "case": 111,
+  "case_seed": 100000411,
+  "seed": 100
+ },
+ "signature": "POST _update_by_query .error.col",
+ "steps": [
+  {
+   "body": {
+    "settings": {
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m20-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m20-a"
+  },
+  {
+   "body": {
+    "query": {
+     "multi_match": {
+      "fields": [
+       "text1^2"
+      ],
+      "fuzziness": null
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "error": {
+      "col": 38,
+      "line": 1,
+      "reason": "[multi_match] unknown token [VALUE_NULL] after [fuzziness]",
+      "root_cause": [
+       {
+        "col": 38,
+        "line": 1,
+        "reason": "[multi_match] unknown token [VALUE_NULL] after [fuzziness]",
+        "type": "parsing_exception"
+       }
+      ],
+      "type": "parsing_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m20-a/_update_by_query?refresh=true"
+  }
+ ]
+}

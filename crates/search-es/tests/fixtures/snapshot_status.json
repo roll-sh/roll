@@ -1,0 +1,875 @@
+{
+ "_about": "Elasticsearch 9.5.5 captures (reference cluster, fs repository ops-r): snapshot status and index_details sizes, a clone, an empty shard, name conflicts and status without names; snapshot_in_progress is a 2-shard snapshot one second in (throttled fs repository).",
+ "snapshot_in_progress": {
+  "_about": "A 2-shard snapshot of 4000 small docs into an fs repository throttled to max_snapshot_bytes_per_sec 2kb, one second in: GET _snapshot/r/s1, GET _snapshot/r/s1/_status, then _status of s1 when done and of s2 (same index, unchanged) taken after it.",
+  "get": {
+   "snapshots": [
+    {
+     "snapshot": "s1",
+     "uuid": "tYyCbjoGQo-oKqqrCEchHw",
+     "repository": "r",
+     "version_id": 9111000,
+     "version": "9.5.2-9.5.5",
+     "indices": [
+      "snapidx"
+     ],
+     "data_streams": [],
+     "include_global_state": true,
+     "state": "IN_PROGRESS",
+     "start_time": "2026-10-27T23:20:54.639Z",
+     "start_time_in_millis": 1793143254639,
+     "end_time": "1970-01-01T00:00:00.000Z",
+     "end_time_in_millis": 0,
+     "duration_in_millis": 0,
+     "failures": [],
+     "shards": {
+      "total": 2,
+      "failed": 0,
+      "successful": 0
+     },
+     "feature_states": []
+    }
+   ],
+   "total": 1,
+   "remaining": 0
+  },
+  "current": {
+   "snapshots": [
+    {
+     "snapshot": "s1",
+     "uuid": "tYyCbjoGQo-oKqqrCEchHw",
+     "repository": "r",
+     "version_id": 9111000,
+     "version": "9.5.2-9.5.5",
+     "indices": [
+      "snapidx"
+     ],
+     "data_streams": [],
+     "include_global_state": true,
+     "state": "IN_PROGRESS",
+     "start_time": "2026-10-27T23:20:54.639Z",
+     "start_time_in_millis": 1793143254639,
+     "end_time": "1970-01-01T00:00:00.000Z",
+     "end_time_in_millis": 0,
+     "duration_in_millis": 0,
+     "failures": [],
+     "shards": {
+      "total": 2,
+      "failed": 0,
+      "successful": 0
+     },
+     "feature_states": []
+    }
+   ],
+   "total": 1,
+   "remaining": 0
+  },
+  "status_all": {
+   "snapshots": [
+    {
+     "snapshot": "s1",
+     "repository": "r",
+     "uuid": "tYyCbjoGQo-oKqqrCEchHw",
+     "state": "STARTED",
+     "include_global_state": true,
+     "shards_stats": {
+      "initializing": 0,
+      "started": 2,
+      "finalizing": 0,
+      "done": 0,
+      "failed": 0,
+      "total": 2
+     },
+     "stats": {
+      "incremental": {
+       "file_count": 11,
+       "size_in_bytes": 147045
+      },
+      "processed": {
+       "file_count": 7,
+       "size_in_bytes": 2724
+      },
+      "total": {
+       "file_count": 11,
+       "size_in_bytes": 147045
+      },
+      "start_time_in_millis": 1793143254639,
+      "time_in_millis": 1003
+     },
+     "indices": {
+      "snapidx": {
+       "shards_stats": {
+        "initializing": 0,
+        "started": 2,
+        "finalizing": 0,
+        "done": 0,
+        "failed": 0,
+        "total": 2
+       },
+       "stats": {
+        "incremental": {
+         "file_count": 11,
+         "size_in_bytes": 147045
+        },
+        "processed": {
+         "file_count": 7,
+         "size_in_bytes": 2724
+        },
+        "total": {
+         "file_count": 11,
+         "size_in_bytes": 147045
+        },
+        "start_time_in_millis": 1793143254639,
+        "time_in_millis": 0
+       },
+       "shards": {
+        "0": {
+         "stage": "STARTED",
+         "stats": {
+          "incremental": {
+           "file_count": 7,
+           "size_in_bytes": 76316
+          },
+          "processed": {
+           "file_count": 4,
+           "size_in_bytes": 1571
+          },
+          "total": {
+           "file_count": 7,
+           "size_in_bytes": 76316
+          },
+          "start_time_in_millis": 1793143254639,
+          "time_in_millis": 0
+         },
+         "node": "3nzIQ4AqR_yA3CBgcFSEyg"
+        },
+        "1": {
+         "stage": "STARTED",
+         "stats": {
+          "incremental": {
+           "file_count": 4,
+           "size_in_bytes": 70729
+          },
+          "processed": {
+           "file_count": 3,
+           "size_in_bytes": 1153
+          },
+          "total": {
+           "file_count": 4,
+           "size_in_bytes": 70729
+          },
+          "start_time_in_millis": 1793143254639,
+          "time_in_millis": 0
+         },
+         "node": "3nzIQ4AqR_yA3CBgcFSEyg"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "status": {
+   "snapshots": [
+    {
+     "snapshot": "s1",
+     "repository": "r",
+     "uuid": "tYyCbjoGQo-oKqqrCEchHw",
+     "state": "STARTED",
+     "include_global_state": true,
+     "shards_stats": {
+      "initializing": 0,
+      "started": 2,
+      "finalizing": 0,
+      "done": 0,
+      "failed": 0,
+      "total": 2
+     },
+     "stats": {
+      "incremental": {
+       "file_count": 11,
+       "size_in_bytes": 147045
+      },
+      "processed": {
+       "file_count": 7,
+       "size_in_bytes": 2724
+      },
+      "total": {
+       "file_count": 11,
+       "size_in_bytes": 147045
+      },
+      "start_time_in_millis": 1793143254639,
+      "time_in_millis": 1206
+     },
+     "indices": {
+      "snapidx": {
+       "shards_stats": {
+        "initializing": 0,
+        "started": 2,
+        "finalizing": 0,
+        "done": 0,
+        "failed": 0,
+        "total": 2
+       },
+       "stats": {
+        "incremental": {
+         "file_count": 11,
+         "size_in_bytes": 147045
+        },
+        "processed": {
+         "file_count": 7,
+         "size_in_bytes": 2724
+        },
+        "total": {
+         "file_count": 11,
+         "size_in_bytes": 147045
+        },
+        "start_time_in_millis": 1793143254639,
+        "time_in_millis": 0
+       },
+       "shards": {
+        "0": {
+         "stage": "STARTED",
+         "stats": {
+          "incremental": {
+           "file_count": 7,
+           "size_in_bytes": 76316
+          },
+          "processed": {
+           "file_count": 4,
+           "size_in_bytes": 1571
+          },
+          "total": {
+           "file_count": 7,
+           "size_in_bytes": 76316
+          },
+          "start_time_in_millis": 1793143254639,
+          "time_in_millis": 0
+         },
+         "node": "3nzIQ4AqR_yA3CBgcFSEyg"
+        },
+        "1": {
+         "stage": "STARTED",
+         "stats": {
+          "incremental": {
+           "file_count": 4,
+           "size_in_bytes": 70729
+          },
+          "processed": {
+           "file_count": 3,
+           "size_in_bytes": 1153
+          },
+          "total": {
+           "file_count": 4,
+           "size_in_bytes": 70729
+          },
+          "start_time_in_millis": 1793143254639,
+          "time_in_millis": 0
+         },
+         "node": "3nzIQ4AqR_yA3CBgcFSEyg"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "status_done": {
+   "snapshots": [
+    {
+     "snapshot": "s1",
+     "repository": "r",
+     "uuid": "tYyCbjoGQo-oKqqrCEchHw",
+     "state": "SUCCESS",
+     "include_global_state": true,
+     "shards_stats": {
+      "initializing": 0,
+      "started": 0,
+      "finalizing": 0,
+      "done": 2,
+      "failed": 0,
+      "total": 2
+     },
+     "stats": {
+      "incremental": {
+       "file_count": 11,
+       "size_in_bytes": 147045
+      },
+      "total": {
+       "file_count": 11,
+       "size_in_bytes": 147045
+      },
+      "start_time_in_millis": 1793143254639,
+      "time_in_millis": 70862
+     },
+     "indices": {
+      "snapidx": {
+       "shards_stats": {
+        "initializing": 0,
+        "started": 0,
+        "finalizing": 0,
+        "done": 2,
+        "failed": 0,
+        "total": 2
+       },
+       "stats": {
+        "incremental": {
+         "file_count": 11,
+         "size_in_bytes": 147045
+        },
+        "total": {
+         "file_count": 11,
+         "size_in_bytes": 147045
+        },
+        "start_time_in_millis": 1793143254639,
+        "time_in_millis": 70862
+       },
+       "shards": {
+        "0": {
+         "stage": "DONE",
+         "stats": {
+          "incremental": {
+           "file_count": 7,
+           "size_in_bytes": 76316
+          },
+          "total": {
+           "file_count": 7,
+           "size_in_bytes": 76316
+          },
+          "start_time_in_millis": 1793143254639,
+          "time_in_millis": 70862
+         }
+        },
+        "1": {
+         "stage": "DONE",
+         "stats": {
+          "incremental": {
+           "file_count": 4,
+           "size_in_bytes": 70729
+          },
+          "total": {
+           "file_count": 4,
+           "size_in_bytes": 70729
+          },
+          "start_time_in_millis": 1793143254639,
+          "time_in_millis": 55841
+         }
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "status_second_snapshot": {
+   "snapshots": [
+    {
+     "snapshot": "s2",
+     "repository": "r",
+     "uuid": "qdzlilQ-TvmBnIIPdO4Lzg",
+     "state": "SUCCESS",
+     "include_global_state": true,
+     "shards_stats": {
+      "initializing": 0,
+      "started": 0,
+      "finalizing": 0,
+      "done": 2,
+      "failed": 0,
+      "total": 2
+     },
+     "stats": {
+      "incremental": {
+       "file_count": 0,
+       "size_in_bytes": 0
+      },
+      "total": {
+       "file_count": 11,
+       "size_in_bytes": 147045
+      },
+      "start_time_in_millis": 1793143351526,
+      "time_in_millis": 203
+     },
+     "indices": {
+      "snapidx": {
+       "shards_stats": {
+        "initializing": 0,
+        "started": 0,
+        "finalizing": 0,
+        "done": 2,
+        "failed": 0,
+        "total": 2
+       },
+       "stats": {
+        "incremental": {
+         "file_count": 0,
+         "size_in_bytes": 0
+        },
+        "total": {
+         "file_count": 11,
+         "size_in_bytes": 147045
+        },
+        "start_time_in_millis": 1793143351526,
+        "time_in_millis": 203
+       },
+       "shards": {
+        "0": {
+         "stage": "DONE",
+         "stats": {
+          "incremental": {
+           "file_count": 0,
+           "size_in_bytes": 0
+          },
+          "total": {
+           "file_count": 7,
+           "size_in_bytes": 76316
+          },
+          "start_time_in_millis": 1793143351526,
+          "time_in_millis": 203
+         }
+        },
+        "1": {
+         "stage": "DONE",
+         "stats": {
+          "incremental": {
+           "file_count": 0,
+           "size_in_bytes": 0
+          },
+          "total": {
+           "file_count": 4,
+           "size_in_bytes": 70729
+          },
+          "start_time_in_millis": 1793143351526,
+          "time_in_millis": 203
+         }
+        }
+       }
+      }
+     }
+    }
+   ]
+  }
+ },
+ "status_human": [
+  200,
+  {
+   "snapshots": [
+    {
+     "snapshot": "ops-s2",
+     "repository": "ops-r",
+     "uuid": "kR0Tp96sRbigF2Uu7Q5dSg",
+     "state": "SUCCESS",
+     "include_global_state": true,
+     "shards_stats": {
+      "initializing": 0,
+      "started": 0,
+      "finalizing": 0,
+      "done": 2,
+      "failed": 0,
+      "total": 2
+     },
+     "stats": {
+      "incremental": {
+       "file_count": 11,
+       "size": "12kb",
+       "size_in_bytes": 12299
+      },
+      "total": {
+       "file_count": 11,
+       "size": "12kb",
+       "size_in_bytes": 12299
+      },
+      "start_time": "2026-10-27T23:55:27.703Z",
+      "start_time_in_millis": 1793145327703,
+      "time": "200ms",
+      "time_in_millis": 200
+     },
+     "indices": {
+      "ops-idx": {
+       "shards_stats": {
+        "initializing": 0,
+        "started": 0,
+        "finalizing": 0,
+        "done": 2,
+        "failed": 0,
+        "total": 2
+       },
+       "stats": {
+        "incremental": {
+         "file_count": 11,
+         "size": "12kb",
+         "size_in_bytes": 12299
+        },
+        "total": {
+         "file_count": 11,
+         "size": "12kb",
+         "size_in_bytes": 12299
+        },
+        "start_time": "2026-10-27T23:55:27.703Z",
+        "start_time_in_millis": 1793145327703,
+        "time": "0s",
+        "time_in_millis": 0
+       },
+       "shards": {
+        "0": {
+         "stage": "DONE",
+         "stats": {
+          "incremental": {
+           "file_count": 7,
+           "size": "7.9kb",
+           "size_in_bytes": 8116
+          },
+          "total": {
+           "file_count": 7,
+           "size": "7.9kb",
+           "size_in_bytes": 8116
+          },
+          "start_time": "2026-10-27T23:55:27.703Z",
+          "start_time_in_millis": 1793145327703,
+          "time": "0s",
+          "time_in_millis": 0
+         }
+        },
+        "1": {
+         "stage": "DONE",
+         "stats": {
+          "incremental": {
+           "file_count": 4,
+           "size": "4kb",
+           "size_in_bytes": 4183
+          },
+          "total": {
+           "file_count": 4,
+           "size": "4kb",
+           "size_in_bytes": 4183
+          },
+          "start_time": "2026-10-27T23:55:27.703Z",
+          "start_time_in_millis": 1793145327703,
+          "time": "0s",
+          "time_in_millis": 0
+         }
+        }
+       }
+      }
+     }
+    }
+   ]
+  }
+ ],
+ "get_index_details_human": [
+  200,
+  {
+   "snapshots": [
+    {
+     "snapshot": "ops-s2",
+     "uuid": "kR0Tp96sRbigF2Uu7Q5dSg",
+     "repository": "ops-r",
+     "version_id": 9111000,
+     "version": "9.5.2-9.5.5",
+     "indices": [
+      "ops-idx"
+     ],
+     "index_details": {
+      "ops-idx": {
+       "shard_count": 2,
+       "size": "12kb",
+       "size_in_bytes": 12299,
+       "max_segments_per_shard": 2
+      }
+     },
+     "data_streams": [],
+     "include_global_state": true,
+     "state": "SUCCESS",
+     "start_time": "2026-10-27T23:55:27.703Z",
+     "start_time_in_millis": 1793145327703,
+     "end_time": "2026-10-27T23:55:27.903Z",
+     "end_time_in_millis": 1793145327903,
+     "duration": "200ms",
+     "duration_in_millis": 200,
+     "failures": [],
+     "shards": {
+      "total": 2,
+      "failed": 0,
+      "successful": 2
+     },
+     "feature_states": []
+    }
+   ],
+   "total": 1,
+   "remaining": 0
+  }
+ ],
+ "clone_status": [
+  200,
+  {
+   "snapshots": [
+    {
+     "snapshot": "ops-s3",
+     "repository": "ops-r",
+     "uuid": "IQOXd-hZQJaVrLLk-J3zAw",
+     "state": "SUCCESS",
+     "include_global_state": true,
+     "shards_stats": {
+      "initializing": 0,
+      "started": 0,
+      "finalizing": 0,
+      "done": 2,
+      "failed": 0,
+      "total": 2
+     },
+     "stats": {
+      "incremental": {
+       "file_count": 0,
+       "size_in_bytes": 0
+      },
+      "total": {
+       "file_count": 11,
+       "size_in_bytes": 12299
+      },
+      "start_time_in_millis": 1793146647405,
+      "time_in_millis": 201
+     },
+     "indices": {
+      "ops-idx": {
+       "shards_stats": {
+        "initializing": 0,
+        "started": 0,
+        "finalizing": 0,
+        "done": 2,
+        "failed": 0,
+        "total": 2
+       },
+       "stats": {
+        "incremental": {
+         "file_count": 0,
+         "size_in_bytes": 0
+        },
+        "total": {
+         "file_count": 11,
+         "size_in_bytes": 12299
+        },
+        "start_time_in_millis": 1793146647405,
+        "time_in_millis": 0
+       },
+       "shards": {
+        "0": {
+         "stage": "DONE",
+         "stats": {
+          "incremental": {
+           "file_count": 0,
+           "size_in_bytes": 0
+          },
+          "total": {
+           "file_count": 7,
+           "size_in_bytes": 8116
+          },
+          "start_time_in_millis": 1793146647405,
+          "time_in_millis": 0
+         }
+        },
+        "1": {
+         "stage": "DONE",
+         "stats": {
+          "incremental": {
+           "file_count": 0,
+           "size_in_bytes": 0
+          },
+          "total": {
+           "file_count": 4,
+           "size_in_bytes": 4183
+          },
+          "start_time_in_millis": 1793146647405,
+          "time_in_millis": 0
+         }
+        }
+       }
+      }
+     }
+    }
+   ]
+  }
+ ],
+ "empty_shard_status": [
+  200,
+  {
+   "snapshots": [
+    {
+     "snapshot": "ops-s4",
+     "repository": "ops-r",
+     "uuid": "9a7jw39WQzWKLG7X1WzOUA",
+     "state": "SUCCESS",
+     "include_global_state": true,
+     "shards_stats": {
+      "initializing": 0,
+      "started": 0,
+      "finalizing": 0,
+      "done": 1,
+      "failed": 0,
+      "total": 1
+     },
+     "stats": {
+      "incremental": {
+       "file_count": 1,
+       "size_in_bytes": 227
+      },
+      "total": {
+       "file_count": 1,
+       "size_in_bytes": 227
+      },
+      "start_time_in_millis": 1793147767561,
+      "time_in_millis": 0
+     },
+     "indices": {
+      "ops-empty": {
+       "shards_stats": {
+        "initializing": 0,
+        "started": 0,
+        "finalizing": 0,
+        "done": 1,
+        "failed": 0,
+        "total": 1
+       },
+       "stats": {
+        "incremental": {
+         "file_count": 1,
+         "size_in_bytes": 227
+        },
+        "total": {
+         "file_count": 1,
+         "size_in_bytes": 227
+        },
+        "start_time_in_millis": 1793147767561,
+        "time_in_millis": 0
+       },
+       "shards": {
+        "0": {
+         "stage": "DONE",
+         "stats": {
+          "incremental": {
+           "file_count": 1,
+           "size_in_bytes": 227
+          },
+          "total": {
+           "file_count": 1,
+           "size_in_bytes": 227
+          },
+          "start_time_in_millis": 1793147767561,
+          "time_in_millis": 0
+         }
+        }
+       }
+      }
+     }
+    }
+   ]
+  }
+ ],
+ "empty_shard_index_details": [
+  200,
+  {
+   "snapshots": [
+    {
+     "snapshot": "ops-s4",
+     "uuid": "9a7jw39WQzWKLG7X1WzOUA",
+     "repository": "ops-r",
+     "version_id": 9111000,
+     "version": "9.5.2-9.5.5",
+     "indices": [
+      "ops-empty"
+     ],
+     "index_details": {
+      "ops-empty": {
+       "shard_count": 1,
+       "size_in_bytes": 227,
+       "max_segments_per_shard": 0
+      }
+     },
+     "data_streams": [],
+     "include_global_state": true,
+     "state": "SUCCESS",
+     "start_time": "2026-10-28T00:36:07.561Z",
+     "start_time_in_millis": 1793147767561,
+     "end_time": "2026-10-28T00:36:07.561Z",
+     "end_time_in_millis": 1793147767561,
+     "duration_in_millis": 0,
+     "failures": [],
+     "shards": {
+      "total": 1,
+      "failed": 0,
+      "successful": 1
+     },
+     "feature_states": []
+    }
+   ],
+   "total": 1,
+   "remaining": 0
+  }
+ ],
+ "name_already_exists": [
+  400,
+  {
+   "error": {
+    "root_cause": [
+     {
+      "type": "snapshot_name_already_in_use_exception",
+      "reason": "[ops-r:ops-s1] Invalid snapshot name [ops-s1], snapshot with the same name already exists"
+     }
+    ],
+    "type": "snapshot_name_already_in_use_exception",
+    "reason": "[ops-r:ops-s1] Invalid snapshot name [ops-s1], snapshot with the same name already exists"
+   },
+   "status": 400
+  }
+ ],
+ "status_missing_repository_without_names": [
+  200,
+  {
+   "snapshots": []
+  }
+ ],
+ "status_all_idle": [
+  200,
+  {
+   "snapshots": []
+  }
+ ],
+ "status_missing_repository_with_names": [
+  404,
+  {
+   "error": {
+    "root_cause": [
+     {
+      "type": "repository_missing_exception",
+      "reason": "[nope] missing"
+     }
+    ],
+    "type": "repository_missing_exception",
+    "reason": "[nope] missing"
+   },
+   "status": 404
+  }
+ ],
+ "current_idle": [
+  200,
+  {
+   "snapshots": [],
+   "total": 0,
+   "remaining": 0
+  }
+ ],
+ "current_status_idle": [
+  404,
+  {
+   "error": {
+    "root_cause": [
+     {
+      "type": "snapshot_missing_exception",
+      "reason": "[ops-r:_current] is missing"
+     }
+    ],
+    "type": "snapshot_missing_exception",
+    "reason": "[ops-r:_current] is missing"
+   },
+   "status": 404
+  }
+ ]
+}

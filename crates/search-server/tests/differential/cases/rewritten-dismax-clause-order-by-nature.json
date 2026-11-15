@@ -1,0 +1,224 @@
+{
+  "diff": {
+    "es": "weight(FunctionScoreQuery((ConstantScore(text0.keyword:over text0:over text0:and text0.keyword:and))^0.0, scored by boost(queryboost(score(MatchNoDocsQuery(\"The \"exists\" query was rewritten to a \"match_none\" query.\")))^0.2))), result of:",
+    "path": ".hits.hits[0]._explanation.description",
+    "roll": "weight(FunctionScoreQuery((ConstantScore(text0:over text0.keyword:over text0:and text0.keyword:and))^0.0, scored by boost(queryboost(score(MatchNoDocsQuery(\"The \"exists\" query was rewritten to a \"match_none\" query.\")))^0.2))), result of:"
+  },
+  "found": {
+    "case": 145,
+    "case_seed": 12000181,
+    "seed": 12
+  },
+  "roll": {
+    "body": {
+      "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 1,
+        "total": 1
+      },
+      "hits": {
+        "hits": [
+          {
+            "_explanation": {
+              "description": "weight(FunctionScoreQuery((ConstantScore(text0:over text0.keyword:over text0:and text0.keyword:and))^0.0, scored by boost(queryboost(score(MatchNoDocsQuery(\"The \"exists\" query was rewritten to a \"match_none\" query.\")))^0.2))), result of:",
+              "details": [
+                {
+                  "description": "ConstantScore(text0:over text0.keyword:over text0:and text0.keyword:and)^0.0",
+                  "details": [],
+                  "value": 0.0
+                }
+              ],
+              "value": 0.0
+            },
+            "_id": "9",
+            "_index": "diff-m1-b",
+            "_node": "0Zr0L-l4THmSU_MWbe51EQ",
+            "_score": 0.0,
+            "_shard": "[diff-m1-b][0]",
+            "_source": {
+              "text0": "red green lazy query and"
+            }
+          }
+        ],
+        "max_score": 0.0,
+        "total": {
+          "relation": "eq",
+          "value": 1
+        }
+      },
+      "timed_out": false,
+      "took": 1
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "POST _search .hits.hits[]._explanation.description",
+  "steps": [
+    {
+      "body": {
+        "settings": {
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m1-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m1-a"
+    },
+    {
+      "body": {
+        "settings": {
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m1-b",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m1-b"
+    },
+    {
+      "body": {
+        "text0": "red green lazy query and"
+      },
+      "es": {
+        "body": {
+          "_id": "9",
+          "_index": "diff-m1-b",
+          "_primary_term": 1,
+          "_seq_no": 0,
+          "_shards": {
+            "failed": 0,
+            "successful": 1,
+            "total": 2
+          },
+          "_version": 1,
+          "result": "created"
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 201
+      },
+      "method": "PUT",
+      "path": "/diff-m1-b/_doc/9"
+    },
+    {
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "successful": 2,
+            "total": 4
+          }
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m1-a,diff-m1-b/_refresh"
+    },
+    {
+      "body": {
+        "explain": true,
+        "query": {
+          "boosting": {
+            "negative": {
+              "exists": {
+                "field": "comp0"
+              }
+            },
+            "negative_boost": 0.2,
+            "positive": {
+              "bool": {
+                "filter": [
+                  {
+                    "simple_query_string": {
+                      "query": "over | and"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 1,
+            "total": 1
+          },
+          "hits": {
+            "hits": [
+              {
+                "_explanation": {
+                  "description": "weight(FunctionScoreQuery((ConstantScore(text0.keyword:over text0:over text0:and text0.keyword:and))^0.0, scored by boost(queryboost(score(MatchNoDocsQuery(\"The \"exists\" query was rewritten to a \"match_none\" query.\")))^0.2))), result of:",
+                  "details": [
+                    {
+                      "description": "ConstantScore(text0.keyword:over text0:over text0:and text0.keyword:and)^0.0",
+                      "details": [],
+                      "value": 0.0
+                    }
+                  ],
+                  "value": 0.0
+                },
+                "_id": "9",
+                "_index": "diff-m1-b",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_score": 0.0,
+                "_shard": "[diff-m1-b][0]",
+                "_source": {
+                  "text0": "red green lazy query and"
+                }
+              }
+            ],
+            "max_score": 0.0,
+            "total": {
+              "relation": "eq",
+              "value": 1
+            }
+          },
+          "timed_out": false,
+          "took": 1
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m1-b/_search"
+    }
+  ]
+}

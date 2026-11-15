@@ -1,0 +1,15 @@
+{
+  "msearch": {
+    "overlay": true,
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/api-reference/search-apis/search/",
+      "description": "Parameters RestSearchAction reads that the vendored spec file lacks."
+    },
+    "params": {
+      "cancel_after_time_interval": {
+        "type": "time",
+        "description": "The time after which the search request will be cancelled."
+      }
+    }
+  }
+}

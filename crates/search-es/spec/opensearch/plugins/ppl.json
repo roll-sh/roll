@@ -1,0 +1,33 @@
+{
+  "ppl": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/search-plugins/sql/ppl/index/",
+      "description": "Runs a PPL (Piped Processing Language) query."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ppl",
+          "methods": [
+            "POST"
+          ]
+        }
+      ]
+    },
+    "params": {
+      "format": {
+        "type": "string",
+        "description": "Response format: jdbc (default), csv, raw or viz."
+      },
+      "sanitize": {
+        "type": "boolean",
+        "description": "Whether csv output escapes cells that start with a formula character."
+      }
+    },
+    "body": {
+      "description": "The query: {\"query\": \"source=...\"}",
+      "required": true
+    }
+  }
+}

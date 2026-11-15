@@ -25,6 +25,8 @@ pub fn preview_key(id: &str) -> String {
 
 /// Settled previews aren't converged again until something changes.
 const SETTLED: i64 = i64::MAX;
+/// How long a converge holds a preview (its `next_at` meanwhile); a crash is retried after it.
+const CONVERGE_LEASE_MS: i64 = 300_000;
 /// The first retry after a failed step, doubling up to [`MAX_BACKOFF_MS`].
 const BACKOFF_MS: i64 = 15_000;
 const MAX_BACKOFF_MS: i64 = 600_000;

@@ -1,0 +1,295 @@
+{
+ "found": {
+  "case": 28,
+  "case_seed": 110000358,
+  "seed": 110
+ },
+ "signature": "POST _search .hits.hits[].highlight.text.length",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "bool0": {
+       "type": "boolean"
+      },
+      "byte0": {
+       "type": "byte"
+      },
+      "comp0": {
+       "type": "completion"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "flat0": {
+       "type": "flattened"
+      },
+      "half0": {
+       "type": "half_float"
+      },
+      "int0": {
+       "type": "integer"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "o": {
+       "properties": {
+        "int0": {
+         "type": "integer"
+        },
+        "kw0": {
+         "type": "keyword"
+        }
+       }
+      },
+      "scaled0": {
+       "scaling_factor": 100,
+       "type": "scaled_float"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "term_vector": "with_positions_offsets",
+       "type": "text"
+      },
+      "wild0": {
+       "type": "wildcard"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m19-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m19-a"
+  },
+  {
+   "es": {
+    "body": {
+     "errors": false,
+     "items": [
+      {
+       "index": {
+        "_id": "14",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      }
+     ],
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": {
+      "_id": "14",
+      "_index": "diff-m19-a",
+      "routing": "r2"
+     }
+    },
+    {
+     "bool0": true,
+     "byte0": 1,
+     "comp0": "Quick index quick",
+     "date0": 1705932540000,
+     "half0": 185.39,
+     "int0": -47,
+     "kw0": [
+      "x-2",
+      "Alpha",
+      "user@example.com"
+     ],
+     "o": {
+      "kw0": "user@example.com"
+     },
+     "scaled0": 141.51,
+     "text0": "engine Quick dog over blue score the"
+    }
+   ],
+   "method": "POST",
+   "path": "/_bulk"
+  },
+  {
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 1
+     }
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m19-a/_refresh"
+  },
+  {
+   "body": {
+    "highlight": {
+     "fields": {
+      "text0": {
+       "fragment_size": 20,
+       "type": "plain"
+      }
+     }
+    },
+    "query": {
+     "bool": {
+      "should": [
+       {
+        "multi_match": {
+         "fuzziness": "AUTO",
+         "query": "banana of engine",
+         "tie_breaker": 0.5,
+         "type": "best_fields"
+        }
+       },
+       {
+        "bool": {
+         "filter": [
+          {
+           "term": {
+            "o.kw0": "beta"
+           }
+          },
+          {
+           "match_phrase_prefix": {
+            "text0": {
+             "query": "blue sh"
+            }
+           }
+          }
+         ],
+         "should": [
+          {
+           "exists": {
+            "field": "flat0"
+           }
+          },
+          {
+           "dis_max": {
+            "queries": [
+             {
+              "term": {
+               "byte0": -121
+              }
+             },
+             {
+              "range": {
+               "o.int0": {
+                "gt": 19,
+                "lt": 96
+               }
+              }
+             }
+            ],
+            "tie_breaker": 0.0
+           }
+          },
+          {
+           "term": {
+            "bool0": false
+           }
+          }
+         ]
+        }
+       }
+      ]
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "14",
+        "_index": "diff-m19-a",
+        "_routing": "r2",
+        "_score": 0.2876821,
+        "_source": {
+         "bool0": true,
+         "byte0": 1,
+         "comp0": "Quick index quick",
+         "date0": 1705932540000,
+         "half0": 185.39,
+         "int0": -47,
+         "kw0": [
+          "x-2",
+          "Alpha",
+          "user@example.com"
+         ],
+         "o": {
+          "kw0": "user@example.com"
+         },
+         "scaled0": 141.51,
+         "text0": "engine Quick dog over blue score the"
+        },
+        "highlight": {
+         "text0": [
+          "<em>engine</em> Quick dog"
+         ]
+        }
+       }
+      ],
+      "max_score": 0.2876821,
+      "total": {
+       "relation": "eq",
+       "value": 1
+      }
+     },
+     "timed_out": false,
+     "took": 20
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m19-a/_search"
+  }
+ ]
+}

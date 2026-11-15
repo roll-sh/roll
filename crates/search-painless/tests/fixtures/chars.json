@@ -1,0 +1,1732 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getType(65), Character.getType(97), Character.getType(453), Character.getType(688), Character.getType(1488), Character.getType(768), Character.getType(8413), Character.getType(2307), Character.getType(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, 2, 3, 4, 5, 6, 7, 8, 9]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLetter(65), Character.isLetter(97), Character.isLetter(453), Character.isLetter(688), Character.isLetter(1488), Character.isLetter(768), Character.isLetter(8413), Character.isLetter(2307), Character.isLetter(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, true, true, true, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isDigit(65), Character.isDigit(97), Character.isDigit(453), Character.isDigit(688), Character.isDigit(1488), Character.isDigit(768), Character.isDigit(8413), Character.isDigit(2307), Character.isDigit(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLetterOrDigit(65), Character.isLetterOrDigit(97), Character.isLetterOrDigit(453), Character.isLetterOrDigit(688), Character.isLetterOrDigit(1488), Character.isLetterOrDigit(768), Character.isLetterOrDigit(8413), Character.isLetterOrDigit(2307), Character.isLetterOrDigit(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, true, true, true, false, false, false, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isAlphabetic(65), Character.isAlphabetic(97), Character.isAlphabetic(453), Character.isAlphabetic(688), Character.isAlphabetic(1488), Character.isAlphabetic(768), Character.isAlphabetic(8413), Character.isAlphabetic(2307), Character.isAlphabetic(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, true, true, true, false, false, true, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isIdeographic(65), Character.isIdeographic(97), Character.isIdeographic(453), Character.isIdeographic(688), Character.isIdeographic(1488), Character.isIdeographic(768), Character.isIdeographic(8413), Character.isIdeographic(2307), Character.isIdeographic(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUpperCase(65), Character.isUpperCase(97), Character.isUpperCase(453), Character.isUpperCase(688), Character.isUpperCase(1488), Character.isUpperCase(768), Character.isUpperCase(8413), Character.isUpperCase(2307), Character.isUpperCase(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLowerCase(65), Character.isLowerCase(97), Character.isLowerCase(453), Character.isLowerCase(688), Character.isLowerCase(1488), Character.isLowerCase(768), Character.isLowerCase(8413), Character.isLowerCase(2307), Character.isLowerCase(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, true, false, true, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isTitleCase(65), Character.isTitleCase(97), Character.isTitleCase(453), Character.isTitleCase(688), Character.isTitleCase(1488), Character.isTitleCase(768), Character.isTitleCase(8413), Character.isTitleCase(2307), Character.isTitleCase(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, true, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isSpaceChar(65), Character.isSpaceChar(97), Character.isSpaceChar(453), Character.isSpaceChar(688), Character.isSpaceChar(1488), Character.isSpaceChar(768), Character.isSpaceChar(8413), Character.isSpaceChar(2307), Character.isSpaceChar(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isWhitespace(65), Character.isWhitespace(97), Character.isWhitespace(453), Character.isWhitespace(688), Character.isWhitespace(1488), Character.isWhitespace(768), Character.isWhitespace(8413), Character.isWhitespace(2307), Character.isWhitespace(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isDefined(65), Character.isDefined(97), Character.isDefined(453), Character.isDefined(688), Character.isDefined(1488), Character.isDefined(768), Character.isDefined(8413), Character.isDefined(2307), Character.isDefined(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, true, true, true, true, true, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isMirrored(65), Character.isMirrored(97), Character.isMirrored(453), Character.isMirrored(688), Character.isMirrored(1488), Character.isMirrored(768), Character.isMirrored(8413), Character.isMirrored(2307), Character.isMirrored(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isIdentifierIgnorable(65), Character.isIdentifierIgnorable(97), Character.isIdentifierIgnorable(453), Character.isIdentifierIgnorable(688), Character.isIdentifierIgnorable(1488), Character.isIdentifierIgnorable(768), Character.isIdentifierIgnorable(8413), Character.isIdentifierIgnorable(2307), Character.isIdentifierIgnorable(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isJavaIdentifierStart(65), Character.isJavaIdentifierStart(97), Character.isJavaIdentifierStart(453), Character.isJavaIdentifierStart(688), Character.isJavaIdentifierStart(1488), Character.isJavaIdentifierStart(768), Character.isJavaIdentifierStart(8413), Character.isJavaIdentifierStart(2307), Character.isJavaIdentifierStart(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, true, true, true, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isJavaIdentifierPart(65), Character.isJavaIdentifierPart(97), Character.isJavaIdentifierPart(453), Character.isJavaIdentifierPart(688), Character.isJavaIdentifierPart(1488), Character.isJavaIdentifierPart(768), Character.isJavaIdentifierPart(8413), Character.isJavaIdentifierPart(2307), Character.isJavaIdentifierPart(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, true, true, true, true, false, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUnicodeIdentifierStart(65), Character.isUnicodeIdentifierStart(97), Character.isUnicodeIdentifierStart(453), Character.isUnicodeIdentifierStart(688), Character.isUnicodeIdentifierStart(1488), Character.isUnicodeIdentifierStart(768), Character.isUnicodeIdentifierStart(8413), Character.isUnicodeIdentifierStart(2307), Character.isUnicodeIdentifierStart(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, true, true, true, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUnicodeIdentifierPart(65), Character.isUnicodeIdentifierPart(97), Character.isUnicodeIdentifierPart(453), Character.isUnicodeIdentifierPart(688), Character.isUnicodeIdentifierPart(1488), Character.isUnicodeIdentifierPart(768), Character.isUnicodeIdentifierPart(8413), Character.isUnicodeIdentifierPart(2307), Character.isUnicodeIdentifierPart(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, true, true, true, true, false, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getNumericValue(65), Character.getNumericValue(97), Character.getNumericValue(453), Character.getNumericValue(688), Character.getNumericValue(1488), Character.getNumericValue(768), Character.getNumericValue(8413), Character.getNumericValue(2307), Character.getNumericValue(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[10, 10, -1, -1, -1, -1, -1, -1, 3]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getDirectionality(65), Character.getDirectionality(97), Character.getDirectionality(453), Character.getDirectionality(688), Character.getDirectionality(1488), Character.getDirectionality(768), Character.getDirectionality(8413), Character.getDirectionality(2307), Character.getDirectionality(1635)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0, 0, 0, 0, 1, 8, 8, 0, 6]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getType(8544), Character.getType(178), Character.getType(32), Character.getType(8232), Character.getType(8233), Character.getType(7), Character.getType(173), Character.getType(57344), Character.getType(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[10, 11, 12, 13, 14, 15, 16, 18, 19]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLetter(8544), Character.isLetter(178), Character.isLetter(32), Character.isLetter(8232), Character.isLetter(8233), Character.isLetter(7), Character.isLetter(173), Character.isLetter(57344), Character.isLetter(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isDigit(8544), Character.isDigit(178), Character.isDigit(32), Character.isDigit(8232), Character.isDigit(8233), Character.isDigit(7), Character.isDigit(173), Character.isDigit(57344), Character.isDigit(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLetterOrDigit(8544), Character.isLetterOrDigit(178), Character.isLetterOrDigit(32), Character.isLetterOrDigit(8232), Character.isLetterOrDigit(8233), Character.isLetterOrDigit(7), Character.isLetterOrDigit(173), Character.isLetterOrDigit(57344), Character.isLetterOrDigit(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isAlphabetic(8544), Character.isAlphabetic(178), Character.isAlphabetic(32), Character.isAlphabetic(8232), Character.isAlphabetic(8233), Character.isAlphabetic(7), Character.isAlphabetic(173), Character.isAlphabetic(57344), Character.isAlphabetic(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isIdeographic(8544), Character.isIdeographic(178), Character.isIdeographic(32), Character.isIdeographic(8232), Character.isIdeographic(8233), Character.isIdeographic(7), Character.isIdeographic(173), Character.isIdeographic(57344), Character.isIdeographic(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUpperCase(8544), Character.isUpperCase(178), Character.isUpperCase(32), Character.isUpperCase(8232), Character.isUpperCase(8233), Character.isUpperCase(7), Character.isUpperCase(173), Character.isUpperCase(57344), Character.isUpperCase(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLowerCase(8544), Character.isLowerCase(178), Character.isLowerCase(32), Character.isLowerCase(8232), Character.isLowerCase(8233), Character.isLowerCase(7), Character.isLowerCase(173), Character.isLowerCase(57344), Character.isLowerCase(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isTitleCase(8544), Character.isTitleCase(178), Character.isTitleCase(32), Character.isTitleCase(8232), Character.isTitleCase(8233), Character.isTitleCase(7), Character.isTitleCase(173), Character.isTitleCase(57344), Character.isTitleCase(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isSpaceChar(8544), Character.isSpaceChar(178), Character.isSpaceChar(32), Character.isSpaceChar(8232), Character.isSpaceChar(8233), Character.isSpaceChar(7), Character.isSpaceChar(173), Character.isSpaceChar(57344), Character.isSpaceChar(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, true, true, true, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isWhitespace(8544), Character.isWhitespace(178), Character.isWhitespace(32), Character.isWhitespace(8232), Character.isWhitespace(8233), Character.isWhitespace(7), Character.isWhitespace(173), Character.isWhitespace(57344), Character.isWhitespace(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, true, true, true, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isDefined(8544), Character.isDefined(178), Character.isDefined(32), Character.isDefined(8232), Character.isDefined(8233), Character.isDefined(7), Character.isDefined(173), Character.isDefined(57344), Character.isDefined(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, true, true, true, true, true, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isMirrored(8544), Character.isMirrored(178), Character.isMirrored(32), Character.isMirrored(8232), Character.isMirrored(8233), Character.isMirrored(7), Character.isMirrored(173), Character.isMirrored(57344), Character.isMirrored(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isIdentifierIgnorable(8544), Character.isIdentifierIgnorable(178), Character.isIdentifierIgnorable(32), Character.isIdentifierIgnorable(8232), Character.isIdentifierIgnorable(8233), Character.isIdentifierIgnorable(7), Character.isIdentifierIgnorable(173), Character.isIdentifierIgnorable(57344), Character.isIdentifierIgnorable(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, true, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isJavaIdentifierStart(8544), Character.isJavaIdentifierStart(178), Character.isJavaIdentifierStart(32), Character.isJavaIdentifierStart(8232), Character.isJavaIdentifierStart(8233), Character.isJavaIdentifierStart(7), Character.isJavaIdentifierStart(173), Character.isJavaIdentifierStart(57344), Character.isJavaIdentifierStart(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isJavaIdentifierPart(8544), Character.isJavaIdentifierPart(178), Character.isJavaIdentifierPart(32), Character.isJavaIdentifierPart(8232), Character.isJavaIdentifierPart(8233), Character.isJavaIdentifierPart(7), Character.isJavaIdentifierPart(173), Character.isJavaIdentifierPart(57344), Character.isJavaIdentifierPart(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, false, false, false, false, true, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUnicodeIdentifierStart(8544), Character.isUnicodeIdentifierStart(178), Character.isUnicodeIdentifierStart(32), Character.isUnicodeIdentifierStart(8232), Character.isUnicodeIdentifierStart(8233), Character.isUnicodeIdentifierStart(7), Character.isUnicodeIdentifierStart(173), Character.isUnicodeIdentifierStart(57344), Character.isUnicodeIdentifierStart(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUnicodeIdentifierPart(8544), Character.isUnicodeIdentifierPart(178), Character.isUnicodeIdentifierPart(32), Character.isUnicodeIdentifierPart(8232), Character.isUnicodeIdentifierPart(8233), Character.isUnicodeIdentifierPart(7), Character.isUnicodeIdentifierPart(173), Character.isUnicodeIdentifierPart(57344), Character.isUnicodeIdentifierPart(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, false, false, false, false, true, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getNumericValue(8544), Character.getNumericValue(178), Character.getNumericValue(32), Character.getNumericValue(8232), Character.getNumericValue(8233), Character.getNumericValue(7), Character.getNumericValue(173), Character.getNumericValue(57344), Character.getNumericValue(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, 2, -1, -1, -1, -1, -1, -1, -1]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getDirectionality(8544), Character.getDirectionality(178), Character.getDirectionality(32), Character.getDirectionality(8232), Character.getDirectionality(8233), Character.getDirectionality(7), Character.getDirectionality(173), Character.getDirectionality(57344), Character.getDirectionality(55296)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0, 3, 12, 12, 10, 9, 9, 0, 0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getType(45), Character.getType(40), Character.getType(41), Character.getType(95), Character.getType(33), Character.getType(43), Character.getType(36), Character.getType(94), Character.getType(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[20, 21, 22, 23, 24, 25, 26, 27, 28]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLetter(45), Character.isLetter(40), Character.isLetter(41), Character.isLetter(95), Character.isLetter(33), Character.isLetter(43), Character.isLetter(36), Character.isLetter(94), Character.isLetter(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isDigit(45), Character.isDigit(40), Character.isDigit(41), Character.isDigit(95), Character.isDigit(33), Character.isDigit(43), Character.isDigit(36), Character.isDigit(94), Character.isDigit(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLetterOrDigit(45), Character.isLetterOrDigit(40), Character.isLetterOrDigit(41), Character.isLetterOrDigit(95), Character.isLetterOrDigit(33), Character.isLetterOrDigit(43), Character.isLetterOrDigit(36), Character.isLetterOrDigit(94), Character.isLetterOrDigit(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isAlphabetic(45), Character.isAlphabetic(40), Character.isAlphabetic(41), Character.isAlphabetic(95), Character.isAlphabetic(33), Character.isAlphabetic(43), Character.isAlphabetic(36), Character.isAlphabetic(94), Character.isAlphabetic(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isIdeographic(45), Character.isIdeographic(40), Character.isIdeographic(41), Character.isIdeographic(95), Character.isIdeographic(33), Character.isIdeographic(43), Character.isIdeographic(36), Character.isIdeographic(94), Character.isIdeographic(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUpperCase(45), Character.isUpperCase(40), Character.isUpperCase(41), Character.isUpperCase(95), Character.isUpperCase(33), Character.isUpperCase(43), Character.isUpperCase(36), Character.isUpperCase(94), Character.isUpperCase(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLowerCase(45), Character.isLowerCase(40), Character.isLowerCase(41), Character.isLowerCase(95), Character.isLowerCase(33), Character.isLowerCase(43), Character.isLowerCase(36), Character.isLowerCase(94), Character.isLowerCase(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isTitleCase(45), Character.isTitleCase(40), Character.isTitleCase(41), Character.isTitleCase(95), Character.isTitleCase(33), Character.isTitleCase(43), Character.isTitleCase(36), Character.isTitleCase(94), Character.isTitleCase(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isSpaceChar(45), Character.isSpaceChar(40), Character.isSpaceChar(41), Character.isSpaceChar(95), Character.isSpaceChar(33), Character.isSpaceChar(43), Character.isSpaceChar(36), Character.isSpaceChar(94), Character.isSpaceChar(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isWhitespace(45), Character.isWhitespace(40), Character.isWhitespace(41), Character.isWhitespace(95), Character.isWhitespace(33), Character.isWhitespace(43), Character.isWhitespace(36), Character.isWhitespace(94), Character.isWhitespace(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isDefined(45), Character.isDefined(40), Character.isDefined(41), Character.isDefined(95), Character.isDefined(33), Character.isDefined(43), Character.isDefined(36), Character.isDefined(94), Character.isDefined(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, true, true, true, true, true, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isMirrored(45), Character.isMirrored(40), Character.isMirrored(41), Character.isMirrored(95), Character.isMirrored(33), Character.isMirrored(43), Character.isMirrored(36), Character.isMirrored(94), Character.isMirrored(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, true, true, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isIdentifierIgnorable(45), Character.isIdentifierIgnorable(40), Character.isIdentifierIgnorable(41), Character.isIdentifierIgnorable(95), Character.isIdentifierIgnorable(33), Character.isIdentifierIgnorable(43), Character.isIdentifierIgnorable(36), Character.isIdentifierIgnorable(94), Character.isIdentifierIgnorable(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isJavaIdentifierStart(45), Character.isJavaIdentifierStart(40), Character.isJavaIdentifierStart(41), Character.isJavaIdentifierStart(95), Character.isJavaIdentifierStart(33), Character.isJavaIdentifierStart(43), Character.isJavaIdentifierStart(36), Character.isJavaIdentifierStart(94), Character.isJavaIdentifierStart(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, true, false, false, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isJavaIdentifierPart(45), Character.isJavaIdentifierPart(40), Character.isJavaIdentifierPart(41), Character.isJavaIdentifierPart(95), Character.isJavaIdentifierPart(33), Character.isJavaIdentifierPart(43), Character.isJavaIdentifierPart(36), Character.isJavaIdentifierPart(94), Character.isJavaIdentifierPart(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, true, false, false, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUnicodeIdentifierStart(45), Character.isUnicodeIdentifierStart(40), Character.isUnicodeIdentifierStart(41), Character.isUnicodeIdentifierStart(95), Character.isUnicodeIdentifierStart(33), Character.isUnicodeIdentifierStart(43), Character.isUnicodeIdentifierStart(36), Character.isUnicodeIdentifierStart(94), Character.isUnicodeIdentifierStart(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUnicodeIdentifierPart(45), Character.isUnicodeIdentifierPart(40), Character.isUnicodeIdentifierPart(41), Character.isUnicodeIdentifierPart(95), Character.isUnicodeIdentifierPart(33), Character.isUnicodeIdentifierPart(43), Character.isUnicodeIdentifierPart(36), Character.isUnicodeIdentifierPart(94), Character.isUnicodeIdentifierPart(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, true, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getNumericValue(45), Character.getNumericValue(40), Character.getNumericValue(41), Character.getNumericValue(95), Character.getNumericValue(33), Character.getNumericValue(43), Character.getNumericValue(36), Character.getNumericValue(94), Character.getNumericValue(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[-1, -1, -1, -1, -1, -1, -1, -1, -1]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getDirectionality(45), Character.getDirectionality(40), Character.getDirectionality(41), Character.getDirectionality(95), Character.getDirectionality(33), Character.getDirectionality(43), Character.getDirectionality(36), Character.getDirectionality(94), Character.getDirectionality(169)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[4, 13, 13, 13, 13, 4, 5, 13, 13]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getType(171), Character.getType(187), Character.getType(888), Character.getType(128512), Character.getType(19968), Character.getType(65313), Character.getType(120782), Character.getType(1114111), Character.getType(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[29, 30, 0, 28, 5, 1, 9, 0, 12]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLetter(171), Character.isLetter(187), Character.isLetter(888), Character.isLetter(128512), Character.isLetter(19968), Character.isLetter(65313), Character.isLetter(120782), Character.isLetter(1114111), Character.isLetter(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, true, true, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isDigit(171), Character.isDigit(187), Character.isDigit(888), Character.isDigit(128512), Character.isDigit(19968), Character.isDigit(65313), Character.isDigit(120782), Character.isDigit(1114111), Character.isDigit(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLetterOrDigit(171), Character.isLetterOrDigit(187), Character.isLetterOrDigit(888), Character.isLetterOrDigit(128512), Character.isLetterOrDigit(19968), Character.isLetterOrDigit(65313), Character.isLetterOrDigit(120782), Character.isLetterOrDigit(1114111), Character.isLetterOrDigit(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, true, true, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isAlphabetic(171), Character.isAlphabetic(187), Character.isAlphabetic(888), Character.isAlphabetic(128512), Character.isAlphabetic(19968), Character.isAlphabetic(65313), Character.isAlphabetic(120782), Character.isAlphabetic(1114111), Character.isAlphabetic(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, true, true, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isIdeographic(171), Character.isIdeographic(187), Character.isIdeographic(888), Character.isIdeographic(128512), Character.isIdeographic(19968), Character.isIdeographic(65313), Character.isIdeographic(120782), Character.isIdeographic(1114111), Character.isIdeographic(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, true, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUpperCase(171), Character.isUpperCase(187), Character.isUpperCase(888), Character.isUpperCase(128512), Character.isUpperCase(19968), Character.isUpperCase(65313), Character.isUpperCase(120782), Character.isUpperCase(1114111), Character.isUpperCase(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, true, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLowerCase(171), Character.isLowerCase(187), Character.isLowerCase(888), Character.isLowerCase(128512), Character.isLowerCase(19968), Character.isLowerCase(65313), Character.isLowerCase(120782), Character.isLowerCase(1114111), Character.isLowerCase(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isTitleCase(171), Character.isTitleCase(187), Character.isTitleCase(888), Character.isTitleCase(128512), Character.isTitleCase(19968), Character.isTitleCase(65313), Character.isTitleCase(120782), Character.isTitleCase(1114111), Character.isTitleCase(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isSpaceChar(171), Character.isSpaceChar(187), Character.isSpaceChar(888), Character.isSpaceChar(128512), Character.isSpaceChar(19968), Character.isSpaceChar(65313), Character.isSpaceChar(120782), Character.isSpaceChar(1114111), Character.isSpaceChar(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isWhitespace(171), Character.isWhitespace(187), Character.isWhitespace(888), Character.isWhitespace(128512), Character.isWhitespace(19968), Character.isWhitespace(65313), Character.isWhitespace(120782), Character.isWhitespace(1114111), Character.isWhitespace(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isDefined(171), Character.isDefined(187), Character.isDefined(888), Character.isDefined(128512), Character.isDefined(19968), Character.isDefined(65313), Character.isDefined(120782), Character.isDefined(1114111), Character.isDefined(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, false, true, true, true, true, false, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isMirrored(171), Character.isMirrored(187), Character.isMirrored(888), Character.isMirrored(128512), Character.isMirrored(19968), Character.isMirrored(65313), Character.isMirrored(120782), Character.isMirrored(1114111), Character.isMirrored(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isIdentifierIgnorable(171), Character.isIdentifierIgnorable(187), Character.isIdentifierIgnorable(888), Character.isIdentifierIgnorable(128512), Character.isIdentifierIgnorable(19968), Character.isIdentifierIgnorable(65313), Character.isIdentifierIgnorable(120782), Character.isIdentifierIgnorable(1114111), Character.isIdentifierIgnorable(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isJavaIdentifierStart(171), Character.isJavaIdentifierStart(187), Character.isJavaIdentifierStart(888), Character.isJavaIdentifierStart(128512), Character.isJavaIdentifierStart(19968), Character.isJavaIdentifierStart(65313), Character.isJavaIdentifierStart(120782), Character.isJavaIdentifierStart(1114111), Character.isJavaIdentifierStart(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, true, true, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isJavaIdentifierPart(171), Character.isJavaIdentifierPart(187), Character.isJavaIdentifierPart(888), Character.isJavaIdentifierPart(128512), Character.isJavaIdentifierPart(19968), Character.isJavaIdentifierPart(65313), Character.isJavaIdentifierPart(120782), Character.isJavaIdentifierPart(1114111), Character.isJavaIdentifierPart(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, true, true, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUnicodeIdentifierStart(171), Character.isUnicodeIdentifierStart(187), Character.isUnicodeIdentifierStart(888), Character.isUnicodeIdentifierStart(128512), Character.isUnicodeIdentifierStart(19968), Character.isUnicodeIdentifierStart(65313), Character.isUnicodeIdentifierStart(120782), Character.isUnicodeIdentifierStart(1114111), Character.isUnicodeIdentifierStart(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, true, true, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUnicodeIdentifierPart(171), Character.isUnicodeIdentifierPart(187), Character.isUnicodeIdentifierPart(888), Character.isUnicodeIdentifierPart(128512), Character.isUnicodeIdentifierPart(19968), Character.isUnicodeIdentifierPart(65313), Character.isUnicodeIdentifierPart(120782), Character.isUnicodeIdentifierPart(1114111), Character.isUnicodeIdentifierPart(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, true, true, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getNumericValue(171), Character.getNumericValue(187), Character.getNumericValue(888), Character.getNumericValue(128512), Character.getNumericValue(19968), Character.getNumericValue(65313), Character.getNumericValue(120782), Character.getNumericValue(1114111), Character.getNumericValue(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[-1, -1, -1, -1, -1, 10, 0, -1, -1]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getDirectionality(171), Character.getDirectionality(187), Character.getDirectionality(888), Character.getDirectionality(128512), Character.getDirectionality(19968), Character.getDirectionality(65313), Character.getDirectionality(120782), Character.getDirectionality(1114111), Character.getDirectionality(160)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[13, 13, -1, 13, 0, 0, 3, -1, 7]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getType(8199), Character.getType(9), Character.getType(28), Character.getType(133), Character.getType(1632), Character.getType(1779), Character.getType(1575), Character.getType(1489), Character.getType(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[12, 15, 15, 15, 9, 9, 5, 5, 4]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLetter(8199), Character.isLetter(9), Character.isLetter(28), Character.isLetter(133), Character.isLetter(1632), Character.isLetter(1779), Character.isLetter(1575), Character.isLetter(1489), Character.isLetter(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, true, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isDigit(8199), Character.isDigit(9), Character.isDigit(28), Character.isDigit(133), Character.isDigit(1632), Character.isDigit(1779), Character.isDigit(1575), Character.isDigit(1489), Character.isDigit(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, true, true, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLetterOrDigit(8199), Character.isLetterOrDigit(9), Character.isLetterOrDigit(28), Character.isLetterOrDigit(133), Character.isLetterOrDigit(1632), Character.isLetterOrDigit(1779), Character.isLetterOrDigit(1575), Character.isLetterOrDigit(1489), Character.isLetterOrDigit(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, true, true, true, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isAlphabetic(8199), Character.isAlphabetic(9), Character.isAlphabetic(28), Character.isAlphabetic(133), Character.isAlphabetic(1632), Character.isAlphabetic(1779), Character.isAlphabetic(1575), Character.isAlphabetic(1489), Character.isAlphabetic(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, true, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isIdeographic(8199), Character.isIdeographic(9), Character.isIdeographic(28), Character.isIdeographic(133), Character.isIdeographic(1632), Character.isIdeographic(1779), Character.isIdeographic(1575), Character.isIdeographic(1489), Character.isIdeographic(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUpperCase(8199), Character.isUpperCase(9), Character.isUpperCase(28), Character.isUpperCase(133), Character.isUpperCase(1632), Character.isUpperCase(1779), Character.isUpperCase(1575), Character.isUpperCase(1489), Character.isUpperCase(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLowerCase(8199), Character.isLowerCase(9), Character.isLowerCase(28), Character.isLowerCase(133), Character.isLowerCase(1632), Character.isLowerCase(1779), Character.isLowerCase(1575), Character.isLowerCase(1489), Character.isLowerCase(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isTitleCase(8199), Character.isTitleCase(9), Character.isTitleCase(28), Character.isTitleCase(133), Character.isTitleCase(1632), Character.isTitleCase(1779), Character.isTitleCase(1575), Character.isTitleCase(1489), Character.isTitleCase(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isSpaceChar(8199), Character.isSpaceChar(9), Character.isSpaceChar(28), Character.isSpaceChar(133), Character.isSpaceChar(1632), Character.isSpaceChar(1779), Character.isSpaceChar(1575), Character.isSpaceChar(1489), Character.isSpaceChar(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isWhitespace(8199), Character.isWhitespace(9), Character.isWhitespace(28), Character.isWhitespace(133), Character.isWhitespace(1632), Character.isWhitespace(1779), Character.isWhitespace(1575), Character.isWhitespace(1489), Character.isWhitespace(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, true, true, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isDefined(8199), Character.isDefined(9), Character.isDefined(28), Character.isDefined(133), Character.isDefined(1632), Character.isDefined(1779), Character.isDefined(1575), Character.isDefined(1489), Character.isDefined(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, true, true, true, true, true, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isMirrored(8199), Character.isMirrored(9), Character.isMirrored(28), Character.isMirrored(133), Character.isMirrored(1632), Character.isMirrored(1779), Character.isMirrored(1575), Character.isMirrored(1489), Character.isMirrored(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isIdentifierIgnorable(8199), Character.isIdentifierIgnorable(9), Character.isIdentifierIgnorable(28), Character.isIdentifierIgnorable(133), Character.isIdentifierIgnorable(1632), Character.isIdentifierIgnorable(1779), Character.isIdentifierIgnorable(1575), Character.isIdentifierIgnorable(1489), Character.isIdentifierIgnorable(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, true, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isJavaIdentifierStart(8199), Character.isJavaIdentifierStart(9), Character.isJavaIdentifierStart(28), Character.isJavaIdentifierStart(133), Character.isJavaIdentifierStart(1632), Character.isJavaIdentifierStart(1779), Character.isJavaIdentifierStart(1575), Character.isJavaIdentifierStart(1489), Character.isJavaIdentifierStart(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, true, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isJavaIdentifierPart(8199), Character.isJavaIdentifierPart(9), Character.isJavaIdentifierPart(28), Character.isJavaIdentifierPart(133), Character.isJavaIdentifierPart(1632), Character.isJavaIdentifierPart(1779), Character.isJavaIdentifierPart(1575), Character.isJavaIdentifierPart(1489), Character.isJavaIdentifierPart(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, true, true, true, true, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUnicodeIdentifierStart(8199), Character.isUnicodeIdentifierStart(9), Character.isUnicodeIdentifierStart(28), Character.isUnicodeIdentifierStart(133), Character.isUnicodeIdentifierStart(1632), Character.isUnicodeIdentifierStart(1779), Character.isUnicodeIdentifierStart(1575), Character.isUnicodeIdentifierStart(1489), Character.isUnicodeIdentifierStart(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, true, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUnicodeIdentifierPart(8199), Character.isUnicodeIdentifierPart(9), Character.isUnicodeIdentifierPart(28), Character.isUnicodeIdentifierPart(133), Character.isUnicodeIdentifierPart(1632), Character.isUnicodeIdentifierPart(1779), Character.isUnicodeIdentifierPart(1575), Character.isUnicodeIdentifierPart(1489), Character.isUnicodeIdentifierPart(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, true, true, true, true, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getNumericValue(8199), Character.getNumericValue(9), Character.getNumericValue(28), Character.getNumericValue(133), Character.getNumericValue(1632), Character.getNumericValue(1779), Character.getNumericValue(1575), Character.getNumericValue(1489), Character.getNumericValue(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[-1, -1, -1, -1, 0, 3, -1, -1, -1]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getDirectionality(8199), Character.getDirectionality(9), Character.getDirectionality(28), Character.getDirectionality(133), Character.getDirectionality(1632), Character.getDirectionality(1779), Character.getDirectionality(1575), Character.getDirectionality(1489), Character.getDirectionality(11823)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[12, 11, 10, 10, 6, 3, 2, 1, 13]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getType(8205), Character.getType(119808), Character.getType(12295), Character.getType(5870), Character.getType(837), Character.getType(8560), Character.getType(9398), Character.getType(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[16, 1, 10, 10, 6, 10, 28, 11]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLetter(8205), Character.isLetter(119808), Character.isLetter(12295), Character.isLetter(5870), Character.isLetter(837), Character.isLetter(8560), Character.isLetter(9398), Character.isLetter(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, true, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isDigit(8205), Character.isDigit(119808), Character.isDigit(12295), Character.isDigit(5870), Character.isDigit(837), Character.isDigit(8560), Character.isDigit(9398), Character.isDigit(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLetterOrDigit(8205), Character.isLetterOrDigit(119808), Character.isLetterOrDigit(12295), Character.isLetterOrDigit(5870), Character.isLetterOrDigit(837), Character.isLetterOrDigit(8560), Character.isLetterOrDigit(9398), Character.isLetterOrDigit(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, true, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isAlphabetic(8205), Character.isAlphabetic(119808), Character.isAlphabetic(12295), Character.isAlphabetic(5870), Character.isAlphabetic(837), Character.isAlphabetic(8560), Character.isAlphabetic(9398), Character.isAlphabetic(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, true, true, true, true, true, true, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isIdeographic(8205), Character.isIdeographic(119808), Character.isIdeographic(12295), Character.isIdeographic(5870), Character.isIdeographic(837), Character.isIdeographic(8560), Character.isIdeographic(9398), Character.isIdeographic(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, true, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUpperCase(8205), Character.isUpperCase(119808), Character.isUpperCase(12295), Character.isUpperCase(5870), Character.isUpperCase(837), Character.isUpperCase(8560), Character.isUpperCase(9398), Character.isUpperCase(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, true, false, false, false, false, true, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isLowerCase(8205), Character.isLowerCase(119808), Character.isLowerCase(12295), Character.isLowerCase(5870), Character.isLowerCase(837), Character.isLowerCase(8560), Character.isLowerCase(9398), Character.isLowerCase(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, true, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isTitleCase(8205), Character.isTitleCase(119808), Character.isTitleCase(12295), Character.isTitleCase(5870), Character.isTitleCase(837), Character.isTitleCase(8560), Character.isTitleCase(9398), Character.isTitleCase(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isSpaceChar(8205), Character.isSpaceChar(119808), Character.isSpaceChar(12295), Character.isSpaceChar(5870), Character.isSpaceChar(837), Character.isSpaceChar(8560), Character.isSpaceChar(9398), Character.isSpaceChar(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isWhitespace(8205), Character.isWhitespace(119808), Character.isWhitespace(12295), Character.isWhitespace(5870), Character.isWhitespace(837), Character.isWhitespace(8560), Character.isWhitespace(9398), Character.isWhitespace(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isDefined(8205), Character.isDefined(119808), Character.isDefined(12295), Character.isDefined(5870), Character.isDefined(837), Character.isDefined(8560), Character.isDefined(9398), Character.isDefined(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, true, true, true, true, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isMirrored(8205), Character.isMirrored(119808), Character.isMirrored(12295), Character.isMirrored(5870), Character.isMirrored(837), Character.isMirrored(8560), Character.isMirrored(9398), Character.isMirrored(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isIdentifierIgnorable(8205), Character.isIdentifierIgnorable(119808), Character.isIdentifierIgnorable(12295), Character.isIdentifierIgnorable(5870), Character.isIdentifierIgnorable(837), Character.isIdentifierIgnorable(8560), Character.isIdentifierIgnorable(9398), Character.isIdentifierIgnorable(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, false, false, false, false, false, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isJavaIdentifierStart(8205), Character.isJavaIdentifierStart(119808), Character.isJavaIdentifierStart(12295), Character.isJavaIdentifierStart(5870), Character.isJavaIdentifierStart(837), Character.isJavaIdentifierStart(8560), Character.isJavaIdentifierStart(9398), Character.isJavaIdentifierStart(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, true, true, true, false, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isJavaIdentifierPart(8205), Character.isJavaIdentifierPart(119808), Character.isJavaIdentifierPart(12295), Character.isJavaIdentifierPart(5870), Character.isJavaIdentifierPart(837), Character.isJavaIdentifierPart(8560), Character.isJavaIdentifierPart(9398), Character.isJavaIdentifierPart(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, true, true, true, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUnicodeIdentifierStart(8205), Character.isUnicodeIdentifierStart(119808), Character.isUnicodeIdentifierStart(12295), Character.isUnicodeIdentifierStart(5870), Character.isUnicodeIdentifierStart(837), Character.isUnicodeIdentifierStart(8560), Character.isUnicodeIdentifierStart(9398), Character.isUnicodeIdentifierStart(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[false, true, true, true, false, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.isUnicodeIdentifierPart(8205), Character.isUnicodeIdentifierPart(119808), Character.isUnicodeIdentifierPart(12295), Character.isUnicodeIdentifierPart(5870), Character.isUnicodeIdentifierPart(837), Character.isUnicodeIdentifierPart(8560), Character.isUnicodeIdentifierPart(9398), Character.isUnicodeIdentifierPart(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, true, true, true, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getNumericValue(8205), Character.getNumericValue(119808), Character.getNumericValue(12295), Character.getNumericValue(5870), Character.getNumericValue(837), Character.getNumericValue(8560), Character.getNumericValue(9398), Character.getNumericValue(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[-1, -1, 0, 17, -1, 1, -1, -2]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getDirectionality(8205), Character.getDirectionality(119808), Character.getDirectionality(12295), Character.getDirectionality(5870), Character.getDirectionality(837), Character.getDirectionality(8560), Character.getDirectionality(9398), Character.getDirectionality(188)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[9, 0, 0, 0, 8, 0, 0, 13]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.digit(0x663, 10), Character.digit(0xFF3A, 36), Character.digit(0x41, 10), Character.digit(0x1D7D7, 10), Character.digit(0x39, 99)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[3, 35, -1, 9, -1]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.toTitleCase((char)0x1C6), Character.toTitleCase((char)0x61), Character.toTitleCase((char)0x1C5), Character.toTitleCase((char)0xDF)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[ǅ, A, ǅ, ß]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "char[] c = new char[] {(char)0x41, (char)0xD83D, (char)0xDE00, (char)0x42}; return [Character.codePointAt(c, 1, 4), Character.codePointAt(c, 1, 2), Character.codePointBefore(c, 3, 0), Character.codePointBefore(c, 3, 2), Character.offsetByCodePoints(c, 0, 4, 0, 2), Character.offsetByCodePoints(c, 0, 4, 4, -2)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[128512, 55357, 128512, 56832, 3, 1]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String s = 'a' + new String(Character.toChars(0x1F600)) + 'b'; return [Character.codePointBefore(s, 3), Character.codePointCount(s, 0, 4), Character.offsetByCodePoints(s, 0, 2), Character.offsetByCodePoints(s, 4, -2)]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "String s = 'a' + new String(Character.toCh ...",
+       "                 ^---- HERE"
+      ],
+      "script": "String s = 'a' + new String(Character.toChars(0x1F600)) + 'b'; return [Character.codePointBefore(s, 3), Character.codePointCount(s, 0, 4), Character.offsetByCodePoints(s, 0, 2), Character.offsetByCodePoints(s, 4, -2)]",
+      "lang": "painless",
+      "position": {
+       "offset": 17,
+       "start": 0,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "String s = 'a' + new String(Character.toCh ...",
+     "                 ^---- HERE"
+    ],
+    "script": "String s = 'a' + new String(Character.toChars(0x1F600)) + 'b'; return [Character.codePointBefore(s, 3), Character.codePointCount(s, 0, 4), Character.offsetByCodePoints(s, 0, 2), Character.offsetByCodePoints(s, 4, -2)]",
+    "lang": "painless",
+    "position": {
+     "offset": 17,
+     "start": 0,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "constructor [java.lang.String, <init>/1] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "char[] d = new char[3]; int n = Character.toChars(0x1F600, d, 1); return [n, (int) d[1], (int) d[2]]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[2, 55357, 56832]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Character.codePointBefore('abc', 0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:55)",
+       "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:52)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.lang.String.checkIndex(String.java:5279)",
+       "java.base/java.lang.StringLatin1.charAt(StringLatin1.java:58)",
+       "java.base/java.lang.String.charAt(String.java:1843)",
+       "java.base/java.lang.Character.codePointBefore(Character.java:9882)",
+       "return Character.codePointBefore('abc', 0)",
+       "                                 ^---- HERE"
+      ],
+      "script": "return Character.codePointBefore('abc', 0)",
+      "lang": "painless",
+      "position": {
+       "offset": 33,
+       "start": 0,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:55)",
+     "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:52)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.lang.String.checkIndex(String.java:5279)",
+     "java.base/java.lang.StringLatin1.charAt(StringLatin1.java:58)",
+     "java.base/java.lang.String.charAt(String.java:1843)",
+     "java.base/java.lang.Character.codePointBefore(Character.java:9882)",
+     "return Character.codePointBefore('abc', 0)",
+     "                                 ^---- HERE"
+    ],
+    "script": "return Character.codePointBefore('abc', 0)",
+    "lang": "painless",
+    "position": {
+     "offset": 33,
+     "start": 0,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "string_index_out_of_bounds_exception",
+     "reason": "Index -1 out of bounds for length 3"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Character.codePointAt(new char[] {(char)65}, 1, 1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.lang.Character.codePointAt(Character.java:9843)",
+       "return Character.codePointAt(new char[] {(char)65}, 1, 1)",
+       "                             ^---- HERE"
+      ],
+      "script": "return Character.codePointAt(new char[] {(char)65}, 1, 1)",
+      "lang": "painless",
+      "position": {
+       "offset": 29,
+       "start": 0,
+       "end": 57
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.lang.Character.codePointAt(Character.java:9843)",
+     "return Character.codePointAt(new char[] {(char)65}, 1, 1)",
+     "                             ^---- HERE"
+    ],
+    "script": "return Character.codePointAt(new char[] {(char)65}, 1, 1)",
+    "lang": "painless",
+    "position": {
+     "offset": 29,
+     "start": 0,
+     "end": 57
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Character.toChars(0x110000, new char[2], 0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.lang.Character.toChars(Character.java:10060)",
+       "return Character.toChars(0x110000, new char[2], 0)",
+       "                                   ^---- HERE"
+      ],
+      "script": "return Character.toChars(0x110000, new char[2], 0)",
+      "lang": "painless",
+      "position": {
+       "offset": 35,
+       "start": 0,
+       "end": 50
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.lang.Character.toChars(Character.java:10060)",
+     "return Character.toChars(0x110000, new char[2], 0)",
+     "                                   ^---- HERE"
+    ],
+    "script": "return Character.toChars(0x110000, new char[2], 0)",
+    "lang": "painless",
+    "position": {
+     "offset": 35,
+     "start": 0,
+     "end": 50
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Not a valid Unicode code point: 0x110000"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.UPPERCASE_LETTER, Character.FINAL_QUOTE_PUNCTUATION, Character.DIRECTIONALITY_UNDEFINED, Character.DIRECTIONALITY_POP_DIRECTIONAL_FORMAT]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, 30, -1, 18]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Character.getName(65), Character.getName(0x1F600), Character.getName(0x378)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[LATIN CAPITAL LETTER A, GRINNING FACE, null]"
+  }
+ }
+]

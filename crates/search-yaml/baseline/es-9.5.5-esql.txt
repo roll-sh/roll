@@ -1,0 +1,552 @@
+# Tests of Elasticsearch 9.5.5's `esql` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain runner=--esql-not-partial setting=esql.federation.enabled=true config=ingest-geoip/GeoLite2-City.mmdb:test/fixtures/geoip-fixture/src/main/resources/geoip-fixture/GeoLite2-City.mmdb config=ingest-geoip/GeoLite2-Country.mmdb:test/fixtures/geoip-fixture/src/main/resources/geoip-fixture/GeoLite2-Country.mmdb config=ingest-geoip/GeoLite2-ASN.mmdb:test/fixtures/geoip-fixture/src/main/resources/geoip-fixture/GeoLite2-ASN.mmdb).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+esql:esql/100_bug_fix/Coalesce and to_ip functions
+esql:esql/100_bug_fix/Limit truncation with zero columns #142473
+esql:esql/100_bug_fix/SET reports correct line/column in validation errors #145873
+esql:esql/100_bug_fix/grok with duplicate names and different types #110533
+esql:esql/100_bug_fix/mv_dedupe from index #104745
+esql:esql/100_bug_fix/null MappedFieldType on single value detection #103141
+esql:esql/100_bug_fix/text in functions #105379
+esql:esql/100_bug_fix/union types with null blocks from missing fields #125850
+esql:esql/100_bug_fix/unsupported and invalid mapped fields
+esql:esql/10_basic/Drop all columns after eval where false
+esql:esql/10_basic/Drop all columns after stats
+esql:esql/10_basic/Drop all columns then stats by constant
+esql:esql/10_basic/Drop all columns with fork
+esql:esql/10_basic/Drop all columns with fork drop all
+esql:esql/10_basic/Drop all columns with fork drop all count
+esql:esql/10_basic/Drop all columns with inline stats 
+esql:esql/10_basic/Drop all columns with inline stats and by
+esql:esql/10_basic/Drop all columns with mutiple indices
+esql:esql/10_basic/Empty list named param is treated as null
+esql:esql/10_basic/Empty list named param rejected for identifier or pattern
+esql:esql/10_basic/Empty list param executes correctly with real index data
+esql:esql/10_basic/Empty list positional param is treated as null
+esql:esql/10_basic/FROM EVAL SORT LIMIT
+esql:esql/10_basic/FROM EVAL SORT LIMIT with documents_found
+esql:esql/10_basic/No columns left after drop
+esql:esql/10_basic/Stats by constant
+esql:esql/10_basic/Stats by constant with no rows
+esql:esql/10_basic/Test Eval With Multiple Expressions
+esql:esql/10_basic/Test From
+esql:esql/10_basic/Test From Sort Limit
+esql:esql/10_basic/Test Input Params
+esql:esql/10_basic/Test Internal Range
+esql:esql/10_basic/Test Interval in Input Params
+esql:esql/10_basic/Test Multi Limit Project
+esql:esql/10_basic/Test Named Input Params
+esql:esql/10_basic/Test Named Input Params For Field Names
+esql:esql/10_basic/Test Named, Multivalued Input Params
+esql:esql/10_basic/Test TopN keep Eval
+esql:esql/10_basic/Test TopN keep Eval Project
+esql:esql/10_basic/Test Unnamed Input Params
+esql:esql/10_basic/Test Unnamed Input Params Also For Limit And Sample
+esql:esql/10_basic/Test Unnamed, Multivalued Input Params
+esql:esql/10_basic/Test keep After TopN
+esql:esql/10_basic/Test keep After TopN Desc
+esql:esql/10_basic/Test wrong LIMIT parameter
+esql:esql/10_basic/basic
+esql:esql/10_basic/basic with documents_found
+esql:esql/10_basic/version is not allowed
+esql:esql/110_all_null/columnar and drop null
+esql:esql/110_all_null/columnar and keep null
+esql:esql/110_all_null/row wise and drop null
+esql:esql/110_all_null/row wise and keep null
+esql:esql/120_profile/avg 8.14 or after
+esql:esql/120_profile/documents found
+esql:esql/130_spatial/cartesian_point
+esql:esql/130_spatial/cartesian_point unsortable
+esql:esql/130_spatial/cartesian_point unsortable status code
+esql:esql/130_spatial/cartesian_point unsortable with limit
+esql:esql/130_spatial/cartesian_point unsortable with limit from row
+esql:esql/130_spatial/cartesian_point unsortable with limit status code
+esql:esql/130_spatial/cartesian_shape
+esql:esql/130_spatial/cartesian_shape unsortable
+esql:esql/130_spatial/cartesian_shape unsortable status code
+esql:esql/130_spatial/cartesian_shape unsortable with limit
+esql:esql/130_spatial/cartesian_shape unsortable with limit from row
+esql:esql/130_spatial/cartesian_shape unsortable with limit status code
+esql:esql/130_spatial/geo_point
+esql:esql/130_spatial/geo_point unsortable
+esql:esql/130_spatial/geo_point unsortable status
+esql:esql/130_spatial/geo_point unsortable with limit
+esql:esql/130_spatial/geo_point unsortable with limit from row
+esql:esql/130_spatial/geo_point unsortable with limit status
+esql:esql/130_spatial/geo_shape
+esql:esql/130_spatial/geo_shape unsortable
+esql:esql/130_spatial/geo_shape unsortable status code
+esql:esql/130_spatial/geo_shape unsortable with limit
+esql:esql/130_spatial/geo_shape unsortable with limit from row
+esql:esql/130_spatial/geo_shape unsortable with limit status code
+esql:esql/130_spatial/geohash unsortable
+esql:esql/130_spatial/geohex unsortable
+esql:esql/130_spatial/geotile unsortable
+esql:esql/130_spatial/values supported for geo_point
+esql:esql/131_spatial_extra/st_dimension on cartesian_point with missing values
+esql:esql/131_spatial_extra/st_dimension on cartesian_shape with mixed types and missing values
+esql:esql/131_spatial_extra/st_dimension on geo_point with missing values
+esql:esql/131_spatial_extra/st_dimension on geo_shape with mixed types and missing values
+esql:esql/131_spatial_extra/st_geometrytype on cartesian_point with missing values
+esql:esql/131_spatial_extra/st_geometrytype on cartesian_shape with mixed types and missing values
+esql:esql/131_spatial_extra/st_geometrytype on geo_point with missing values
+esql:esql/131_spatial_extra/st_geometrytype on geo_shape with mixed types and missing values
+esql:esql/131_spatial_extra/st_isempty on cartesian_point with missing values
+esql:esql/131_spatial_extra/st_isempty on cartesian_shape with mixed types and missing values
+esql:esql/131_spatial_extra/st_isempty on geo_point with missing values
+esql:esql/131_spatial_extra/st_isempty on geo_shape with mixed types and missing values
+esql:esql/140_metadata/Aggregate ignored field
+esql:esql/140_metadata/All fields correct
+esql:esql/140_metadata/All fields ignored
+esql:esql/140_metadata/Count_distinct on _source is a 400 error
+esql:esql/140_metadata/Filter by ignored
+esql:esql/140_metadata/Group by ignored field
+esql:esql/140_metadata/One ignored field
+esql:esql/140_metadata/sort on _source not allowed
+esql:esql/140_metadata/sort returning _source is allowed
+esql:esql/140_metadata/source meta field and dynamic false
+esql:esql/140_metadata/source meta field and keep
+esql:esql/150_lookup/index named lookup still works
+esql:esql/160_union_types/CASE
+esql:esql/160_union_types/load four indices with multiple conversion functions TO_LONG and TO_IP
+esql:esql/160_union_types/load four indices with single conversion function TO_IP
+esql:esql/160_union_types/load four indices with single conversion function TO_LONG
+esql:esql/160_union_types/load single index ip_long
+esql:esql/160_union_types/load single index ip_long and aggregate by client_ip
+esql:esql/160_union_types/load single index ip_long and aggregate client_ip my message
+esql:esql/160_union_types/load single index ip_long stats invalid grouping
+esql:esql/160_union_types/load single index keyword_keyword
+esql:esql/160_union_types/load two indexes and aggregate converted client_ip
+esql:esql/160_union_types/load two indexes and group by converted client_ip
+esql:esql/160_union_types/load two indexes, convert client_ip and group by something invalid
+esql:esql/160_union_types/load two indices and drop ambiguous field client_ip
+esql:esql/160_union_types/load two indices and drop ambiguous field event_duration
+esql:esql/160_union_types/load two indices with incorrect conversion function, TO_IP instead of TO_LONG
+esql:esql/160_union_types/load two indices with incorrect conversion function, TO_LONG instead of TO_IP
+esql:esql/160_union_types/load two indices with no conversion function, but needs TO_IP conversion
+esql:esql/160_union_types/load two indices with single conversion function TO_IP
+esql:esql/160_union_types/load two indices with single conversion function TO_LONG
+esql:esql/160_union_types/load two indices, convert and then drop ambiguous field client_ip
+esql:esql/160_union_types/load two indices, convert and then drop ambiguous field event_duration
+esql:esql/160_union_types/load two indices, convert, rename and then drop ambiguous field client_ip
+esql:esql/160_union_types/load two indices, convert, rename and then drop ambiguous field event_duration
+esql:esql/160_union_types/load two indices, convert, rename but not drop ambiguous field client_ip
+esql:esql/160_union_types/load two indices, convert, rename but not drop ambiguous field event_duration
+esql:esql/160_union_types/load two indices, showing unsupported type and null value for client_ip
+esql:esql/160_union_types/suggested_type
+esql:esql/161_union_types_subfields/load single index
+esql:esql/161_union_types_subfields/load two indices with to_string
+esql:esql/161_union_types_subfields/load two indices with to_version
+esql:esql/161_union_types_subfields/load two indices with to_version and to_string
+esql:esql/161_union_types_subfields/load two indices with to_version and to_string nested and un-nested
+esql:esql/162_nested_field_conflicts/BYTES_REF vs LONG nested conflict
+esql:esql/162_nested_field_conflicts/DOUBLE vs LONG nested conflict
+esql:esql/162_nested_field_conflicts/KEEP and SORT: nested integer vs object long
+esql:esql/162_nested_field_conflicts/WHERE IS NOT NULL keeps only the object-index rows
+esql:esql/162_nested_field_conflicts/aggregation: SUM and COUNT skip nested values
+esql:esql/162_nested_field_conflicts/deep path: nested parent with intermediate object
+esql:esql/162_nested_field_conflicts/explicit long cast still nullifies the nested shard
+esql:esql/162_nested_field_conflicts/include_in_root does not leak nested values
+esql:esql/162_nested_field_conflicts/nested-only index does not resolve the nested subfield
+esql:esql/162_nested_field_conflicts/unmapped_fields=load does not re-open the nested type-skew path
+esql:esql/170_no_replicas/Test From 1
+esql:esql/170_no_replicas/Test From 5
+esql:esql/180_match_operator/combined where match
+esql:esql/180_match_operator/match after stats
+esql:esql/180_match_operator/match on non existing column
+esql:esql/180_match_operator/match on non-mapped column
+esql:esql/180_match_operator/match on overwritten column with non-mapped value
+esql:esql/180_match_operator/match with disjunctions
+esql:esql/180_match_operator/match with integer field
+esql:esql/180_match_operator/match within eval
+esql:esql/180_match_operator/multiple match
+esql:esql/180_match_operator/not where match
+esql:esql/180_match_operator/simple where match
+esql:esql/190_lookup_join/basic
+esql:esql/190_lookup_join/basic join on two fields
+esql:esql/190_lookup_join/constant field filter does not match
+esql:esql/190_lookup_join/constant field filter matches
+esql:esql/190_lookup_join/fails with non-lookup index v2
+esql:esql/190_lookup_join/lookup-no-key
+esql:esql/190_lookup_join/lookup-no-key-only-key
+esql:esql/190_lookup_join/mv-on-lookup
+esql:esql/190_lookup_join/mv-on-query
+esql:esql/190_lookup_join/pattern-multiple
+esql:esql/190_lookup_join/pattern-single
+esql:esql/191_lookup_join_on_datastreams/data streams supported in LOOKUP JOIN
+esql:esql/191_lookup_join_text/keyword-keyword
+esql:esql/191_lookup_join_text/keyword-text
+esql:esql/191_lookup_join_text/text-keyword
+esql:esql/191_lookup_join_text/text-text
+esql:esql/192_lookup_join_on_aliases/alias-as-lookup-index
+esql:esql/192_lookup_join_on_aliases/alias-pattern-single
+esql:esql/192_lookup_join_on_aliases/alias-repeated-alias
+esql:esql/192_lookup_join_on_aliases/alias-repeated-index
+esql:esql/192_lookup_join_on_aliases/fails when alias or pattern resolves to multiple v2
+esql:esql/192_unmapped_load_partial_non_keyword/date-nanos-punks
+esql:esql/192_unmapped_load_partial_non_keyword/date-nanos-punks-2
+esql:esql/192_unmapped_load_partial_non_keyword/rename-punks
+esql:esql/192_unmapped_load_partial_non_keyword/sort-punks
+esql:esql/192_unmapped_load_partial_non_keyword/where-punks
+esql:esql/192_unmapped_load_partial_non_keyword/where-punks-nullified-per-index
+esql:esql/200_queries/Get with invalid task ID
+esql:esql/200_queries/Get with non-existent task ID
+esql:esql/200_queries/List with no running queries
+esql:esql/200_view/abstraction-name-conflicts
+esql:esql/200_view/crud
+esql:esql/200_view/cyclic-view-chain
+esql:esql/200_view/cyclic-view-mutual-reference
+esql:esql/200_view/cyclic-view-self-reference
+esql:esql/200_view/delete-all-views
+esql:esql/200_view/delete-multiple-views
+esql:esql/200_view/delete-multiple-views-one-missing
+esql:esql/200_view/delete-multiple-views-with-wildcard
+esql:esql/200_view/invalid-operations
+esql:esql/200_view/invalid-views
+esql:esql/200_view/query-from-multiple-views
+esql:esql/200_view/query-from-nested-views
+esql:esql/200_view/query-from-view
+esql:esql/200_view/query-view-with-outer-params
+esql:esql/200_view/view-name-conflicts
+esql:esql/200_view/view-refers-to-nonexistent-index
+esql:esql/200_view/view-with-wildcard-matching-view
+esql:esql/20_aggs/Test Eval Row With Null
+esql:esql/20_aggs/Test Eval With Multiple Expressions
+esql:esql/20_aggs/Test Eval With Null
+esql:esql/20_aggs/Test Eval With Null And Count
+esql:esql/20_aggs/Test From
+esql:esql/20_aggs/Test From Stats Avg
+esql:esql/20_aggs/Test From Stats Avg With Alias
+esql:esql/20_aggs/Test From Stats Count
+esql:esql/20_aggs/Test From Stats Count With Alias
+esql:esql/20_aggs/Test From Stats Eval
+esql:esql/20_aggs/Test From Stats Max
+esql:esql/20_aggs/Test From Stats Max With Alias
+esql:esql/20_aggs/Test From Stats Min
+esql:esql/20_aggs/Test From Stats Min With Alias
+esql:esql/20_aggs/Test Grouping Median Absolute Deviation On Double
+esql:esql/20_aggs/Test Grouping Median Absolute Deviation On Long
+esql:esql/20_aggs/Test Grouping Median On Double
+esql:esql/20_aggs/Test Grouping Median On Long
+esql:esql/20_aggs/Test Median Absolute Deviation On Double
+esql:esql/20_aggs/Test Median Absolute Deviation On Long
+esql:esql/20_aggs/Test Median On Double
+esql:esql/20_aggs/Test Median On Long
+esql:esql/20_aggs/Test Sort With Keyword Field
+esql:esql/20_aggs/Test Stats Where
+esql:esql/20_aggs/Test simple grouping avg
+esql:esql/20_aggs/grouping on text
+esql:esql/210_data_source/cluster-state-visibility
+esql:esql/210_data_source/delete-missing
+esql:esql/210_data_source/get-empty
+esql:esql/210_data_source/get-missing
+esql:esql/210_data_source/invalid-data-source-names
+esql:esql/210_data_source/malformed-body
+esql:esql/210_data_source/missing-type
+esql:esql/210_data_source/unknown-type
+esql:esql/210_empty_string/keyword equals empty string
+esql:esql/210_empty_string/keyword to_lower equals empty string
+esql:esql/210_empty_string/text equals empty string
+esql:esql/210_empty_string/text to_lower equals empty string
+esql:esql/220_dataset/cluster-state-visibility
+esql:esql/220_dataset/delete-missing
+esql:esql/220_dataset/get-empty
+esql:esql/220_dataset/get-missing
+esql:esql/220_dataset/invalid-dataset-names
+esql:esql/220_dataset/mappings-unknown-keys-rejected
+esql:esql/220_dataset/mappings-validator-rejections
+esql:esql/220_dataset/missing-data-source
+esql:esql/220_dataset/missing-resource
+esql:esql/220_dataset/parent-data-source-not-found
+esql:esql/230_folding/CIDR_MATCH with multiple CIDRs
+esql:esql/230_folding/CIDR_MATCH with non-foldable CIDRs
+esql:esql/230_folding/COUNT_DISTINCT with foldable precision
+esql:esql/230_folding/COUNT_DISTINCT with no precision
+esql:esql/230_folding/COUNT_DISTINCT with non-foldable precision
+esql:esql/230_folding/Employee name equals
+esql:esql/230_folding/Employee name in list
+esql:esql/230_folding/Foldable query using KQL on name but with non-foldable expression
+esql:esql/230_folding/Foldable query using MATCH_PHRASE on name
+esql:esql/230_folding/Foldable query using MATCH_PHRASE on name but with non constant query
+esql:esql/230_folding/Foldable query using MATCH_PHRASE on name but with non-foldable expression
+esql:esql/230_folding/Foldable query using QSTR on name
+esql:esql/230_folding/Foldable query using QSTR on name but with non-foldable expression
+esql:esql/230_folding/MATCH function with foldable query
+esql:esql/230_folding/MATCH function with non-foldable query
+esql:esql/230_folding/MV_SORT with foldable order
+esql:esql/230_folding/MV_SORT with foldable order on employee favorite numbers
+esql:esql/230_folding/MV_SORT with invalid foldable order
+esql:esql/230_folding/MV_SORT with invalid non-foldable order
+esql:esql/230_folding/Percentile with foldable value
+esql:esql/230_folding/Percentile with non-foldable value
+esql:esql/230_folding/SAMPLE function with constant folding
+esql:esql/230_folding/SAMPLE function with negative limit value after folding
+esql:esql/230_folding/TOP function with constant folding
+esql:esql/230_folding/TOP function with negative limit value after folding
+esql:esql/230_folding/TOP_SNIPPETS with foldable query
+esql:esql/230_folding/TOP_SNIPPETS with non-foldable query
+esql:esql/230_folding/Top function with invalid sort order
+esql:esql/240_base_conversion/aggregate_family, first argument, aggregate_metric_double not a string
+esql:esql/240_base_conversion/aggregate_family, second argument, aggregate_metric_double not an integer
+esql:esql/240_base_conversion/common_family, first argument, date not a string
+esql:esql/240_base_conversion/common_family, first argument, date_nanos not a string
+esql:esql/240_base_conversion/common_family, second argument, date not an integer
+esql:esql/240_base_conversion/common_family, second argument, date_nanos not an integer
+esql:esql/240_base_conversion/common_family, to_integer first argument, boolean not a string
+esql:esql/240_base_conversion/common_family, to_integer second argument, boolean not an integer
+esql:esql/240_base_conversion/common_family, to_long first argument, boolean not a string
+esql:esql/240_base_conversion/common_family, to_long second argument, boolean not an integer
+esql:esql/240_base_conversion/keyword_family, to_integer first argument, valid query works without error
+esql:esql/240_base_conversion/keyword_family, to_long first argument, valid query works without error
+esql:esql/240_base_conversion/no index, to_integer literal second argument is not an integer
+esql:esql/240_base_conversion/no index, to_integer with 3 args
+esql:esql/240_base_conversion/no index, to_integer with no args
+esql:esql/240_base_conversion/no index, to_long literal second argument is not an integer
+esql:esql/240_base_conversion/no index, to_long with 3 args
+esql:esql/240_base_conversion/no index, to_long with no args
+esql:esql/240_base_conversion/numeric_family, first argument, byte not a string
+esql:esql/240_base_conversion/numeric_family, first argument, double not a string
+esql:esql/240_base_conversion/numeric_family, first argument, float not a string
+esql:esql/240_base_conversion/numeric_family, first argument, half_float not a string
+esql:esql/240_base_conversion/numeric_family, first argument, integer not a string
+esql:esql/240_base_conversion/numeric_family, first argument, scaled_float not a string
+esql:esql/240_base_conversion/numeric_family, first argument, short not a string
+esql:esql/240_base_conversion/numeric_family, first argument, unsigned_long not a string
+esql:esql/240_base_conversion/numeric_family, second argument, double not an integer
+esql:esql/240_base_conversion/numeric_family, second argument, float not an integer
+esql:esql/240_base_conversion/numeric_family, second argument, half_float not an integer
+esql:esql/240_base_conversion/numeric_family, second argument, invalid byte value -6
+esql:esql/240_base_conversion/numeric_family, second argument, invalid integer value -6
+esql:esql/240_base_conversion/numeric_family, second argument, invalid long value -6
+esql:esql/240_base_conversion/numeric_family, second argument, invalid short value -6
+esql:esql/240_base_conversion/numeric_family, second argument, invalid unsigned_long value 0
+esql:esql/240_base_conversion/numeric_family, second argument, scaled_float not an integer
+esql:esql/240_base_conversion/numeric_family, to_integer first argument, integer not a string
+esql:esql/240_base_conversion/numeric_family, to_long first argument, long not a string
+esql:esql/250_columnar_keyword/Test avg length
+esql:esql/250_columnar_keyword/Test mv max
+esql:esql/250_columnar_keyword/Test mv_min
+esql:esql/25_aggs_on_null/agg on half missing
+esql:esql/25_aggs_on_null/agg on missing
+esql:esql/25_aggs_on_null/agg on null
+esql:esql/25_aggs_on_null/group on half missing
+esql:esql/25_aggs_on_null/group on missing
+esql:esql/25_aggs_on_null/group on null
+esql:esql/25_aggs_on_null/group on null, long
+esql:esql/260_flattened_subfield/loading from index with many-dotted field names
+esql:esql/260_flattened_subfield/loading from index*
+esql:esql/260_flattened_subfield/loading from two indices with different mappings 1
+esql:esql/260_flattened_subfield/loading from two indices with different mappings 2
+esql:esql/260_flattened_subfield/loading from two indices with different mappings 3
+esql:esql/260_flattened_subfield/loading subfield of flattened 1
+esql:esql/260_flattened_subfield/loading subfield of flattened 2
+esql:esql/260_flattened_subfield/loading subfield of flattened 3
+esql:esql/261_flattened/lookup join on expression with FIELD_EXTRACT is unsupported
+esql:esql/261_flattened/lookup join on flattened field is unsupported
+esql:esql/261_flattened/sort by flattened field
+esql:esql/26_aggs_bucket/BUCKET column metadata coexists with approximation metadata
+esql:esql/26_aggs_bucket/BUCKET column metadata in REST response
+esql:esql/26_aggs_bucket/BUCKET column metadata in columnar response
+esql:esql/26_aggs_bucket/Datetime interval as string
+esql:esql/26_aggs_bucket/TBUCKET column metadata in REST response
+esql:esql/26_aggs_bucket/friendlier BUCKET interval hourly: #110916
+esql:esql/26_aggs_bucket/friendlier BUCKET interval: monthly #110916
+esql:esql/271_unmapped_fields_field_alias/field alias aliased, concrete, and missing across three indices with cast and load
+esql:esql/271_unmapped_fields_field_alias/field alias in a cross-index type conflict resolves via an explicit cast
+esql:esql/271_unmapped_fields_field_alias/field alias is inert to unmapped_fields - default, load and nullify resolve identically
+esql:esql/271_unmapped_fields_field_alias/field alias present in one index and absent in another with load
+esql:esql/271_unmapped_fields_field_alias/loading a subfield of a flattened field (direct) fails with load
+esql:esql/271_unmapped_fields_field_alias/loading a subfield via a flattened field alias fails the same way
+esql:esql/271_unmapped_fields_field_alias/loading a subfield via a flattened field alias still fails under a type conflict
+esql:esql/271_unmapped_fields_field_alias/nullify resolves a flattened subfield via an alias to null instead of failing
+esql:esql/271_unmapped_fields_field_alias/unmapped_fields=load surfaces an unmapped field value from _source by its literal name
+esql:esql/280_unmapped_load_fork/one-branch-multi-index
+esql:esql/280_unmapped_load_fork/one-branch-one-index
+esql:esql/280_unmapped_load_fork/two-branches-multi-index
+esql:esql/280_unmapped_load_fork/two-branches-multi-index-wildcard
+esql:esql/280_unmapped_load_fork/two-branches-one-index
+esql:esql/280_unmapped_load_fork/two-branches-one-index-wildcard
+esql:esql/281_unmapped_load_subqueries_views/an unmapped field materialized by EVAL in a view wins over load from source
+esql:esql/281_unmapped_load_subqueries_views/cross-branch type conflict fails when the column is used
+esql:esql/281_unmapped_load_subqueries_views/load unmapped field referenced inside one view branch
+esql:esql/281_unmapped_load_subqueries_views/load unmapped field referenced only above a branching view
+esql:esql/281_unmapped_load_subqueries_views/loading an unmapped field in a subquery does not cross-pollinate a sibling view
+esql:esql/281_unmapped_load_subqueries_views/loading an unmapped field in one view does not cross-pollinate a sibling view
+esql:esql/290_unmapped_load_partial_keyword_convert/aggregate_metric_double cast on fully unmapped field
+esql:esql/290_unmapped_load_partial_keyword_convert/aggregate_metric_double cast on punk field
+esql:esql/290_unmapped_load_partial_keyword_convert/to_degrees on single-type punk field
+esql:esql/290_unmapped_load_partial_keyword_convert/to_radians on single-type punk field
+esql:esql/292_unmapped_load_keyword_multifield/keyword with multi-field partially unmapped does not crash
+esql:esql/293_unmapped_load_object_from_stored_source/mapped object field from stored source loads as null
+esql:esql/293_unmapped_load_object_from_stored_source/unmapped array fields from stored source: scalar elements load as multivalue, object elements drop
+esql:esql/293_unmapped_load_object_from_stored_source/unmapped object field from stored source loads as null
+esql:esql/294_unmapped_load_object_from_synthetic_source/unmapped array fields from synthetic source: scalar elements load as multivalue, object elements drop
+esql:esql/294_unmapped_load_object_from_synthetic_source/unmapped object field from synthetic source loads as null
+esql:esql/300_columnar_array_ordering/boolean multi-value array order
+esql:esql/300_columnar_array_ordering/date multi-value array order
+esql:esql/300_columnar_array_ordering/double multi-value array order
+esql:esql/300_columnar_array_ordering/integer multi-value array order
+esql:esql/300_columnar_array_ordering/ip multi-value array order
+esql:esql/300_columnar_array_ordering/keyword multi-value array order
+esql:esql/300_columnar_array_ordering/long multi-value array order
+esql:esql/300_columnar_array_ordering/match_only_text multi-value array order
+esql:esql/300_columnar_array_ordering/scaled_float multi-value array order
+esql:esql/300_columnar_array_ordering/text multi-value array order
+esql:esql/300_columnar_array_ordering/unsigned_long multi-value array order
+esql:esql/30_types/_source
+esql:esql/30_types/_source disabled
+esql:esql/30_types/_source keep all
+esql:esql/30_types/alias
+esql:esql/30_types/cartesian_point
+esql:esql/30_types/constant_keyword
+esql:esql/30_types/constant_keyword with null value
+esql:esql/30_types/geo_point
+esql:esql/30_types/id
+esql:esql/30_types/ip
+esql:esql/30_types/keyword no doc_values
+esql:esql/30_types/multivalued boolean
+esql:esql/30_types/multivalued keyword
+esql:esql/30_types/numbers
+esql:esql/30_types/scaled_float
+esql:esql/30_types/small_numbers
+esql:esql/30_types/synthetic _source text stored
+esql:esql/30_types/synthetic _source text with parent keyword
+esql:esql/30_types/text
+esql:esql/30_types/unsigned_long
+esql:esql/30_types/version
+esql:esql/30_types/wildcard
+esql:esql/40_tsdb/PromQL avg aggregation
+esql:esql/40_tsdb/PromQL increase on counter field
+esql:esql/40_tsdb/PromQL irate on counter field
+esql:esql/40_tsdb/PromQL label matcher multi-value with exact matcher promotes to regex
+esql:esql/40_tsdb/PromQL label matcher unknown param error
+esql:esql/40_tsdb/PromQL label matcher with named param
+esql:esql/40_tsdb/PromQL label matcher with positional param
+esql:esql/40_tsdb/PromQL label matcher with regex multi-value param
+esql:esql/40_tsdb/PromQL max_over_time
+esql:esql/40_tsdb/PromQL missing field outside the command fails under nullify
+esql:esql/40_tsdb/PromQL rate on counter field
+esql:esql/40_tsdb/PromQL sum_over_time with grouping
+esql:esql/40_tsdb/PromQL unknown function error
+esql:esql/40_tsdb/PromQL unmapped metric inside the command returns no rows under nullify
+esql:esql/40_tsdb/PromQL with unmapped_fields nullify is unaffected for mapped fields
+esql:esql/40_tsdb/Stats on aggregate_metric_double with no count, but has sum
+esql:esql/40_tsdb/Stats with partial submetrics for aggregate metric double with average as default
+esql:esql/40_tsdb/TS Command grouping on text field
+esql:esql/40_tsdb/TS command on flattened field with time_series_dimensions
+esql:esql/40_tsdb/TS command spurious grouping when non-dimension flattened keys vary
+esql:esql/40_tsdb/_source
+esql:esql/40_tsdb/aggregate_metric_double unsortable
+esql:esql/40_tsdb/avg of aggregate_metric_double
+esql:esql/40_tsdb/cast counter then filter
+esql:esql/40_tsdb/cast then sort on counter
+esql:esql/40_tsdb/error on rename timestamp
+esql:esql/40_tsdb/filter on counter without cast
+esql:esql/40_tsdb/first/last with null sort and dropped timestamp fails cleanly
+esql:esql/40_tsdb/flattened field with time_series_dimensions
+esql:esql/40_tsdb/from doc with aggregate_metric_double
+esql:esql/40_tsdb/from index pattern explicit counter use
+esql:esql/40_tsdb/from index pattern unsupported counter
+esql:esql/40_tsdb/grouping stats on aggregate_metric_double
+esql:esql/40_tsdb/load a document
+esql:esql/40_tsdb/load everything
+esql:esql/40_tsdb/render aggregate_metric_double when missing min and max
+esql:esql/40_tsdb/render aggregate_metric_double when missing value
+esql:esql/40_tsdb/sort by _tsid
+esql:esql/40_tsdb/sort by counter_double
+esql:esql/40_tsdb/sort by counter_integer
+esql:esql/40_tsdb/sort by histogram
+esql:esql/40_tsdb/sort on counter without cast
+esql:esql/40_tsdb/sorting with aggregate_metric_double with partial submetrics
+esql:esql/40_tsdb/stats on aggregate_metric_double
+esql:esql/40_tsdb/stats on aggregate_metric_double missing min and max
+esql:esql/40_tsdb/stats on aggregate_metric_double with partial submetrics missing sum and count
+esql:esql/40_tsdb/to_aggregate_metric_double with multi_values
+esql:esql/40_tsdb/to_string aggregate_metric_double
+esql:esql/40_unsupported_types/double nested declared in mapping
+esql:esql/40_unsupported_types/nested declared in mapping
+esql:esql/40_unsupported_types/nested declared inline
+esql:esql/45_non_tsdb_counter/filter on counter
+esql:esql/45_non_tsdb_counter/load a document
+esql:esql/45_non_tsdb_counter/load everything
+esql:esql/46_downsample/MV_EXPAND on non-MV aggregate metric double
+esql:esql/46_downsample/Over time functions from downsampled and non-downsampled indices simultaneously, no grouping
+esql:esql/46_downsample/Over time functions from downsampled and non-downsampled indices simultaneously, with grouping
+esql:esql/46_downsample/Query stats on downsampled index
+esql:esql/46_downsample/Render stats from downsampled index
+esql:esql/46_downsample/Sort from multiple indices one with aggregate metric double
+esql:esql/46_downsample/Stats from downsampled and non-downsampled index simultaneously
+esql:esql/46_downsample/Stats from downsampled and non-downsampled index simultaneously with implicit casting
+esql:esql/50_index_patterns/_index LIKE with overly complex pattern
+esql:esql/50_index_patterns/disjoint_mappings
+esql:esql/50_index_patterns/same_name_different_type
+esql:esql/50_index_patterns/same_name_different_type_same_family
+esql:esql/51_many_indexes/load many indices with ambiguities
+esql:esql/52_passthrough/passthrough field cross-index: attributes.foo accessible without type conflict
+esql:esql/52_passthrough/passthrough field cross-index: attributes.foo.bar accessible without type conflict
+esql:esql/60_enrich/Enrich in fork
+esql:esql/60_enrich/Enrich on keyword
+esql:esql/60_enrich/Enrich on keyword with fields
+esql:esql/60_enrich/Enrich on keyword with fields alias
+esql:esql/60_enrich/Enrich on text
+esql:esql/60_enrich/Enrich with brackets in policy name
+esql:esql/60_usage/Basic ESQL usage output (telemetry) non-snapshot version
+esql:esql/60_usage/Views telemetry
+esql:esql/60_usage/took
+esql:esql/61_enrich_ip/IP
+esql:esql/61_enrich_ip/IP strings
+esql:esql/61_enrich_ip/IP text fields
+esql:esql/61_enrich_ip/Invalid IP strings
+esql:esql/62_extra_enrich/Enrich fields includes match field
+esql:esql/62_extra_enrich/movies
+esql:esql/63_enrich_int_range/Invalid age as double
+esql:esql/63_enrich_int_range/Invalid age as keyword
+esql:esql/63_enrich_int_range/ages
+esql:esql/63_enrich_int_range/ages as keywords
+esql:esql/63_enrich_int_range/ages as typecast keywords
+esql:esql/64_enrich_int_match/Invalid decade as double
+esql:esql/64_enrich_int_match/Invalid decade as keyword
+esql:esql/64_enrich_int_match/decades
+esql:esql/64_enrich_int_match/decades as typecast keywords
+esql:esql/65_enrich_geo/locations_geo_point_invalid_shapes
+esql:esql/65_enrich_geo/locations_geo_point_valid_shapes
+esql:esql/65_enrich_geo/locations_keyword_invalid_shapes
+esql:esql/65_enrich_geo/locations_keyword_valid_shapes
+esql:esql/70_locale/Date format with Italian locale
+esql:esql/70_locale/Date format with default locale
+esql:esql/80_text/IN on text
+esql:esql/80_text/IN on text and itself
+esql:esql/80_text/NOT IN on text
+esql:esql/80_text/all
+esql:esql/80_text/eval and filter text
+esql:esql/80_text/filter by text
+esql:esql/80_text/filter on text multi-field
+esql:esql/80_text/like and rlike with parameters
+esql:esql/80_text/like by multi-field text
+esql:esql/80_text/like by text
+esql:esql/80_text/like list with an invalid parameter
+esql:esql/80_text/like with overly complex pattern
+esql:esql/80_text/remove text typecast
+esql:esql/80_text/reverse text
+esql:esql/80_text/rlike by multi-field text
+esql:esql/80_text/rlike by text
+esql:esql/80_text/rlike with overly complex pattern
+esql:esql/80_text/sort by text
+esql:esql/80_text/sort by text multi-field
+esql:esql/80_text/sort by text multi-field desc
+esql:esql/80_text/split text
+esql:esql/80_text/stats by text no raw
+esql:esql/80_text/stats by text with raw
+esql:esql/80_text/stats text no raw
+esql:esql/80_text/stats text with raw
+esql:esql/80_text/stored text with synthetic source
+esql:esql/80_text/text in functions
+esql:esql/80_text/text with synthetic source
+esql:esql/80_text/values function
+esql:esql/81_text_exact_subfields/extract
+esql:esql/81_text_exact_subfields/filter ignore above
+esql:esql/81_text_exact_subfields/filter with normalizer
+esql:esql/81_text_exact_subfields/non indexed
+esql:esql/81_text_exact_subfields/sort ignore above
+esql:esql/81_text_exact_subfields/sort normalizer
+esql:esql/90_non_indexed/fetch

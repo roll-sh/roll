@@ -1,0 +1,496 @@
+{
+  "description": "Round 3 (c): data stream failure stores (mapping and timestamp failures redirected, version conflicts not, not_enabled status in bulk and index responses), data stream write rules (timestamp missing or repeated, create-only, deletes)",
+  "steps": [
+    {
+      "req": "PUT /_index_template/es-docs-fst",
+      "body": {
+        "index_patterns": [
+          "es-docs-fs-*"
+        ],
+        "data_stream": {},
+        "priority": 500,
+        "template": {
+          "mappings": {
+            "properties": {
+              "@timestamp": {
+                "type": "date"
+              },
+              "count": {
+                "type": "long"
+              }
+            }
+          },
+          "data_stream_options": {
+            "failure_store": {
+              "enabled": true
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /_index_template/es-docs-nofst",
+      "body": {
+        "index_patterns": [
+          "es-docs-nofs-*"
+        ],
+        "data_stream": {},
+        "priority": 500,
+        "template": {
+          "mappings": {
+            "properties": {
+              "@timestamp": {
+                "type": "date"
+              },
+              "count": {
+                "type": "long"
+              }
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "POST /es-docs-fs-a/_doc?refresh=true",
+      "body": {
+        "@timestamp": "2020-12-12",
+        "count": 1
+      },
+      "mask": [
+        "_id",
+        "@timestamp",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "old_index",
+        "new_index"
+      ],
+      "status": 201,
+      "response": {
+        "_index": ".ds-es-docs-fs-a-2026.10.22-000001",
+        "_id": "EOfdY6EB9DjmY5Inrkb5",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "POST /es-docs-fs-a/_doc?refresh=true",
+      "body": {
+        "@timestamp": "2020-12-12",
+        "count": "bad"
+      },
+      "mask": [
+        "_id",
+        "@timestamp",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "old_index",
+        "new_index"
+      ],
+      "status": 201,
+      "response": {
+        "_index": ".fs-es-docs-fs-a-2026.10.22-000002",
+        "_id": "EufdY6EB9DjmY5InsEYU",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "failure_store": "used"
+      }
+    },
+    {
+      "req": "PUT /es-docs-fs-a/_create/k1?refresh=true",
+      "body": {
+        "@timestamp": "2020-12-12",
+        "count": 2
+      },
+      "mask": [
+        "_id",
+        "@timestamp",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "old_index",
+        "new_index"
+      ],
+      "status": 201,
+      "response": {
+        "_index": ".ds-es-docs-fs-a-2026.10.22-000001",
+        "_id": "k1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 1,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "PUT /es-docs-fs-a/_create/k1?refresh=true",
+      "body": {
+        "@timestamp": "2020-12-12",
+        "count": 3
+      },
+      "mask": [
+        "_id",
+        "@timestamp",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "old_index",
+        "new_index"
+      ],
+      "status": 409,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "version_conflict_engine_exception",
+              "reason": "[k1]: version conflict, document already exists (current version [1])",
+              "index_uuid": "OwC7zxyvSHSaBu3NHc5xEQ",
+              "shard": "0",
+              "index": ".ds-es-docs-fs-a-2026.10.22-000001"
+            }
+          ],
+          "type": "version_conflict_engine_exception",
+          "reason": "[k1]: version conflict, document already exists (current version [1])",
+          "index_uuid": "OwC7zxyvSHSaBu3NHc5xEQ",
+          "shard": "0",
+          "index": ".ds-es-docs-fs-a-2026.10.22-000001"
+        },
+        "status": 409
+      }
+    },
+    {
+      "req": "POST /_bulk?refresh=true",
+      "raw": "{\"create\":{\"_index\":\"es-docs-fs-a\"}}\n{\"@timestamp\":\"2020-12-12\",\"count\":\"bad\"}\n{\"create\":{\"_index\":\"es-docs-nofs-a\"}}\n{\"@timestamp\":\"2020-12-12\",\"count\":\"bad\"}\n{\"create\":{\"_index\":\"es-docs-nofs-a\"}}\n{\"count\":1}\n{\"create\":{\"_index\":\"es-docs-nofs-a\"}}\n{\"@timestamp\":[\"2020-12-12\",\"2021-01-01\"]}\n{\"index\":{\"_index\":\"es-docs-nofs-a\",\"_id\":\"1\"}}\n{\"@timestamp\":\"2020-12-12\"}\n{\"delete\":{\"_index\":\"es-docs-nofs-a\",\"_id\":\"1\"}}\n",
+      "mask": [
+        "_id",
+        "@timestamp",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "old_index",
+        "new_index",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "errors": true,
+        "took": 200,
+        "items": [
+          {
+            "create": {
+              "_index": ".fs-es-docs-fs-a-2026.10.22-000002",
+              "_id": "F-fdY6EB9DjmY5InsUZd",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 1,
+              "_primary_term": 1,
+              "failure_store": "used",
+              "status": 201
+            }
+          },
+          {
+            "create": {
+              "_index": ".ds-es-docs-nofs-a-2026.10.22-000001",
+              "_id": "FOfdY6EB9DjmY5InsUZc",
+              "status": 400,
+              "failure_store": "not_enabled",
+              "error": {
+                "type": "document_parsing_exception",
+                "reason": "[1:36] failed to parse field [count] of type [long] in document with id 'FOfdY6EB9DjmY5InsUZc'. Preview of field's value: 'bad'",
+                "caused_by": {
+                  "type": "illegal_argument_exception",
+                  "reason": "For input string: \"bad\""
+                }
+              }
+            }
+          },
+          {
+            "create": {
+              "_index": ".ds-es-docs-nofs-a-2026.10.22-000001",
+              "_id": "FefdY6EB9DjmY5InsUZc",
+              "status": 400,
+              "failure_store": "not_enabled",
+              "error": {
+                "type": "document_parsing_exception",
+                "reason": "[1:11] failed to parse: data stream timestamp field [@timestamp] is missing",
+                "caused_by": {
+                  "type": "illegal_argument_exception",
+                  "reason": "data stream timestamp field [@timestamp] is missing"
+                }
+              }
+            }
+          },
+          {
+            "create": {
+              "_index": ".ds-es-docs-nofs-a-2026.10.22-000001",
+              "_id": "FufdY6EB9DjmY5InsUZc",
+              "status": 400,
+              "failure_store": "not_enabled",
+              "error": {
+                "type": "document_parsing_exception",
+                "reason": "[1:29] failed to parse field [@timestamp] of type [date] in document with id 'FufdY6EB9DjmY5InsUZc'. Preview of field's value: '2021-01-01'",
+                "caused_by": {
+                  "type": "illegal_argument_exception",
+                  "reason": "data stream timestamp field [@timestamp] encountered multiple values"
+                }
+              }
+            }
+          },
+          {
+            "index": {
+              "_index": "es-docs-nofs-a",
+              "_id": "1",
+              "status": 400,
+              "error": {
+                "type": "illegal_argument_exception",
+                "reason": "only write ops with an op_type of create are allowed in data streams"
+              }
+            }
+          },
+          {
+            "delete": {
+              "_index": "es-docs-nofs-a",
+              "_id": "1",
+              "status": 400,
+              "error": {
+                "type": "illegal_argument_exception",
+                "reason": "only write ops with an op_type of create are allowed in data streams"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req": "POST /es-docs-nofs-a/_doc",
+      "body": {
+        "foo": "bar"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "document_parsing_exception",
+              "reason": "[1:13] failed to parse: data stream timestamp field [@timestamp] is missing"
+            }
+          ],
+          "type": "document_parsing_exception",
+          "reason": "[1:13] failed to parse: data stream timestamp field [@timestamp] is missing",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "data stream timestamp field [@timestamp] is missing"
+          },
+          "failure_store": "not_enabled"
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "POST /.fs-es-docs-fs-a-*/_search",
+      "body": {
+        "sort": [
+          "@timestamp"
+        ],
+        "_source": [
+          "document",
+          "error.type",
+          "error.message"
+        ]
+      },
+      "mask": [
+        "_id",
+        "@timestamp",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "old_index",
+        "new_index",
+        "took",
+        "sort"
+      ],
+      "status": 200,
+      "response": {
+        "took": 1,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 2,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": ".fs-es-docs-fs-a-2026.10.22-000002",
+              "_id": "EufdY6EB9DjmY5InsEYU",
+              "_score": null,
+              "_source": {
+                "document": {
+                  "id": "EefdY6EB9DjmY5Inr0YN",
+                  "index": "es-docs-fs-a",
+                  "source": {
+                    "@timestamp": "2020-12-12",
+                    "count": "bad"
+                  }
+                },
+                "error": {
+                  "type": "document_parsing_exception",
+                  "message": "[1:36] failed to parse field [count] of type [long] in document with id 'EefdY6EB9DjmY5Inr0YN'. Preview of field's value: 'bad'"
+                }
+              },
+              "sort": [
+                1792676834978
+              ]
+            },
+            {
+              "_index": ".fs-es-docs-fs-a-2026.10.22-000002",
+              "_id": "F-fdY6EB9DjmY5InsUZd",
+              "_score": null,
+              "_source": {
+                "document": {
+                  "id": "E-fdY6EB9DjmY5InsUZc",
+                  "index": "es-docs-fs-a",
+                  "source": {
+                    "@timestamp": "2020-12-12",
+                    "count": "bad"
+                  }
+                },
+                "error": {
+                  "type": "document_parsing_exception",
+                  "message": "[1:36] failed to parse field [count] of type [long] in document with id 'E-fdY6EB9DjmY5InsUZc'. Preview of field's value: 'bad'"
+                }
+              },
+              "sort": [
+                1792676835579
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "GET /_data_stream/es-docs-fs-a",
+      "mask": [
+        "_id",
+        "@timestamp",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "old_index",
+        "new_index"
+      ],
+      "status": 200,
+      "response": {
+        "data_streams": [
+          {
+            "name": "es-docs-fs-a",
+            "timestamp_field": {
+              "name": "@timestamp"
+            },
+            "indices": [
+              {
+                "index_name": ".ds-es-docs-fs-a-2026.10.22-000001",
+                "index_uuid": "OwC7zxyvSHSaBu3NHc5xEQ",
+                "managed_by": "Unmanaged",
+                "prefer_ilm": true,
+                "index_mode": "standard"
+              }
+            ],
+            "generation": 2,
+            "status": "YELLOW",
+            "template": "es-docs-fst",
+            "next_generation_managed_by": "Unmanaged",
+            "prefer_ilm": true,
+            "hidden": false,
+            "system": false,
+            "allow_custom_routing": false,
+            "replicated": false,
+            "rollover_on_write": false,
+            "index_mode": "standard",
+            "settings": {},
+            "mappings": {},
+            "failure_store": {
+              "enabled": true,
+              "rollover_on_write": false,
+              "indices": [
+                {
+                  "index_name": ".fs-es-docs-fs-a-2026.10.22-000002",
+                  "index_uuid": "Z4LBG_IcSKyl0aaMRZUqBw",
+                  "managed_by": "Data stream lifecycle"
+                }
+              ],
+              "lifecycle": {
+                "enabled": true,
+                "effective_retention": "30d",
+                "retention_determined_by": "default_failures_retention"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req": "DELETE /_data_stream/es-docs-fs-a,es-docs-nofs-a",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "DELETE /_index_template/es-docs-fst",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "DELETE /_index_template/es-docs-nofst",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    }
+  ]
+}

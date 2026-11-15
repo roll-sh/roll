@@ -1,0 +1,1734 @@
+{
+  "description" : "Sorts on one single-valued field and several keys with _first, _last and custom missing values, where the worst queued hit lacks a value (perf-query round 6).",
+  "steps" : [
+    {
+      "req" : "PUT /esm-perf-query-sort",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "n" : {
+              "type" : "long"
+            },
+            "d" : {
+              "type" : "double"
+            },
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-perf-query-sort"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"m0\"}}\n{}\n{\"index\": {\"_id\": \"m1\"}}\n{}\n{\"index\": {\"_id\": \"m2\"}}\n{}\n{\"index\": {\"_id\": \"v0\"}}\n{\"n\": 5, \"d\": 5.5, \"k\": \"e\"}\n{\"index\": {\"_id\": \"v1\"}}\n{\"n\": -3, \"d\": -3.5, \"k\": \"b\"}\n{\"index\": {\"_id\": \"v2\"}}\n{\"n\": 0, \"d\": 0.0, \"k\": \"a\"}\n{\"index\": {\"_id\": \"m3\"}}\n{}\n{\"index\": {\"_id\": \"v3\"}}\n{\"n\": 7, \"d\": 7.5, \"k\": \"g\"}\n{\"index\": {\"_id\": \"v4\"}}\n{\"n\": 5, \"d\": 5.5, \"k\": \"e\"}\n{\"index\": {\"_id\": \"m4\"}}\n{}\n",
+      "headers" : {
+        "Content-Type" : "application/x-ndjson"
+      },
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 2,
+        "sort" : [
+          {
+            "n" : {
+              "order" : "asc",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                -9223372036854775808
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                -9223372036854775808
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "n" : {
+              "order" : "asc",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                -9223372036854775808
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                -9223372036854775808
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                -9223372036854775808
+              ]
+            },
+            {
+              "_id" : "m3",
+              "sort" : [
+                -9223372036854775808
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 2,
+        "sort" : [
+          {
+            "n" : {
+              "order" : "asc",
+              "missing" : "_last"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v1",
+              "sort" : [
+                -3
+              ]
+            },
+            {
+              "_id" : "v2",
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "n" : {
+              "order" : "asc",
+              "missing" : "_last"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v1",
+              "sort" : [
+                -3
+              ]
+            },
+            {
+              "_id" : "v2",
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_id" : "v0",
+              "sort" : [
+                5
+              ]
+            },
+            {
+              "_id" : "v4",
+              "sort" : [
+                5
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 2,
+        "sort" : [
+          {
+            "n" : {
+              "order" : "desc",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                9223372036854775807
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                9223372036854775807
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "n" : {
+              "order" : "desc",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                9223372036854775807
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                9223372036854775807
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                9223372036854775807
+              ]
+            },
+            {
+              "_id" : "m3",
+              "sort" : [
+                9223372036854775807
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 2,
+        "sort" : [
+          {
+            "n" : {
+              "order" : "desc",
+              "missing" : "_last"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v3",
+              "sort" : [
+                7
+              ]
+            },
+            {
+              "_id" : "v0",
+              "sort" : [
+                5
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "n" : {
+              "order" : "desc",
+              "missing" : "_last"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v3",
+              "sort" : [
+                7
+              ]
+            },
+            {
+              "_id" : "v0",
+              "sort" : [
+                5
+              ]
+            },
+            {
+              "_id" : "v4",
+              "sort" : [
+                5
+              ]
+            },
+            {
+              "_id" : "v2",
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 2,
+        "sort" : [
+          {
+            "d" : {
+              "order" : "asc",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                "-Infinity"
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                "-Infinity"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "d" : {
+              "order" : "asc",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                "-Infinity"
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                "-Infinity"
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                "-Infinity"
+              ]
+            },
+            {
+              "_id" : "m3",
+              "sort" : [
+                "-Infinity"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 2,
+        "sort" : [
+          {
+            "d" : {
+              "order" : "asc",
+              "missing" : "_last"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v1",
+              "sort" : [
+                -3.5
+              ]
+            },
+            {
+              "_id" : "v2",
+              "sort" : [
+                0.0
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "d" : {
+              "order" : "asc",
+              "missing" : "_last"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v1",
+              "sort" : [
+                -3.5
+              ]
+            },
+            {
+              "_id" : "v2",
+              "sort" : [
+                0.0
+              ]
+            },
+            {
+              "_id" : "v0",
+              "sort" : [
+                5.5
+              ]
+            },
+            {
+              "_id" : "v4",
+              "sort" : [
+                5.5
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 2,
+        "sort" : [
+          {
+            "d" : {
+              "order" : "desc",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                "Infinity"
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                "Infinity"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "d" : {
+              "order" : "desc",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                "Infinity"
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                "Infinity"
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                "Infinity"
+              ]
+            },
+            {
+              "_id" : "m3",
+              "sort" : [
+                "Infinity"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 2,
+        "sort" : [
+          {
+            "d" : {
+              "order" : "desc",
+              "missing" : "_last"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v3",
+              "sort" : [
+                7.5
+              ]
+            },
+            {
+              "_id" : "v0",
+              "sort" : [
+                5.5
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "d" : {
+              "order" : "desc",
+              "missing" : "_last"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v3",
+              "sort" : [
+                7.5
+              ]
+            },
+            {
+              "_id" : "v0",
+              "sort" : [
+                5.5
+              ]
+            },
+            {
+              "_id" : "v4",
+              "sort" : [
+                5.5
+              ]
+            },
+            {
+              "_id" : "v2",
+              "sort" : [
+                0.0
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 2,
+        "sort" : [
+          {
+            "k" : {
+              "order" : "asc",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                null
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                null
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "k" : {
+              "order" : "asc",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                null
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                null
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                null
+              ]
+            },
+            {
+              "_id" : "m3",
+              "sort" : [
+                null
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 2,
+        "sort" : [
+          {
+            "k" : {
+              "order" : "asc",
+              "missing" : "_last"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v2",
+              "sort" : [
+                "a"
+              ]
+            },
+            {
+              "_id" : "v1",
+              "sort" : [
+                "b"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "k" : {
+              "order" : "asc",
+              "missing" : "_last"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v2",
+              "sort" : [
+                "a"
+              ]
+            },
+            {
+              "_id" : "v1",
+              "sort" : [
+                "b"
+              ]
+            },
+            {
+              "_id" : "v0",
+              "sort" : [
+                "e"
+              ]
+            },
+            {
+              "_id" : "v4",
+              "sort" : [
+                "e"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 2,
+        "sort" : [
+          {
+            "k" : {
+              "order" : "desc",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                null
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                null
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "k" : {
+              "order" : "desc",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                null
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                null
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                null
+              ]
+            },
+            {
+              "_id" : "m3",
+              "sort" : [
+                null
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 2,
+        "sort" : [
+          {
+            "k" : {
+              "order" : "desc",
+              "missing" : "_last"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v3",
+              "sort" : [
+                "g"
+              ]
+            },
+            {
+              "_id" : "v0",
+              "sort" : [
+                "e"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "k" : {
+              "order" : "desc",
+              "missing" : "_last"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v3",
+              "sort" : [
+                "g"
+              ]
+            },
+            {
+              "_id" : "v0",
+              "sort" : [
+                "e"
+              ]
+            },
+            {
+              "_id" : "v4",
+              "sort" : [
+                "e"
+              ]
+            },
+            {
+              "_id" : "v1",
+              "sort" : [
+                "b"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "n" : {
+              "order" : "asc",
+              "missing" : 0
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v1",
+              "sort" : [
+                -3
+              ]
+            },
+            {
+              "_id" : "m0",
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 5,
+        "sort" : [
+          {
+            "d" : {
+              "order" : "asc",
+              "missing" : 5.5
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v1",
+              "sort" : [
+                -3.5
+              ]
+            },
+            {
+              "_id" : "v2",
+              "sort" : [
+                0.0
+              ]
+            },
+            {
+              "_id" : "m0",
+              "sort" : [
+                5.5
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                5.5
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                5.5
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "k" : {
+              "order" : "asc",
+              "missing" : "c"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v2",
+              "sort" : [
+                "a"
+              ]
+            },
+            {
+              "_id" : "v1",
+              "sort" : [
+                "b"
+              ]
+            },
+            {
+              "_id" : "m0",
+              "sort" : [
+                "c"
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                "c"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 5,
+        "sort" : [
+          {
+            "k" : {
+              "order" : "asc",
+              "missing" : "e"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v2",
+              "sort" : [
+                "a"
+              ]
+            },
+            {
+              "_id" : "v1",
+              "sort" : [
+                "b"
+              ]
+            },
+            {
+              "_id" : "m0",
+              "sort" : [
+                "e"
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                "e"
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                "e"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "n" : {
+              "order" : "desc",
+              "missing" : 0
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v3",
+              "sort" : [
+                7
+              ]
+            },
+            {
+              "_id" : "v0",
+              "sort" : [
+                5
+              ]
+            },
+            {
+              "_id" : "v4",
+              "sort" : [
+                5
+              ]
+            },
+            {
+              "_id" : "m0",
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 5,
+        "sort" : [
+          {
+            "d" : {
+              "order" : "desc",
+              "missing" : 5.5
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v3",
+              "sort" : [
+                7.5
+              ]
+            },
+            {
+              "_id" : "m0",
+              "sort" : [
+                5.5
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                5.5
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                5.5
+              ]
+            },
+            {
+              "_id" : "v0",
+              "sort" : [
+                5.5
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "k" : {
+              "order" : "desc",
+              "missing" : "c"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v3",
+              "sort" : [
+                "g"
+              ]
+            },
+            {
+              "_id" : "v0",
+              "sort" : [
+                "e"
+              ]
+            },
+            {
+              "_id" : "v4",
+              "sort" : [
+                "e"
+              ]
+            },
+            {
+              "_id" : "m0",
+              "sort" : [
+                "c"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 5,
+        "sort" : [
+          {
+            "k" : {
+              "order" : "desc",
+              "missing" : "e"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v3",
+              "sort" : [
+                "g"
+              ]
+            },
+            {
+              "_id" : "m0",
+              "sort" : [
+                "e"
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                "e"
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                "e"
+              ]
+            },
+            {
+              "_id" : "v0",
+              "sort" : [
+                "e"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 4,
+        "sort" : [
+          {
+            "k" : {
+              "order" : "asc",
+              "missing" : "_first"
+            }
+          },
+          {
+            "n" : {
+              "order" : "desc"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                null,
+                -9223372036854775808
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                null,
+                -9223372036854775808
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                null,
+                -9223372036854775808
+              ]
+            },
+            {
+              "_id" : "m3",
+              "sort" : [
+                null,
+                -9223372036854775808
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 5,
+        "sort" : [
+          {
+            "k" : {
+              "order" : "desc"
+            }
+          },
+          {
+            "n" : {
+              "order" : "asc",
+              "missing" : "_first"
+            }
+          },
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v3",
+              "sort" : [
+                "g",
+                7,
+                7
+              ]
+            },
+            {
+              "_id" : "v0",
+              "sort" : [
+                "e",
+                5,
+                3
+              ]
+            },
+            {
+              "_id" : "v4",
+              "sort" : [
+                "e",
+                5,
+                8
+              ]
+            },
+            {
+              "_id" : "v1",
+              "sort" : [
+                "b",
+                -3,
+                4
+              ]
+            },
+            {
+              "_id" : "v2",
+              "sort" : [
+                "a",
+                0,
+                5
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 3,
+        "sort" : [
+          {
+            "n" : {
+              "order" : "asc",
+              "missing" : "_first"
+            }
+          },
+          {
+            "k" : {
+              "order" : "desc",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                -9223372036854775808,
+                null
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                -9223372036854775808,
+                null
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                -9223372036854775808,
+                null
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 2,
+        "track_total_hits" : false,
+        "sort" : [
+          {
+            "n" : {
+              "order" : "asc",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                -9223372036854775808
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                -9223372036854775808
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-perf-query-sort/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "size" : 3,
+        "track_total_hits" : false,
+        "sort" : [
+          {
+            "k" : {
+              "order" : "desc",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                null
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                null
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                null
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-perf-query-sort",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

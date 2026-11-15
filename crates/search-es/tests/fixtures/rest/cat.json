@@ -1,0 +1,501 @@
+{
+  "description": "_cat tables: columns, aliases, sorting, formats, help.",
+  "steps": [
+    {
+      "req": "PUT /esm-k1",
+      "body": {
+        "settings": {
+          "number_of_shards": 2,
+          "number_of_replicas": 0
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-k1"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-k2",
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-k2"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-k3",
+      "body": {
+        "aliases": {
+          "esm-kal": {
+            "routing": "r"
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-k3"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-k3/_close",
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "indices": {
+          "esm-k3": {
+            "closed": true
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cat/indices/esm-k*?h=health,status,index,pri,rep,docs.count,docs.deleted&s=index",
+      "status": 200,
+      "text": "green  open  esm-k1 2 0 0 0\nyellow open  esm-k2 1 1 0 0\nyellow close esm-k3 1 1    \n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/indices/esm-k*?v&h=h,s,i,p,r,dc&s=i:desc",
+      "status": 200,
+      "text": "h      s     i      p r dc\nyellow close esm-k3 1 1   \nyellow open  esm-k2 1 1  0\ngreen  open  esm-k1 2 0  0\n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/indices/esm-k*?format=json&h=index,status,pri&s=index",
+      "status": 200,
+      "response": [
+        {
+          "index": "esm-k1",
+          "status": "open",
+          "pri": "2"
+        },
+        {
+          "index": "esm-k2",
+          "status": "open",
+          "pri": "1"
+        },
+        {
+          "index": "esm-k3",
+          "status": "close",
+          "pri": "1"
+        }
+      ],
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cat/indices/esm-k*?format=json&h=index,bogus,pri&s=index&pretty",
+      "status": 200,
+      "response": [
+        {
+          "index": "esm-k1",
+          "pri": "2"
+        },
+        {
+          "index": "esm-k2",
+          "pri": "1"
+        },
+        {
+          "index": "esm-k3",
+          "pri": "1"
+        }
+      ],
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cat/indices/esm-k*?h=index&s=pri,index",
+      "status": 200,
+      "text": "esm-k2\nesm-k3\nesm-k1\n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/indices/esm-k*?h=index&s=bogus",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Unable to sort by unknown sort key `bogus`"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Unable to sort by unknown sort key `bogus`"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cat/indices/esm-k*?h=index,health&health=green",
+      "status": 200,
+      "text": "esm-k1 green\n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/indices/esm-k*?h=index&health=bogus",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "unknown cluster health status [bogus]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "unknown cluster health status [bogus]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cat/indices/esm-k*?h=index,store.size,pri.store.size,docs.*&s=index&format=json&expand_wildcards=open",
+      "status": 200,
+      "response": [
+        {
+          "index": "esm-k1",
+          "store.size": "227b",
+          "pri.store.size": "227b",
+          "docs.count": "0",
+          "docs.deleted": "0"
+        },
+        {
+          "index": "esm-k2",
+          "store.size": "227b",
+          "pri.store.size": "227b",
+          "docs.count": "0",
+          "docs.deleted": "0"
+        }
+      ],
+      "response_headers": {
+        "content-type": "application/json"
+      },
+      "mask": [
+        "store.size",
+        "pri.store.size"
+      ]
+    },
+    {
+      "req": "GET /_cat/indices/esm-k1?h=index,store.size&pri&format=json",
+      "status": 200,
+      "response": [
+        {
+          "index": "esm-k1",
+          "store.size": "227b",
+          "pri.store.size": "227b"
+        }
+      ],
+      "response_headers": {
+        "content-type": "application/json"
+      },
+      "mask": [
+        "store.size",
+        "pri.store.size"
+      ]
+    },
+    {
+      "req": "GET /_cat/indices/esm-nope",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "index_not_found_exception",
+              "reason": "no such index [esm-nope]",
+              "resource.type": "index_or_alias",
+              "resource.id": "esm-nope",
+              "index_uuid": "_na_",
+              "index": "esm-nope"
+            }
+          ],
+          "type": "index_not_found_exception",
+          "reason": "no such index [esm-nope]",
+          "resource.type": "index_or_alias",
+          "resource.id": "esm-nope",
+          "index_uuid": "_na_",
+          "index": "esm-nope"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cat/indices/esm-k1?h=index,flush.total_time&time=ms&format=json",
+      "status": 200,
+      "response": [
+        {
+          "index": "esm-k1",
+          "flush.total_time": "0"
+        }
+      ],
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cat/indices/esm-k1?h=index,memory.total&bytes=b&format=json",
+      "status": 200,
+      "response": [
+        {
+          "index": "esm-k1",
+          "memory.total": "0"
+        }
+      ],
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cat/aliases/esm-kal?format=json",
+      "status": 200,
+      "response": [
+        {
+          "alias": "esm-kal",
+          "index": "esm-k3",
+          "filter": "-",
+          "routing.index": "r",
+          "routing.search": "r",
+          "is_write_index": "-"
+        }
+      ],
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cat/aliases/esm-nope",
+      "status": 200,
+      "text": "",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/shards/esm-k1?h=index,shard,prirep,state,docs&s=shard",
+      "status": 200,
+      "text": "esm-k1 0 p STARTED 0\nesm-k1 1 p STARTED 0\n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/shards/esm-k2?h=index,shard,prirep,state,unassigned.reason&s=prirep",
+      "status": 200,
+      "text": "esm-k2 0 p STARTED    \nesm-k2 0 r UNASSIGNED INDEX_CREATED\n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/count/esm-k1?h=count",
+      "status": 200,
+      "text": "0\n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/count/esm-k3?h=count",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "index_closed_exception",
+              "reason": "closed",
+              "index_uuid": "ZwMd0mI5T6OmI-oMYREjiQ",
+              "index": "esm-k3"
+            }
+          ],
+          "type": "index_closed_exception",
+          "reason": "closed",
+          "index_uuid": "ZwMd0mI5T6OmI-oMYREjiQ",
+          "index": "esm-k3"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cat/health?h=status,node.total,node.data&format=json",
+      "status": 200,
+      "response": [
+        {
+          "status": "yellow",
+          "node.total": "1",
+          "node.data": "1"
+        }
+      ],
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cat/master?help",
+      "status": 200,
+      "text": "id   |   | node id    \nhost | h | host name  \nip   |   | ip address \nnode | n | node name  \n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/aliases?help",
+      "status": 200,
+      "text": "alias          | a                | alias name           \nindex          | i,idx            | index alias points to\nfilter         | f,fi             | filter               \nrouting.index  | ri,routingIndex  | index routing        \nrouting.search | rs,routingSearch | search routing       \nis_write_index | w,isWriteIndex   | write index          \n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/templates?help",
+      "status": 200,
+      "text": "name           | n   | template name                                \nindex_patterns | t   | template index patterns                      \norder          | o,p | template application order/priority number   \nversion        | v   | version                                      \ncomposed_of    | c   | component templates comprising index template\n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/health?help",
+      "status": 200,
+      "text": "epoch                 | t,time                                               | seconds since 1970-01-01 00:00:00  \ntimestamp             | ts,hms,hhmmss                                        | time in HH:MM:SS                   \ncluster               | cl                                                   | cluster name                       \nstatus                | st                                                   | health status                      \nnode.total            | nt,nodeTotal                                         | total number of nodes              \nnode.data             | nd,nodeData                                          | number of nodes that can store data\nshards                | t,sh,shards.total,shardsTotal                        | total number of shards             \npri                   | p,shards.primary,shardsPrimary                       | number of primary shards           \nrelo                  | r,shards.relocating,shardsRelocating                 | number of relocating nodes         \ninit                  | i,shards.initializing,shardsInitializing             | number of initializing nodes       \nunassign              | u,shards.unassigned,shardsUnassigned                 | number of unassigned shards        \nunassign.pri          | up,shards.unassigned.primary,shardsUnassignedPrimary | number of unassigned primary shards\npending_tasks         | pt,pendingTasks                                      | number of pending tasks            \nmax_task_wait_time    | mtwt,maxTaskWaitTime                                 | wait time of longest task pending  \nactive_shards_percent | asp,activeShardsPercent                              | active number of shards in percent \n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/count?help",
+      "status": 200,
+      "text": "epoch     | t,time                  | seconds since 1970-01-01 00:00:00\ntimestamp | ts,hms,hhmmss           | time in HH:MM:SS                 \ncount     | dc,docs.count,docsCount | the document count               \n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/indices?help",
+      "status": 200,
+      "text": "health                                            | h                                             | current health status                                                                                            \nstatus                                            | s                                             | open/close status                                                                                                \nindex                                             | i,idx                                         | index name                                                                                                       \nuuid                                              | id,uuid                                       | index uuid                                                                                                       \npri                                               | p,shards.primary,shardsPrimary                | number of primary shards                                                                                         \nrep                                               | r,shards.replica,shardsReplica                | number of replica shards                                                                                         \ndocs.count                                        | dc,docsCount                                  | available docs                                                                                                   \ndocs.deleted                                      | dd,docsDeleted                                | deleted docs                                                                                                     \ncreation.date                                     | cd                                            | index creation date (millisecond value)                                                                          \ncreation.date.string                              | cds                                           | index creation date (as string)                                                                                  \nstore.size                                        | ss,storeSize                                  | store size of primaries & replicas                                                                               \npri.store.size                                    |                                               | store size of primaries                                                                                          \ndataset.size                                      |                                               | total size of dataset                                                                                            \ncompletion.size                                   | cs,completionSize                             | size of completion                                                                                               \npri.completion.size                               |                                               | size of completion                                                                                               \nfielddata.memory_size                             | fm,fielddataMemory                            | used fielddata cache                                                                                             \npri.fielddata.memory_size                         |                                               | used fielddata cache                                                                                             \nfielddata.evictions                               | fe,fielddataEvictions                         | fielddata evictions                                                                                              \npri.fielddata.evictions                           |                                               | fielddata evictions                                                                                              \nquery_cache.memory_size                           | qcm,queryCacheMemory                          | used query cache                                                                                                 \npri.query_cache.memory_size                       |                                               | used query cache                                                                                                 \nquery_cache.evictions                             | qce,queryCacheEvictions                       | query cache evictions                                                                                            \npri.query_cache.evictions                         |                                               | query cache evictions                                                                                            \nrequest_cache.memory_size                         | rcm,requestCacheMemory                        | used request cache                                                                                               \npri.request_cache.memory_size                     |                                               | used request cache                                                                                               \nrequest_cache.evictions                           | rce,requestCacheEvictions                     | request cache evictions                                                                                          \npri.request_cache.evictions                       |                                               | request cache evictions                                                                                          \nrequest_cache.hit_count                           | rchc,requestCacheHitCount                     | request cache hit count                                                                                          \npri.request_cache.hit_count                       |                                               | request cache hit count                                                                                          \nrequest_cache.miss_count                          | rcmc,requestCacheMissCount                    | request cache miss count                                                                                         \npri.request_cache.miss_count                      |                                               | request cache miss count                                                                                         \nflush.total                                       | ft,flushTotal                                 | number of flushes                                                                                                \npri.flush.total                                   |                                               | number of flushes                                                                                                \nflush.total_time                                  | ftt,flushTotalTime                            | time spent in flush                                                                                              \npri.flush.total_time                              |                                               | time spent in flush                                                                                              \nget.current                                       | gc,getCurrent                                 | number of current get ops                                                                                        \npri.get.current                                   |                                               | number of current get ops                                                                                        \nget.time                                          | gti,getTime                                   | time spent in get                                                                                                \npri.get.time                                      |                                               | time spent in get                                                                                                \nget.total                                         | gto,getTotal                                  | number of get ops                                                                                                \npri.get.total                                     |                                               | number of get ops                                                                                                \nget.exists_time                                   | geti,getExistsTime                            | time spent in successful gets                                                                                    \npri.get.exists_time                               |                                               | time spent in successful gets                                                                                    \nget.exists_total                                  | geto,getExistsTotal                           | number of successful gets                                                                                        \npri.get.exists_total                              |                                               | number of successful gets                                                                                        \nget.missing_time                                  | gmti,getMissingTime                           | time spent in failed gets                                                                                        \npri.get.missing_time                              |                                               | time spent in failed gets                                                                                        \nget.missing_total                                 | gmto,getMissingTotal                          | number of failed gets                                                                                            \npri.get.missing_total                             |                                               | number of failed gets                                                                                            \nindexing.delete_current                           | idc,indexingDeleteCurrent                     | number of current deletions                                                                                      \npri.indexing.delete_current                       |                                               | number of current deletions                                                                                      \nindexing.delete_time                              | idti,indexingDeleteTime                       | time spent in deletions                                                                                          \npri.indexing.delete_time                          |                                               | time spent in deletions                                                                                          \nindexing.delete_total                             | idto,indexingDeleteTotal                      | number of delete ops                                                                                             \npri.indexing.delete_total                         |                                               | number of delete ops                                                                                             \nindexing.index_current                            | iic,indexingIndexCurrent                      | number of current indexing ops                                                                                   \npri.indexing.index_current                        |                                               | number of current indexing ops                                                                                   \nindexing.index_time                               | iiti,indexingIndexTime                        | time spent in indexing                                                                                           \npri.indexing.index_time                           |                                               | time spent in indexing                                                                                           \nindexing.index_total                              | iito,indexingIndexTotal                       | number of indexing ops                                                                                           \npri.indexing.index_total                          |                                               | number of indexing ops                                                                                           \nindexing.index_failed                             | iif,indexingIndexFailed                       | number of failed indexing ops                                                                                    \npri.indexing.index_failed                         |                                               | number of failed indexing ops                                                                                    \nindexing.index_failed_due_to_version_conflict     | iifvc,indexingIndexFailedDueToVersionConflict | number of failed indexing ops due to version conflict                                                            \npri.indexing.index_failed_due_to_version_conflict |                                               | number of failed indexing ops due to version conflict                                                            \nmerges.current                                    | mc,mergesCurrent                              | number of current merges                                                                                         \npri.merges.current                                |                                               | number of current merges                                                                                         \nmerges.current_docs                               | mcd,mergesCurrentDocs                         | number of current merging docs                                                                                   \npri.merges.current_docs                           |                                               | number of current merging docs                                                                                   \nmerges.current_size                               | mcs,mergesCurrentSize                         | size of current merges                                                                                           \npri.merges.current_size                           |                                               | size of current merges                                                                                           \nmerges.total                                      | mt,mergesTotal                                | number of completed merge ops                                                                                    \npri.merges.total                                  |                                               | number of completed merge ops                                                                                    \nmerges.total_docs                                 | mtd,mergesTotalDocs                           | docs merged                                                                                                      \npri.merges.total_docs                             |                                               | docs merged                                                                                                      \nmerges.total_size                                 | mts,mergesTotalSize                           | size merged                                                                                                      \npri.merges.total_size                             |                                               | size merged                                                                                                      \nmerges.total_time                                 | mtt,mergesTotalTime                           | time spent in merges                                                                                             \npri.merges.total_time                             |                                               | time spent in merges                                                                                             \nrefresh.total                                     | rto,refreshTotal                              | total refreshes                                                                                                  \npri.refresh.total                                 |                                               | total refreshes                                                                                                  \nrefresh.time                                      | rti,refreshTime                               | time spent in refreshes                                                                                          \npri.refresh.time                                  |                                               | time spent in refreshes                                                                                          \nrefresh.external_total                            | rto,refreshTotal                              | total external refreshes                                                                                         \npri.refresh.external_total                        |                                               | total external refreshes                                                                                         \nrefresh.external_time                             | rti,refreshTime                               | time spent in external refreshes                                                                                 \npri.refresh.external_time                         |                                               | time spent in external refreshes                                                                                 \nrefresh.listeners                                 | rli,refreshListeners                          | number of pending refresh listeners                                                                              \npri.refresh.listeners                             |                                               | number of pending refresh listeners                                                                              \nsearch.fetch_current                              | sfc,searchFetchCurrent                        | current fetch phase ops                                                                                          \npri.search.fetch_current                          |                                               | current fetch phase ops                                                                                          \nsearch.fetch_time                                 | sfti,searchFetchTime                          | time spent in fetch phase                                                                                        \npri.search.fetch_time                             |                                               | time spent in fetch phase                                                                                        \nsearch.fetch_total                                | sfto,searchFetchTotal                         | total fetch ops                                                                                                  \npri.search.fetch_total                            |                                               | total fetch ops                                                                                                  \nsearch.open_contexts                              | so,searchOpenContexts                         | open search contexts                                                                                             \npri.search.open_contexts                          |                                               | open search contexts                                                                                             \nsearch.query_current                              | sqc,searchQueryCurrent                        | current query phase ops                                                                                          \npri.search.query_current                          |                                               | current query phase ops                                                                                          \nsearch.query_time                                 | sqti,searchQueryTime                          | time spent in query phase                                                                                        \npri.search.query_time                             |                                               | time spent in query phase                                                                                        \nsearch.query_total                                | sqto,searchQueryTotal                         | total query phase ops                                                                                            \npri.search.query_total                            |                                               | total query phase ops                                                                                            \nsearch.scroll_current                             | scc,searchScrollCurrent                       | open scroll contexts                                                                                             \npri.search.scroll_current                         |                                               | open scroll contexts                                                                                             \nsearch.scroll_time                                | scti,searchScrollTime                         | time scroll contexts held open                                                                                   \npri.search.scroll_time                            |                                               | time scroll contexts held open                                                                                   \nsearch.scroll_total                               | scto,searchScrollTotal                        | completed scroll contexts                                                                                        \npri.search.scroll_total                           |                                               | completed scroll contexts                                                                                        \nsegments.count                                    | sc,segmentsCount                              | number of segments                                                                                               \npri.segments.count                                |                                               | number of segments                                                                                               \nsegments.memory                                   | sm,segmentsMemory                             | memory used by segments                                                                                          \npri.segments.memory                               |                                               | memory used by segments                                                                                          \nsegments.index_writer_memory                      | siwm,segmentsIndexWriterMemory                | memory used by index writer                                                                                      \npri.segments.index_writer_memory                  |                                               | memory used by index writer                                                                                      \nsegments.version_map_memory                       | svmm,segmentsVersionMapMemory                 | memory used by version map                                                                                       \npri.segments.version_map_memory                   |                                               | memory used by version map                                                                                       \nsegments.fixed_bitset_memory                      | sfbm,fixedBitsetMemory                        | memory used by fixed bit sets for nested object field types and type filters for types referred in _parent fields\npri.segments.fixed_bitset_memory                  |                                               | memory used by fixed bit sets for nested object field types and type filters for types referred in _parent fields\nwarmer.current                                    | wc,warmerCurrent                              | current warmer ops                                                                                               \npri.warmer.current                                |                                               | current warmer ops                                                                                               \nwarmer.total                                      | wto,warmerTotal                               | total warmer ops                                                                                                 \npri.warmer.total                                  |                                               | total warmer ops                                                                                                 \nwarmer.total_time                                 | wtt,warmerTotalTime                           | time spent in warmers                                                                                            \npri.warmer.total_time                             |                                               | time spent in warmers                                                                                            \nsuggest.current                                   | suc,suggestCurrent                            | number of current suggest ops                                                                                    \npri.suggest.current                               |                                               | number of current suggest ops                                                                                    \nsuggest.time                                      | suti,suggestTime                              | time spend in suggest                                                                                            \npri.suggest.time                                  |                                               | time spend in suggest                                                                                            \nsuggest.total                                     | suto,suggestTotal                             | number of suggest ops                                                                                            \npri.suggest.total                                 |                                               | number of suggest ops                                                                                            \nmemory.total                                      | tm,memoryTotal                                | total used memory                                                                                                \npri.memory.total                                  |                                               | total user memory                                                                                                \nbulk.total_operations                             | bto,bulkTotalOperation                        | number of bulk shard ops                                                                                         \npri.bulk.total_operations                         |                                               | number of bulk shard ops                                                                                         \nbulk.total_time                                   | btti,bulkTotalTime                            | time spend in shard bulk                                                                                         \npri.bulk.total_time                               |                                               | time spend in shard bulk                                                                                         \nbulk.total_size_in_bytes                          | btsi,bulkTotalSizeInBytes                     | total size in bytes of shard bulk                                                                                \npri.bulk.total_size_in_bytes                      |                                               | total size in bytes of shard bulk                                                                                \nbulk.avg_time                                     | bati,bulkAvgTime                              | average time spend in shard bulk                                                                                 \npri.bulk.avg_time                                 |                                               | average time spend in shard bulk                                                                                 \nbulk.avg_size_in_bytes                            | basi,bulkAvgSizeInBytes                       | average size in bytes of shard bulk                                                                              \npri.bulk.avg_size_in_bytes                        |                                               | average size in bytes of shard bulk                                                                              \ndense_vector.value_count                          | dvc,denseVectorCount                          | total count of indexed dense vector                                                                              \npri.dense_vector.value_count                      |                                               | total count of indexed dense vector                                                                              \nsparse_vector.value_count                         | svc,sparseVectorCount                         | total count of indexed sparse vectors                                                                            \npri.sparse_vector.value_count                     |                                               | total count of indexed sparse vectors                                                                            \n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/shards?help",
+      "status": 200,
+      "text": "index                                         | i,idx                                         | index name                                                                                                       \nshard                                         | s,sh                                          | shard name                                                                                                       \nprirep                                        | p,pr,primaryOrReplica                         | primary or replica                                                                                               \nstate                                         | st                                            | shard state                                                                                                      \ndocs                                          | d,dc                                          | number of docs in shard                                                                                          \nstore                                         | sto                                           | store size of shard (how much disk it uses)                                                                      \ndataset                                       |                                               | total size of dataset                                                                                            \nip                                            |                                               | ip of node where it lives                                                                                        \nid                                            |                                               | unique id of node where it lives                                                                                 \nnode                                          | n                                             | name of node where it lives                                                                                      \nunassigned.reason                             | ur                                            | reason shard became unassigned                                                                                   \nunassigned.at                                 | ua                                            | time shard became unassigned (UTC)                                                                               \nunassigned.for                                | uf                                            | time has been unassigned                                                                                         \nunassigned.details                            | ud                                            | additional details as to why the shard became unassigned                                                         \nrecoverysource.type                           | rs                                            | recovery source type                                                                                             \ncompletion.size                               | cs,completionSize                             | size of completion                                                                                               \nfielddata.memory_size                         | fm,fielddataMemory                            | used fielddata cache                                                                                             \nfielddata.evictions                           | fe,fielddataEvictions                         | fielddata evictions                                                                                              \nquery_cache.memory_size                       | qcm,queryCacheMemory                          | used query cache                                                                                                 \nquery_cache.evictions                         | qce,queryCacheEvictions                       | query cache evictions                                                                                            \nflush.total                                   | ft,flushTotal                                 | number of flushes                                                                                                \nflush.total_time                              | ftt,flushTotalTime                            | time spent in flush                                                                                              \nget.current                                   | gc,getCurrent                                 | number of current get ops                                                                                        \nget.time                                      | gti,getTime                                   | time spent in get                                                                                                \nget.total                                     | gto,getTotal                                  | number of get ops                                                                                                \nget.exists_time                               | geti,getExistsTime                            | time spent in successful gets                                                                                    \nget.exists_total                              | geto,getExistsTotal                           | number of successful gets                                                                                        \nget.missing_time                              | gmti,getMissingTime                           | time spent in failed gets                                                                                        \nget.missing_total                             | gmto,getMissingTotal                          | number of failed gets                                                                                            \nindexing.delete_current                       | idc,indexingDeleteCurrent                     | number of current deletions                                                                                      \nindexing.delete_time                          | idti,indexingDeleteTime                       | time spent in deletions                                                                                          \nindexing.delete_total                         | idto,indexingDeleteTotal                      | number of delete ops                                                                                             \nindexing.index_current                        | iic,indexingIndexCurrent                      | number of current indexing ops                                                                                   \nindexing.index_time                           | iiti,indexingIndexTime                        | time spent in indexing                                                                                           \nindexing.index_total                          | iito,indexingIndexTotal                       | number of indexing ops                                                                                           \nindexing.index_failed                         | iif,indexingIndexFailed                       | number of failed indexing ops                                                                                    \nindexing.index_failed_due_to_version_conflict | iifvc,indexingIndexFailedDueToVersionConflict | number of failed indexing ops due to version conflict                                                            \nmerges.current                                | mc,mergesCurrent                              | number of current merges                                                                                         \nmerges.current_docs                           | mcd,mergesCurrentDocs                         | number of current merging docs                                                                                   \nmerges.current_size                           | mcs,mergesCurrentSize                         | size of current merges                                                                                           \nmerges.total                                  | mt,mergesTotal                                | number of completed merge ops                                                                                    \nmerges.total_docs                             | mtd,mergesTotalDocs                           | docs merged                                                                                                      \nmerges.total_size                             | mts,mergesTotalSize                           | size merged                                                                                                      \nmerges.total_time                             | mtt,mergesTotalTime                           | time spent in merges                                                                                             \nrefresh.total                                 | rto,refreshTotal                              | total refreshes                                                                                                  \nrefresh.time                                  | rti,refreshTime                               | time spent in refreshes                                                                                          \nrefresh.external_total                        | rto,refreshTotal                              | total external refreshes                                                                                         \nrefresh.external_time                         | rti,refreshTime                               | time spent in external refreshes                                                                                 \nrefresh.listeners                             | rli,refreshListeners                          | number of pending refresh listeners                                                                              \nsearch.fetch_current                          | sfc,searchFetchCurrent                        | current fetch phase ops                                                                                          \nsearch.fetch_time                             | sfti,searchFetchTime                          | time spent in fetch phase                                                                                        \nsearch.fetch_total                            | sfto,searchFetchTotal                         | total fetch ops                                                                                                  \nsearch.open_contexts                          | so,searchOpenContexts                         | open search contexts                                                                                             \nsearch.query_current                          | sqc,searchQueryCurrent                        | current query phase ops                                                                                          \nsearch.query_time                             | sqti,searchQueryTime                          | time spent in query phase                                                                                        \nsearch.query_total                            | sqto,searchQueryTotal                         | total query phase ops                                                                                            \nsearch.scroll_current                         | scc,searchScrollCurrent                       | open scroll contexts                                                                                             \nsearch.scroll_time                            | scti,searchScrollTime                         | time scroll contexts held open                                                                                   \nsearch.scroll_total                           | scto,searchScrollTotal                        | completed scroll contexts                                                                                        \nsegments.count                                | sc,segmentsCount                              | number of segments                                                                                               \nsegments.memory                               | sm,segmentsMemory                             | memory used by segments                                                                                          \nsegments.index_writer_memory                  | siwm,segmentsIndexWriterMemory                | memory used by index writer                                                                                      \nsegments.version_map_memory                   | svmm,segmentsVersionMapMemory                 | memory used by version map                                                                                       \nsegments.fixed_bitset_memory                  | sfbm,fixedBitsetMemory                        | memory used by fixed bit sets for nested object field types and type filters for types referred in _parent fields\nseq_no.max                                    | sqm,maxSeqNo                                  | max sequence number                                                                                              \nseq_no.local_checkpoint                       | sql,localCheckpoint                           | local checkpoint                                                                                                 \nseq_no.global_checkpoint                      | sqg,globalCheckpoint                          | global checkpoint                                                                                                \nwarmer.current                                | wc,warmerCurrent                              | current warmer ops                                                                                               \nwarmer.total                                  | wto,warmerTotal                               | total warmer ops                                                                                                 \nwarmer.total_time                             | wtt,warmerTotalTime                           | time spent in warmers                                                                                            \npath.data                                     | pd,dataPath                                   | shard data path                                                                                                  \npath.state                                    | ps,statsPath                                  | shard state path                                                                                                 \nbulk.total_operations                         | bto,bulkTotalOperations                       | number of bulk shard ops                                                                                         \nbulk.total_time                               | btti,bulkTotalTime                            | time spend in shard bulk                                                                                         \nbulk.total_size_in_bytes                      | btsi,bulkTotalSizeInBytes                     | total size in bytes of shard bulk                                                                                \nbulk.avg_time                                 | bati,bulkAvgTime                              | average time spend in shard bulk                                                                                 \nbulk.avg_size_in_bytes                        | basi,bulkAvgSizeInBytes                       | avg size in bytes of shard bulk                                                                                  \ndense_vector.value_count                      | dvc,denseVectorCount                          | number of indexed dense vectors in shard                                                                         \nsparse_vector.value_count                     | svc,sparseVectorCount                         | number of indexed sparse vectors in shard                                                                        \n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/nodes?help",
+      "status": 200,
+      "text": "id                                            | id,nodeId                                     | unique node id                                                                                                   \npid                                           | p                                             | process id                                                                                                       \nip                                            | i                                             | ip address                                                                                                       \nport                                          | po                                            | bound transport port                                                                                             \nhttp_address                                  | http                                          | bound http address                                                                                               \nversion                                       | v                                             | es version                                                                                                       \ntype                                          | t                                             | es distribution type                                                                                             \nbuild                                         | b                                             | es build hash                                                                                                    \njdk                                           | j                                             | jdk version                                                                                                      \ndisk.total                                    | dt,diskTotal                                  | total disk space                                                                                                 \ndisk.used                                     | du,diskUsed                                   | used disk space                                                                                                  \ndisk.avail                                    | d,da,disk,diskAvail                           | available disk space                                                                                             \ndisk.used_percent                             | dup,diskUsedPercent                           | used disk space percentage                                                                                       \nheap.current                                  | hc,heapCurrent                                | used heap                                                                                                        \nheap.percent                                  | hp,heapPercent                                | used heap ratio                                                                                                  \nheap.max                                      | hm,heapMax                                    | max configured heap                                                                                              \nram.current                                   | rc,ramCurrent                                 | used machine memory                                                                                              \nram.percent                                   | rp,ramPercent                                 | used machine memory ratio                                                                                        \nram.max                                       | rm,ramMax                                     | total machine memory                                                                                             \nfile_desc.current                             | fdc,fileDescriptorCurrent                     | used file descriptors                                                                                            \nfile_desc.percent                             | fdp,fileDescriptorPercent                     | used file descriptor ratio                                                                                       \nfile_desc.max                                 | fdm,fileDescriptorMax                         | max file descriptors                                                                                             \ncpu                                           | cpu                                           | recent cpu usage                                                                                                 \nload_1m                                       | l                                             | 1m load avg                                                                                                      \nload_5m                                       | l                                             | 5m load avg                                                                                                      \nload_15m                                      | l                                             | 15m load avg                                                                                                     \navailable_processors                          | ap                                            | available processors                                                                                             \nuptime                                        | u                                             | node uptime                                                                                                      \nnode.role                                     | r,role,nodeRole                               | m:master eligible node, d:data node, i:ingest node, -:coordinating node only                                     \nmaster                                        | m                                             | *:current master                                                                                                 \nname                                          | n                                             | node name                                                                                                        \ncompletion.size                               | cs,completionSize                             | size of completion                                                                                               \nfielddata.memory_size                         | fm,fielddataMemory                            | used fielddata cache                                                                                             \nfielddata.evictions                           | fe,fielddataEvictions                         | fielddata evictions                                                                                              \nquery_cache.memory_size                       | qcm,queryCacheMemory                          | used query cache                                                                                                 \nquery_cache.evictions                         | qce,queryCacheEvictions                       | query cache evictions                                                                                            \nquery_cache.hit_count                         | qchc,queryCacheHitCount                       | query cache hit counts                                                                                           \nquery_cache.miss_count                        | qcmc,queryCacheMissCount                      | query cache miss counts                                                                                          \nrequest_cache.memory_size                     | rcm,requestCacheMemory                        | used request cache                                                                                               \nrequest_cache.evictions                       | rce,requestCacheEvictions                     | request cache evictions                                                                                          \nrequest_cache.hit_count                       | rchc,requestCacheHitCount                     | request cache hit counts                                                                                         \nrequest_cache.miss_count                      | rcmc,requestCacheMissCount                    | request cache miss counts                                                                                        \nflush.total                                   | ft,flushTotal                                 | number of flushes                                                                                                \nflush.total_time                              | ftt,flushTotalTime                            | time spent in flush                                                                                              \nget.current                                   | gc,getCurrent                                 | number of current get ops                                                                                        \nget.time                                      | gti,getTime                                   | time spent in get                                                                                                \nget.total                                     | gto,getTotal                                  | number of get ops                                                                                                \nget.exists_time                               | geti,getExistsTime                            | time spent in successful gets                                                                                    \nget.exists_total                              | geto,getExistsTotal                           | number of successful gets                                                                                        \nget.missing_time                              | gmti,getMissingTime                           | time spent in failed gets                                                                                        \nget.missing_total                             | gmto,getMissingTotal                          | number of failed gets                                                                                            \nindexing.delete_current                       | idc,indexingDeleteCurrent                     | number of current deletions                                                                                      \nindexing.delete_time                          | idti,indexingDeleteTime                       | time spent in deletions                                                                                          \nindexing.delete_total                         | idto,indexingDeleteTotal                      | number of delete ops                                                                                             \nindexing.index_current                        | iic,indexingIndexCurrent                      | number of current indexing ops                                                                                   \nindexing.index_time                           | iiti,indexingIndexTime                        | time spent in indexing                                                                                           \nindexing.index_total                          | iito,indexingIndexTotal                       | number of indexing ops                                                                                           \nindexing.index_failed                         | iif,indexingIndexFailed                       | number of failed indexing ops                                                                                    \nindexing.index_failed_due_to_version_conflict | iifvc,indexingIndexFailedDueToVersionConflict | number of failed indexing ops due to version conflict                                                            \nmerges.current                                | mc,mergesCurrent                              | number of current merges                                                                                         \nmerges.current_docs                           | mcd,mergesCurrentDocs                         | number of current merging docs                                                                                   \nmerges.current_size                           | mcs,mergesCurrentSize                         | size of current merges                                                                                           \nmerges.total                                  | mt,mergesTotal                                | number of completed merge ops                                                                                    \nmerges.total_docs                             | mtd,mergesTotalDocs                           | docs merged                                                                                                      \nmerges.total_size                             | mts,mergesTotalSize                           | size merged                                                                                                      \nmerges.total_time                             | mtt,mergesTotalTime                           | time spent in merges                                                                                             \nrefresh.total                                 | rto,refreshTotal                              | total refreshes                                                                                                  \nrefresh.time                                  | rti,refreshTime                               | time spent in refreshes                                                                                          \nrefresh.external_total                        | rto,refreshTotal                              | total external refreshes                                                                                         \nrefresh.external_time                         | rti,refreshTime                               | time spent in external refreshes                                                                                 \nrefresh.listeners                             | rli,refreshListeners                          | number of pending refresh listeners                                                                              \nscript.compilations                           | scrcc,scriptCompilations                      | script compilations                                                                                              \nscript.cache_evictions                        | scrce,scriptCacheEvictions                    | script cache evictions                                                                                           \nscript.compilation_limit_triggered            | scrclt,scriptCacheCompilationLimitTriggered   | script cache compilation limit triggered                                                                         \nsearch.fetch_current                          | sfc,searchFetchCurrent                        | current fetch phase ops                                                                                          \nsearch.fetch_time                             | sfti,searchFetchTime                          | time spent in fetch phase                                                                                        \nsearch.fetch_total                            | sfto,searchFetchTotal                         | total fetch ops                                                                                                  \nsearch.open_contexts                          | so,searchOpenContexts                         | open search contexts                                                                                             \nsearch.query_current                          | sqc,searchQueryCurrent                        | current query phase ops                                                                                          \nsearch.query_time                             | sqti,searchQueryTime                          | time spent in query phase                                                                                        \nsearch.query_total                            | sqto,searchQueryTotal                         | total query phase ops                                                                                            \nsearch.scroll_current                         | scc,searchScrollCurrent                       | open scroll contexts                                                                                             \nsearch.scroll_time                            | scti,searchScrollTime                         | time scroll contexts held open                                                                                   \nsearch.scroll_total                           | scto,searchScrollTotal                        | completed scroll contexts                                                                                        \nsegments.count                                | sc,segmentsCount                              | number of segments                                                                                               \nsegments.memory                               | sm,segmentsMemory                             | memory used by segments                                                                                          \nsegments.index_writer_memory                  | siwm,segmentsIndexWriterMemory                | memory used by index writer                                                                                      \nsegments.version_map_memory                   | svmm,segmentsVersionMapMemory                 | memory used by version map                                                                                       \nsegments.fixed_bitset_memory                  | sfbm,fixedBitsetMemory                        | memory used by fixed bit sets for nested object field types and type filters for types referred in _parent fields\nsuggest.current                               | suc,suggestCurrent                            | number of current suggest ops                                                                                    \nsuggest.time                                  | suti,suggestTime                              | time spend in suggest                                                                                            \nsuggest.total                                 | suto,suggestTotal                             | number of suggest ops                                                                                            \nbulk.total_operations                         | bto,bulkTotalOperations                       | number of bulk shard ops                                                                                         \nbulk.total_time                               | btti,bulkTotalTime                            | time spend in shard bulk                                                                                         \nbulk.total_size_in_bytes                      | btsi,bulkTotalSizeInBytes                     | total size in bytes of shard bulk                                                                                \nbulk.avg_time                                 | bati,bulkAvgTime                              | average time spend in shard bulk                                                                                 \nbulk.avg_size_in_bytes                        | basi,bulkAvgSizeInBytes                       | average size in bytes of shard bulk                                                                              \nshard_stats.total_count                       | sstc,shards,shardStatsTotalCount              | number of shards assigned                                                                                        \nmappings.total_count                          | mtc,mappingsTotalCount                        | number of mappings                                                                                               \nmappings.total_estimated_overhead_in_bytes    | mteo,mappingsTotalEstimatedOverheadInBytes    | estimated overhead in bytes of mappings                                                                          \n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/allocation?help",
+      "status": 200,
+      "text": "shards                | s                       | number of shards on node                                                \nshards.undesired      |                         | number of shards that are scheduled to be moved elsewhere in the cluster\nwrite_load.forecast   | wlf,writeLoadForecast   | sum of index write load forecasts                                       \ndisk.indices.forecast | dif,diskIndicesForecast | sum of shard size forecasts                                             \ndisk.indices          | di,diskIndices          | disk used by ES indices                                                 \ndisk.used             | du,diskUsed             | disk used (total, not just ES)                                          \ndisk.avail            | da,diskAvail            | disk available                                                          \ndisk.total            | dt,diskTotal            | total capacity of all volumes                                           \ndisk.percent          | dp,diskPercent          | percent disk used                                                       \nhost                  | h                       | host of node                                                            \nip                    |                         | ip of node                                                              \nnode                  | n                       | name of node                                                            \nnode.role             | r,role,nodeRole         | node roles                                                              \n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat",
+      "status": 200,
+      "text": "=^.^=\n/_cat/allocation\n/_cat/shards\n/_cat/shards/{index}\n/_cat/master\n/_cat/nodes\n/_cat/tasks\n/_cat/indices\n/_cat/indices/{index}\n/_cat/segments\n/_cat/segments/{index}\n/_cat/count\n/_cat/count/{index}\n/_cat/recovery\n/_cat/recovery/{index}\n/_cat/health\n/_cat/pending_tasks\n/_cat/aliases\n/_cat/aliases/{alias}\n/_cat/thread_pool\n/_cat/thread_pool/{thread_pools}\n/_cat/circuit_breaker\n/_cat/circuit_breaker/{circuit_breaker_patterns}\n/_cat/plugins\n/_cat/fielddata\n/_cat/fielddata/{fields}\n/_cat/nodeattrs\n/_cat/repositories\n/_cat/snapshots/{repository}\n/_cat/templates\n/_cat/component_templates\n/_cat/ml/anomaly_detectors\n/_cat/ml/anomaly_detectors/{job_id}\n/_cat/ml/datafeeds\n/_cat/ml/datafeeds/{datafeed_id}\n/_cat/ml/trained_models\n/_cat/ml/trained_models/{model_id}\n/_cat/ml/data_frame/analytics\n/_cat/ml/data_frame/analytics/{id}\n/_cat/transforms\n/_cat/transforms/{transform_id}\n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/indices/esm-k1?h=index&bogus=1",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "request [/_cat/indices/esm-k1] contains unrecognized parameter: [bogus]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "request [/_cat/indices/esm-k1] contains unrecognized parameter: [bogus]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cat/indices/esm-k1?h=index&v=bogus",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Failed to parse value [bogus] as only [true] or [false] are allowed."
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Failed to parse value [bogus] as only [true] or [false] are allowed."
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cat/indices/esm-k1?h=index&format=yaml",
+      "status": 200,
+      "text": "---\n- index: \"esm-k1\"\n",
+      "response_headers": {
+        "content-type": "application/yaml"
+      }
+    }
+  ]
+}

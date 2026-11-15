@@ -1,0 +1,96 @@
+---
+requires:
+  stack: true
+  serverless: false
+---
+setup:
+  - do:
+      ml.put_job:
+        job_id: get-model-snapshots
+        body:  >
+          {
+            "analysis_config" : {
+                "detectors" :[{"function":"metric","field_name":"responsetime","by_field_name":"airline"}]
+            },
+            "data_description" : {
+                "format":"xcontent",
+                "time_field":"time"
+            }
+          }
+
+  - do:
+      index:
+        index:  .ml-anomalies-get-model-snapshots
+        id:     "get-model-snapshots-1"
+        body:  >
+          {
+            "job_id": "get-model-snapshots",
+            "snapshot_id": "1",
+            "timestamp": "2016-06-02T00:00:00Z",
+            "snapshot_doc_count": 1
+          }
+
+  - do:
+      index:
+        index:  .ml-state-000001
+        id:     "get-model-snapshots_model_state_1#1"
+        body: {}
+
+  - do:
+      index:
+        index:  .ml-anomalies-get-model-snapshots
+        id:     "get-model-snapshots-2"
+        body:  >
+          {
+            "job_id": "get-model-snapshots",
+            "snapshot_id": "2",
+            "timestamp": "2016-06-01T00:00:00Z",
+            "snapshot_doc_count": 2
+          }
+
+  - do:
+      index:
+        index:  .ml-state-000001
+        id:     "get-model-snapshots_model_state_2#1"
+        body:  {}
+
+  - do:
+      index:
+        index:  .ml-state-000001
+        id:     "get-model-snapshots_model_state_2#2"
+        body:  {}
+  - do:
+      indices.refresh:
+        index: [.ml-anomalies-get-model-snapshots, .ml-state*]
+---
+teardown:
+  - do:
+      ml.delete_job:
+        job_id: get-model-snapshots
+---
+"Model snapshots":
+  - do:
+      ml.get_model_snapshots:
+        job_id: "get-model-snapshots"
+        snapshot_id: "_all"
+  - match: { count: 2 }
+  - match: { model_snapshots.0.timestamp: 1464825600000 }
+  - match: { model_snapshots.1.timestamp: 1464739200000 }
+
+  - do:
+      ml.get_model_snapshots:
+        job_id: "get-model-snapshots"
+        snapshot_id: "2"
+  - match: { count: 1 }
+  - match: { model_snapshots.0.timestamp: 1464739200000 }
+
+  - do:
+      catch: missing
+      ml.delete_model_snapshot:
+        job_id: "non-existent-job"
+        snapshot_id: "delete-model-snapshot"
+
+  - do:
+      ml.delete_model_snapshot:
+        job_id: "get-model-snapshots"
+        snapshot_id: "2"

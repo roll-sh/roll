@@ -1,0 +1,1076 @@
+{
+  "description": "Search pipelines with verbose_pipeline, and the source order and empty profile response processors leave (OpenSearch 3.9.0)",
+  "dialect": "opensearch",
+  "steps": [
+    {
+      "req": "PUT /esm-v",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "t": {
+              "type": "text"
+            },
+            "n": {
+              "type": "integer"
+            },
+            "k": {
+              "type": "keyword"
+            }
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-v"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /esm-v/_doc/1?refresh=true",
+      "body": {
+        "t": "hello world",
+        "n": 1,
+        "k": "a"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 201,
+      "response": {
+        "_index": "esm-v",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /esm-v/_doc/2?refresh=true",
+      "body": {
+        "zeta": "x",
+        "alpha": "y",
+        "t": "hello",
+        "n": 2,
+        "k": "b"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 201,
+      "response": {
+        "_index": "esm-v",
+        "_id": "2",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 1,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /esm-v/_doc/3?refresh=true",
+      "body": {
+        "t": "other",
+        "n": 3,
+        "k": "c"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 201,
+      "response": {
+        "_index": "esm-v",
+        "_id": "3",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 2,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_search/pipeline/esm-vp",
+      "body": {
+        "request_processors": [
+          {
+            "filter_query": {
+              "tag": "tag1",
+              "query": {
+                "match": {
+                  "t": "hello"
+                }
+              }
+            }
+          }
+        ],
+        "response_processors": [
+          {
+            "rename_field": {
+              "field": "t",
+              "target_field": "t2"
+            }
+          }
+        ]
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_search/pipeline/esm-vp2",
+      "body": {
+        "request_processors": [
+          {
+            "oversample": {
+              "sample_factor": 2
+            }
+          }
+        ],
+        "response_processors": [
+          {
+            "truncate_hits": {
+              "tag": "tr"
+            }
+          },
+          {
+            "sort": {
+              "field": "k",
+              "order": "desc"
+            }
+          }
+        ]
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /esm-v/_search?search_pipeline=esm-vp&verbose_pipeline=true",
+      "mask": [
+        "took",
+        "duration_millis"
+      ],
+      "body": {
+        "query": {
+          "match_all": {}
+        },
+        "size": 1,
+        "sort": [
+          {
+            "n": "asc"
+          }
+        ]
+      },
+      "status": 200,
+      "response": {
+        "took": 10,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 2,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "esm-v",
+              "_id": "1",
+              "_score": null,
+              "_source": {
+                "k": "a",
+                "n": 1,
+                "t2": "hello world"
+              },
+              "sort": [
+                1
+              ]
+            }
+          ]
+        },
+        "processor_results": [
+          {
+            "processor_name": "filter_query",
+            "tag": "tag1",
+            "duration_millis": 0,
+            "status": "success",
+            "input_data": {
+              "verbose_pipeline": true,
+              "size": 1,
+              "query": {
+                "match_all": {
+                  "boost": 1.0
+                }
+              },
+              "sort": [
+                {
+                  "n": {
+                    "order": "asc"
+                  }
+                }
+              ]
+            },
+            "output_data": {
+              "verbose_pipeline": true,
+              "size": 1,
+              "query": {
+                "bool": {
+                  "filter": [
+                    {
+                      "match": {
+                        "t": {
+                          "auto_generate_synonyms_phrase_query": true,
+                          "query": "hello",
+                          "zero_terms_query": "NONE",
+                          "fuzzy_transpositions": true,
+                          "boost": 1.0,
+                          "prefix_length": 0,
+                          "operator": "OR",
+                          "lenient": false,
+                          "max_expansions": 50
+                        }
+                      }
+                    }
+                  ],
+                  "adjust_pure_negative": true,
+                  "must": [
+                    {
+                      "match_all": {
+                        "boost": 1.0
+                      }
+                    }
+                  ],
+                  "boost": 1.0
+                }
+              },
+              "sort": [
+                {
+                  "n": {
+                    "order": "asc"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "processor_name": "rename_field",
+            "duration_millis": 0,
+            "status": "success",
+            "input_data": [
+              {
+                "_index": "esm-v",
+                "_id": "1",
+                "_score": null,
+                "_source": {
+                  "t": "hello world",
+                  "n": 1,
+                  "k": "a"
+                },
+                "sort": [
+                  1
+                ]
+              }
+            ],
+            "output_data": [
+              {
+                "_index": "esm-v",
+                "_id": "1",
+                "_score": null,
+                "_source": {
+                  "k": "a",
+                  "n": 1,
+                  "t2": "hello world"
+                },
+                "sort": [
+                  1
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /esm-v/_search?search_pipeline=esm-vp",
+      "mask": [
+        "took",
+        "duration_millis"
+      ],
+      "body": {
+        "verbose_pipeline": true,
+        "query": {
+          "term": {
+            "k": "a"
+          }
+        },
+        "_source": [
+          "t",
+          "n"
+        ]
+      },
+      "status": 200,
+      "response": {
+        "took": 4,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-v",
+              "_id": "1",
+              "_score": 1.0,
+              "_source": {
+                "n": 1,
+                "t2": "hello world"
+              }
+            }
+          ]
+        },
+        "processor_results": [
+          {
+            "processor_name": "filter_query",
+            "tag": "tag1",
+            "duration_millis": 0,
+            "status": "success",
+            "input_data": {
+              "verbose_pipeline": true,
+              "query": {
+                "term": {
+                  "k": {
+                    "boost": 1.0,
+                    "value": "a"
+                  }
+                }
+              },
+              "_source": {
+                "includes": [
+                  "t",
+                  "n"
+                ]
+              }
+            },
+            "output_data": {
+              "verbose_pipeline": true,
+              "query": {
+                "bool": {
+                  "filter": [
+                    {
+                      "match": {
+                        "t": {
+                          "auto_generate_synonyms_phrase_query": true,
+                          "query": "hello",
+                          "zero_terms_query": "NONE",
+                          "fuzzy_transpositions": true,
+                          "boost": 1.0,
+                          "prefix_length": 0,
+                          "operator": "OR",
+                          "lenient": false,
+                          "max_expansions": 50
+                        }
+                      }
+                    }
+                  ],
+                  "adjust_pure_negative": true,
+                  "must": [
+                    {
+                      "term": {
+                        "k": {
+                          "boost": 1.0,
+                          "value": "a"
+                        }
+                      }
+                    }
+                  ],
+                  "boost": 1.0
+                }
+              },
+              "_source": {
+                "includes": [
+                  "t",
+                  "n"
+                ]
+              }
+            }
+          },
+          {
+            "processor_name": "rename_field",
+            "duration_millis": 0,
+            "status": "success",
+            "input_data": [
+              {
+                "_index": "esm-v",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "t": "hello world",
+                  "n": 1
+                }
+              }
+            ],
+            "output_data": [
+              {
+                "_index": "esm-v",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "n": 1,
+                  "t2": "hello world"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /esm-v/_search?search_pipeline=esm-vp&verbose_pipeline=false",
+      "body": {
+        "verbose_pipeline": true,
+        "size": 1,
+        "sort": [
+          {
+            "n": "asc"
+          }
+        ]
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 2,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "esm-v",
+              "_id": "1",
+              "_score": null,
+              "_source": {
+                "k": "a",
+                "n": 1,
+                "t2": "hello world"
+              },
+              "sort": [
+                1
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /esm-v/_search?verbose_pipeline=true",
+      "body": {
+        "size": 1
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "The 'verbose pipeline' option requires a search pipeline to be defined."
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "The 'verbose pipeline' option requires a search pipeline to be defined."
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /esm-v/_search",
+      "body": {
+        "verbose_pipeline": true,
+        "size": 1
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "The 'verbose pipeline' option requires a search pipeline to be defined."
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "The 'verbose pipeline' option requires a search pipeline to be defined."
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /esm-v/_search?search_pipeline=esm-vp2&verbose_pipeline=true",
+      "mask": [
+        "took",
+        "duration_millis"
+      ],
+      "body": {
+        "size": 1,
+        "sort": [
+          {
+            "n": "asc"
+          }
+        ],
+        "query": {
+          "range": {
+            "n": {
+              "gte": 1
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 3,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "esm-v",
+              "_id": "1",
+              "_score": null,
+              "_source": {
+                "t": "hello world",
+                "k": "a",
+                "n": 1
+              },
+              "sort": [
+                1
+              ]
+            }
+          ]
+        },
+        "profile": {
+          "shards": []
+        },
+        "processor_results": [
+          {
+            "processor_name": "oversample",
+            "duration_millis": 0,
+            "status": "success",
+            "input_data": {
+              "verbose_pipeline": true,
+              "size": 1,
+              "query": {
+                "range": {
+                  "n": {
+                    "include_lower": true,
+                    "include_upper": true,
+                    "from": 1,
+                    "boost": 1.0,
+                    "to": null
+                  }
+                }
+              },
+              "sort": [
+                {
+                  "n": {
+                    "order": "asc"
+                  }
+                }
+              ]
+            },
+            "output_data": {
+              "verbose_pipeline": true,
+              "size": 2,
+              "query": {
+                "range": {
+                  "n": {
+                    "include_lower": true,
+                    "include_upper": true,
+                    "from": 1,
+                    "boost": 1.0,
+                    "to": null
+                  }
+                }
+              },
+              "sort": [
+                {
+                  "n": {
+                    "order": "asc"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "processor_name": "truncate_hits",
+            "tag": "tr",
+            "duration_millis": 0,
+            "status": "success",
+            "input_data": [
+              {
+                "_index": "esm-v",
+                "_id": "1",
+                "_score": null,
+                "_source": {
+                  "t": "hello world",
+                  "n": 1,
+                  "k": "a"
+                },
+                "sort": [
+                  1
+                ]
+              },
+              {
+                "_index": "esm-v",
+                "_id": "2",
+                "_score": null,
+                "_source": {
+                  "zeta": "x",
+                  "alpha": "y",
+                  "t": "hello",
+                  "n": 2,
+                  "k": "b"
+                },
+                "sort": [
+                  2
+                ]
+              }
+            ],
+            "output_data": [
+              {
+                "_index": "esm-v",
+                "_id": "1",
+                "_score": null,
+                "_source": {
+                  "t": "hello world",
+                  "n": 1,
+                  "k": "a"
+                },
+                "sort": [
+                  1
+                ]
+              }
+            ]
+          },
+          {
+            "processor_name": "sort",
+            "duration_millis": 0,
+            "status": "success",
+            "input_data": [
+              {
+                "_index": "esm-v",
+                "_id": "1",
+                "_score": null,
+                "_source": {
+                  "t": "hello world",
+                  "n": 1,
+                  "k": "a"
+                },
+                "sort": [
+                  1
+                ]
+              }
+            ],
+            "output_data": [
+              {
+                "_index": "esm-v",
+                "_id": "1",
+                "_score": null,
+                "_source": {
+                  "t": "hello world",
+                  "k": "a",
+                  "n": 1
+                },
+                "sort": [
+                  1
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /esm-v/_search?verbose_pipeline=true",
+      "mask": [
+        "took",
+        "duration_millis"
+      ],
+      "body": {
+        "size": 2,
+        "sort": [
+          {
+            "n": "desc"
+          }
+        ],
+        "search_pipeline": {
+          "request_processors": [
+            {
+              "filter_query": {
+                "query": {
+                  "terms": {
+                    "k": [
+                      "a",
+                      "b"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 2,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "esm-v",
+              "_id": "2",
+              "_score": null,
+              "_source": {
+                "zeta": "x",
+                "alpha": "y",
+                "t": "hello",
+                "n": 2,
+                "k": "b"
+              },
+              "sort": [
+                2
+              ]
+            },
+            {
+              "_index": "esm-v",
+              "_id": "1",
+              "_score": null,
+              "_source": {
+                "t": "hello world",
+                "n": 1,
+                "k": "a"
+              },
+              "sort": [
+                1
+              ]
+            }
+          ]
+        },
+        "processor_results": [
+          {
+            "processor_name": "filter_query",
+            "duration_millis": 0,
+            "status": "success",
+            "input_data": {
+              "verbose_pipeline": true,
+              "size": 2,
+              "search_pipeline": {
+                "request_processors": [
+                  {
+                    "filter_query": {
+                      "query": {
+                        "terms": {
+                          "k": [
+                            "a",
+                            "b"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "sort": [
+                {
+                  "n": {
+                    "order": "desc"
+                  }
+                }
+              ]
+            },
+            "output_data": {
+              "verbose_pipeline": true,
+              "size": 2,
+              "query": {
+                "bool": {
+                  "filter": [
+                    {
+                      "terms": {
+                        "boost": 1.0,
+                        "k": [
+                          "a",
+                          "b"
+                        ]
+                      }
+                    }
+                  ],
+                  "adjust_pure_negative": true,
+                  "boost": 1.0
+                }
+              },
+              "search_pipeline": {
+                "request_processors": [
+                  {
+                    "filter_query": {
+                      "query": {
+                        "terms": {
+                          "k": [
+                            "a",
+                            "b"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "sort": [
+                {
+                  "n": {
+                    "order": "desc"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /esm-v/_search?search_pipeline=esm-vp2",
+      "body": {
+        "sort": [
+          {
+            "n": "asc"
+          }
+        ]
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 3,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "esm-v",
+              "_id": "1",
+              "_score": null,
+              "_source": {
+                "t": "hello world",
+                "k": "a",
+                "n": 1
+              },
+              "sort": [
+                1
+              ]
+            },
+            {
+              "_index": "esm-v",
+              "_id": "2",
+              "_score": null,
+              "_source": {
+                "zeta": "x",
+                "t": "hello",
+                "alpha": "y",
+                "k": "b",
+                "n": 2
+              },
+              "sort": [
+                2
+              ]
+            },
+            {
+              "_index": "esm-v",
+              "_id": "3",
+              "_score": null,
+              "_source": {
+                "t": "other",
+                "k": "c",
+                "n": 3
+              },
+              "sort": [
+                3
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /esm-v",
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_search/pipeline/esm-vp",
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_search/pipeline/esm-vp2",
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    }
+  ]
+}

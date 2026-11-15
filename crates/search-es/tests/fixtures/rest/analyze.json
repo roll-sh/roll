@@ -1,0 +1,2289 @@
+{
+  "description" : "_analyze: request parsing, analyzer selection, field analyzers, explain; analysis settings validation at create/settings/templates",
+  "steps" : [
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "Foo Bar"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "foo",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "bar",
+            "start_offset" : 4,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : [
+          "Foo Bar",
+          "Baz"
+        ],
+        "tokenizer" : "standard"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "Foo",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "Bar",
+            "start_offset" : 4,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "Baz",
+            "start_offset" : 8,
+            "end_offset" : 11,
+            "type" : "<ALPHANUM>",
+            "position" : 102
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "This is troubled",
+        "analyzer" : "standard",
+        "explain" : true
+      },
+      "status" : 200,
+      "response" : {
+        "detail" : {
+          "custom_analyzer" : false,
+          "analyzer" : {
+            "name" : "standard",
+            "tokens" : [
+              {
+                "token" : "this",
+                "start_offset" : 0,
+                "end_offset" : 4,
+                "type" : "<ALPHANUM>",
+                "position" : 0,
+                "bytes" : "[74 68 69 73]",
+                "positionLength" : 1,
+                "termFrequency" : 1
+              },
+              {
+                "token" : "is",
+                "start_offset" : 5,
+                "end_offset" : 7,
+                "type" : "<ALPHANUM>",
+                "position" : 1,
+                "bytes" : "[69 73]",
+                "positionLength" : 1,
+                "termFrequency" : 1
+              },
+              {
+                "token" : "troubled",
+                "start_offset" : 8,
+                "end_offset" : 16,
+                "type" : "<ALPHANUM>",
+                "position" : 2,
+                "bytes" : "[74 72 6f 75 62 6c 65 64]",
+                "positionLength" : 1,
+                "termFrequency" : 1
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "Foo Bar-baz",
+        "tokenizer" : "standard",
+        "char_filter" : [
+          "html_strip"
+        ],
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "keyword_marker",
+            "keywords" : [
+              "foo"
+            ]
+          },
+          "word_delimiter_graph"
+        ],
+        "explain" : true
+      },
+      "status" : 200,
+      "response" : {
+        "detail" : {
+          "custom_analyzer" : true,
+          "charfilters" : [
+            {
+              "name" : "html_strip",
+              "filtered_text" : [
+                "Foo Bar-baz"
+              ]
+            }
+          ],
+          "tokenizer" : {
+            "name" : "standard",
+            "tokens" : [
+              {
+                "token" : "Foo",
+                "start_offset" : 0,
+                "end_offset" : 3,
+                "type" : "<ALPHANUM>",
+                "position" : 0,
+                "bytes" : "[46 6f 6f]",
+                "positionLength" : 1,
+                "termFrequency" : 1
+              },
+              {
+                "token" : "Bar",
+                "start_offset" : 4,
+                "end_offset" : 7,
+                "type" : "<ALPHANUM>",
+                "position" : 1,
+                "bytes" : "[42 61 72]",
+                "positionLength" : 1,
+                "termFrequency" : 1
+              },
+              {
+                "token" : "baz",
+                "start_offset" : 8,
+                "end_offset" : 11,
+                "type" : "<ALPHANUM>",
+                "position" : 2,
+                "bytes" : "[62 61 7a]",
+                "positionLength" : 1,
+                "termFrequency" : 1
+              }
+            ]
+          },
+          "tokenfilters" : [
+            {
+              "name" : "lowercase",
+              "tokens" : [
+                {
+                  "token" : "foo",
+                  "start_offset" : 0,
+                  "end_offset" : 3,
+                  "type" : "<ALPHANUM>",
+                  "position" : 0,
+                  "bytes" : "[66 6f 6f]",
+                  "positionLength" : 1,
+                  "termFrequency" : 1
+                },
+                {
+                  "token" : "bar",
+                  "start_offset" : 4,
+                  "end_offset" : 7,
+                  "type" : "<ALPHANUM>",
+                  "position" : 1,
+                  "bytes" : "[62 61 72]",
+                  "positionLength" : 1,
+                  "termFrequency" : 1
+                },
+                {
+                  "token" : "baz",
+                  "start_offset" : 8,
+                  "end_offset" : 11,
+                  "type" : "<ALPHANUM>",
+                  "position" : 2,
+                  "bytes" : "[62 61 7a]",
+                  "positionLength" : 1,
+                  "termFrequency" : 1
+                }
+              ]
+            },
+            {
+              "name" : "__anonymous__keyword_marker",
+              "tokens" : [
+                {
+                  "token" : "foo",
+                  "start_offset" : 0,
+                  "end_offset" : 3,
+                  "type" : "<ALPHANUM>",
+                  "position" : 0,
+                  "bytes" : "[66 6f 6f]",
+                  "keyword" : true,
+                  "positionLength" : 1,
+                  "termFrequency" : 1
+                },
+                {
+                  "token" : "bar",
+                  "start_offset" : 4,
+                  "end_offset" : 7,
+                  "type" : "<ALPHANUM>",
+                  "position" : 1,
+                  "bytes" : "[62 61 72]",
+                  "keyword" : false,
+                  "positionLength" : 1,
+                  "termFrequency" : 1
+                },
+                {
+                  "token" : "baz",
+                  "start_offset" : 8,
+                  "end_offset" : 11,
+                  "type" : "<ALPHANUM>",
+                  "position" : 2,
+                  "bytes" : "[62 61 7a]",
+                  "keyword" : false,
+                  "positionLength" : 1,
+                  "termFrequency" : 1
+                }
+              ]
+            },
+            {
+              "name" : "word_delimiter_graph",
+              "tokens" : [
+                {
+                  "token" : "foo",
+                  "start_offset" : 0,
+                  "end_offset" : 3,
+                  "type" : "<ALPHANUM>",
+                  "position" : 0,
+                  "bytes" : "[66 6f 6f]",
+                  "keyword" : true,
+                  "positionLength" : 1,
+                  "termFrequency" : 1
+                },
+                {
+                  "token" : "bar",
+                  "start_offset" : 4,
+                  "end_offset" : 7,
+                  "type" : "<ALPHANUM>",
+                  "position" : 1,
+                  "bytes" : "[62 61 72]",
+                  "keyword" : false,
+                  "positionLength" : 1,
+                  "termFrequency" : 1
+                },
+                {
+                  "token" : "baz",
+                  "start_offset" : 8,
+                  "end_offset" : 11,
+                  "type" : "<ALPHANUM>",
+                  "position" : 2,
+                  "bytes" : "[62 61 7a]",
+                  "keyword" : false,
+                  "positionLength" : 1,
+                  "termFrequency" : 1
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "Foo Bar",
+        "analyzer" : "english",
+        "explain" : true,
+        "attributes" : [
+          "keyword"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "detail" : {
+          "custom_analyzer" : false,
+          "analyzer" : {
+            "name" : "english",
+            "tokens" : [
+              {
+                "token" : "foo",
+                "start_offset" : 0,
+                "end_offset" : 3,
+                "type" : "<ALPHANUM>",
+                "position" : 0,
+                "keyword" : false
+              },
+              {
+                "token" : "bar",
+                "start_offset" : 4,
+                "end_offset" : 7,
+                "type" : "<ALPHANUM>",
+                "position" : 1,
+                "keyword" : false
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "Foo Bar",
+        "filter" : [
+          "lowercase"
+        ],
+        "explain" : true
+      },
+      "status" : 200,
+      "response" : {
+        "detail" : {
+          "custom_analyzer" : true,
+          "charfilters" : [ ],
+          "tokenizer" : {
+            "name" : "keyword",
+            "tokens" : [
+              {
+                "token" : "Foo Bar",
+                "start_offset" : 0,
+                "end_offset" : 7,
+                "type" : "word",
+                "position" : 0,
+                "bytes" : "[46 6f 6f 20 42 61 72]",
+                "positionLength" : 1,
+                "termFrequency" : 1
+              }
+            ]
+          },
+          "tokenfilters" : [
+            {
+              "name" : "lowercase",
+              "tokens" : [
+                {
+                  "token" : "foo bar",
+                  "start_offset" : 0,
+                  "end_offset" : 7,
+                  "type" : "word",
+                  "position" : 0,
+                  "bytes" : "[66 6f 6f 20 62 61 72]",
+                  "positionLength" : 1,
+                  "termFrequency" : 1
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "wi-fi rocks",
+        "tokenizer" : "standard",
+        "filter" : [
+          {
+            "type" : "synonym_graph",
+            "synonyms" : [
+              "wifi, wi fi"
+            ]
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "wifi",
+            "start_offset" : 0,
+            "end_offset" : 5,
+            "type" : "SYNONYM",
+            "position" : 0,
+            "positionLength" : 2
+          },
+          {
+            "token" : "wi",
+            "start_offset" : 0,
+            "end_offset" : 2,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "fi",
+            "start_offset" : 3,
+            "end_offset" : 5,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "rocks",
+            "start_offset" : 6,
+            "end_offset" : 11,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "a",
+        "foo" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:13] [analyze_request] unknown field [foo]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:13] [analyze_request] unknown field [foo]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : {
+          "a" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:9] [analyze_request] text doesn't support values of type: START_OBJECT"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:9] [analyze_request] text doesn't support values of type: START_OBJECT"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "x",
+        "analyzer" : 5
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:24] [analyze_request] analyzer doesn't support values of type: VALUE_NUMBER"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:24] [analyze_request] analyzer doesn't support values of type: VALUE_NUMBER"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "x",
+        "filter" : [
+          5
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:23] Expected [VALUE_STRING] or [START_OBJECT], got VALUE_NUMBER"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:23] [analyze_request] failed to parse field [filter]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:23] Expected [VALUE_STRING] or [START_OBJECT], got VALUE_NUMBER"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "x",
+        "filter" : [
+          [
+            "a"
+          ]
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:23] [analyze_request] failed to parse field [filter]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:23] [analyze_request] failed to parse field [filter]",
+          "caused_by" : {
+            "type" : "illegal_state_exception",
+            "reason" : "expected value but got [START_ARRAY]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : [
+          "x",
+          1,
+          true,
+          null
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:21] [analyze_request] failed to parse field [text]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:21] [analyze_request] failed to parse field [text]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Expected text at 1:21 but found VALUE_NULL"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : [
+          "a",
+          {
+            "b" : 1
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:14] [analyze_request] failed to parse field [text]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:14] [analyze_request] failed to parse field [text]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Expected text at 1:14 but found START_OBJECT"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "x",
+        "explain" : "yes"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:23] [analyze_request] failed to parse field [explain]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:23] [analyze_request] failed to parse field [explain]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Failed to parse value [yes] as only [true] or [false] are allowed."
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "x",
+        "filter" : "lowercase"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:22] [analyze_request] filter doesn't support values of type: VALUE_STRING"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:22] [analyze_request] filter doesn't support values of type: VALUE_STRING"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: text is missing;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: text is missing;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "request body or source parameter is required"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "request body or source parameter is required"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : [
+        1
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:1] [analyze_request] Expected START_OBJECT but was: START_ARRAY"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:1] [analyze_request] Expected START_OBJECT but was: START_ARRAY"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "x",
+        "field" : "f"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "analysis based on a specific field requires an index"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "analysis based on a specific field requires an index"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "x",
+        "analyzer" : "nope"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to find global analyzer [nope]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "failed to find global analyzer [nope]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "x",
+        "normalizer" : "lowercase"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: index is required if normalizer is specified;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: index is required if normalizer is specified;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "x",
+        "tokenizer" : "nope"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to find global tokenizer under [nope]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "failed to find global tokenizer under [nope]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "x",
+        "filter" : [
+          "nope"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to find global filter under [nope]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "failed to find global filter under [nope]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "x",
+        "tokenizer" : { }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Missing [type] setting for anonymous tokenizer: {}"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Missing [type] setting for anonymous tokenizer: {}"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "text" : "x",
+        "filter" : [
+          {
+            "a" : 1
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Missing [type] setting for anonymous filter: {\"a\":\"1\"}"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Missing [type] setting for anonymous filter: {\"a\":\"1\"}"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze?index=esm-nope",
+      "body" : {
+        "text" : "x"
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-nope",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-nope",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-nope/_analyze",
+      "body" : {
+        "text" : "x"
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-nope",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-nope",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-an1",
+      "body" : {
+        "settings" : {
+          "analysis" : {
+            "analyzer" : {
+              "a" : {
+                "type" : "custom",
+                "tokenizer" : "nope"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Custom Analyzer [a] failed to find tokenizer under name [nope]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Custom Analyzer [a] failed to find tokenizer under name [nope]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-an1",
+      "body" : {
+        "settings" : {
+          "analysis" : {
+            "filter" : {
+              "f" : {
+                "type" : "nope"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Unknown filter type [nope] for [f]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Unknown filter type [nope] for [f]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-an1",
+      "body" : {
+        "settings" : {
+          "analysis" : {
+            "analyzer" : {
+              "a" : {
+                "tokenizer" : "standard",
+                "filter" : [
+                  "nope"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Custom Analyzer [a] failed to find filter under name [nope]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Custom Analyzer [a] failed to find filter under name [nope]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-t1",
+      "body" : {
+        "index_patterns" : [
+          "esm-zz*"
+        ],
+        "template" : {
+          "settings" : {
+            "analysis" : {
+              "analyzer" : {
+                "a" : {
+                  "type" : "custom",
+                  "tokenizer" : "nope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "composable template [esm-t1] template after composition is invalid"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "composable template [esm-t1] template after composition is invalid",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Custom Analyzer [a] failed to find tokenizer under name [nope]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-c1",
+      "body" : {
+        "template" : {
+          "settings" : {
+            "analysis" : {
+              "analyzer" : {
+                "a" : {
+                  "type" : "custom",
+                  "tokenizer" : "nope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Custom Analyzer [a] failed to find tokenizer under name [nope]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Custom Analyzer [a] failed to find tokenizer under name [nope]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_template/esm-l1",
+      "body" : {
+        "index_patterns" : [
+          "esm-zz*"
+        ],
+        "settings" : {
+          "analysis" : {
+            "analyzer" : {
+              "a" : {
+                "type" : "custom",
+                "tokenizer" : "nope"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Custom Analyzer [a] failed to find tokenizer under name [nope]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Custom Analyzer [a] failed to find tokenizer under name [nope]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Legacy index templates are deprecated in favor of composable templates.\""
+        ]
+      }
+    },
+    {
+      "req" : "PUT /esm-an3",
+      "body" : {
+        "settings" : {
+          "analysis" : {
+            "normalizer" : {
+              "n" : {
+                "type" : "custom",
+                "filter" : [
+                  "lowercase"
+                ]
+              }
+            },
+            "analyzer" : {
+              "ws" : {
+                "type" : "custom",
+                "tokenizer" : "whitespace"
+              }
+            }
+          }
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            },
+            "kn" : {
+              "type" : "keyword",
+              "normalizer" : "n"
+            },
+            "l" : {
+              "type" : "long"
+            },
+            "t" : {
+              "type" : "text",
+              "analyzer" : "whitespace",
+              "fields" : {
+                "e" : {
+                  "type" : "text",
+                  "analyzer" : "english"
+                }
+              }
+            },
+            "w" : {
+              "type" : "wildcard"
+            },
+            "c" : {
+              "type" : "constant_keyword"
+            },
+            "m" : {
+              "type" : "match_only_text"
+            },
+            "o" : {
+              "properties" : {
+                "x" : {
+                  "type" : "text"
+                }
+              }
+            },
+            "tc" : {
+              "type" : "token_count",
+              "analyzer" : "standard"
+            },
+            "a" : {
+              "type" : "alias",
+              "path" : "t"
+            },
+            "ip" : {
+              "type" : "ip"
+            },
+            "fl" : {
+              "type" : "flattened"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-an3"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "k",
+        "text" : "Foo Bars the"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "Foo Bars the",
+            "start_offset" : 0,
+            "end_offset" : 12,
+            "type" : "word",
+            "position" : 0
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "kn",
+        "text" : "Foo Bars the"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "foo bars the",
+            "start_offset" : 0,
+            "end_offset" : 12,
+            "type" : "word",
+            "position" : 0
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "l",
+        "text" : "Foo Bars the"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't process field [l], Analysis requests are only supported on tokenized fields"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Can't process field [l], Analysis requests are only supported on tokenized fields"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "t",
+        "text" : "Foo Bars the"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "Foo",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "Bars",
+            "start_offset" : 4,
+            "end_offset" : 8,
+            "type" : "word",
+            "position" : 1
+          },
+          {
+            "token" : "the",
+            "start_offset" : 9,
+            "end_offset" : 12,
+            "type" : "word",
+            "position" : 2
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "t.e",
+        "text" : "Foo Bars the"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "foo",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "bar",
+            "start_offset" : 4,
+            "end_offset" : 8,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "w",
+        "text" : "Foo Bars the"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't process field [w], Analysis requests are only supported on tokenized fields"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Can't process field [w], Analysis requests are only supported on tokenized fields"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "c",
+        "text" : "Foo Bars the"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't process field [c], Analysis requests are only supported on tokenized fields"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Can't process field [c], Analysis requests are only supported on tokenized fields"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "m",
+        "text" : "Foo Bars the"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "foo",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "bars",
+            "start_offset" : 4,
+            "end_offset" : 8,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "the",
+            "start_offset" : 9,
+            "end_offset" : 12,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "o",
+        "text" : "Foo Bars the"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "foo",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "bars",
+            "start_offset" : 4,
+            "end_offset" : 8,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "the",
+            "start_offset" : 9,
+            "end_offset" : 12,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "o.x",
+        "text" : "Foo Bars the"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "foo",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "bars",
+            "start_offset" : 4,
+            "end_offset" : 8,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "the",
+            "start_offset" : 9,
+            "end_offset" : 12,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "tc",
+        "text" : "Foo Bars the"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't process field [tc], Analysis requests are only supported on tokenized fields"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Can't process field [tc], Analysis requests are only supported on tokenized fields"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "a",
+        "text" : "Foo Bars the"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "Foo",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "Bars",
+            "start_offset" : 4,
+            "end_offset" : 8,
+            "type" : "word",
+            "position" : 1
+          },
+          {
+            "token" : "the",
+            "start_offset" : 9,
+            "end_offset" : 12,
+            "type" : "word",
+            "position" : 2
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "ip",
+        "text" : "Foo Bars the"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't process field [ip], Analysis requests are only supported on tokenized fields"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Can't process field [ip], Analysis requests are only supported on tokenized fields"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "fl",
+        "text" : "Foo Bars the"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "Foo Bars the",
+            "start_offset" : 0,
+            "end_offset" : 12,
+            "type" : "word",
+            "position" : 0
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "fl.x",
+        "text" : "Foo Bars the"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No analyzer configured for field fl._keyed"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No analyzer configured for field fl._keyed"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "field" : "missing",
+        "text" : "Foo Bars the"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "foo",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "bars",
+            "start_offset" : 4,
+            "end_offset" : 8,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "the",
+            "start_offset" : 9,
+            "end_offset" : 12,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "normalizer" : "n",
+        "text" : "Foo BAR"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "foo bar",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "word",
+            "position" : 0
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "normalizer" : "n",
+        "text" : "Foo BAR",
+        "explain" : true
+      },
+      "status" : 200,
+      "response" : {
+        "detail" : {
+          "custom_analyzer" : true,
+          "charfilters" : [ ],
+          "tokenizer" : {
+            "name" : "keyword",
+            "tokens" : [
+              {
+                "token" : "Foo BAR",
+                "start_offset" : 0,
+                "end_offset" : 7,
+                "type" : "word",
+                "position" : 0,
+                "bytes" : "[46 6f 6f 20 42 41 52]",
+                "positionLength" : 1,
+                "termFrequency" : 1
+              }
+            ]
+          },
+          "tokenfilters" : [
+            {
+              "name" : "lowercase",
+              "tokens" : [
+                {
+                  "token" : "foo bar",
+                  "start_offset" : 0,
+                  "end_offset" : 7,
+                  "type" : "word",
+                  "position" : 0,
+                  "bytes" : "[66 6f 6f 20 62 61 72]",
+                  "positionLength" : 1,
+                  "termFrequency" : 1
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "normalizer" : "lowercase",
+        "text" : "Foo BAR"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "foo bar",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "word",
+            "position" : 0
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "normalizer" : "nope",
+        "text" : "Foo BAR"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to find normalizer under [nope]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "failed to find normalizer under [nope]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "analyzer" : "nope",
+        "text" : "Foo BAR"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to find analyzer [nope]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "failed to find analyzer [nope]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "analyzer" : "ws",
+        "text" : "Foo BAR"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "Foo",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "BAR",
+            "start_offset" : 4,
+            "end_offset" : 7,
+            "type" : "word",
+            "position" : 1
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3/_analyze",
+      "body" : {
+        "text" : "Foo Bar",
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "stop",
+            "stopwords" : [
+              "bar"
+            ]
+          }
+        ],
+        "explain" : true,
+        "attributes" : [
+          "keyword"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "detail" : {
+          "custom_analyzer" : true,
+          "charfilters" : [ ],
+          "tokenizer" : {
+            "name" : "standard",
+            "tokens" : [
+              {
+                "token" : "Foo",
+                "start_offset" : 0,
+                "end_offset" : 3,
+                "type" : "<ALPHANUM>",
+                "position" : 0
+              },
+              {
+                "token" : "Bar",
+                "start_offset" : 4,
+                "end_offset" : 7,
+                "type" : "<ALPHANUM>",
+                "position" : 1
+              }
+            ]
+          },
+          "tokenfilters" : [
+            {
+              "name" : "lowercase",
+              "tokens" : [
+                {
+                  "token" : "foo",
+                  "start_offset" : 0,
+                  "end_offset" : 3,
+                  "type" : "<ALPHANUM>",
+                  "position" : 0
+                },
+                {
+                  "token" : "bar",
+                  "start_offset" : 4,
+                  "end_offset" : 7,
+                  "type" : "<ALPHANUM>",
+                  "position" : 1
+                }
+              ]
+            },
+            {
+              "name" : "__anonymous__stop",
+              "tokens" : [
+                {
+                  "token" : "foo",
+                  "start_offset" : 0,
+                  "end_offset" : 3,
+                  "type" : "<ALPHANUM>",
+                  "position" : 0
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-an4",
+      "body" : {
+        "aliases" : {
+          "esm-al" : { }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-an4"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-an3/_aliases/esm-al",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-al/_analyze",
+      "body" : {
+        "text" : "x"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "alias [esm-al] has more than one index associated with it [esm-an3, esm-an4], can't execute a single index op"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "alias [esm-al] has more than one index associated with it [esm-an3, esm-an4], can't execute a single index op"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an*/_analyze",
+      "body" : {
+        "text" : "x"
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-an*]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-an*",
+              "index_uuid" : "_na_",
+              "index" : "esm-an*"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-an*]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-an*",
+          "index_uuid" : "_na_",
+          "index" : "esm-an*"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an3,esm-an4/_analyze",
+      "body" : {
+        "text" : "x"
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-an3,esm-an4]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-an3,esm-an4",
+              "index_uuid" : "_na_",
+              "index" : "esm-an3,esm-an4"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-an3,esm-an4]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-an3,esm-an4",
+          "index_uuid" : "_na_",
+          "index" : "esm-an3,esm-an4"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-an4/_close",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "indices" : {
+          "esm-an4" : {
+            "closed" : true
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an4/_analyze",
+      "body" : {
+        "text" : "x"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_closed_exception",
+              "reason" : "closed",
+              "index_uuid" : "QpOvblWBQ-KsX7F6ge0JvQ",
+              "index" : "esm-an4"
+            }
+          ],
+          "type" : "index_closed_exception",
+          "reason" : "closed",
+          "index_uuid" : "QpOvblWBQ-KsX7F6ge0JvQ",
+          "index" : "esm-an4"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-an4/_settings",
+      "body" : {
+        "analysis" : {
+          "analyzer" : {
+            "a" : {
+              "type" : "custom",
+              "tokenizer" : "nope"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Custom Analyzer [a] failed to find tokenizer under name [nope]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Custom Analyzer [a] failed to find tokenizer under name [nope]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-an4/_settings",
+      "body" : {
+        "analysis" : {
+          "analyzer" : {
+            "a" : {
+              "type" : "custom",
+              "tokenizer" : "whitespace"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-an4/_open",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-an4/_analyze",
+      "body" : {
+        "analyzer" : "a",
+        "text" : "Foo Bar"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "Foo",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "Bar",
+            "start_offset" : 4,
+            "end_offset" : 7,
+            "type" : "word",
+            "position" : 1
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-an4/_settings",
+      "body" : {
+        "analysis" : {
+          "analyzer" : {
+            "b" : {
+              "type" : "custom",
+              "tokenizer" : "whitespace"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "reason"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't update non dynamic setting(s) [[index.analysis.analyzer.b.type, index.analysis.analyzer.b.tokenizer]] for open indices [[esm-an4/QpOvblWBQ-KsX7F6ge0JvQ]]. You can either resubmit the update with `?reopen=true`, or create a new index with the desired setting(s) and reindex your data. See https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-reindex"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Can't update non dynamic setting(s) [[index.analysis.analyzer.b.type, index.analysis.analyzer.b.tokenizer]] for open indices [[esm-an4/QpOvblWBQ-KsX7F6ge0JvQ]]. You can either resubmit the update with `?reopen=true`, or create a new index with the desired setting(s) and reindex your data. See https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-reindex"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

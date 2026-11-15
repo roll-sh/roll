@@ -1,0 +1,1103 @@
+{
+  "description": "SQL: selects, aggregations, functions, formats, cursors, translate, errors",
+  "steps": [
+    {
+      "req": "PUT /compat-xpack-emp",
+      "body": {
+        "mappings": {
+          "properties": {
+            "emp_no": {
+              "type": "integer"
+            },
+            "first_name": {
+              "type": "keyword"
+            },
+            "last_name": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "gender": {
+              "type": "keyword"
+            },
+            "salary": {
+              "type": "long"
+            },
+            "height": {
+              "type": "double"
+            },
+            "hire_date": {
+              "type": "date"
+            },
+            "languages": {
+              "type": "integer"
+            },
+            "still_hired": {
+              "type": "boolean"
+            },
+            "dept": {
+              "type": "keyword"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "compat-xpack-emp"
+      }
+    },
+    {
+      "req": "POST /compat-xpack-emp/_bulk?refresh=true&filter_path=errors",
+      "raw": "{\"index\": {\"_id\": \"10001\"}}\n{\"emp_no\": 10001, \"first_name\": \"Georgi\", \"last_name\": \"Facello\", \"gender\": \"M\", \"salary\": 57305, \"height\": 2.03, \"hire_date\": \"1986-06-26T00:00:00Z\", \"languages\": 2, \"still_hired\": true, \"dept\": \"eng\"}\n{\"index\": {\"_id\": \"10002\"}}\n{\"emp_no\": 10002, \"first_name\": \"Bezalel\", \"last_name\": \"Simmel\", \"gender\": \"F\", \"salary\": 56371, \"height\": 2.08, \"hire_date\": \"1985-11-21T00:00:00Z\", \"languages\": 5, \"still_hired\": true, \"dept\": \"sales\"}\n{\"index\": {\"_id\": \"10003\"}}\n{\"emp_no\": 10003, \"first_name\": \"Parto\", \"last_name\": \"Bamford\", \"gender\": \"M\", \"salary\": 61805, \"height\": 1.83, \"hire_date\": \"1986-08-28T00:00:00Z\", \"languages\": 4, \"still_hired\": false, \"dept\": \"eng\"}\n{\"index\": {\"_id\": \"10004\"}}\n{\"emp_no\": 10004, \"first_name\": \"Chirstian\", \"last_name\": \"Koblick\", \"gender\": \"M\", \"salary\": 36174, \"height\": 1.78, \"hire_date\": \"1986-12-01T00:00:00Z\", \"languages\": 5, \"still_hired\": true, \"dept\": \"ops\"}\n{\"index\": {\"_id\": \"10005\"}}\n{\"emp_no\": 10005, \"first_name\": \"Kyoichi\", \"last_name\": \"Maliniak\", \"gender\": \"M\", \"salary\": 63528, \"height\": 2.05, \"hire_date\": \"1989-09-12T00:00:00Z\", \"languages\": 1, \"still_hired\": true, \"dept\": \"sales\"}\n{\"index\": {\"_id\": \"10006\"}}\n{\"emp_no\": 10006, \"first_name\": \"Anneke\", \"last_name\": \"Preusig\", \"gender\": \"F\", \"salary\": 60335, \"height\": 1.56, \"hire_date\": \"1989-06-02T00:00:00Z\", \"languages\": 3, \"still_hired\": false, \"dept\": \"eng\"}\n{\"index\": {\"_id\": \"10007\"}}\n{\"emp_no\": 10007, \"first_name\": \"Tzvetan\", \"last_name\": \"Zielinski\", \"gender\": \"F\", \"salary\": 74572, \"height\": 1.7, \"hire_date\": \"1989-02-10T00:00:00Z\", \"languages\": 4, \"still_hired\": true, \"dept\": \"ops\"}\n{\"index\": {\"_id\": \"10008\"}}\n{\"emp_no\": 10008, \"first_name\": \"Saniya\", \"last_name\": \"Kalloufi\", \"gender\": null, \"salary\": 43906, \"height\": 2.1, \"hire_date\": \"1994-09-15T00:00:00Z\", \"languages\": null, \"still_hired\": false, \"dept\": \"eng\"}\n",
+      "status": 200,
+      "response": {
+        "errors": false
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT emp_no, first_name, salary FROM \"compat-xpack-emp\" ORDER BY emp_no LIMIT 3"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "emp_no",
+            "type": "integer"
+          },
+          {
+            "name": "first_name",
+            "type": "keyword"
+          },
+          {
+            "name": "salary",
+            "type": "long"
+          }
+        ],
+        "rows": [
+          [
+            10001,
+            "Georgi",
+            57305
+          ],
+          [
+            10002,
+            "Bezalel",
+            56371
+          ],
+          [
+            10003,
+            "Parto",
+            61805
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT * FROM \"compat-xpack-emp\" ORDER BY emp_no LIMIT 1"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "dept",
+            "type": "keyword"
+          },
+          {
+            "name": "emp_no",
+            "type": "integer"
+          },
+          {
+            "name": "first_name",
+            "type": "keyword"
+          },
+          {
+            "name": "gender",
+            "type": "keyword"
+          },
+          {
+            "name": "height",
+            "type": "double"
+          },
+          {
+            "name": "hire_date",
+            "type": "datetime"
+          },
+          {
+            "name": "languages",
+            "type": "integer"
+          },
+          {
+            "name": "last_name",
+            "type": "text"
+          },
+          {
+            "name": "salary",
+            "type": "long"
+          },
+          {
+            "name": "still_hired",
+            "type": "boolean"
+          }
+        ],
+        "rows": [
+          [
+            "eng",
+            10001,
+            "Georgi",
+            "M",
+            2.03,
+            "1986-06-26T00:00:00.000Z",
+            2,
+            "Facello",
+            57305,
+            true
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT dept, COUNT(*) AS c, AVG(salary) AS a, MAX(height) FROM \"compat-xpack-emp\" GROUP BY dept ORDER BY dept"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "dept",
+            "type": "keyword"
+          },
+          {
+            "name": "c",
+            "type": "long"
+          },
+          {
+            "name": "a",
+            "type": "double"
+          },
+          {
+            "name": "MAX(height)",
+            "type": "double"
+          }
+        ],
+        "rows": [
+          [
+            "eng",
+            4,
+            55837.75,
+            2.1
+          ],
+          [
+            "ops",
+            2,
+            55373.0,
+            1.78
+          ],
+          [
+            "sales",
+            2,
+            59949.5,
+            2.08
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT COUNT(*) FROM \"compat-xpack-emp\""
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "COUNT(*)",
+            "type": "long"
+          }
+        ],
+        "rows": [
+          [
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT gender, COUNT(*) c FROM \"compat-xpack-emp\" GROUP BY gender HAVING COUNT(*) > 1 ORDER BY c DESC"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "gender",
+            "type": "keyword"
+          },
+          {
+            "name": "c",
+            "type": "long"
+          }
+        ],
+        "rows": [
+          [
+            "M",
+            4
+          ],
+          [
+            "F",
+            3
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT first_name FROM \"compat-xpack-emp\" WHERE salary > 60000 AND still_hired = true ORDER BY first_name"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "first_name",
+            "type": "keyword"
+          }
+        ],
+        "rows": [
+          [
+            "Kyoichi"
+          ],
+          [
+            "Tzvetan"
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT first_name, last_name FROM \"compat-xpack-emp\" WHERE first_name LIKE '%a%' ORDER BY first_name"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "first_name",
+            "type": "keyword"
+          },
+          {
+            "name": "last_name",
+            "type": "text"
+          }
+        ],
+        "rows": [
+          [
+            "Bezalel",
+            "Simmel"
+          ],
+          [
+            "Chirstian",
+            "Koblick"
+          ],
+          [
+            "Parto",
+            "Bamford"
+          ],
+          [
+            "Saniya",
+            "Kalloufi"
+          ],
+          [
+            "Tzvetan",
+            "Zielinski"
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT emp_no FROM \"compat-xpack-emp\" WHERE languages IS NULL"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "emp_no",
+            "type": "integer"
+          }
+        ],
+        "rows": [
+          [
+            10008
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT emp_no FROM \"compat-xpack-emp\" WHERE emp_no IN (10001, 10002) ORDER BY emp_no DESC"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "emp_no",
+            "type": "integer"
+          }
+        ],
+        "rows": [
+          [
+            10002
+          ],
+          [
+            10001
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT emp_no FROM \"compat-xpack-emp\" WHERE salary BETWEEN 50000 AND 60000 ORDER BY emp_no"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "emp_no",
+            "type": "integer"
+          }
+        ],
+        "rows": [
+          [
+            10001
+          ],
+          [
+            10002
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT YEAR(hire_date) y, COUNT(*) FROM \"compat-xpack-emp\" GROUP BY y ORDER BY y"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "y",
+            "type": "integer"
+          },
+          {
+            "name": "COUNT(*)",
+            "type": "long"
+          }
+        ],
+        "rows": [
+          [
+            1985,
+            1
+          ],
+          [
+            1986,
+            3
+          ],
+          [
+            1989,
+            3
+          ],
+          [
+            1994,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT UCASE(first_name) u, LENGTH(first_name) l, ROUND(height, 1) r FROM \"compat-xpack-emp\" ORDER BY emp_no LIMIT 2"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "u",
+            "type": "keyword"
+          },
+          {
+            "name": "l",
+            "type": "integer"
+          },
+          {
+            "name": "r",
+            "type": "double"
+          }
+        ],
+        "rows": [
+          [
+            "GEORGI",
+            6,
+            2.0
+          ],
+          [
+            "BEZALEL",
+            7,
+            2.1
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT CONCAT(first_name, last_name) n FROM \"compat-xpack-emp\" ORDER BY emp_no LIMIT 2"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "n",
+            "type": "keyword"
+          }
+        ],
+        "rows": [
+          [
+            "GeorgiFacello"
+          ],
+          [
+            "BezalelSimmel"
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT MIN(hire_date), MAX(hire_date) FROM \"compat-xpack-emp\""
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "MIN(hire_date)",
+            "type": "datetime"
+          },
+          {
+            "name": "MAX(hire_date)",
+            "type": "datetime"
+          }
+        ],
+        "rows": [
+          [
+            "1985-11-21T00:00:00.000Z",
+            "1994-09-15T00:00:00.000Z"
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT CAST(height AS INTEGER) h FROM \"compat-xpack-emp\" ORDER BY emp_no LIMIT 2"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "h",
+            "type": "integer"
+          }
+        ],
+        "rows": [
+          [
+            2
+          ],
+          [
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT emp_no, hire_date FROM \"compat-xpack-emp\" ORDER BY hire_date LIMIT 2"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "emp_no",
+            "type": "integer"
+          },
+          {
+            "name": "hire_date",
+            "type": "datetime"
+          }
+        ],
+        "rows": [
+          [
+            10002,
+            "1985-11-21T00:00:00.000Z"
+          ],
+          [
+            10001,
+            "1986-06-26T00:00:00.000Z"
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT nope FROM \"compat-xpack-emp\""
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "verification_exception",
+              "reason": "Found 1 problem\nline 1:8: Unknown column [nope]"
+            }
+          ],
+          "type": "verification_exception",
+          "reason": "Found 1 problem\nline 1:8: Unknown column [nope]"
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT * FROM \"compat-xpack-missing\""
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "verification_exception",
+              "reason": "Found 1 problem\nline 1:15: Unknown index [compat-xpack-missing]"
+            }
+          ],
+          "type": "verification_exception",
+          "reason": "Found 1 problem\nline 1:15: Unknown index [compat-xpack-missing]"
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT FROM \"compat-xpack-emp\""
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parsing_exception",
+              "reason": "line 1:8: extraneous input 'FROM' expecting {'ALL', 'ANALYZE', 'ANALYZED', 'CASE', 'CAST', 'CATALOGS', 'COLUMNS', 'CONVERT', 'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'DAY', 'DEBUG', 'DISTINCT', 'EXECUTABLE', 'EXISTS', 'EXPLAIN', 'EXTRACT', 'FALSE', 'FIRST', 'FORMAT', 'FULL', 'FUNCTIONS', 'GRAPHVIZ', 'HOUR', 'INTERVAL', 'LAST', 'LEFT', 'LIMIT', 'MAPPED', 'MATCH', 'MINUTE', 'MONTH', 'NOT', 'NULL', 'OPTIMIZED', 'PARSED', 'PHYSICAL', 'PIVOT', 'PLAN', 'RIGHT', 'RLIKE', 'QUERY', 'SCHEMAS', 'SECOND', 'SHOW', 'SYS', 'TABLES', 'TEXT', 'TRUE', 'TOP', 'TYPE', 'TYPES', 'VERIFY', 'YEAR', FUNCTION_ESC, DATE_ESC, TIME_ESC, TIMESTAMP_ESC, GUID_ESC, '(', '+', '-', '*', '?', STRING, INTEGER_VALUE, DECIMAL_VALUE, IDENTIFIER, DIGIT_IDENTIFIER, QUOTED_IDENTIFIER, BACKQUOTED_IDENTIFIER}"
+            }
+          ],
+          "type": "parsing_exception",
+          "reason": "line 1:8: extraneous input 'FROM' expecting {'ALL', 'ANALYZE', 'ANALYZED', 'CASE', 'CAST', 'CATALOGS', 'COLUMNS', 'CONVERT', 'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'DAY', 'DEBUG', 'DISTINCT', 'EXECUTABLE', 'EXISTS', 'EXPLAIN', 'EXTRACT', 'FALSE', 'FIRST', 'FORMAT', 'FULL', 'FUNCTIONS', 'GRAPHVIZ', 'HOUR', 'INTERVAL', 'LAST', 'LEFT', 'LIMIT', 'MAPPED', 'MATCH', 'MINUTE', 'MONTH', 'NOT', 'NULL', 'OPTIMIZED', 'PARSED', 'PHYSICAL', 'PIVOT', 'PLAN', 'RIGHT', 'RLIKE', 'QUERY', 'SCHEMAS', 'SECOND', 'SHOW', 'SYS', 'TABLES', 'TEXT', 'TRUE', 'TOP', 'TYPE', 'TYPES', 'VERIFY', 'YEAR', FUNCTION_ESC, DATE_ESC, TIME_ESC, TIMESTAMP_ESC, GUID_ESC, '(', '+', '-', '*', '?', STRING, INTEGER_VALUE, DECIMAL_VALUE, IDENTIFIER, DIGIT_IDENTIFIER, QUOTED_IDENTIFIER, BACKQUOTED_IDENTIFIER}"
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT dept, first_name FROM \"compat-xpack-emp\" GROUP BY dept"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "verification_exception",
+              "reason": "Found 1 problem\nline 1:14: Cannot use non-grouped column [first_name], expected [dept]"
+            }
+          ],
+          "type": "verification_exception",
+          "reason": "Found 1 problem\nline 1:14: Cannot use non-grouped column [first_name], expected [dept]"
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT 1 + 2 AS three, 'x' AS s"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "three",
+            "type": "integer"
+          },
+          {
+            "name": "s",
+            "type": "keyword"
+          }
+        ],
+        "rows": [
+          [
+            3,
+            "x"
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT emp_no FROM \"compat-xpack-emp\" WHERE MATCH(last_name, 'Facello')"
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "emp_no",
+            "type": "integer"
+          }
+        ],
+        "rows": [
+          [
+            10001
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=txt",
+      "body": {
+        "query": "SELECT emp_no, first_name FROM \"compat-xpack-emp\" ORDER BY emp_no LIMIT 2"
+      },
+      "status": 200
+    },
+    {
+      "req": "POST /_sql?format=csv",
+      "body": {
+        "query": "SELECT emp_no, first_name FROM \"compat-xpack-emp\" ORDER BY emp_no LIMIT 2"
+      },
+      "status": 200
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT emp_no, first_name FROM \"compat-xpack-emp\" ORDER BY emp_no LIMIT 2",
+        "columnar": true
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "emp_no",
+            "type": "integer"
+          },
+          {
+            "name": "first_name",
+            "type": "keyword"
+          }
+        ],
+        "values": [
+          [
+            10001,
+            10002
+          ],
+          [
+            "Georgi",
+            "Bezalel"
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql/translate",
+      "body": {
+        "query": "SELECT emp_no FROM \"compat-xpack-emp\" WHERE salary > 60000 ORDER BY emp_no LIMIT 5"
+      },
+      "status": 200,
+      "response": {
+        "size": 5,
+        "query": {
+          "range": {
+            "salary": {
+              "gt": 60000,
+              "boost": 1.0
+            }
+          }
+        },
+        "_source": false,
+        "fields": [
+          {
+            "field": "emp_no"
+          }
+        ],
+        "sort": [
+          {
+            "emp_no": {
+              "order": "asc",
+              "missing": "_last",
+              "unmapped_type": "integer"
+            }
+          }
+        ],
+        "track_total_hits": -1
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT emp_no FROM \"compat-xpack-emp\" ORDER BY emp_no",
+        "fetch_size": 3
+      },
+      "mask": [
+        "cursor"
+      ],
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "emp_no",
+            "type": "integer"
+          }
+        ],
+        "rows": [
+          [
+            10001
+          ],
+          [
+            10002
+          ],
+          [
+            10003
+          ]
+        ],
+        "cursor": "3aLBBERGTABijGJgzGBgYmRgYmIAgv9AwA9iAAEzIyNXWmZqTkp8cX5RCVtqbkF8Xj4Da3xOYnEJIwMDI3tmXklqemoRRDXjFkZmsCGMQMMY1IXBxgEBSARkKiMjzAQmxibGu4sOsjAKJOfnFiSW6FYUJCZn6wLNF8vMT3WysCguDilMLUtLc04Nc4syKE9nYBTzMQotKswpzA6JyszONAz1Kkzxd40sZwDaBAaHxYy8TUqSKgqTQjycHb2DAkPKvbM9E4EKcBnJwMAF9y8jYxrUbUh+YgSaDQAAAP//AwA="
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT 1",
+        "foo": 1
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "x_content_parse_exception",
+              "reason": "[1:21] [sql/query] unknown field [foo]"
+            }
+          ],
+          "type": "x_content_parse_exception",
+          "reason": "[1:21] [sql/query] unknown field [foo]"
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {},
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "action_request_validation_exception",
+              "reason": "Validation Failed: 1: one of [query] or [cursor] is required;"
+            }
+          ],
+          "type": "action_request_validation_exception",
+          "reason": "Validation Failed: 1: one of [query] or [cursor] is required;"
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "POST /_sql?format=yaml",
+      "body": {
+        "query": "SELECT 1"
+      },
+      "status": 200
+    },
+    {
+      "req": "POST /_sql?format=bogus",
+      "body": {
+        "query": "SELECT 1"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Invalid request content type: Accept=[*/*], Content-Type=[application/json], format=[bogus]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Invalid request content type: Accept=[*/*], Content-Type=[application/json], format=[bogus]"
+        },
+        "status": 400
+      },
+      "headers": {
+        "Accept": "*/*"
+      }
+    },
+    {
+      "req": "POST /_sql/close",
+      "body": {
+        "cursor": "abc"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Input stream is not compressed with DEFLATE!"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Input stream is not compressed with DEFLATE!"
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SHOW TABLES LIKE 'compat-xpack-emp'"
+      },
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "catalog",
+            "type": "keyword"
+          },
+          {
+            "name": "name",
+            "type": "keyword"
+          },
+          {
+            "name": "type",
+            "type": "keyword"
+          },
+          {
+            "name": "kind",
+            "type": "keyword"
+          }
+        ],
+        "rows": [
+          [
+            "docker-cluster",
+            "compat-xpack-emp",
+            "TABLE",
+            "INDEX"
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "DESCRIBE \"compat-xpack-emp\""
+      },
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "column",
+            "type": "keyword"
+          },
+          {
+            "name": "type",
+            "type": "keyword"
+          },
+          {
+            "name": "mapping",
+            "type": "keyword"
+          }
+        ],
+        "rows": [
+          [
+            "dept",
+            "VARCHAR",
+            "keyword"
+          ],
+          [
+            "emp_no",
+            "INTEGER",
+            "integer"
+          ],
+          [
+            "first_name",
+            "VARCHAR",
+            "keyword"
+          ],
+          [
+            "gender",
+            "VARCHAR",
+            "keyword"
+          ],
+          [
+            "height",
+            "DOUBLE",
+            "double"
+          ],
+          [
+            "hire_date",
+            "TIMESTAMP",
+            "datetime"
+          ],
+          [
+            "languages",
+            "INTEGER",
+            "integer"
+          ],
+          [
+            "last_name",
+            "VARCHAR",
+            "text"
+          ],
+          [
+            "last_name.keyword",
+            "VARCHAR",
+            "keyword"
+          ],
+          [
+            "salary",
+            "BIGINT",
+            "long"
+          ],
+          [
+            "still_hired",
+            "BOOLEAN",
+            "boolean"
+          ]
+        ]
+      }
+    },
+    {
+      "req": "POST /_sql?format=json",
+      "body": {
+        "query": "SELECT emp_no FROM \"compat-xpack-emp\" WHERE emp_no = ?",
+        "params": [
+          10003
+        ]
+      },
+      "status": 200,
+      "response": {
+        "columns": [
+          {
+            "name": "emp_no",
+            "type": "integer"
+          }
+        ],
+        "rows": [
+          [
+            10003
+          ]
+        ]
+      }
+    },
+    {
+      "req": "DELETE /compat-xpack-emp",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,1044 @@
+{
+  "description" : "security: roles, users, role mappings, application privileges, has_privileges, API keys (as the elastic superuser)",
+  "steps" : [
+    {
+      "req" : "GET /_security/_authenticate",
+      "mask" : [
+        "authentication_realm",
+        "lookup_realm"
+      ],
+      "status" : 200,
+      "response" : {
+        "username" : "elastic",
+        "roles" : [
+          "superuser"
+        ],
+        "full_name" : null,
+        "email" : null,
+        "metadata" : {
+          "_reserved" : true
+        },
+        "enabled" : true,
+        "authentication_realm" : {
+          "name" : "reserved",
+          "type" : "reserved"
+        },
+        "lookup_realm" : {
+          "name" : "reserved",
+          "type" : "reserved"
+        },
+        "authentication_type" : "realm"
+      }
+    },
+    {
+      "req" : "PUT /_security/role/compat-xpack-role",
+      "body" : {
+        "cluster" : [
+          "monitor"
+        ],
+        "indices" : [
+          {
+            "names" : [
+              "compat-xpack-*"
+            ],
+            "privileges" : [
+              "read",
+              "view_index_metadata"
+            ],
+            "allow_restricted_indices" : false
+          }
+        ],
+        "metadata" : {
+          "v" : 1
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "role" : {
+          "created" : true
+        }
+      }
+    },
+    {
+      "req" : "PUT /_security/role/compat-xpack-role",
+      "body" : {
+        "cluster" : [
+          "monitor",
+          "manage_ilm"
+        ],
+        "indices" : [
+          {
+            "names" : [
+              "compat-xpack-*"
+            ],
+            "privileges" : [
+              "read"
+            ]
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "role" : {
+          "created" : false
+        }
+      }
+    },
+    {
+      "req" : "GET /_security/role/compat-xpack-role",
+      "status" : 200,
+      "response" : {
+        "compat-xpack-role" : {
+          "cluster" : [
+            "monitor",
+            "manage_ilm"
+          ],
+          "indices" : [
+            {
+              "names" : [
+                "compat-xpack-*"
+              ],
+              "privileges" : [
+                "read"
+              ],
+              "allow_restricted_indices" : false
+            }
+          ],
+          "applications" : [ ],
+          "run_as" : [ ],
+          "metadata" : { },
+          "transient_metadata" : {
+            "enabled" : true
+          }
+        }
+      }
+    },
+    {
+      "req" : "GET /_security/role/compat-xpack-nope",
+      "status" : 404,
+      "response" : { }
+    },
+    {
+      "req" : "PUT /_security/role/compat-xpack-bad",
+      "body" : {
+        "cluster" : [
+          "bogus_priv"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: unknown cluster privilege [bogus_priv]. a privilege must be either one of the predefined cluster privilege names [manage_own_api_key,manage_data_stream_global_retention,monitor_data_stream_global_retention,none,cancel_task,clone_api_key,cross_cluster_replication,cross_cluster_search,delegate_pki,grant_api_key,manage_autoscaling,manage_index_templates,manage_logstash_pipelines,manage_oidc,manage_saml,manage_search_application,manage_search_query_rules,manage_search_synonyms,manage_service_account,manage_token,manage_user_profile,monitor_connector,monitor_enrich,monitor_esql,monitor_inference,monitor_ml,monitor_reindex,monitor_rollup,monitor_snapshot,monitor_stats,monitor_text_structure,monitor_watcher,post_behavioral_analytics_event,read_ccr,read_connector_secrets,read_fleet_secrets,read_ilm,read_pipeline,read_project_routing,read_security,read_slm,transport_client,write_connector_secrets,write_fleet_secrets,create_snapshot,manage_behavioral_analytics,manage_ccr,manage_connector,manage_enrich,manage_ilm,manage_inference,manage_ml,manage_project_routing,manage_reindex,manage_rollup,manage_slm,manage_watcher,monitor_data_frame_transforms,monitor_transform,manage_ingest_pipelines,manage_pipeline,manage_api_key,manage_data_frame_transforms,manage_transform,manage_security,monitor,manage,all] or a pattern over one of the available cluster actions;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: unknown cluster privilege [bogus_priv]. a privilege must be either one of the predefined cluster privilege names [manage_own_api_key,manage_data_stream_global_retention,monitor_data_stream_global_retention,none,cancel_task,clone_api_key,cross_cluster_replication,cross_cluster_search,delegate_pki,grant_api_key,manage_autoscaling,manage_index_templates,manage_logstash_pipelines,manage_oidc,manage_saml,manage_search_application,manage_search_query_rules,manage_search_synonyms,manage_service_account,manage_token,manage_user_profile,monitor_connector,monitor_enrich,monitor_esql,monitor_inference,monitor_ml,monitor_reindex,monitor_rollup,monitor_snapshot,monitor_stats,monitor_text_structure,monitor_watcher,post_behavioral_analytics_event,read_ccr,read_connector_secrets,read_fleet_secrets,read_ilm,read_pipeline,read_project_routing,read_security,read_slm,transport_client,write_connector_secrets,write_fleet_secrets,create_snapshot,manage_behavioral_analytics,manage_ccr,manage_connector,manage_enrich,manage_ilm,manage_inference,manage_ml,manage_project_routing,manage_reindex,manage_rollup,manage_slm,manage_watcher,monitor_data_frame_transforms,monitor_transform,manage_ingest_pipelines,manage_pipeline,manage_api_key,manage_data_frame_transforms,manage_transform,manage_security,monitor,manage,all] or a pattern over one of the available cluster actions;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_security/role/compat-xpack-bad2",
+      "body" : {
+        "indices" : [
+          {
+            "names" : [
+              "x"
+            ],
+            "privileges" : [
+              "readd"
+            ]
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: unknown index privilege [readd]. a privilege must be either one of the predefined fixed indices privileges [all,auto_configure,create,create_dataset,create_doc,create_index,create_view,cross_cluster_replication,cross_cluster_replication_internal,delete,delete_dataset,delete_index,delete_view,index,maintenance,manage,manage_data_stream_lifecycle,manage_dataset,manage_failure_store,manage_follow_index,manage_ilm,manage_leader_index,manage_view,monitor,none,read,read_cross_cluster,read_dataset_metadata,read_failure_store,read_view_metadata,view_index_metadata,write] or a pattern over one of the available index actions;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: unknown index privilege [readd]. a privilege must be either one of the predefined fixed indices privileges [all,auto_configure,create,create_dataset,create_doc,create_index,create_view,cross_cluster_replication,cross_cluster_replication_internal,delete,delete_dataset,delete_index,delete_view,index,maintenance,manage,manage_data_stream_lifecycle,manage_dataset,manage_failure_store,manage_follow_index,manage_ilm,manage_leader_index,manage_view,monitor,none,read,read_cross_cluster,read_dataset_metadata,read_failure_store,read_view_metadata,view_index_metadata,write] or a pattern over one of the available index actions;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_security/role/compat-xpack-bad3",
+      "body" : {
+        "foo" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "failed to parse role [compat-xpack-bad3]. unexpected field [foo]"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "failed to parse role [compat-xpack-bad3]. unexpected field [foo]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_security/user/compat-xpack-user",
+      "body" : {
+        "password" : "s3cret-password",
+        "roles" : [
+          "compat-xpack-role"
+        ],
+        "full_name" : "Test User",
+        "email" : "t@example.com",
+        "metadata" : {
+          "a" : 1
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "created" : true
+      }
+    },
+    {
+      "req" : "PUT /_security/user/compat-xpack-user",
+      "body" : {
+        "roles" : [
+          "compat-xpack-role",
+          "viewer"
+        ],
+        "full_name" : "Test User 2"
+      },
+      "status" : 200,
+      "response" : {
+        "created" : false
+      }
+    },
+    {
+      "req" : "GET /_security/user/compat-xpack-user",
+      "status" : 200,
+      "response" : {
+        "compat-xpack-user" : {
+          "username" : "compat-xpack-user",
+          "roles" : [
+            "compat-xpack-role",
+            "viewer"
+          ],
+          "full_name" : "Test User 2",
+          "email" : null,
+          "metadata" : { },
+          "enabled" : true
+        }
+      }
+    },
+    {
+      "req" : "GET /_security/user/compat-xpack-nope",
+      "status" : 404,
+      "response" : { }
+    },
+    {
+      "req" : "PUT /_security/user/compat-xpack-short",
+      "body" : {
+        "password" : "abc",
+        "roles" : [ ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "validation_exception",
+              "reason" : "Validation Failed: 1: passwords must be at least [6] characters long;"
+            }
+          ],
+          "type" : "validation_exception",
+          "reason" : "Validation Failed: 1: passwords must be at least [6] characters long;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_security/user/compat-xpack-nopw",
+      "body" : {
+        "roles" : [ ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "validation_exception",
+              "reason" : "Validation Failed: 1: password must be specified unless you are updating an existing user;"
+            }
+          ],
+          "type" : "validation_exception",
+          "reason" : "Validation Failed: 1: password must be specified unless you are updating an existing user;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_security/user/compat-xpack-user/_disable",
+      "status" : 200,
+      "response" : { }
+    },
+    {
+      "req" : "GET /_security/user/compat-xpack-user?filter_path=*.enabled",
+      "status" : 200,
+      "response" : {
+        "compat-xpack-user" : {
+          "enabled" : false
+        }
+      }
+    },
+    {
+      "req" : "PUT /_security/user/compat-xpack-user/_enable",
+      "status" : 200,
+      "response" : { }
+    },
+    {
+      "req" : "POST /_security/user/compat-xpack-user/_password",
+      "body" : {
+        "password" : "another-password"
+      },
+      "status" : 200,
+      "response" : { }
+    },
+    {
+      "req" : "POST /_security/user/compat-xpack-user/_password",
+      "body" : {
+        "password" : "x"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "validation_exception",
+              "reason" : "Validation Failed: 1: passwords must be at least [6] characters long;"
+            }
+          ],
+          "type" : "validation_exception",
+          "reason" : "Validation Failed: 1: passwords must be at least [6] characters long;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_security/_query/user?filter_path=total,count,users.username",
+      "body" : {
+        "query" : {
+          "prefix" : {
+            "username" : "compat-xpack-"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "total" : 1,
+        "count" : 1,
+        "users" : [
+          {
+            "username" : "compat-xpack-user"
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_security/_query/role?filter_path=total,count,roles.name",
+      "body" : {
+        "query" : {
+          "prefix" : {
+            "name" : "compat-xpack-"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "total" : 1,
+        "count" : 1,
+        "roles" : [
+          {
+            "name" : "compat-xpack-role"
+          }
+        ]
+      }
+    },
+    {
+      "req" : "PUT /_security/role_mapping/compat-xpack-mapping",
+      "body" : {
+        "roles" : [
+          "compat-xpack-role"
+        ],
+        "enabled" : true,
+        "rules" : {
+          "field" : {
+            "username" : "*"
+          }
+        },
+        "metadata" : {
+          "m" : 1
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "role_mapping" : {
+          "created" : true
+        }
+      }
+    },
+    {
+      "req" : "GET /_security/role_mapping/compat-xpack-mapping",
+      "status" : 200,
+      "response" : {
+        "compat-xpack-mapping" : {
+          "enabled" : true,
+          "roles" : [
+            "compat-xpack-role"
+          ],
+          "rules" : {
+            "field" : {
+              "username" : "*"
+            }
+          },
+          "metadata" : {
+            "m" : 1
+          }
+        }
+      }
+    },
+    {
+      "req" : "GET /_security/role_mapping/compat-xpack-nope",
+      "status" : 404,
+      "response" : { }
+    },
+    {
+      "req" : "PUT /_security/role_mapping/compat-xpack-badmap",
+      "body" : {
+        "roles" : [
+          "x"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "failed to parse role-mapping [compat-xpack-badmap]. missing field [rules]",
+              "line" : 1,
+              "col" : 15
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "failed to parse role-mapping [compat-xpack-badmap]. missing field [rules]",
+          "line" : 1,
+          "col" : 15,
+          "caused_by" : {
+            "type" : "illegal_state_exception",
+            "reason" : "failed to parse role-mapping [compat-xpack-badmap]. missing field [rules]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_security/user/_has_privileges",
+      "body" : {
+        "cluster" : [
+          "monitor",
+          "manage"
+        ],
+        "index" : [
+          {
+            "names" : [
+              "compat-xpack-idx"
+            ],
+            "privileges" : [
+              "read",
+              "write"
+            ]
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "username" : "elastic",
+        "has_all_requested" : true,
+        "cluster" : {
+          "monitor" : true,
+          "manage" : true
+        },
+        "index" : {
+          "compat-xpack-idx" : {
+            "read" : true,
+            "write" : true
+          }
+        },
+        "application" : { }
+      }
+    },
+    {
+      "req" : "GET /_security/user/_privileges?filter_path=cluster,run_as",
+      "status" : 200,
+      "response" : {
+        "cluster" : [
+          "all"
+        ],
+        "run_as" : [
+          "*"
+        ]
+      }
+    },
+    {
+      "req" : "PUT /_security/privilege",
+      "body" : {
+        "compat-xpack-app" : {
+          "read" : {
+            "actions" : [
+              "data:read/*"
+            ],
+            "metadata" : {
+              "d" : 1
+            }
+          },
+          "write" : {
+            "actions" : [
+              "data:write/*"
+            ]
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "compat-xpack-app" : {
+          "read" : {
+            "created" : true
+          },
+          "write" : {
+            "created" : true
+          }
+        }
+      }
+    },
+    {
+      "req" : "GET /_security/privilege/compat-xpack-app",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "compat-xpack-app" : {
+          "write" : {
+            "application" : "compat-xpack-app",
+            "name" : "write",
+            "actions" : [
+              "data:write/*"
+            ],
+            "metadata" : { }
+          },
+          "read" : {
+            "application" : "compat-xpack-app",
+            "name" : "read",
+            "actions" : [
+              "data:read/*"
+            ],
+            "metadata" : {
+              "d" : 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "GET /_security/privilege/compat-xpack-app/read",
+      "status" : 200,
+      "response" : {
+        "compat-xpack-app" : {
+          "read" : {
+            "application" : "compat-xpack-app",
+            "name" : "read",
+            "actions" : [
+              "data:read/*"
+            ],
+            "metadata" : {
+              "d" : 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "DELETE /_security/privilege/compat-xpack-app/write",
+      "status" : 200,
+      "response" : {
+        "compat-xpack-app" : {
+          "write" : {
+            "found" : true
+          }
+        }
+      }
+    },
+    {
+      "req" : "DELETE /_security/privilege/compat-xpack-app/write",
+      "status" : 404,
+      "response" : {
+        "compat-xpack-app" : {
+          "write" : {
+            "found" : false
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /_security/api_key?filter_path=name,expiration",
+      "body" : {
+        "name" : "compat-xpack-key",
+        "expiration" : "1d",
+        "role_descriptors" : {
+          "r" : {
+            "cluster" : [
+              "monitor"
+            ]
+          }
+        },
+        "metadata" : {
+          "k" : "v"
+        }
+      },
+      "mask" : [
+        "expiration"
+      ],
+      "status" : 200,
+      "response" : {
+        "name" : "compat-xpack-key",
+        "expiration" : 1792832615059
+      }
+    },
+    {
+      "req" : "POST /_security/api_key",
+      "body" : {
+        "name" : "compat-xpack-key",
+        "foo" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:28] [api_key_request] unknown field [foo]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:28] [api_key_request] unknown field [foo]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_security/api_key",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Required [name]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Required [name]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_security/api_key",
+      "body" : {
+        "name" : null
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:9] [api_key_request] name doesn't support values of type: VALUE_NULL"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:9] [api_key_request] name doesn't support values of type: VALUE_NULL"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_security/api_key",
+      "body" : {
+        "name" : ""
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: api key name is required;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: api key name is required;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_security/api_key",
+      "body" : {
+        "name" : "compat-xpack-k2",
+        "expiration" : "bad"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [api_key_request] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "Failed to build [api_key_request] after last required field arrived",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "failed to parse [bad]",
+            "caused_by" : {
+              "type" : "number_format_exception",
+              "reason" : "For input string: \"ba\""
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_security/api_key",
+      "body" : {
+        "name" : "compat-xpack-k2",
+        "metadata" : {
+          "_r" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: API key metadata keys may not start with [_];"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: API key metadata keys may not start with [_];"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_security/api_key",
+      "body" : {
+        "name" : "compat-xpack-k2",
+        "role_descriptors" : {
+          "r" : {
+            "foo" : 1
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "failed to parse role [r]. unexpected field [foo]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:58] [api_key_request] failed to parse field [role_descriptors]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:58] [role_descriptors] failed to parse field [r]",
+            "caused_by" : {
+              "type" : "parse_exception",
+              "reason" : "failed to parse role [r]. unexpected field [foo]"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_security/api_key",
+      "body" : {
+        "name" : "compat-xpack-k2",
+        "role_descriptors" : [ ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:46] [api_key_request] failed to parse field [role_descriptors]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:46] [api_key_request] failed to parse field [role_descriptors]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[role_descriptors] doesn't support arrays. Use a single object with multiple fields."
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /_security/api_key?name=compat-xpack-key&active_only=true&filter_path=api_keys.name,api_keys.invalidated,api_keys.metadata,api_keys.role_descriptors,api_keys.type,api_keys.username,api_keys.realm",
+      "status" : 200,
+      "response" : {
+        "api_keys" : [
+          {
+            "name" : "compat-xpack-key",
+            "type" : "rest",
+            "invalidated" : false,
+            "username" : "elastic",
+            "realm" : "reserved",
+            "metadata" : {
+              "k" : "v"
+            },
+            "role_descriptors" : {
+              "r" : {
+                "cluster" : [
+                  "monitor"
+                ],
+                "indices" : [ ],
+                "applications" : [ ],
+                "run_as" : [ ],
+                "metadata" : { },
+                "transient_metadata" : {
+                  "enabled" : true
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_security/_query/api_key?filter_path=total,count,api_keys.name",
+      "body" : {
+        "query" : {
+          "bool" : {
+            "filter" : [
+              {
+                "term" : {
+                  "name" : "compat-xpack-key"
+                }
+              },
+              {
+                "term" : {
+                  "invalidated" : false
+                }
+              }
+            ]
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "total" : 1,
+        "count" : 1,
+        "api_keys" : [
+          {
+            "name" : "compat-xpack-key"
+          }
+        ]
+      }
+    },
+    {
+      "req" : "DELETE /_security/api_key?filter_path=invalidated_api_keys.length,error_count",
+      "body" : {
+        "name" : "compat-xpack-key"
+      },
+      "status" : 200,
+      "response" : {
+        "error_count" : 0
+      }
+    },
+    {
+      "req" : "DELETE /_security/api_key",
+      "body" : {
+        "name" : "compat-xpack-nokey"
+      },
+      "status" : 200,
+      "response" : {
+        "invalidated_api_keys" : [ ],
+        "previously_invalidated_api_keys" : [ ],
+        "error_count" : 0
+      }
+    },
+    {
+      "req" : "DELETE /_security/api_key",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: One of [api key id(s), api key name, username, realm name] must be specified if [owner] flag is false;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: One of [api key id(s), api key name, username, realm name] must be specified if [owner] flag is false;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /_security/privilege/_builtin?filter_path=cluster",
+      "skip" : "long list compared separately",
+      "status" : 200,
+      "response" : {
+        "cluster" : [
+          "all",
+          "cancel_task",
+          "clone_api_key",
+          "create_snapshot",
+          "cross_cluster_replication",
+          "cross_cluster_search",
+          "delegate_pki",
+          "grant_api_key",
+          "manage",
+          "manage_api_key",
+          "manage_autoscaling",
+          "manage_behavioral_analytics",
+          "manage_ccr",
+          "manage_connector",
+          "manage_data_frame_transforms",
+          "manage_data_stream_global_retention",
+          "manage_enrich",
+          "manage_ilm",
+          "manage_index_templates",
+          "manage_inference",
+          "manage_ingest_pipelines",
+          "manage_logstash_pipelines",
+          "manage_ml",
+          "manage_oidc",
+          "manage_own_api_key",
+          "manage_pipeline",
+          "manage_reindex",
+          "manage_rollup",
+          "manage_saml",
+          "manage_search_application",
+          "manage_search_query_rules",
+          "manage_search_synonyms",
+          "manage_security",
+          "manage_service_account",
+          "manage_slm",
+          "manage_token",
+          "manage_transform",
+          "manage_user_profile",
+          "manage_watcher",
+          "monitor",
+          "monitor_connector",
+          "monitor_data_frame_transforms",
+          "monitor_data_stream_global_retention",
+          "monitor_enrich",
+          "monitor_esql",
+          "monitor_inference",
+          "monitor_ml",
+          "monitor_reindex",
+          "monitor_rollup",
+          "monitor_snapshot",
+          "monitor_stats",
+          "monitor_text_structure",
+          "monitor_transform",
+          "monitor_watcher",
+          "none",
+          "post_behavioral_analytics_event",
+          "read_ccr",
+          "read_connector_secrets",
+          "read_fleet_secrets",
+          "read_ilm",
+          "read_pipeline",
+          "read_security",
+          "read_slm",
+          "transport_client",
+          "write_connector_secrets",
+          "write_fleet_secrets"
+        ]
+      }
+    },
+    {
+      "req" : "DELETE /_security/role_mapping/compat-xpack-mapping",
+      "status" : 200,
+      "response" : {
+        "found" : true
+      }
+    },
+    {
+      "req" : "DELETE /_security/role_mapping/compat-xpack-mapping",
+      "status" : 404,
+      "response" : {
+        "found" : false
+      }
+    },
+    {
+      "req" : "DELETE /_security/user/compat-xpack-user",
+      "status" : 200,
+      "response" : {
+        "found" : true
+      }
+    },
+    {
+      "req" : "DELETE /_security/user/compat-xpack-user",
+      "status" : 404,
+      "response" : {
+        "found" : false
+      }
+    },
+    {
+      "req" : "DELETE /_security/role/compat-xpack-role",
+      "status" : 200,
+      "response" : {
+        "found" : true
+      }
+    },
+    {
+      "req" : "DELETE /_security/role/compat-xpack-role",
+      "status" : 404,
+      "response" : {
+        "found" : false
+      }
+    },
+    {
+      "req" : "DELETE /_security/privilege/compat-xpack-app/read",
+      "status" : 200,
+      "response" : {
+        "compat-xpack-app" : {
+          "read" : {
+            "found" : true
+          }
+        }
+      }
+    }
+  ]
+}

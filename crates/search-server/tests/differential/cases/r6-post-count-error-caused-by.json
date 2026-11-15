@@ -1,0 +1,66 @@
+{
+ "found": {
+  "case": 0,
+  "case_seed": 121000363,
+  "seed": 121
+ },
+ "signature": "POST _count .error.caused_by",
+ "steps": [
+  {
+   "body": {
+    "settings": {
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m1-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m1-a"
+  },
+  {
+   "body": {
+    "query": {}
+   },
+   "es": {
+    "body": {
+     "error": {
+      "caused_by": {
+       "reason": "query malformed, empty clause found at [1:11]",
+       "type": "illegal_argument_exception"
+      },
+      "col": 11,
+      "line": 1,
+      "reason": "Failed to parse",
+      "root_cause": [
+       {
+        "col": 11,
+        "line": 1,
+        "reason": "Failed to parse",
+        "type": "parsing_exception"
+       }
+      ],
+      "type": "parsing_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m1-a/_count"
+  }
+ ]
+}

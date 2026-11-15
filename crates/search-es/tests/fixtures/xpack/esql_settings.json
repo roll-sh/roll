@@ -1,0 +1,1301 @@
+{
+  "description" : "ES|QL query settings (SET, unmapped_fields, time_zone, body settings), METADATA _source, LIKE/RLIKE pattern errors, doc-values types (float widening, constant_keyword, version order, no-doc-values source order)",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-p4?filter_path=errors,acknowledged,error",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "k" : {
+              "type" : "keyword"
+            },
+            "nodv" : {
+              "type" : "keyword",
+              "doc_values" : false
+            },
+            "_under" : {
+              "type" : "long"
+            },
+            "f" : {
+              "type" : "float"
+            },
+            "h" : {
+              "type" : "half_float"
+            },
+            "sf" : {
+              "type" : "scaled_float",
+              "scaling_factor" : 100
+            },
+            "ip" : {
+              "type" : "ip"
+            },
+            "v" : {
+              "type" : "version"
+            },
+            "ck" : {
+              "type" : "constant_keyword",
+              "value" : "const"
+            },
+            "b" : {
+              "type" : "boolean"
+            },
+            "i" : {
+              "type" : "integer"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-p4u?filter_path=errors,acknowledged,error",
+      "body" : {
+        "mappings" : {
+          "dynamic" : false,
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-p4/_bulk?refresh=true&filter_path=errors,error",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"@timestamp\":\"2025-05-31T22:30:00Z\",\"k\":[\"b\",\"a\",\"b\"],\"nodv\":[\"z\",\"y\"],\"_under\":5,\"f\":1.1,\"h\":2.2,\"sf\":10.371,\"ip\":[\"10.0.0.2\",\"::1\",\"10.0.0.1\"],\"v\":[\"1.10.0\",\"1.2.0\"],\"b\":[true,false],\"i\":[3,1,2]}\n{\"index\":{\"_id\":\"2\"}}\n{\"@timestamp\":\"2025-06-01T01:00:00Z\",\"k\":\"c\",\"f\":-0.5,\"i\":7}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-p4u/_bulk?refresh=true&filter_path=errors,error",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"k\":\"x\",\"extra\":\"e1\",\"num\":5,\"obj\":{\"a\":1}}\n{\"index\":{\"_id\":\"2\"}}\n{\"k\":\"y\",\"extra\":[\"e3\",\"e2\"]}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p4 | KEEP k, nodv, _under, f, h, sf, ip, v, ck, b, i | SORT _under NULLS LAST"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "k",
+            "type" : "keyword"
+          },
+          {
+            "name" : "nodv",
+            "type" : "keyword"
+          },
+          {
+            "name" : "_under",
+            "type" : "long"
+          },
+          {
+            "name" : "f",
+            "type" : "double"
+          },
+          {
+            "name" : "h",
+            "type" : "double"
+          },
+          {
+            "name" : "sf",
+            "type" : "double"
+          },
+          {
+            "name" : "ip",
+            "type" : "ip"
+          },
+          {
+            "name" : "v",
+            "type" : "version"
+          },
+          {
+            "name" : "ck",
+            "type" : "keyword"
+          },
+          {
+            "name" : "b",
+            "type" : "boolean"
+          },
+          {
+            "name" : "i",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            [
+              "a",
+              "b"
+            ],
+            [
+              "z",
+              "y"
+            ],
+            5,
+            1.100000023841858,
+            2.19921875,
+            10.37,
+            [
+              "::1",
+              "10.0.0.1",
+              "10.0.0.2"
+            ],
+            [
+              "1.2.0",
+              "1.10.0"
+            ],
+            "const",
+            [
+              false,
+              true
+            ],
+            [
+              1,
+              2,
+              3
+            ]
+          ],
+          [
+            "c",
+            null,
+            null,
+            -0.5,
+            null,
+            null,
+            null,
+            null,
+            "const",
+            null,
+            7
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p4 | STATS c = COUNT(*), s = SUM(f), m = MAX(h), x = MIN(sf) BY ck"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "s",
+            "type" : "double"
+          },
+          {
+            "name" : "m",
+            "type" : "double"
+          },
+          {
+            "name" : "x",
+            "type" : "double"
+          },
+          {
+            "name" : "ck",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            2,
+            0.6000000238418579,
+            2.19921875,
+            10.37,
+            "const"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p4 | WHERE i > 2 | KEEP i, k | SORT i"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "i",
+            "type" : "integer"
+          },
+          {
+            "name" : "k",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            7,
+            "c"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p4 | SORT f DESC | KEEP f | LIMIT 1"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "f",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            1.100000023841858
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p4 METADATA _index, _version | KEEP _index, _version, k | SORT k"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "_index",
+            "type" : "keyword"
+          },
+          {
+            "name" : "_version",
+            "type" : "long"
+          },
+          {
+            "name" : "k",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "compat-xpack-p4",
+            1,
+            [
+              "a",
+              "b"
+            ]
+          ],
+          [
+            "compat-xpack-p4",
+            1,
+            "c"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p4 METADATA _source | KEEP _source | SORT _source"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:61: cannot sort on _source"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:61: cannot sort on _source"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p4 METADATA _source | EVAL x = _source"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:46: EVAL does not support type [_source] as the return data type of expression [_source]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:46: EVAL does not support type [_source] as the return data type of expression [_source]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p4 METADATA _id, _source | SORT _id | KEEP _id, _source"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "_id",
+            "type" : "keyword"
+          },
+          {
+            "name" : "_source",
+            "type" : "_source"
+          }
+        ],
+        "values" : [
+          [
+            "1",
+            {
+              "@timestamp" : "2025-05-31T22:30:00Z",
+              "k" : [
+                "b",
+                "a",
+                "b"
+              ],
+              "nodv" : [
+                "z",
+                "y"
+              ],
+              "_under" : 5,
+              "f" : 1.1,
+              "h" : 2.2,
+              "sf" : 10.371,
+              "ip" : [
+                "10.0.0.2",
+                "::1",
+                "10.0.0.1"
+              ],
+              "v" : [
+                "1.10.0",
+                "1.2.0"
+              ],
+              "b" : [
+                true,
+                false
+              ],
+              "i" : [
+                3,
+                1,
+                2
+              ]
+            }
+          ],
+          [
+            "2",
+            {
+              "@timestamp" : "2025-06-01T01:00:00Z",
+              "k" : "c",
+              "f" : -0.5,
+              "i" : 7
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW job = \"x\" | WHERE job LIKE \"*a?????????????\""
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:23: Invalid regex pattern for RLIKE [*a?????????????]: [Pattern was too complex to determinize]"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:23: Invalid regex pattern for RLIKE [*a?????????????]: [Pattern was too complex to determinize]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW job = \"x\" | WHERE job RLIKE \"(a|b)*a(a|b){13}\""
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:23: Invalid regex pattern for RLIKE [(a|b)*a(a|b){13}]: [Pattern was too complex to determinize]"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:23: Invalid regex pattern for RLIKE [(a|b)*a(a|b){13}]: [Pattern was too complex to determinize]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW job = \"x\" | WHERE job RLIKE \"(\""
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:23: Invalid regex pattern for RLIKE [(]: [unexpected end-of-string]"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:23: Invalid regex pattern for RLIKE [(]: [unexpected end-of-string]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW job = \"abc\" | WHERE job RLIKE \"a.c\" AND job LIKE \"a?c\" AND job NOT LIKE \"b*\""
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "job",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "abc"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET no_such_setting=\"x\"; ROW x = 1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:1: Unknown setting [no_such_setting]"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:1: Unknown setting [no_such_setting]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET unmapped_fields=\"nullify\"; ROW x = 1 | KEEP x, y"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "x",
+            "type" : "integer"
+          },
+          {
+            "name" : "y",
+            "type" : "null"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET unmapped_fields=\"nullify\"; ROW x = 1 | EVAL z = y"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "x",
+            "type" : "integer"
+          },
+          {
+            "name" : "y",
+            "type" : "null"
+          },
+          {
+            "name" : "z",
+            "type" : "null"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            null,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET unmapped_fields = \"INVALID\"; ROW x = 1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:1: Error validating setting [unmapped_fields]: Invalid unmapped_fields resolution [INVALID], must be one of [DEFAULT, NULLIFY, LOAD]"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:1: Error validating setting [unmapped_fields]: Invalid unmapped_fields resolution [INVALID], must be one of [DEFAULT, NULLIFY, LOAD]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET unmapped_fields=1; ROW x = 1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:1: Setting [unmapped_fields] must be of type KEYWORD"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:1: Setting [unmapped_fields] must be of type KEYWORD"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET unmapped_fields=\"fail\"; ROW x = 1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:1: Error validating setting [unmapped_fields]: Invalid unmapped_fields resolution [fail], must be one of [DEFAULT, NULLIFY, LOAD]"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:1: Error validating setting [unmapped_fields]: Invalid unmapped_fields resolution [fail], must be one of [DEFAULT, NULLIFY, LOAD]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET column_metadata=\"x\"; ROW x = 1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:1: Setting [column_metadata] must be of type BOOLEAN"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:1: Setting [column_metadata] must be of type BOOLEAN"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET column_metadata=true; ROW x = 1"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "x",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET time_zone=\"Foo/Bar\"; ROW x = 1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:1: Error validating setting [time_zone]: Invalid time zone [Foo/Bar]"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:1: Error validating setting [time_zone]: Invalid time zone [Foo/Bar]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET time_zone=\"+04:00\" ROW x = 1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:24: mismatched input 'ROW' expecting ';'"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:24: mismatched input 'ROW' expecting ';'",
+          "caused_by" : {
+            "type" : "input_mismatch_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET a = 1;"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:11: extraneous input '<EOF>' expecting {, 'row', 'from', 'ts', 'promql', 'set', 'show'}"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:11: extraneous input '<EOF>' expecting {, 'row', 'from', 'ts', 'promql', 'set', 'show'}"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET approximation={\"rows\":10000}; ROW x = 1"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "x",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW x = 1; SET a=1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:10: mismatched input ';' expecting {<EOF>, '|', 'and', '::', ',', 'or', '+', '-', '*', '/', '%'}"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:10: mismatched input ';' expecting {<EOF>, '|', 'and', '::', ',', 'or', '+', '-', '*', '/', '%'}",
+          "caused_by" : {
+            "type" : "input_mismatch_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET time_zone=\"+04:00\"; ROW x = TO_DATETIME(\"2025-01-01T00:00:00Z\") | EVAL h = DATE_EXTRACT(\"hour_of_day\", x)"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "x",
+            "type" : "date"
+          },
+          {
+            "name" : "h",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            "2025-01-01T04:00:00.000+04:00",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET time_zone=\"Europe/Paris\"; FROM compat-xpack-p4 | EVAL hour = DATE_EXTRACT(\"hour_of_day\", @timestamp), d = DAY_NAME(@timestamp), m = MONTH_NAME(@timestamp), t = DATE_TRUNC(1 day, @timestamp) | KEEP @timestamp, hour, d, m, t | SORT @timestamp"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "@timestamp",
+            "type" : "date"
+          },
+          {
+            "name" : "hour",
+            "type" : "long"
+          },
+          {
+            "name" : "d",
+            "type" : "keyword"
+          },
+          {
+            "name" : "m",
+            "type" : "keyword"
+          },
+          {
+            "name" : "t",
+            "type" : "date"
+          }
+        ],
+        "values" : [
+          [
+            "2025-06-01T00:30:00.000+02:00",
+            0,
+            "Sunday",
+            "June",
+            "2025-06-01T00:00:00.000+02:00"
+          ],
+          [
+            "2025-06-01T03:00:00.000+02:00",
+            3,
+            "Sunday",
+            "June",
+            "2025-06-01T00:00:00.000+02:00"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET time_zone=\"-05:00\"; FROM compat-xpack-p4 | STATS c = COUNT(*) BY b = BUCKET(@timestamp, 1 day) | SORT b"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "b",
+            "type" : "date"
+          }
+        ],
+        "values" : [
+          [
+            2,
+            "2025-05-31T00:00:00.000-05:00"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET unmapped_fields=\"nullify\"; FROM compat-xpack-p4u | KEEP k, extra | SORT k"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "k",
+            "type" : "keyword"
+          },
+          {
+            "name" : "extra",
+            "type" : "null"
+          }
+        ],
+        "values" : [
+          [
+            "x",
+            null
+          ],
+          [
+            "y",
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET unmapped_fields=\"load\"; FROM compat-xpack-p4u | KEEP k, extra, num | SORT k"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "k",
+            "type" : "keyword"
+          },
+          {
+            "name" : "extra",
+            "type" : "keyword"
+          },
+          {
+            "name" : "num",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "x",
+            "e1",
+            "5"
+          ],
+          [
+            "y",
+            [
+              "e3",
+              "e2"
+            ],
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET unmapped_fields=\"load\"; FROM compat-xpack-p4u | WHERE extra IS NOT NULL | KEEP k | SORT k"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "k",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "x"
+          ],
+          [
+            "y"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET unmapped_fields=\"load\"; FROM compat-xpack-p4u | STATS c = COUNT(*) BY extra | SORT extra"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "extra",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            "e1"
+          ],
+          [
+            1,
+            "e2"
+          ],
+          [
+            1,
+            "e3"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW x = 1",
+        "settings" : {
+          "time_zone" : "+01:00"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "x",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW x = 1",
+        "settings" : {
+          "unmapped_fields" : "load"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:34] Setting [unmapped_fields] is not exposed as a request body parameter"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:34] [esql/query] failed to parse field [settings]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:34] Setting [unmapped_fields] is not exposed as a request body parameter"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW x = 1",
+        "settings" : {
+          "no_such_setting" : "x"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:34] Unknown setting [no_such_setting] under [settings]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:34] [esql/query] failed to parse field [settings]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:34] Unknown setting [no_such_setting] under [settings]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW x = 1",
+        "settings" : {
+          "time_zone" : "Foo/Bar"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:46] Failed to parse value for setting [time_zone]: Invalid time zone [Foo/Bar]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:46] [esql/query] failed to parse field [settings]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:46] Failed to parse value for setting [time_zone]: Invalid time zone [Foo/Bar]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW x = 1",
+        "settings" : 5
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:33] [esql/query] settings doesn't support values of type: VALUE_NUMBER"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:33] [esql/query] settings doesn't support values of type: VALUE_NUMBER"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW x = 1",
+        "time_zone" : "Foo/Bar"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:34] [esql/query] failed to parse field [time_zone]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:34] [esql/query] failed to parse field [time_zone]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Invalid time zone [Foo/Bar]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW x = 1",
+        "settings" : {
+          "time_zone" : "Europe/Paris"
+        },
+        "time_zone" : "+04:00"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Setting [time_zone] has conflicting values at the top level of the request body and under [settings]; specify it in only one place, or with the same value in both."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Setting [time_zone] has conflicting values at the top level of the request body and under [settings]; specify it in only one place, or with the same value in both."
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p4 | KEEP @timestamp | SORT @timestamp",
+        "settings" : {
+          "time_zone" : "Europe/Paris"
+        },
+        "time_zone" : "Europe/Paris"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "@timestamp",
+            "type" : "date"
+          }
+        ],
+        "values" : [
+          [
+            "2025-06-01T00:30:00.000+02:00"
+          ],
+          [
+            "2025-06-01T03:00:00.000+02:00"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "SET time_zone=\"+01:00\"; FROM compat-xpack-p4 | KEEP @timestamp | SORT @timestamp",
+        "time_zone" : "+04:00"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "@timestamp",
+            "type" : "date"
+          }
+        ],
+        "values" : [
+          [
+            "2025-05-31T23:30:00.000+01:00"
+          ],
+          [
+            "2025-06-01T02:00:00.000+01:00"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p4 | KEEP @timestamp, k | SORT @timestamp",
+        "time_zone" : "Asia/Kolkata",
+        "columnar" : true
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "@timestamp",
+            "type" : "date"
+          },
+          {
+            "name" : "k",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "2025-06-01T04:00:00.000+05:30",
+            "2025-06-01T06:30:00.000+05:30"
+          ],
+          [
+            [
+              "a",
+              "b"
+            ],
+            "c"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-p4?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-p4u?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

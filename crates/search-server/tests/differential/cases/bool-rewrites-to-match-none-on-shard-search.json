@@ -1,0 +1,282 @@
+{
+  "diff": {
+    "es": {
+      "body": {
+        "_shards": {
+          "failed": 0,
+          "skipped": 0,
+          "successful": 3,
+          "total": 3
+        },
+        "hits": {
+          "hits": [],
+          "max_score": null,
+          "total": {
+            "relation": "eq",
+            "value": 0
+          }
+        },
+        "timed_out": false,
+        "took": 0
+      },
+      "error": null,
+      "status": 200
+    },
+    "path": "status 200",
+    "roll": {
+      "body": {
+        "error": {
+          "failed_shards": [
+            {
+              "index": "diff-m17-a",
+              "node": "0Zr0L-l4THmSU_MWbe51EQ",
+              "reason": {
+                "caused_by": {
+                  "reason": "All fields in [combined_fields] query must have the same search analyzer",
+                  "type": "illegal_argument_exception"
+                },
+                "index": "diff-m17-a",
+                "index_uuid": "K8mnnAbSQc2alTEJ4lkZVQ",
+                "reason": "failed to create query: All fields in [combined_fields] query must have the same search analyzer",
+                "type": "query_shard_exception"
+              },
+              "shard": 0
+            }
+          ],
+          "grouped": true,
+          "phase": "dfs",
+          "reason": "all shards failed",
+          "root_cause": [
+            {
+              "index": "diff-m17-a",
+              "index_uuid": "K8mnnAbSQc2alTEJ4lkZVQ",
+              "reason": "failed to create query: All fields in [combined_fields] query must have the same search analyzer",
+              "type": "query_shard_exception"
+            }
+          ],
+          "type": "search_phase_execution_exception"
+        },
+        "status": 400
+      },
+      "error": "search_phase_execution_exception",
+      "status": 400
+    }
+  },
+  "found": {
+    "case": 62,
+    "case_seed": 3000071,
+    "seed": 3
+  },
+  "roll": {
+    "body": {
+      "error": {
+        "failed_shards": [
+          {
+            "index": "diff-m17-a",
+            "node": "0Zr0L-l4THmSU_MWbe51EQ",
+            "reason": {
+              "caused_by": {
+                "reason": "All fields in [combined_fields] query must have the same search analyzer",
+                "type": "illegal_argument_exception"
+              },
+              "index": "diff-m17-a",
+              "index_uuid": "K8mnnAbSQc2alTEJ4lkZVQ",
+              "reason": "failed to create query: All fields in [combined_fields] query must have the same search analyzer",
+              "type": "query_shard_exception"
+            },
+            "shard": 0
+          }
+        ],
+        "grouped": true,
+        "phase": "dfs",
+        "reason": "all shards failed",
+        "root_cause": [
+          {
+            "index": "diff-m17-a",
+            "index_uuid": "K8mnnAbSQc2alTEJ4lkZVQ",
+            "reason": "failed to create query: All fields in [combined_fields] query must have the same search analyzer",
+            "type": "query_shard_exception"
+          }
+        ],
+        "type": "search_phase_execution_exception"
+      },
+      "status": 400
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+  },
+  "signature": "POST _search status 200:200 vs 400:search_phase_execution_exception",
+  "steps": [
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "date0": {
+              "format": "strict_date_optional_time||epoch_millis",
+              "type": "date"
+            },
+            "int0": {
+              "type": "integer"
+            },
+            "kw0": {
+              "type": "keyword"
+            },
+            "text0": {
+              "analyzer": "simple",
+              "fields": {
+                "raw": {
+                  "ignore_above": 32,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            },
+            "text1": {
+              "analyzer": "stop",
+              "fields": {
+                "raw": {
+                  "ignore_above": 32,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            },
+            "wild0": {
+              "type": "wildcard"
+            }
+          }
+        },
+        "settings": {
+          "number_of_replicas": 0,
+          "number_of_shards": 3,
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m17-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m17-a"
+    },
+    {
+      "body": {
+        "query": {
+          "bool": {
+            "filter": [
+              {
+                "bool": {
+                  "filter": [
+                    {
+                      "range": {
+                        "date0": {}
+                      }
+                    }
+                  ],
+                  "should": [
+                    {
+                      "bool": {
+                        "filter": [
+                          {
+                            "term": {
+                              "int0": 6
+                            }
+                          },
+                          {
+                            "regexp": {
+                              "kw0": {
+                                "value": "(al|be).*"
+                              }
+                            }
+                          }
+                        ],
+                        "must": [
+                          {
+                            "term": {
+                              "kw0": "x-1"
+                            }
+                          },
+                          {
+                            "combined_fields": {
+                              "fields": [
+                                "text0",
+                                "text1"
+                              ],
+                              "query": "and cat"
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "boosting": {
+                        "negative": {
+                          "term": {
+                            "kw0": "rho"
+                          }
+                        },
+                        "negative_boost": 0.2,
+                        "positive": {
+                          "match_all": {}
+                        }
+                      }
+                    },
+                    {
+                      "multi_match": {
+                        "fields": [
+                          "text0",
+                          "text1",
+                          "text1^2"
+                        ],
+                        "query": "slow",
+                        "type": "phrase"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 3,
+            "total": 3
+          },
+          "hits": {
+            "hits": [],
+            "max_score": null,
+            "total": {
+              "relation": "eq",
+              "value": 0
+            }
+          },
+          "timed_out": false,
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m17-a/_search?search_type=dfs_query_then_fetch"
+    }
+  ]
+}

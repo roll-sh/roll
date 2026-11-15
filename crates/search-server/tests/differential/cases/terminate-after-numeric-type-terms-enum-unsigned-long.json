@@ -1,0 +1,1105 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "DELETE",
+      "path": "/hw-ta?ignore_unavailable=true",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/hw-ta",
+      "body": {
+        "settings": {
+          "number_of_shards": 2,
+          "refresh_interval": -1
+        },
+        "mappings": {
+          "properties": {
+            "k": {
+              "type": "keyword"
+            },
+            "n": {
+              "type": "long"
+            },
+            "t": {
+              "type": "text"
+            },
+            "o": {
+              "properties": {
+                "i": {
+                  "type": "integer"
+                }
+              }
+            },
+            "u": {
+              "type": "unsigned_long"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "hw-ta"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "hw-ta",
+            "_id": "1"
+          }
+        },
+        {
+          "k": "a",
+          "n": 1,
+          "t": "x y",
+          "o": {
+            "i": 3
+          },
+          "u": 5
+        },
+        {
+          "index": {
+            "_index": "hw-ta",
+            "_id": "2"
+          }
+        },
+        {
+          "k": "a",
+          "n": 2,
+          "t": "x"
+        },
+        {
+          "index": {
+            "_index": "hw-ta",
+            "_id": "3"
+          }
+        },
+        {
+          "k": "b",
+          "n": 3,
+          "t": "y"
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "hw-ta",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 2,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-ta",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 2,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-ta",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 2,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "hw-ta",
+            "_id": "4"
+          }
+        },
+        {
+          "k": "c",
+          "n": 4
+        },
+        {
+          "index": {
+            "_index": "hw-ta",
+            "_id": "5"
+          }
+        },
+        {
+          "k": "a",
+          "n": 5
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "hw-ta",
+                "_id": "4",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 2,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-ta",
+                "_id": "5",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 2,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_search",
+      "body": {
+        "size": 0,
+        "terminate_after": 1
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 5,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_search",
+      "body": {
+        "size": 0,
+        "terminate_after": 1,
+        "aggs": {}
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "terminated_early": true,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_search",
+      "body": {
+        "size": 0,
+        "terminate_after": 2,
+        "aggs": {
+          "m": {
+            "avg": {
+              "field": "n"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "terminated_early": true,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "aggregations": {
+            "m": {
+              "value": 2.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_search",
+      "body": {
+        "size": 0,
+        "terminate_after": 1,
+        "query": {
+          "term": {
+            "k": "a"
+          }
+        },
+        "aggs": {
+          "m": {
+            "terms": {
+              "field": "k"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "terminated_early": true,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "aggregations": {
+            "m": {
+              "doc_count_error_upper_bound": 0,
+              "sum_other_doc_count": 0,
+              "buckets": [
+                {
+                  "key": "a",
+                  "doc_count": 1
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_search",
+      "body": {
+        "size": 0,
+        "terminate_after": 1,
+        "query": {
+          "bool": {
+            "must": [
+              {
+                "term": {
+                  "k": "a"
+                }
+              },
+              {
+                "term": {
+                  "t": "x"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_search",
+      "body": {
+        "size": 1,
+        "terminate_after": 1
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "terminated_early": true,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 5,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-ta",
+                "_id": "3",
+                "_score": 1.0,
+                "_source": {
+                  "k": "b",
+                  "n": 3,
+                  "t": "y"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_search",
+      "body": {
+        "sort": [
+          {
+            "o.i": {
+              "numeric_type": "double"
+            }
+          }
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 5,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "hw-ta",
+                "_id": "1",
+                "_score": null,
+                "_source": {
+                  "k": "a",
+                  "n": 1,
+                  "o": {
+                    "i": 3
+                  },
+                  "t": "x y",
+                  "u": 5
+                },
+                "sort": [
+                  3.0
+                ]
+              },
+              {
+                "_index": "hw-ta",
+                "_id": "3",
+                "_score": null,
+                "_source": {
+                  "k": "b",
+                  "n": 3,
+                  "t": "y"
+                },
+                "sort": [
+                  "Infinity"
+                ]
+              },
+              {
+                "_index": "hw-ta",
+                "_id": "2",
+                "_score": null,
+                "_source": {
+                  "k": "a",
+                  "n": 2,
+                  "t": "x"
+                },
+                "sort": [
+                  "Infinity"
+                ]
+              },
+              {
+                "_index": "hw-ta",
+                "_id": "4",
+                "_score": null,
+                "_source": {
+                  "k": "c",
+                  "n": 4
+                },
+                "sort": [
+                  "Infinity"
+                ]
+              },
+              {
+                "_index": "hw-ta",
+                "_id": "5",
+                "_score": null,
+                "_source": {
+                  "k": "a",
+                  "n": 5
+                },
+                "sort": [
+                  "Infinity"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_search",
+      "body": {
+        "sort": [
+          {
+            "o.i": {
+              "numeric_type": "double",
+              "order": "desc"
+            }
+          }
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 5,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "hw-ta",
+                "_id": "1",
+                "_score": null,
+                "_source": {
+                  "k": "a",
+                  "n": 1,
+                  "o": {
+                    "i": 3
+                  },
+                  "t": "x y",
+                  "u": 5
+                },
+                "sort": [
+                  3.0
+                ]
+              },
+              {
+                "_index": "hw-ta",
+                "_id": "3",
+                "_score": null,
+                "_source": {
+                  "k": "b",
+                  "n": 3,
+                  "t": "y"
+                },
+                "sort": [
+                  "-Infinity"
+                ]
+              },
+              {
+                "_index": "hw-ta",
+                "_id": "2",
+                "_score": null,
+                "_source": {
+                  "k": "a",
+                  "n": 2,
+                  "t": "x"
+                },
+                "sort": [
+                  "-Infinity"
+                ]
+              },
+              {
+                "_index": "hw-ta",
+                "_id": "4",
+                "_score": null,
+                "_source": {
+                  "k": "c",
+                  "n": 4
+                },
+                "sort": [
+                  "-Infinity"
+                ]
+              },
+              {
+                "_index": "hw-ta",
+                "_id": "5",
+                "_score": null,
+                "_source": {
+                  "k": "a",
+                  "n": 5
+                },
+                "sort": [
+                  "-Infinity"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_search",
+      "body": {
+        "sort": [
+          {
+            "n": {
+              "numeric_type": "double"
+            }
+          }
+        ],
+        "size": 2
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 5,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "hw-ta",
+                "_id": "1",
+                "_score": null,
+                "_source": {
+                  "k": "a",
+                  "n": 1,
+                  "o": {
+                    "i": 3
+                  },
+                  "t": "x y",
+                  "u": 5
+                },
+                "sort": [
+                  1.0
+                ]
+              },
+              {
+                "_index": "hw-ta",
+                "_id": "2",
+                "_score": null,
+                "_source": {
+                  "k": "a",
+                  "n": 2,
+                  "t": "x"
+                },
+                "sort": [
+                  2.0
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_terms_enum",
+      "body": {
+        "field": "k"
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "failed": 0
+          },
+          "terms": [
+            "a",
+            "b",
+            "c"
+          ],
+          "complete": true
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_terms_enum",
+      "body": {
+        "field": "zz"
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "failed": 0
+          },
+          "terms": [],
+          "complete": true
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_terms_enum",
+      "body": {
+        "field": "k",
+        "index_filter": {
+          "match": {
+            "t": "nothing"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "failed": 0
+          },
+          "terms": [
+            "a",
+            "b",
+            "c"
+          ],
+          "complete": true
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_terms_enum",
+      "body": {
+        "field": "k",
+        "index_filter": {
+          "term": {
+            "zz": "x"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 0,
+            "successful": 0,
+            "failed": 0
+          },
+          "terms": [],
+          "complete": true
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_terms_enum",
+      "body": {
+        "field": "k",
+        "index_filter": {
+          "match_none": {}
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 0,
+            "successful": 0,
+            "failed": 0
+          },
+          "terms": [],
+          "complete": true
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_terms_enum",
+      "body": {
+        "field": "k",
+        "index_filter": {
+          "term": {
+            "_index": "hw-ta"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "failed": 0
+          },
+          "terms": [
+            "a",
+            "b",
+            "c"
+          ],
+          "complete": true
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_search",
+      "body": {
+        "query": {
+          "ids": {
+            "values": [
+              "1"
+            ]
+          }
+        },
+        "fields": [
+          "rt"
+        ],
+        "runtime_mappings": {
+          "rt": {
+            "type": "double",
+            "script": {
+              "source": "emit((doc['u'].size() == 0 ? 0 : doc['u'].value) + 0.5)"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 1,
+            "failures": [
+              {
+                "shard": 1,
+                "index": "hw-ta",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "script_exception",
+                  "reason": "runtime error",
+                  "script_stack": [
+                    "emit((doc['u'].size() == 0 ? 0 : doc['u'].value) + 0.5)",
+                    "                                         ^---- HERE"
+                  ],
+                  "script": "emit((doc['u'].size() == 0 ? 0 : doc['u'].value) + 0.5)",
+                  "lang": "painless",
+                  "position": {
+                    "offset": 41,
+                    "start": 0,
+                    "end": 55
+                  },
+                  "caused_by": {
+                    "type": "illegal_argument_exception",
+                    "reason": "Illegal list shortcut value [value]."
+                  }
+                }
+              }
+            ]
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-ta/_search",
+      "body": {
+        "query": {
+          "script": {
+            "script": "doc['u'].size() > 0 && doc['u'].value > 1"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-ta",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "k": "a",
+                  "n": 1,
+                  "o": {
+                    "i": 3
+                  },
+                  "t": "x y",
+                  "u": 5
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/hw-ta",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

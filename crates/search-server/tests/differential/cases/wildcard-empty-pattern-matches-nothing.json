@@ -1,0 +1,292 @@
+{
+  "diff": {
+    "es": 0,
+    "path": ".aggregations.histogram_4.buckets[0].filters_6.buckets.b.doc_count",
+    "roll": 1
+  },
+  "found": {
+    "case": 113,
+    "case_seed": 14000155,
+    "seed": 14
+  },
+  "roll": {
+    "body": {
+      "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 5,
+        "total": 5
+      },
+      "aggregations": {
+        "histogram_4": {
+          "buckets": [
+            {
+              "doc_count": 1,
+              "filters_6": {
+                "buckets": {
+                  "b": {
+                    "doc_count": 1
+                  }
+                }
+              },
+              "key": 120.0
+            }
+          ]
+        }
+      },
+      "hits": {
+        "hits": [
+          {
+            "_id": "33",
+            "_index": "diff-m1-a",
+            "_score": 1.0,
+            "_source": {
+              "comp0": "fast stream runs",
+              "date0": 1717077600000,
+              "dbl0": 137.12,
+              "flt0": 114.04,
+              "half0": 123.14,
+              "kw0": "user@example.com",
+              "long0": 67,
+              "mot0": "runs cats apple banana",
+              "text0": "search Dogs index ran the runs apple fox cat",
+              "text1": "of slow stream lazy fox and apple",
+              "wild0": ""
+            }
+          }
+        ],
+        "max_score": 1.0,
+        "total": {
+          "relation": "eq",
+          "value": 1
+        }
+      },
+      "timed_out": false,
+      "took": 2
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "POST _search .aggregations.histogram.buckets[].filters.buckets.b.doc_count",
+  "steps": [
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "flt0": {
+              "type": "float"
+            },
+            "half0": {
+              "type": "half_float"
+            },
+            "kw0": {
+              "type": "keyword"
+            },
+            "long0": {
+              "type": "long"
+            },
+            "mot0": {
+              "type": "match_only_text"
+            },
+            "text0": {
+              "analyzer": "simple",
+              "type": "text"
+            },
+            "text1": {
+              "analyzer": "stop",
+              "type": "text"
+            },
+            "wild0": {
+              "type": "wildcard"
+            }
+          }
+        },
+        "settings": {
+          "number_of_replicas": 0,
+          "number_of_shards": 5,
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m1-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m1-a"
+    },
+    {
+      "es": {
+        "body": {
+          "errors": false,
+          "items": [
+            {
+              "index": {
+                "_id": "33",
+                "_index": "diff-m1-a",
+                "_primary_term": 1,
+                "_seq_no": 0,
+                "_shards": {
+                  "failed": 0,
+                  "successful": 1,
+                  "total": 1
+                },
+                "_version": 1,
+                "result": "created",
+                "status": 201
+              }
+            }
+          ],
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "lines": [
+        {
+          "index": {
+            "_id": "33",
+            "_index": "diff-m1-a"
+          }
+        },
+        {
+          "comp0": "fast stream runs",
+          "date0": 1717077600000,
+          "dbl0": 137.12,
+          "flt0": 114.04,
+          "half0": 123.14,
+          "kw0": "user@example.com",
+          "long0": 67,
+          "mot0": "runs cats apple banana",
+          "text0": "search Dogs index ran the runs apple fox cat",
+          "text1": "of slow stream lazy fox and apple",
+          "wild0": ""
+        }
+      ],
+      "method": "POST",
+      "path": "/_bulk"
+    },
+    {
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "successful": 5,
+            "total": 5
+          }
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m1-a/_refresh"
+    },
+    {
+      "body": {
+        "aggs": {
+          "histogram_4": {
+            "aggs": {
+              "filters_6": {
+                "filters": {
+                  "filters": {
+                    "b": {
+                      "term": {
+                        "wild0": {
+                          "case_insensitive": true,
+                          "value": ""
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "histogram": {
+              "field": "half0",
+              "interval": 10
+            }
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 5,
+            "total": 5
+          },
+          "aggregations": {
+            "histogram_4": {
+              "buckets": [
+                {
+                  "doc_count": 1,
+                  "filters_6": {
+                    "buckets": {
+                      "b": {
+                        "doc_count": 0
+                      }
+                    }
+                  },
+                  "key": 120.0
+                }
+              ]
+            }
+          },
+          "hits": {
+            "hits": [
+              {
+                "_id": "33",
+                "_index": "diff-m1-a",
+                "_score": 1.0,
+                "_source": {
+                  "comp0": "fast stream runs",
+                  "date0": 1717077600000,
+                  "dbl0": 137.12,
+                  "flt0": 114.04,
+                  "half0": 123.14,
+                  "kw0": "user@example.com",
+                  "long0": 67,
+                  "mot0": "runs cats apple banana",
+                  "text0": "search Dogs index ran the runs apple fox cat",
+                  "text1": "of slow stream lazy fox and apple",
+                  "wild0": ""
+                }
+              }
+            ],
+            "max_score": 1.0,
+            "total": {
+              "relation": "eq",
+              "value": 1
+            }
+          },
+          "timed_out": false,
+          "took": 2
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m1-a/_search"
+    }
+  ]
+}

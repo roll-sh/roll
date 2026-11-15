@@ -1,0 +1,1222 @@
+{
+  "description" : "search applications, query rules and connectors as stored objects",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-s",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "user" : {
+              "type" : "keyword"
+            },
+            "tags" : {
+              "type" : "keyword"
+            },
+            "n" : {
+              "type" : "integer"
+            },
+            "msg" : {
+              "type" : "text"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-s"
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-s/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"1\"}}\n{\"user\": \"alice\", \"tags\": [\"a\", \"b\"], \"n\": 1, \"msg\": \"quick brown fox\"}\n{\"index\": {\"_id\": \"2\"}}\n{\"user\": \"bob\", \"tags\": [\"b\", \"c\"], \"n\": 2, \"msg\": \"lazy dog\"}\n{\"index\": {\"_id\": \"3\"}}\n{\"user\": \"alice\", \"tags\": [\"a\", \"c\"], \"n\": 3, \"msg\": \"quick dog\"}\n{\"index\": {\"_id\": \"4\"}}\n{\"user\": \"carol\", \"tags\": [\"a\"], \"n\": 4, \"msg\": \"brown cow\"}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "PUT /_application/search_application/compat-xpack-app",
+      "body" : {
+        "indices" : [
+          "compat-xpack-s"
+        ],
+        "template" : {
+          "script" : {
+            "source" : {
+              "query" : {
+                "match" : {
+                  "msg" : "{{q}}"
+                }
+              }
+            },
+            "params" : {
+              "q" : "dog"
+            }
+          }
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "GET /_application/search_application/compat-xpack-app",
+      "mask" : [
+        "updated_at_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "name" : "compat-xpack-app",
+        "indices" : [
+          "compat-xpack-s"
+        ],
+        "updated_at_millis" : 1792756877933,
+        "template" : {
+          "script" : {
+            "source" : {
+              "query" : {
+                "match" : {
+                  "msg" : "{{q}}"
+                }
+              }
+            },
+            "lang" : "mustache",
+            "options" : {
+              "content_type" : "application/json;charset=utf-8"
+            },
+            "params" : {
+              "q" : "dog"
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "PUT /_application/search_application/compat-xpack-app?create=true",
+      "body" : {
+        "indices" : [
+          "compat-xpack-s"
+        ]
+      },
+      "status" : 409,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "version_conflict_engine_exception",
+              "reason" : "[compat-xpack-app]: version conflict, document already exists (current version [1])",
+              "index_uuid" : "vnH2admvTcO4CxcraiDz8A",
+              "shard" : "0",
+              "index" : ".search-app-1"
+            }
+          ],
+          "type" : "version_conflict_engine_exception",
+          "reason" : "[compat-xpack-app]: version conflict, document already exists (current version [1])",
+          "index_uuid" : "vnH2admvTcO4CxcraiDz8A",
+          "shard" : "0",
+          "index" : ".search-app-1"
+        },
+        "status" : 409
+      }
+    },
+    {
+      "req" : "PUT /_application/search_application/compat-xpack-bad",
+      "body" : {
+        "indices" : [
+          "compat-xpack-nope"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "no such index [compat-xpack-nope]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "no such index [compat-xpack-nope]",
+          "caused_by" : {
+            "type" : "index_not_found_exception",
+            "reason" : "no such index [compat-xpack-nope]",
+            "resource.type" : "index_or_alias",
+            "resource.id" : "compat-xpack-nope",
+            "index_uuid" : "_na_",
+            "index" : "compat-xpack-nope"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_application/search_application/compat-xpack-bad2",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: indices are missing;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: indices are missing;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_application/search_application/compat-xpack-app/_search?filter_path=hits.total,hits.hits._id",
+      "body" : {
+        "params" : {
+          "q" : "quick"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "hits" : [
+            {
+              "_id" : "3"
+            },
+            {
+              "_id" : "1"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /_application/search_application/compat-xpack-app/_search?filter_path=hits.total",
+      "body" : { },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /_application/search_application/compat-xpack-app/_search",
+      "body" : {
+        "params" : {
+          "zzz" : 1
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.72615415,
+          "hits" : [
+            {
+              "_index" : "compat-xpack-s",
+              "_id" : "2",
+              "_score" : 0.72615415,
+              "_source" : {
+                "user" : "bob",
+                "tags" : [
+                  "b",
+                  "c"
+                ],
+                "n" : 2,
+                "msg" : "lazy dog"
+              }
+            },
+            {
+              "_index" : "compat-xpack-s",
+              "_id" : "3",
+              "_score" : 0.72615415,
+              "_source" : {
+                "user" : "alice",
+                "tags" : [
+                  "a",
+                  "c"
+                ],
+                "n" : 3,
+                "msg" : "quick dog"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /_application/search_application/compat-xpack-app/_render_query",
+      "body" : {
+        "params" : {
+          "q" : "x"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "query" : {
+          "match" : {
+            "msg" : {
+              "query" : "x"
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "GET /_application/search_application?q=compat-xpack-*",
+      "mask" : [
+        "updated_at_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "count" : 1,
+        "results" : [
+          {
+            "name" : "compat-xpack-app",
+            "updated_at_millis" : 1792756877933
+          }
+        ]
+      }
+    },
+    {
+      "req" : "GET /_application/search_application/compat-xpack-nope",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "compat-xpack-nope"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "compat-xpack-nope"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "DELETE /_application/search_application/compat-xpack-app",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_application/search_application/compat-xpack-app",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "compat-xpack-app"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "compat-xpack-app"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "PUT /_query_rules/compat-xpack-rules",
+      "body" : {
+        "rules" : [
+          {
+            "rule_id" : "r1",
+            "type" : "pinned",
+            "criteria" : [
+              {
+                "type" : "exact",
+                "metadata" : "q",
+                "values" : [
+                  "dog"
+                ]
+              }
+            ],
+            "actions" : {
+              "ids" : [
+                "4"
+              ]
+            }
+          }
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "GET /_query_rules/compat-xpack-rules",
+      "status" : 200,
+      "response" : {
+        "ruleset_id" : "compat-xpack-rules",
+        "rules" : [
+          {
+            "rule_id" : "r1",
+            "type" : "pinned",
+            "criteria" : [
+              {
+                "type" : "exact",
+                "metadata" : "q",
+                "values" : [
+                  "dog"
+                ]
+              }
+            ],
+            "actions" : {
+              "ids" : [
+                "4"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "PUT /_query_rules/compat-xpack-rules/_rule/r2",
+      "body" : {
+        "type" : "exclude",
+        "criteria" : [
+          {
+            "type" : "always"
+          }
+        ],
+        "actions" : {
+          "ids" : [
+            "2"
+          ]
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "GET /_query_rules/compat-xpack-rules/_rule/r2",
+      "status" : 200,
+      "response" : {
+        "rule_id" : "r2",
+        "type" : "exclude",
+        "criteria" : [
+          {
+            "type" : "always"
+          }
+        ],
+        "actions" : {
+          "ids" : [
+            "2"
+          ]
+        }
+      }
+    },
+    {
+      "req" : "GET /_query_rules/compat-xpack-rules/_rule/nope",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "rule id nope not found in ruleset compat-xpack-rules"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "rule id nope not found in ruleset compat-xpack-rules"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /_query_rules/compat-xpack-rules/_test",
+      "body" : {
+        "match_criteria" : {
+          "q" : "dog"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "total_matched_rules" : 2,
+        "matched_rules" : [
+          {
+            "ruleset_id" : "compat-xpack-rules",
+            "rule_id" : "r1"
+          },
+          {
+            "ruleset_id" : "compat-xpack-rules",
+            "rule_id" : "r2"
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-s/_search?filter_path=hits.hits._id",
+      "body" : {
+        "query" : {
+          "rule" : {
+            "organic" : {
+              "match" : {
+                "msg" : "dog"
+              }
+            },
+            "ruleset_ids" : [
+              "compat-xpack-rules"
+            ],
+            "match_criteria" : {
+              "q" : "dog"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "4"
+            },
+            {
+              "_id" : "3"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "PUT /_query_rules/compat-xpack-bad",
+      "body" : {
+        "rules" : [
+          {
+            "rule_id" : "r1",
+            "type" : "pinned",
+            "criteria" : [
+              {
+                "type" : "exact",
+                "metadata" : "q"
+              }
+            ],
+            "actions" : {
+              "ids" : [
+                "4"
+              ]
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [query_rule_criteria] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:85] [query_ruleset] failed to parse field [rules]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:85] [query_rule] failed to parse field [criteria]",
+            "caused_by" : {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [query_rule_criteria] after last required field arrived",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "criteriaValues cannot be null or empty"
+              }
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_query_rules/compat-xpack-bad2",
+      "body" : {
+        "rules" : [
+          {
+            "rule_id" : "r1",
+            "type" : "bogus",
+            "criteria" : [
+              {
+                "type" : "always"
+              }
+            ],
+            "actions" : {
+              "ids" : [
+                "4"
+              ]
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [query_rule] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:96] [query_ruleset] failed to parse field [rules]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "Failed to build [query_rule] after last required field arrived",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Unknown QueryRuleType: bogus"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /_query_rules?filter_path=count",
+      "status" : 200,
+      "response" : {
+        "count" : 1
+      }
+    },
+    {
+      "req" : "DELETE /_query_rules/compat-xpack-rules/_rule/r2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_query_rules/compat-xpack-rules",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "GET /_query_rules/compat-xpack-rules",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "compat-xpack-rules"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "compat-xpack-rules"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "PUT /_connector/compat-xpack-conn",
+      "body" : {
+        "index_name" : "compat-xpack-cidx",
+        "name" : "c",
+        "service_type" : "google_drive"
+      },
+      "status" : 201,
+      "response" : {
+        "id" : "compat-xpack-conn",
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "GET /_connector/compat-xpack-conn?filter_path=id,index_name,name,service_type,status,is_native,scheduling,language,pipeline",
+      "status" : 200,
+      "response" : {
+        "id" : "compat-xpack-conn",
+        "index_name" : "compat-xpack-cidx",
+        "is_native" : false,
+        "name" : "c",
+        "scheduling" : {
+          "access_control" : {
+            "enabled" : false,
+            "interval" : "0 0 0 * * ?"
+          },
+          "full" : {
+            "enabled" : false,
+            "interval" : "0 0 0 * * ?"
+          },
+          "incremental" : {
+            "enabled" : false,
+            "interval" : "0 0 0 * * ?"
+          }
+        },
+        "service_type" : "google_drive",
+        "status" : "created"
+      }
+    },
+    {
+      "req" : "PUT /_connector/compat-xpack-conn/_name",
+      "body" : {
+        "name" : "renamed",
+        "description" : "d"
+      },
+      "status" : 200,
+      "response" : {
+        "result" : "updated"
+      }
+    },
+    {
+      "req" : "PUT /_connector/compat-xpack-conn/_status",
+      "body" : {
+        "status" : "bogus"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:11] [connector_update_status_request] failed to parse field [status]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:11] [connector_update_status_request] failed to parse field [status]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Unknown ConnectorStatus [bogus]."
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /_connector/compat-xpack-conn?filter_path=name,description",
+      "status" : 200,
+      "response" : {
+        "name" : "renamed",
+        "description" : "d"
+      }
+    },
+    {
+      "req" : "GET /_connector/compat-xpack-nope",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "connector [compat-xpack-nope] not found"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "connector [compat-xpack-nope] not found"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "DELETE /_connector/compat-xpack-conn?hard=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_query_rules/compat-xpack-bad3",
+      "body" : {
+        "rules" : [
+          {
+            "rule_id" : "r1",
+            "type" : "pinned",
+            "criteria" : [
+              {
+                "type" : "always"
+              }
+            ]
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:73] [query_ruleset] failed to parse field [rules]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:73] [query_ruleset] failed to parse field [rules]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Required [actions]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_query_rules/compat-xpack-bad4",
+      "body" : {
+        "rules" : [
+          {
+            "rule_id" : "r1",
+            "type" : "pinned",
+            "criteria" : [
+              {
+                "type" : "Bogus",
+                "metadata" : "q",
+                "values" : [
+                  "a"
+                ]
+              }
+            ],
+            "actions" : {
+              "ids" : [
+                "4"
+              ]
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [query_rule_criteria] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:99] [query_ruleset] failed to parse field [rules]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:99] [query_rule] failed to parse field [criteria]",
+            "caused_by" : {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:99] [query_rule_criteria] failed to parse field [values]",
+              "caused_by" : {
+                "type" : "x_content_parse_exception",
+                "reason" : "Failed to build [query_rule_criteria] after last required field arrived",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Unknown QueryRuleCriteriaType: Bogus"
+                }
+              }
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_query_rules/compat-xpack-bad5",
+      "body" : {
+        "rules" : [
+          {
+            "rule_id" : "r1",
+            "type" : "pinned",
+            "criteria" : [
+              {
+                "type" : "always"
+              }
+            ],
+            "actions" : {
+              "ids" : [
+                "4"
+              ],
+              "docs" : [
+                {
+                  "_id" : "1"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "pinned query rule actions must contain only one of either ids or docs"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:118] [query_ruleset] failed to parse field [rules]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "Failed to build [query_rule] after last required field arrived",
+            "caused_by" : {
+              "type" : "parse_exception",
+              "reason" : "pinned query rule actions must contain only one of either ids or docs"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_query_rules/compat-xpack-bad6",
+      "body" : {
+        "rules" : [
+          {
+            "rule_id" : "r1",
+            "type" : "pinned",
+            "criteria" : [
+              {
+                "type" : "lt",
+                "metadata" : "q",
+                "values" : [
+                  "x"
+                ]
+              }
+            ],
+            "actions" : {
+              "ids" : [
+                "4"
+              ]
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [query_rule] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:123] [query_ruleset] failed to parse field [rules]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "Failed to build [query_rule] after last required field arrived",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Input [x] is not valid for CriteriaType [lt]"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_query_rules/compat-xpack-bad7",
+      "body" : {
+        "rules" : [
+          {
+            "rule_id" : "r1",
+            "type" : "pinned",
+            "criteria" : [ ],
+            "actions" : {
+              "ids" : [
+                "4"
+              ]
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [query_rule] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:80] [query_ruleset] failed to parse field [rules]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "Failed to build [query_rule] after last required field arrived",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Query rule criteria cannot be empty"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_query_rules/compat-xpack-bad8",
+      "body" : {
+        "rules" : [
+          {
+            "type" : "pinned",
+            "criteria" : [
+              {
+                "type" : "always"
+              }
+            ],
+            "actions" : {
+              "ids" : [
+                "4"
+              ]
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: rule_id cannot be null or empty. rule: [{\"rule_id\":null,\"type\":\"pinned\",\"criteria\":[{\"type\":\"always\"}],\"actions\":{\"ids\":[\"4\"]}}];"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: rule_id cannot be null or empty. rule: [{\"rule_id\":null,\"type\":\"pinned\",\"criteria\":[{\"type\":\"always\"}],\"actions\":{\"ids\":[\"4\"]}}];"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_query_rules/compat-xpack-bad9",
+      "body" : {
+        "rules" : [ ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [query_ruleset] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "Failed to build [query_ruleset] after last required field arrived",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "rules cannot be empty"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_query_rules/compat-xpack-bad10",
+      "body" : {
+        "rules" : [
+          {
+            "rule_id" : "r1",
+            "type" : "pinned",
+            "criteria" : [
+              {
+                "type" : "always"
+              }
+            ],
+            "actions" : {
+              "ids" : [
+                "4"
+              ]
+            },
+            "priority" : -1
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [query_rule] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:109] [query_ruleset] failed to parse field [rules]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:109] [query_rule] failed to parse field [priority]",
+            "caused_by" : {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [query_rule] after last required field arrived",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Priority was -1, must be between 0 and 1000000"
+              }
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_query_rules/compat-xpack-rules2/_rule/r1",
+      "body" : {
+        "type" : "pinned",
+        "criteria" : [
+          {
+            "type" : "exact",
+            "metadata" : "q"
+          }
+        ],
+        "actions" : {
+          "ids" : [
+            "4"
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [query_rule_criteria] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:60] [query_rule] failed to parse field [criteria]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "Failed to build [query_rule_criteria] after last required field arrived",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "criteriaValues cannot be null or empty"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_query_rules/compat-xpack-rules2/_rule/r1",
+      "body" : {
+        "type" : "bogus",
+        "criteria" : [
+          {
+            "type" : "always"
+          }
+        ],
+        "actions" : {
+          "ids" : [
+            "4"
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [query_rule] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "Failed to build [query_rule] after last required field arrived",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Unknown QueryRuleType: bogus"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_query_rules/compat-xpack-rules2/_rule/r1",
+      "body" : {
+        "type" : "pinned",
+        "criteria" : [
+          {
+            "type" : "always"
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Required [actions]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Required [actions]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_application/search_application/compat-xpack-bad3",
+      "body" : {
+        "indices" : [ ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: indices are missing;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: indices are missing;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_connector/compat-xpack-nope/_status",
+      "body" : {
+        "status" : "bogus"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:11] [connector_update_status_request] failed to parse field [status]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:11] [connector_update_status_request] failed to parse field [status]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Unknown ConnectorStatus [bogus]."
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-s",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

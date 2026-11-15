@@ -1,0 +1,479 @@
+{
+  "description" : "ES|QL union types: fields mapped with different types across indices are unsupported (original_types, suggested_cast) until a conversion function or :: cast that takes every type resolves them; other uses fail with the ambiguity error",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-u-ip-long?filter_path=errors,acknowledged,error",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "client_ip" : {
+              "type" : "ip"
+            },
+            "event_duration" : {
+              "type" : "long"
+            },
+            "message" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-u-kw-long?filter_path=errors,acknowledged,error",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "client_ip" : {
+              "type" : "keyword"
+            },
+            "event_duration" : {
+              "type" : "long"
+            },
+            "message" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-u-ip-kw?filter_path=errors,acknowledged,error",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "client_ip" : {
+              "type" : "ip"
+            },
+            "event_duration" : {
+              "type" : "keyword"
+            },
+            "message" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /_bulk?refresh=true&filter_path=errors,error",
+      "raw" : "{\"index\": {\"_index\": \"compat-xpack-u-ip-long\"}}\n{\"@timestamp\": \"2023-10-23T13:55:01.543Z\", \"client_ip\": \"172.21.3.15\", \"event_duration\": 1756467, \"message\": \"Connected to 172.21.3.15\"}\n{\"index\": {\"_index\": \"compat-xpack-u-ip-long\"}}\n{\"@timestamp\": \"2023-10-23T13:53:55.832Z\", \"client_ip\": \"172.21.0.5\", \"event_duration\": 5033755, \"message\": \"Connection error\"}\n{\"index\": {\"_index\": \"compat-xpack-u-kw-long\"}}\n{\"@timestamp\": \"2023-10-23T13:52:55.015Z\", \"client_ip\": \"172.21.2.113\", \"event_duration\": 8268153, \"message\": \"Connection error\"}\n{\"index\": {\"_index\": \"compat-xpack-u-ip-kw\"}}\n{\"@timestamp\": \"2023-10-23T13:51:54.732Z\", \"client_ip\": \"172.21.3.15\", \"event_duration\": \"725448\", \"message\": \"Connection error\"}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-u-* METADATA _index | SORT _index ASC, @timestamp DESC"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "@timestamp",
+            "type" : "date"
+          },
+          {
+            "name" : "client_ip",
+            "type" : "unsupported",
+            "original_types" : [
+              "ip",
+              "keyword"
+            ],
+            "suggested_cast" : "keyword"
+          },
+          {
+            "name" : "event_duration",
+            "type" : "unsupported",
+            "original_types" : [
+              "keyword",
+              "long"
+            ],
+            "suggested_cast" : "keyword"
+          },
+          {
+            "name" : "message",
+            "type" : "keyword"
+          },
+          {
+            "name" : "_index",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "2023-10-23T13:51:54.732Z",
+            null,
+            null,
+            "Connection error",
+            "compat-xpack-u-ip-kw"
+          ],
+          [
+            "2023-10-23T13:55:01.543Z",
+            null,
+            null,
+            "Connected to 172.21.3.15",
+            "compat-xpack-u-ip-long"
+          ],
+          [
+            "2023-10-23T13:53:55.832Z",
+            null,
+            null,
+            "Connection error",
+            "compat-xpack-u-ip-long"
+          ],
+          [
+            "2023-10-23T13:52:55.015Z",
+            null,
+            null,
+            "Connection error",
+            "compat-xpack-u-kw-long"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-u-ip-long,compat-xpack-u-ip-kw METADATA _index | EVAL event_duration = TO_LONG(event_duration) | KEEP _index, event_duration | SORT _index, event_duration"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "_index",
+            "type" : "keyword"
+          },
+          {
+            "name" : "event_duration",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            "compat-xpack-u-ip-kw",
+            725448
+          ],
+          [
+            "compat-xpack-u-ip-long",
+            1756467
+          ],
+          [
+            "compat-xpack-u-ip-long",
+            5033755
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-u-ip-long,compat-xpack-u-ip-kw | EVAL event_duration = TO_IP(event_duration)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:80: Cannot use field [event_duration] due to ambiguities being mapped as [2] incompatible types: [keyword] in [compat-xpack-u-ip-kw], [long] in [compat-xpack-u-ip-long]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:80: Cannot use field [event_duration] due to ambiguities being mapped as [2] incompatible types: [keyword] in [compat-xpack-u-ip-kw], [long] in [compat-xpack-u-ip-long]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-u-ip-long,compat-xpack-u-kw-long | EVAL client_ip = TO_LONG(client_ip)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:79: Cannot use field [client_ip] due to ambiguities being mapped as [2] incompatible types: [ip] in [compat-xpack-u-ip-long], [keyword] in [compat-xpack-u-kw-long]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:79: Cannot use field [client_ip] due to ambiguities being mapped as [2] incompatible types: [ip] in [compat-xpack-u-ip-long], [keyword] in [compat-xpack-u-kw-long]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-u-ip-long,compat-xpack-u-kw-long METADATA _index | EVAL client_ip = TO_IP(client_ip) | KEEP _index, client_ip | SORT _index, client_ip"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "_index",
+            "type" : "keyword"
+          },
+          {
+            "name" : "client_ip",
+            "type" : "ip"
+          }
+        ],
+        "values" : [
+          [
+            "compat-xpack-u-ip-long",
+            "172.21.0.5"
+          ],
+          [
+            "compat-xpack-u-ip-long",
+            "172.21.3.15"
+          ],
+          [
+            "compat-xpack-u-kw-long",
+            "172.21.2.113"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-u-ip-long,compat-xpack-u-kw-long | STATS count = COUNT(*) BY client_ip::ip | SORT count DESC, `client_ip::ip` ASC"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "count",
+            "type" : "long"
+          },
+          {
+            "name" : "client_ip::ip",
+            "type" : "ip"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            "172.21.0.5"
+          ],
+          [
+            1,
+            "172.21.2.113"
+          ],
+          [
+            1,
+            "172.21.3.15"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-u-ip-long,compat-xpack-u-kw-long | STATS count = COUNT(client_ip::ip) BY message | SORT count DESC, message ASC"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "count",
+            "type" : "long"
+          },
+          {
+            "name" : "message",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            2,
+            "Connection error"
+          ],
+          [
+            1,
+            "Connected to 172.21.3.15"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-u-ip-long,compat-xpack-u-kw-long | EVAL x = TO_IP(client_ip), y = TO_STRING(client_ip) | KEEP x, y | SORT y"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "x",
+            "type" : "ip"
+          },
+          {
+            "name" : "y",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "172.21.0.5",
+            "172.21.0.5"
+          ],
+          [
+            "172.21.2.113",
+            "172.21.2.113"
+          ],
+          [
+            "172.21.3.15",
+            "172.21.3.15"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-u-ip-long,compat-xpack-u-kw-long | DROP client_ip | SORT @timestamp | KEEP message"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "message",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "Connection error"
+          ],
+          [
+            "Connection error"
+          ],
+          [
+            "Connected to 172.21.3.15"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-u-ip-long,compat-xpack-u-kw-long | WHERE client_ip == \"172.21.3.15\""
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:60: Cannot use field [client_ip] due to ambiguities being mapped as [2] incompatible types: [ip] in [compat-xpack-u-ip-long], [keyword] in [compat-xpack-u-kw-long]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:60: Cannot use field [client_ip] due to ambiguities being mapped as [2] incompatible types: [ip] in [compat-xpack-u-ip-long], [keyword] in [compat-xpack-u-kw-long]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-u-* | KEEP client_ip, event_duration | LIMIT 1"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "client_ip",
+            "type" : "unsupported",
+            "original_types" : [
+              "ip",
+              "keyword"
+            ],
+            "suggested_cast" : "keyword"
+          },
+          {
+            "name" : "event_duration",
+            "type" : "unsupported",
+            "original_types" : [
+              "keyword",
+              "long"
+            ],
+            "suggested_cast" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            null,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-u-ip-long?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-u-kw-long?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-u-ip-kw?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

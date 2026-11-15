@@ -1,0 +1,374 @@
+# Tests of Elasticsearch 9.5.5's `ent-search` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (security roles=x-pack/plugin/ent-search/src/yamlRestTest/resources/roles.yml users=entsearch-superuser:entsearch-superuser-password:superuser,entsearch-admin:entsearch-admin-password:admin,entsearch-user:entsearch-user-password:user,entsearch-unprivileged:entsearch-unprivileged-password:unprivileged login=entsearch-admin:entsearch-admin-password admin=entsearch-superuser:entsearch-superuser-password).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+ent-search:entsearch/10_basic/Enterprise Search loaded
+ent-search:entsearch/20_usage/xpack usage includes Enterprise Search
+ent-search:entsearch/analytics/10_behavioral_analytics_list/Get Analytics Collection - Resource does not exist
+ent-search:entsearch/analytics/10_behavioral_analytics_list/Get Analytics Collection for a particular collection
+ent-search:entsearch/analytics/10_behavioral_analytics_list/Get Analytics Collection list
+ent-search:entsearch/analytics/20_behavioral_analytics_put/Create Analytics Collection
+ent-search:entsearch/analytics/20_behavioral_analytics_put/Create Analytics Collection - analytics collection already exists
+ent-search:entsearch/analytics/30_behavioral_analytics_delete/Delete Analytics Collection
+ent-search:entsearch/analytics/30_behavioral_analytics_delete/Delete Analytics Collection - Analytics Collection does not exist
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post analytics event - Analytics collection does not exist
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post analytics event - Event type does not exist
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post analytics event - Unknown event field
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post page_view analytics event
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post page_view analytics event - Missing page.url
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post page_view analytics event - Missing session.id
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post page_view analytics event - Missing user.id
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post page_view analytics event - With document
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post page_view analytics event - With page title
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post page_view analytics event - With referrer
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post page_view analytics event - debug and session information
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post search analytics event
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post search analytics event - With filters
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post search analytics event - With pagination
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post search analytics event - With search application
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post search analytics event - With search results
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post search analytics event - With sort name and direction
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post search analytics event - With sort order
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post search analytics event - debug and session information
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post search analytics event – Missing search query
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post search_click analytics event
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post search_click analytics event - Document Only
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post search_click analytics event - Page Only
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post search_click analytics event - debug and session information
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post search_click analytics event – Missing page url and document
+ent-search:entsearch/analytics/40_behavioral_analytics_event_post/Post search_click analytics event – Missing search query
+ent-search:entsearch/connector/100_connector_update_error/Reset Connector Error
+ent-search:entsearch/connector/100_connector_update_error/Update Connector Error
+ent-search:entsearch/connector/100_connector_update_error/Update Connector Error - 400 status code when connector_id is empty
+ent-search:entsearch/connector/100_connector_update_error/Update Connector Error - 400 status code when payload is not string
+ent-search:entsearch/connector/100_connector_update_error/Update Connector Error - 404 when connector doesn't exist
+ent-search:entsearch/connector/10_connector_put/Create Connector
+ent-search:entsearch/connector/10_connector_put/Create Connector - Check for missing keys
+ent-search:entsearch/connector/10_connector_put/Create Connector - Default values are initialized correctly
+ent-search:entsearch/connector/10_connector_put/Create Connector - Id returned as part of response
+ent-search:entsearch/connector/10_connector_put/Create Connector - Index name used by another connector
+ent-search:entsearch/connector/10_connector_put/Create Connector - Index name used by deleted connector
+ent-search:entsearch/connector/10_connector_put/Create Connector - Invalid Index Name
+ent-search:entsearch/connector/10_connector_put/Create Connector - Invalid Managed Connector Index Prefix
+ent-search:entsearch/connector/10_connector_put/Create Connector - Native connector is initialized correctly
+ent-search:entsearch/connector/10_connector_put/Create Connector - Resource already exists
+ent-search:entsearch/connector/10_connector_put/Create Connector - Succeeds if body not provided
+ent-search:entsearch/connector/10_connector_put/Create Connector - Succeeds if body not provided and id not provided
+ent-search:entsearch/connector/10_connector_put/Create Connector - Without index attached
+ent-search:entsearch/connector/10_connector_put/Put connector fails for unprivileged user
+ent-search:entsearch/connector/110_connector_update_name/Update Connector Description
+ent-search:entsearch/connector/110_connector_update_name/Update Connector Name
+ent-search:entsearch/connector/110_connector_update_name/Update Connector Name and Description
+ent-search:entsearch/connector/110_connector_update_name/Update Connector Scheduling - 400 status code when connector_id is empty
+ent-search:entsearch/connector/110_connector_update_name/Update Connector Scheduling - 400 status code when payload is not string
+ent-search:entsearch/connector/110_connector_update_name/Update Connector Scheduling - 404 when connector doesn't exist
+ent-search:entsearch/connector/120_connector_update_service_type/Update Connector Service Type
+ent-search:entsearch/connector/120_connector_update_service_type/Update Connector Service Type - 400 status code when connector_id is empty
+ent-search:entsearch/connector/120_connector_update_service_type/Update Connector Service Type - 400 status code when payload is not string
+ent-search:entsearch/connector/120_connector_update_service_type/Update Connector Service Type - 404 when connector doesn't exist
+ent-search:entsearch/connector/130_connector_update_index_name/Update Connector Index Name
+ent-search:entsearch/connector/130_connector_update_index_name/Update Connector Index Name - 400 status code when connector_id is empty
+ent-search:entsearch/connector/130_connector_update_index_name/Update Connector Index Name - 400 status code when invalid index name
+ent-search:entsearch/connector/130_connector_update_index_name/Update Connector Index Name - 400 status code when payload is not string
+ent-search:entsearch/connector/130_connector_update_index_name/Update Connector Index Name - 404 when connector doesn't exist
+ent-search:entsearch/connector/130_connector_update_index_name/Update Connector Index Name - Index name is the same
+ent-search:entsearch/connector/130_connector_update_index_name/Update Connector Index Name - Index name used by another connector
+ent-search:entsearch/connector/130_connector_update_index_name/Update Connector Index Name - detach index
+ent-search:entsearch/connector/130_connector_update_index_name/Update Managed Connector Index Name
+ent-search:entsearch/connector/130_connector_update_index_name/Update Managed Connector Index Name - Bad Prefix
+ent-search:entsearch/connector/140_connector_update_native/Update Connector Native
+ent-search:entsearch/connector/140_connector_update_native/Update Connector Native - 400 status code when connector_id is empty
+ent-search:entsearch/connector/140_connector_update_native/Update Connector Native - 400 status code when payload is not string
+ent-search:entsearch/connector/140_connector_update_native/Update Connector Native - 404 when connector doesn't exist
+ent-search:entsearch/connector/140_connector_update_native/Update Connector Native - changing connector to Elastic-managed correct index name
+ent-search:entsearch/connector/140_connector_update_native/Update Connector Native - changing connector to Elastic-managed wrong index name
+ent-search:entsearch/connector/150_connector_update_status/Update Connector Status
+ent-search:entsearch/connector/150_connector_update_status/Update Connector Status - 400 status code when connector_id is empty
+ent-search:entsearch/connector/150_connector_update_status/Update Connector Status - 400 status code when invalid status
+ent-search:entsearch/connector/150_connector_update_status/Update Connector Status - 400 status code when invalid status transition
+ent-search:entsearch/connector/150_connector_update_status/Update Connector Status - 400 status code when payload is not string
+ent-search:entsearch/connector/150_connector_update_status/Update Connector Status - 404 when connector doesn't exist
+ent-search:entsearch/connector/15_connector_post/Create Connector
+ent-search:entsearch/connector/15_connector_post/Create Connector - Default values are initialized correctly
+ent-search:entsearch/connector/15_connector_post/Create Connector - Index name used by another connector
+ent-search:entsearch/connector/15_connector_post/Create Connector - Invalid Index Name
+ent-search:entsearch/connector/15_connector_post/Create Connector - Invalid Managed Connector Index Prefix
+ent-search:entsearch/connector/15_connector_post/Create Connector - Native connector is initialized correctly
+ent-search:entsearch/connector/15_connector_post/Create Connector - Succeeds if body not provided
+ent-search:entsearch/connector/15_connector_post/Create Connector - Without index attached
+ent-search:entsearch/connector/15_connector_post/Post connector fails for unprivileged user
+ent-search:entsearch/connector/160_connector_update_api_key_id/Update Connector Api Key Id
+ent-search:entsearch/connector/160_connector_update_api_key_id/Update Connector Api Key Id - 400 status code when both values are null
+ent-search:entsearch/connector/160_connector_update_api_key_id/Update Connector Api Key Id - 400 status code when connector_id is empty
+ent-search:entsearch/connector/160_connector_update_api_key_id/Update Connector Api Key Id - 400 status code when payload is not string
+ent-search:entsearch/connector/160_connector_update_api_key_id/Update Connector Api Key Id - 404 when connector doesn't exist
+ent-search:entsearch/connector/160_connector_update_api_key_id/Update Connector Api Key Id and Api Key Secret Id
+ent-search:entsearch/connector/160_connector_update_api_key_id/Update Connector Api Key Secret Id
+ent-search:entsearch/connector/170_connector_update_features/Update Connector Features
+ent-search:entsearch/connector/170_connector_update_features/Update Connector Features - 400 status code when connector_id is empty
+ent-search:entsearch/connector/170_connector_update_features/Update Connector Features - 400 status code when payload unknown
+ent-search:entsearch/connector/170_connector_update_features/Update Connector Features - 404 when connector doesn't exist
+ent-search:entsearch/connector/170_connector_update_features/Update Connector Features - Partial Update
+ent-search:entsearch/connector/20_connector_list/List Connector - Soft deleted with size
+ent-search:entsearch/connector/20_connector_list/List Connector - empty
+ent-search:entsearch/connector/20_connector_list/List Connector - filter by connector names
+ent-search:entsearch/connector/20_connector_list/List Connector - filter by index name and name
+ent-search:entsearch/connector/20_connector_list/List Connector - filter by index names
+ent-search:entsearch/connector/20_connector_list/List Connector - filter by index names, illegal name
+ent-search:entsearch/connector/20_connector_list/List Connector - filter by multiple service types
+ent-search:entsearch/connector/20_connector_list/List Connector - filter by search query
+ent-search:entsearch/connector/20_connector_list/List Connector - filter by service type
+ent-search:entsearch/connector/20_connector_list/List Connector - with size
+ent-search:entsearch/connector/20_connector_list/List Connectors
+ent-search:entsearch/connector/20_connector_list/List Connectors - 2 hard deleted connectors, 1 soft deleted
+ent-search:entsearch/connector/20_connector_list/List Connectors - All hard deleted connectors
+ent-search:entsearch/connector/20_connector_list/List Connectors - Single hard deleted connector
+ent-search:entsearch/connector/20_connector_list/List Connectors - Single soft deleted connector
+ent-search:entsearch/connector/20_connector_list/List Connectors - Soft deleted connectors
+ent-search:entsearch/connector/20_connector_list/List Connectors - Soft deleted connectors / no deleted
+ent-search:entsearch/connector/20_connector_list/List Connectors - Soft deleted with from
+ent-search:entsearch/connector/20_connector_list/List Connectors - with from
+ent-search:entsearch/connector/20_connector_list/List connectors fails for unprivileged user
+ent-search:entsearch/connector/20_connector_list/List connectors requires read-only index privileges
+ent-search:entsearch/connector/20_connector_list/Read-only access is sufficient to list connectors
+ent-search:entsearch/connector/30_connector_delete/Delete Connector
+ent-search:entsearch/connector/30_connector_delete/Delete Connector - Connector does not exist
+ent-search:entsearch/connector/30_connector_delete/Delete Connector - Hard Delete
+ent-search:entsearch/connector/30_connector_delete/Delete Connector - Supports soft deletes
+ent-search:entsearch/connector/30_connector_delete/Delete Connector - deletes associated sync jobs
+ent-search:entsearch/connector/30_connector_delete/Delete Connector - doesn't associated sync jobs when delete_sync_jobs is false
+ent-search:entsearch/connector/30_connector_delete/Delete connector fails for unprivileged user
+ent-search:entsearch/connector/40_connector_update_pipeline/Update Connector Pipeline
+ent-search:entsearch/connector/40_connector_update_pipeline/Update Connector Pipeline - Connector doesn't exist
+ent-search:entsearch/connector/40_connector_update_pipeline/Update Connector Pipeline - Required fields are missing
+ent-search:entsearch/connector/50_connector_update_scheduling/Update Connector Scheduling
+ent-search:entsearch/connector/50_connector_update_scheduling/Update Connector Scheduling - Connector doesn't exist
+ent-search:entsearch/connector/50_connector_update_scheduling/Update Connector Scheduling - Schedules are missing
+ent-search:entsearch/connector/50_connector_update_scheduling/Update Connector Scheduling - Update single schedule only
+ent-search:entsearch/connector/50_connector_update_scheduling/Update Connector Scheduling - Wrong CRON expression
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering - Activate edited draft
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering - Activate invalid draft
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering - Activate valid draft
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering - Connector doesn't exist
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering - Mixed order and default value
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering - Required fields are missing
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering - Update draft
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering - Update draft advanced snippet only
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering - Update draft rules only
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering - Update filtering draft validation
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering - Update full filtering object
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering - Update validation missing validation errors
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering - Update validation missing validation state
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering - Wrong datetime expression
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering with value literal - Default rule not present
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering with value literal - Empty rules
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering with value literal - Wrong advanced snippet value
+ent-search:entsearch/connector/60_connector_update_filtering/Update Connector Filtering with with value literal - Only default rule
+ent-search:entsearch/connector/70_connector_check_in/Connector Check-in
+ent-search:entsearch/connector/70_connector_check_in/Connector Check-in Error - Connector doesn't exist
+ent-search:entsearch/connector/70_connector_check_in/Connector Check-in Error - connector_id is empty
+ent-search:entsearch/connector/80_connector_update_last_sync_stats/Update Connector Filtering - Wrong datetime expression
+ent-search:entsearch/connector/80_connector_update_last_sync_stats/Update Connector Filtering - Wrong status
+ent-search:entsearch/connector/80_connector_update_last_sync_stats/Update Connector Last Sync Stats
+ent-search:entsearch/connector/80_connector_update_last_sync_stats/Update Connector Last Sync Stats - Connector doesn't exist
+ent-search:entsearch/connector/80_connector_update_last_sync_stats/Update Connector Last Sync Stats - Supports different datetime format
+ent-search:entsearch/connector/80_connector_update_last_sync_stats/Update Connector Last Sync Stats - Supports different partial updates
+ent-search:entsearch/connector/80_connector_update_last_sync_stats/Update Connector Last Sync Stats - Supports sync_cursor updates
+ent-search:entsearch/connector/90_connector_update_configuration/Update Connector Configuration
+ent-search:entsearch/connector/90_connector_update_configuration/Update Connector Configuration - 'configuration' and 'values' are both non-null
+ent-search:entsearch/connector/90_connector_update_configuration/Update Connector Configuration - 'configuration' and 'values' are null
+ent-search:entsearch/connector/90_connector_update_configuration/Update Connector Configuration - Clear configuration
+ent-search:entsearch/connector/90_connector_update_configuration/Update Connector Configuration - Connector doesn't exist
+ent-search:entsearch/connector/90_connector_update_configuration/Update Connector Configuration - Crawler configuration
+ent-search:entsearch/connector/90_connector_update_configuration/Update Connector Configuration - Partial Values Update
+ent-search:entsearch/connector/90_connector_update_configuration/Update Connector Configuration - Required fields are missing
+ent-search:entsearch/connector/90_connector_update_configuration/Update Connector Configuration - Unknown constraint
+ent-search:entsearch/connector/90_connector_update_configuration/Update Connector Configuration - Unknown field type
+ent-search:entsearch/connector/90_connector_update_configuration/Update Connector Configuration - Update unknown field value
+ent-search:entsearch/connector/90_connector_update_configuration/Update Connector Configuration - Values Only
+ent-search:entsearch/connector/90_connector_update_configuration/Update Connector Configuration with null tooltip
+ent-search:entsearch/connector/90_connector_update_configuration/Update Connector Configuration with numeric select options
+ent-search:entsearch/connector/secret/10_connector_secret_post/Post connector secret - admin
+ent-search:entsearch/connector/secret/10_connector_secret_post/Post connector secret - authorized user
+ent-search:entsearch/connector/secret/10_connector_secret_post/Post connector secret - unauthorized user
+ent-search:entsearch/connector/secret/10_connector_secret_post/Post connector secret when id is missing should fail
+ent-search:entsearch/connector/secret/20_connector_secret_put/Put connector secret - admin
+ent-search:entsearch/connector/secret/20_connector_secret_put/Put connector secret - authorized user
+ent-search:entsearch/connector/secret/20_connector_secret_put/Put connector secret - unauthorized user
+ent-search:entsearch/connector/secret/20_connector_secret_put/Put connector secret when id is missing should fail
+ent-search:entsearch/connector/secret/30_connector_secret_get/Get connector secret - Secret does not exist
+ent-search:entsearch/connector/secret/30_connector_secret_get/Get connector secret - admin
+ent-search:entsearch/connector/secret/30_connector_secret_get/Get connector secret - user with privileges
+ent-search:entsearch/connector/secret/30_connector_secret_get/Get connector secret - user without privileges
+ent-search:entsearch/connector/secret/40_connector_secret_delete/Delete connector secret - Secret does not exist
+ent-search:entsearch/connector/secret/40_connector_secret_delete/Delete connector secret - admin
+ent-search:entsearch/connector/secret/40_connector_secret_delete/Delete connector secret - user with privileges
+ent-search:entsearch/connector/secret/40_connector_secret_delete/Delete connector secret - user without privileges
+ent-search:entsearch/connector/sync_job/10_connector_sync_job_post/Create access control sync job - expect prefixed connector index name
+ent-search:entsearch/connector/sync_job/10_connector_sync_job_post/Create connector sync job
+ent-search:entsearch/connector/sync_job/10_connector_sync_job_post/Create connector sync job fails for unprivileged user
+ent-search:entsearch/connector/sync_job/10_connector_sync_job_post/Create connector sync job with complex connector document
+ent-search:entsearch/connector/sync_job/10_connector_sync_job_post/Create connector sync job with filtering
+ent-search:entsearch/connector/sync_job/10_connector_sync_job_post/Create connector sync job with invalid job type
+ent-search:entsearch/connector/sync_job/10_connector_sync_job_post/Create connector sync job with invalid trigger method
+ent-search:entsearch/connector/sync_job/10_connector_sync_job_post/Create connector sync job with missing job type - expect job type full as default
+ent-search:entsearch/connector/sync_job/10_connector_sync_job_post/Create connector sync job with missing trigger method - expect trigger method on_demand as default
+ent-search:entsearch/connector/sync_job/10_connector_sync_job_post/Create connector sync job with no index attached
+ent-search:entsearch/connector/sync_job/10_connector_sync_job_post/Create connector sync job with no service type
+ent-search:entsearch/connector/sync_job/10_connector_sync_job_post/Create connector sync job with non-existing connector id
+ent-search:entsearch/connector/sync_job/20_connector_sync_job_delete/Delete Connector Sync Job
+ent-search:entsearch/connector/sync_job/20_connector_sync_job_delete/Delete Connector Sync Job - Connector Sync Job does not exist
+ent-search:entsearch/connector/sync_job/20_connector_sync_job_delete/Delete connector fails for unprivileged user
+ent-search:entsearch/connector/sync_job/30_connector_sync_job_check_in/Check in a Connector Sync Job
+ent-search:entsearch/connector/sync_job/30_connector_sync_job_check_in/Check in a Connector Sync Job - Connector Sync Job does not exist
+ent-search:entsearch/connector/sync_job/40_connector_sync_job_cancel/Cancel a Connector Sync Job - Connector Sync Job does not exist
+ent-search:entsearch/connector/sync_job/40_connector_sync_job_cancel/Cancel a canceled Connector Sync Job - invalid state transition from canceled to canceling
+ent-search:entsearch/connector/sync_job/40_connector_sync_job_cancel/Cancel a pending Connector Sync Job - transition to canceled directly
+ent-search:entsearch/connector/sync_job/50_connector_sync_job_get/Get connector sync job
+ent-search:entsearch/connector/sync_job/50_connector_sync_job_get/Get connector sync job - Missing sync job id
+ent-search:entsearch/connector/sync_job/50_connector_sync_job_get/Get sync job fails for unprivileged user
+ent-search:entsearch/connector/sync_job/50_connector_sync_job_get/Read-only access is sufficient to get the sync job
+ent-search:entsearch/connector/sync_job/60_connector_sync_job_error/Set an error for a Connector Sync Job - Connector Sync Job does not exist
+ent-search:entsearch/connector/sync_job/60_connector_sync_job_error/Set an error for a pending connector sync job - invalid state transition from pending to error
+ent-search:entsearch/connector/sync_job/70_connector_sync_job_update_stats/Update the ingestion stats for a Connector Sync Job - Connector Sync Job does not exist
+ent-search:entsearch/connector/sync_job/70_connector_sync_job_update_stats/Update the ingestion stats for a connector sync job - metadata wrong type number
+ent-search:entsearch/connector/sync_job/70_connector_sync_job_update_stats/Update the ingestion stats for a connector sync job - metadata wrong type string
+ent-search:entsearch/connector/sync_job/70_connector_sync_job_update_stats/Update the ingestion stats for a connector sync job - negative deleted document count error
+ent-search:entsearch/connector/sync_job/70_connector_sync_job_update_stats/Update the ingestion stats for a connector sync job - negative indexed document count error
+ent-search:entsearch/connector/sync_job/70_connector_sync_job_update_stats/Update the ingestion stats for a connector sync job - negative indexed document volume error
+ent-search:entsearch/connector/sync_job/70_connector_sync_job_update_stats/Update the ingestion stats for a connector sync job - negative optional total document count error
+ent-search:entsearch/connector/sync_job/70_connector_sync_job_update_stats/Update the ingestion stats for a connector sync job - only mandatory parameters
+ent-search:entsearch/connector/sync_job/70_connector_sync_job_update_stats/Update the ingestion stats for a connector sync job - with optional last_seen
+ent-search:entsearch/connector/sync_job/70_connector_sync_job_update_stats/Update the ingestion stats for a connector sync job - with optional metadata
+ent-search:entsearch/connector/sync_job/70_connector_sync_job_update_stats/Update the ingestion stats for a connector sync job - with optional total_document_count
+ent-search:entsearch/connector/sync_job/80_connector_sync_job_list/List Connector Sync Jobs
+ent-search:entsearch/connector/sync_job/80_connector_sync_job_list/List Connector Sync Jobs - Get jobs for connector one
+ent-search:entsearch/connector/sync_job/80_connector_sync_job_list/List Connector Sync Jobs - Get jobs with multiple job types
+ent-search:entsearch/connector/sync_job/80_connector_sync_job_list/List Connector Sync Jobs - Get jobs with single job type
+ent-search:entsearch/connector/sync_job/80_connector_sync_job_list/List Connector Sync Jobs - Get pending jobs
+ent-search:entsearch/connector/sync_job/80_connector_sync_job_list/List Connector Sync Jobs - empty list
+ent-search:entsearch/connector/sync_job/80_connector_sync_job_list/List Connector Sync Jobs - with from
+ent-search:entsearch/connector/sync_job/80_connector_sync_job_list/List Connector Sync Jobs - with invalid job status
+ent-search:entsearch/connector/sync_job/80_connector_sync_job_list/List Connector Sync Jobs - with invalid job type
+ent-search:entsearch/connector/sync_job/80_connector_sync_job_list/List Connector Sync Jobs - with size
+ent-search:entsearch/connector/sync_job/90_connector_sync_job_claim/Fail to claim a Connector Sync Job - Connector Sync Job does not exist
+ent-search:entsearch/connector/sync_job/90_connector_sync_job_claim/Fail to claim a Connector Sync Job - worker_hostname is missing
+ent-search:entsearch/connector/sync_job/90_connector_sync_job_claim/Fail to claim a Connector Sync Job - worker_hostname is null
+ent-search:entsearch/connector/sync_job/90_connector_sync_job_claim/Set both worker_hostname and sync_cursor for a Connector Sync Job
+ent-search:entsearch/connector/sync_job/90_connector_sync_job_claim/Set only worker_hostname for a Connector Sync Job
+ent-search:entsearch/rules/10_query_ruleset_put/Create Query Ruleset
+ent-search:entsearch/rules/10_query_ruleset_put/Create Query Ruleset - Insufficient privilege
+ent-search:entsearch/rules/10_query_ruleset_put/Create Query Ruleset - Resource already exists
+ent-search:entsearch/rules/10_query_ruleset_put/Test numeric comparison rule validation
+ent-search:entsearch/rules/10_query_ruleset_put/Test numeric comparison with multiple values
+ent-search:entsearch/rules/20_query_ruleset_list/List Query Rulesets
+ent-search:entsearch/rules/20_query_ruleset_list/List Query Rulesets - Insufficient privilege
+ent-search:entsearch/rules/20_query_ruleset_list/List Query Rulesets - empty
+ent-search:entsearch/rules/20_query_ruleset_list/List Query Rulesets - with from
+ent-search:entsearch/rules/20_query_ruleset_list/List Query Rulesets - with size
+ent-search:entsearch/rules/20_query_ruleset_list/List Query Rulesets with multiple rules
+ent-search:entsearch/rules/20_query_ruleset_list/List query rulesets - include rule types
+ent-search:entsearch/rules/30_query_ruleset_delete/Delete Query Ruleset
+ent-search:entsearch/rules/30_query_ruleset_delete/Delete Query Ruleset - Insufficient privilege
+ent-search:entsearch/rules/30_query_ruleset_delete/Delete Query Ruleset - Ruleset does not exist
+ent-search:entsearch/rules/40_rule_query_search/As a user, perform a rule query with a doc match
+ent-search:entsearch/rules/40_rule_query_search/As a user, perform a rule query with an ID match
+ent-search:entsearch/rules/40_rule_query_search/Multi-index search with missing documents does not error
+ent-search:entsearch/rules/40_rule_query_search/Perform a query over an alias, where one document is pinned specifying the index
+ent-search:entsearch/rules/40_rule_query_search/Perform a query that matches multiple exclude rules
+ent-search:entsearch/rules/40_rule_query_search/Perform a query that matches multiple exclude rules with docs specifying index
+ent-search:entsearch/rules/40_rule_query_search/Perform a query where the same ID is both pinned and excluded, leading it to be excluded
+ent-search:entsearch/rules/40_rule_query_search/Perform a rule query over a ruleset with combined numeric and text rule matching
+ent-search:entsearch/rules/40_rule_query_search/Perform a rule query specifying a ruleset that does not exist
+ent-search:entsearch/rules/40_rule_query_search/Perform a rule query specifying too many rulesets
+ent-search:entsearch/rules/40_rule_query_search/Perform a rule query that matches complex rules
+ent-search:entsearch/rules/40_rule_query_search/Perform a rule query that specifies both a ruleset_id and ruleset_ids
+ent-search:entsearch/rules/40_rule_query_search/Perform a rule query with an ID match
+ent-search:entsearch/rules/40_rule_query_search/Perform a rule query with an organic query that must be rewritten to another query type
+ent-search:entsearch/rules/40_rule_query_search/Perform a rule query with full legacy syntax
+ent-search:entsearch/rules/40_rule_query_search/Perform a rule query with multiple matching rules
+ent-search:entsearch/rules/40_rule_query_search/Perform a rule query with multiple rulesets that are applied in order of ruleset then rule
+ent-search:entsearch/rules/40_rule_query_search/Perform a rule query with no matching rules
+ent-search:entsearch/rules/40_rule_query_search/Perform a rule query without specifying a ruleset
+ent-search:entsearch/rules/40_rule_query_search/Perform a search with malformed rule query
+ent-search:entsearch/rules/40_rule_query_search/Verify rule query still works with legacy ruleset_id
+ent-search:entsearch/rules/50_query_rule_put/Create Query Rule - Insufficient privilege
+ent-search:entsearch/rules/50_query_rule_put/Create Query Rule - Resource already exists
+ent-search:entsearch/rules/50_query_rule_put/Create query rule with existing ruleset respecting priority order
+ent-search:entsearch/rules/50_query_rule_put/Create query rule with nonexistant ruleset that is also created
+ent-search:entsearch/rules/5_query_rulesets_before_setup/Delete query ruleset returns a 404 when no query rulesets exist
+ent-search:entsearch/rules/5_query_rulesets_before_setup/Get query ruleset returns a 404 when no query rulesets exist
+ent-search:entsearch/rules/5_query_rulesets_before_setup/List query rulesets returns an empty list when no query rulesets exist
+ent-search:entsearch/rules/60_query_rule_delete/Delete Query Rule - Rule does not exist
+ent-search:entsearch/rules/60_query_rule_delete/Delete Query Rule - Ruleset does not exist
+ent-search:entsearch/rules/60_query_rule_delete/Delete Query Rule, ruleset is also deleted as it is now empty
+ent-search:entsearch/rules/60_query_rule_delete/Delete Query Rule, ruleset still exists
+ent-search:entsearch/rules/60_query_rule_delete/Delete Query Ruleset - Insufficient privilege
+ent-search:entsearch/rules/70_query_rule_test/As a user, test query rules with a doc match
+ent-search:entsearch/rules/70_query_rule_test/As a user, test query rules with an ID match
+ent-search:entsearch/rules/70_query_rule_test/Perform a rule query over a ruleset with combined numeric and text rule matching
+ent-search:entsearch/rules/70_query_rule_test/Test query rules with a doc match
+ent-search:entsearch/rules/70_query_rule_test/Test query rules with an ID match
+ent-search:entsearch/rules/70_query_rule_test/Test query rules with an empty body
+ent-search:entsearch/rules/70_query_rule_test/Test query rules with no matching rules
+ent-search:entsearch/rules/70_query_rule_test/Test query rules, specifying a ruleset that does not exist
+ent-search:entsearch/rules/70_query_rule_test/Test rules where the same ID is both pinned and excluded
+ent-search:entsearch/rules/80_query_rules_retriever/query rules allowed to be defined as a sub-retriever
+ent-search:entsearch/rules/80_query_rules_retriever/query rules retriever combined with rrf
+ent-search:entsearch/rules/80_query_rules_retriever/query rules retriever combined with rrf and pagination
+ent-search:entsearch/rules/80_query_rules_retriever/query rules retriever explains pinned documents as constant score queries
+ent-search:entsearch/rules/80_query_rules_retriever/query rules retriever supports explicit sort on score
+ent-search:entsearch/rules/80_query_rules_retriever/query rules retriever supports explicit sort on score with secondary sort allowed
+ent-search:entsearch/rules/80_query_rules_retriever/query rules retriever supports rank window size
+ent-search:entsearch/rules/80_query_rules_retriever/query rules will error if sorting by anything other than score
+ent-search:entsearch/rules/80_query_rules_retriever/standalone query rules retriever
+ent-search:entsearch/rules/81_query_rules_retriever_no_rulesets/query rules retriever when the .query-rules system index is missing
+ent-search:entsearch/search/15_search_application_before_setup/Delete Search Application returns a 404 when no Search Applications exist
+ent-search:entsearch/search/15_search_application_before_setup/Get Search Application returns a 404 when no Search Applications exist
+ent-search:entsearch/search/15_search_application_before_setup/List Search Application returns an empty list when no Search Applications exist
+ent-search:entsearch/search/20_search_application_put/Create Search Application
+ent-search:entsearch/search/20_search_application_put/Create Search Application - Cluster State Template
+ent-search:entsearch/search/20_search_application_put/Create Search Application - Incorrect template language
+ent-search:entsearch/search/20_search_application_put/Create Search Application - Index does not exist
+ent-search:entsearch/search/20_search_application_put/Create Search Application - Insufficient privilege
+ent-search:entsearch/search/20_search_application_put/Create Search Application - Resource already exists
+ent-search:entsearch/search/20_search_application_put/Create Search Application - Script missing from template
+ent-search:entsearch/search/20_search_application_put/Create Search Application with string encoded template script
+ent-search:entsearch/search/20_search_application_put/Create search application fails for unprivileged user
+ent-search:entsearch/search/20_search_application_put/Update Search Application - Dictionary is not a valid JSON Schema
+ent-search:entsearch/search/20_search_application_put/Update Search Application with null template
+ent-search:entsearch/search/30_search_application_get/Get Search Application - Resource does not exist
+ent-search:entsearch/search/30_search_application_get/Get Search Application with no template specified returns default template with warning header
+ent-search:entsearch/search/30_search_application_get/Get Search Application with template
+ent-search:entsearch/search/30_search_application_get/Get search application fails for unprivileged user
+ent-search:entsearch/search/40_search_application_delete/Delete Search Application
+ent-search:entsearch/search/40_search_application_delete/Delete Search Application - Alias does not exist as alias was explicitly removed
+ent-search:entsearch/search/40_search_application_delete/Delete Search Application - Alias does not exist as indices were deleted
+ent-search:entsearch/search/40_search_application_delete/Delete Search Application - Index does not exist
+ent-search:entsearch/search/40_search_application_delete/Delete search application fails for unprivileged user
+ent-search:entsearch/search/50_search_application_list/Empty query results
+ent-search:entsearch/search/50_search_application_list/List Search Applications
+ent-search:entsearch/search/50_search_application_list/List search applications fails for unprivileged user
+ent-search:entsearch/search/50_search_application_list/Pagination - From
+ent-search:entsearch/search/50_search_application_list/Pagination - Size
+ent-search:entsearch/search/50_search_application_list/Query
+ent-search:entsearch/search/52_search_application_render_query/Render Query for Search Application with default parameters
+ent-search:entsearch/search/52_search_application_render_query/Render query for search application - not found
+ent-search:entsearch/search/52_search_application_render_query/Render query for search application overriding all parameters
+ent-search:entsearch/search/52_search_application_render_query/Render query for search application overriding part of the parameters
+ent-search:entsearch/search/52_search_application_render_query/Render query for search application with a list of parameters
+ent-search:entsearch/search/52_search_application_render_query/Render query for search application with floats
+ent-search:entsearch/search/52_search_application_render_query/Render search application query fails for unprivileged user
+ent-search:entsearch/search/52_search_application_render_query/Render search application query fails on invalid rendered JSON
+ent-search:entsearch/search/55_search_application_search/Query Search Application - not found
+ent-search:entsearch/search/55_search_application_search/Query Search Application overriding all parameters
+ent-search:entsearch/search/55_search_application_search/Query Search Application overriding part of the parameters
+ent-search:entsearch/search/55_search_application_search/Query Search Application with default parameters
+ent-search:entsearch/search/55_search_application_search/Query Search Application with invalid parameter validation
+ent-search:entsearch/search/55_search_application_search/Query Search Application with list of parameters
+ent-search:entsearch/search/55_search_application_search/Query Search Application without required parameter
+ent-search:entsearch/search/55_search_application_search/Search Application search with typed keys includes type prefix in aggregation names
+ent-search:entsearch/search/55_search_application_search/Search Application search with typed keys set to false returns aggregations without type prefix
+ent-search:entsearch/search/55_search_application_search/Search Application search without typed keys returns aggregations without type prefix
+ent-search:entsearch/search/55_search_application_search/Search application search fails for unprivileged user
+ent-search:entsearch/search/55_search_application_search/Search application search fails on invalid rendered JSON
+ent-search:entsearch/search/56_search_application_search_with_apikey/Query Search Application with API key

@@ -1,0 +1,1616 @@
+{
+ "docs": [
+  "the quick brown fox jumps over the lazy dog",
+  "quick quick brown brown fox",
+  "brown quick fox",
+  "a quick red fox and a brown dog",
+  [
+   "the lazy dog",
+   "the quick brown cat"
+  ],
+  [
+   "over the lazy",
+   "dog sleeps"
+  ],
+  "Quick Brown Foxes are QUICK",
+  "fox",
+  "",
+  [
+   "brown",
+   "quick"
+  ],
+  "quickly browning the quickest brown fox",
+  "the dog the dog the dog"
+ ],
+ "cases": [
+  {
+   "query": {
+    "match_phrase": {
+     "m": "quick brown"
+    }
+   },
+   "total": 4,
+   "hits": [
+    {
+     "id": "0",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"quick brown\")",
+      "details": []
+     }
+    },
+    {
+     "id": "1",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"quick brown\")",
+      "details": []
+     }
+    },
+    {
+     "id": "4",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"quick brown\")",
+      "details": []
+     }
+    },
+    {
+     "id": "6",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"quick brown\")",
+      "details": []
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match_phrase": {
+     "m": {
+      "query": "quick fox",
+      "slop": 1
+     }
+    }
+   },
+   "total": 3,
+   "hits": [
+    {
+     "id": "0",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"quick fox\"~1)",
+      "details": []
+     }
+    },
+    {
+     "id": "2",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"quick fox\"~1)",
+      "details": []
+     }
+    },
+    {
+     "id": "3",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"quick fox\"~1)",
+      "details": []
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match_phrase": {
+     "m": {
+      "query": "brown quick",
+      "slop": 2
+     }
+    }
+   },
+   "total": 5,
+   "hits": [
+    {
+     "id": "0",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"brown quick\"~2)",
+      "details": []
+     }
+    },
+    {
+     "id": "1",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"brown quick\"~2)",
+      "details": []
+     }
+    },
+    {
+     "id": "2",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"brown quick\"~2)",
+      "details": []
+     }
+    },
+    {
+     "id": "4",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"brown quick\"~2)",
+      "details": []
+     }
+    },
+    {
+     "id": "6",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"brown quick\"~2)",
+      "details": []
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match_phrase": {
+     "m": {
+      "query": "fox quick",
+      "slop": 3
+     }
+    }
+   },
+   "total": 3,
+   "hits": [
+    {
+     "id": "0",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"fox quick\"~3)",
+      "details": []
+     }
+    },
+    {
+     "id": "2",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"fox quick\"~3)",
+      "details": []
+     }
+    },
+    {
+     "id": "3",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"fox quick\"~3)",
+      "details": []
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match_phrase": {
+     "m": "the lazy dog"
+    }
+   },
+   "total": 2,
+   "hits": [
+    {
+     "id": "0",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"the lazy dog\")",
+      "details": []
+     }
+    },
+    {
+     "id": "4",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"the lazy dog\")",
+      "details": []
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match_phrase": {
+     "m": "lazy dog sleeps"
+    }
+   },
+   "total": 0,
+   "hits": []
+  },
+  {
+   "query": {
+    "match_phrase": {
+     "m": {
+      "query": "lazy dog",
+      "slop": 101
+     }
+    }
+   },
+   "total": 3,
+   "hits": [
+    {
+     "id": "0",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"lazy dog\"~101)",
+      "details": []
+     }
+    },
+    {
+     "id": "4",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"lazy dog\"~101)",
+      "details": []
+     }
+    },
+    {
+     "id": "5",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"lazy dog\"~101)",
+      "details": []
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match_phrase": {
+     "m": {
+      "query": "brown quick",
+      "slop": 101
+     }
+    }
+   },
+   "total": 7,
+   "hits": [
+    {
+     "id": "0",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"brown quick\"~101)",
+      "details": []
+     }
+    },
+    {
+     "id": "1",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"brown quick\"~101)",
+      "details": []
+     }
+    },
+    {
+     "id": "2",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"brown quick\"~101)",
+      "details": []
+     }
+    },
+    {
+     "id": "3",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"brown quick\"~101)",
+      "details": []
+     }
+    },
+    {
+     "id": "4",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"brown quick\"~101)",
+      "details": []
+     }
+    },
+    {
+     "id": "6",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"brown quick\"~101)",
+      "details": []
+     }
+    },
+    {
+     "id": "9",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"brown quick\"~101)",
+      "details": []
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match_phrase": {
+     "m": "the dog"
+    }
+   },
+   "total": 1,
+   "hits": [
+    {
+     "id": "11",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"the dog\")",
+      "details": []
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match_phrase_prefix": {
+     "m": "quick br"
+    }
+   },
+   "total": 4,
+   "hits": [
+    {
+     "id": "0",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"quick (browning brown)\")",
+      "details": []
+     }
+    },
+    {
+     "id": "1",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"quick (browning brown)\")",
+      "details": []
+     }
+    },
+    {
+     "id": "4",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"quick (browning brown)\")",
+      "details": []
+     }
+    },
+    {
+     "id": "6",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"quick (browning brown)\")",
+      "details": []
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match_phrase_prefix": {
+     "m": "qu"
+    }
+   },
+   "total": 8,
+   "hits": [
+    {
+     "id": "0",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:quickly m:quick m:quickest)",
+      "details": []
+     }
+    },
+    {
+     "id": "1",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:quickly m:quick m:quickest)",
+      "details": []
+     }
+    },
+    {
+     "id": "2",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:quickly m:quick m:quickest)",
+      "details": []
+     }
+    },
+    {
+     "id": "3",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:quickly m:quick m:quickest)",
+      "details": []
+     }
+    },
+    {
+     "id": "4",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:quickly m:quick m:quickest)",
+      "details": []
+     }
+    },
+    {
+     "id": "6",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:quickly m:quick m:quickest)",
+      "details": []
+     }
+    },
+    {
+     "id": "9",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:quickly m:quick m:quickest)",
+      "details": []
+     }
+    },
+    {
+     "id": "10",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:quickly m:quick m:quickest)",
+      "details": []
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match_phrase_prefix": {
+     "m": {
+      "query": "the qu",
+      "slop": 1
+     }
+    }
+   },
+   "total": 3,
+   "hits": [
+    {
+     "id": "0",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"the (quickly quick quickest)\"~1)",
+      "details": []
+     }
+    },
+    {
+     "id": "4",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"the (quickly quick quickest)\"~1)",
+      "details": []
+     }
+    },
+    {
+     "id": "10",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:\"the (quickly quick quickest)\"~1)",
+      "details": []
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match": {
+     "m": "fox"
+    }
+   },
+   "total": 6,
+   "hits": [
+    {
+     "id": "0",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:fox)",
+      "details": []
+     }
+    },
+    {
+     "id": "1",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:fox)",
+      "details": []
+     }
+    },
+    {
+     "id": "2",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:fox)",
+      "details": []
+     }
+    },
+    {
+     "id": "3",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:fox)",
+      "details": []
+     }
+    },
+    {
+     "id": "7",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:fox)",
+      "details": []
+     }
+    },
+    {
+     "id": "10",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "ConstantScore(m:fox)",
+      "details": []
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match": {
+     "m": {
+      "query": "quick fox",
+      "operator": "and"
+     }
+    }
+   },
+   "total": 4,
+   "hits": [
+    {
+     "id": "0",
+     "score": 2.0,
+     "explanation": {
+      "value": 2.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:quick)",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:fox)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "1",
+     "score": 2.0,
+     "explanation": {
+      "value": 2.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:quick)",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:fox)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "2",
+     "score": 2.0,
+     "explanation": {
+      "value": 2.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:quick)",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:fox)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "3",
+     "score": 2.0,
+     "explanation": {
+      "value": 2.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:quick)",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:fox)",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match": {
+     "m": "brown dog"
+    }
+   },
+   "total": 10,
+   "hits": [
+    {
+     "id": "0",
+     "score": 2.0,
+     "explanation": {
+      "value": 2.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:brown)",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:dog)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "3",
+     "score": 2.0,
+     "explanation": {
+      "value": 2.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:brown)",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:dog)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "4",
+     "score": 2.0,
+     "explanation": {
+      "value": 2.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:brown)",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:dog)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "1",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:brown)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "2",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:brown)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "5",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:dog)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "6",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:brown)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "9",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:brown)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "10",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:brown)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "11",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:dog)",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "bool": {
+     "must": [
+      {
+       "match_phrase": {
+        "m": "quick brown"
+       }
+      }
+     ],
+     "filter": [
+      {
+       "match": {
+        "m": "fox"
+       }
+      }
+     ]
+    }
+   },
+   "total": 2,
+   "hits": [
+    {
+     "id": "0",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:\"quick brown\")",
+        "details": []
+       },
+       {
+        "value": 0.0,
+        "description": "match on required clause, product of:",
+        "details": [
+         {
+          "value": 0.0,
+          "description": "# clause",
+          "details": []
+         },
+         {
+          "value": 1.0,
+          "description": "m:fox",
+          "details": []
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "id": "1",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "sum of:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "ConstantScore(m:\"quick brown\")",
+        "details": []
+       },
+       {
+        "value": 0.0,
+        "description": "match on required clause, product of:",
+        "details": [
+         {
+          "value": 0.0,
+          "description": "# clause",
+          "details": []
+         },
+         {
+          "value": 1.0,
+          "description": "m:fox",
+          "details": []
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match_phrase": {
+     "m": {
+      "query": "quick brown",
+      "boost": 3
+     }
+    }
+   },
+   "total": 4,
+   "hits": [
+    {
+     "id": "0",
+     "score": 3.0,
+     "explanation": {
+      "value": 3.0,
+      "description": "ConstantScore(m:\"quick brown\")^3.0",
+      "details": []
+     }
+    },
+    {
+     "id": "1",
+     "score": 3.0,
+     "explanation": {
+      "value": 3.0,
+      "description": "ConstantScore(m:\"quick brown\")^3.0",
+      "details": []
+     }
+    },
+    {
+     "id": "4",
+     "score": 3.0,
+     "explanation": {
+      "value": 3.0,
+      "description": "ConstantScore(m:\"quick brown\")^3.0",
+      "details": []
+     }
+    },
+    {
+     "id": "6",
+     "score": 3.0,
+     "explanation": {
+      "value": 3.0,
+      "description": "ConstantScore(m:\"quick brown\")^3.0",
+      "details": []
+     }
+    }
+   ]
+  }
+ ],
+ "iv_docs": [
+  null,
+  "Apache Lucene powers Elasticsearch",
+  "Elasticsearch is based on Apache Lucene",
+  "The Apache Software Foundation manages many projects including Lucene",
+  [
+   "lucene apache",
+   "apache lucene lucene"
+  ]
+ ],
+ "iv_cases": [
+  {
+   "query": {
+    "intervals": {
+     "m": {
+      "match": {
+       "query": "apache lucene",
+       "max_gaps": 1
+      }
+     }
+    }
+   },
+   "total": 3,
+   "hits": [
+    {
+     "id": "4",
+     "score": 0.6666666,
+     "explanation": {
+      "value": 0.6666666,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 2.0,
+        "description": "S, the sloppy frequency of the interval query m:MAXGAPS/1(UNORDERED(apache,lucene))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "1",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:MAXGAPS/1(UNORDERED(apache,lucene))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "2",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:MAXGAPS/1(UNORDERED(apache,lucene))",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "intervals": {
+     "m": {
+      "match": {
+       "query": "apache lucene",
+       "ordered": true
+      }
+     }
+    }
+   },
+   "total": 4,
+   "hits": [
+    {
+     "id": "1",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:ORDERED(apache,lucene)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "2",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:ORDERED(apache,lucene)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "4",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:ORDERED(apache,lucene)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "3",
+     "score": 0.12500006,
+     "explanation": {
+      "value": 0.12500006,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.14285715,
+        "description": "S, the sloppy frequency of the interval query m:ORDERED(apache,lucene)",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "intervals": {
+     "m": {
+      "prefix": {
+       "prefix": "luc"
+      }
+     }
+    }
+   },
+   "total": 4,
+   "hits": [
+    {
+     "id": "4",
+     "score": 0.75,
+     "explanation": {
+      "value": 0.75,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 3.0,
+        "description": "S, the sloppy frequency of the interval query m:MultiTerm(luc*)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "1",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:MultiTerm(luc*)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "2",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:MultiTerm(luc*)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "3",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:MultiTerm(luc*)",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "intervals": {
+     "m": {
+      "wildcard": {
+       "pattern": "*ase*"
+      }
+     }
+    }
+   },
+   "total": 1,
+   "hits": [
+    {
+     "id": "2",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:MultiTerm(*ase*)",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "intervals": {
+     "m": {
+      "fuzzy": {
+       "term": "lucane"
+      }
+     }
+    }
+   },
+   "total": 4,
+   "hits": [
+    {
+     "id": "4",
+     "score": 0.75,
+     "explanation": {
+      "value": 0.75,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 3.0,
+        "description": "S, the sloppy frequency of the interval query m:MultiTerm(lucane)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "1",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:MultiTerm(lucane)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "2",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:MultiTerm(lucane)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "3",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:MultiTerm(lucane)",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "intervals": {
+     "m": {
+      "match": {
+       "query": "lucene"
+      },
+      "boost": 2
+     }
+    }
+   },
+   "total": 4,
+   "hits": [
+    {
+     "id": "4",
+     "score": 1.5,
+     "explanation": {
+      "value": 1.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 2.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 3.0,
+        "description": "S, the sloppy frequency of the interval query m:lucene",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "1",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 2.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:lucene",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "2",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 2.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:lucene",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "3",
+     "score": 1.0,
+     "explanation": {
+      "value": 1.0,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 2.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:lucene",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

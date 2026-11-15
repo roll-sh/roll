@@ -1,0 +1,453 @@
+{
+ "found": {
+  "case": 39,
+  "case_seed": 104000351,
+  "seed": 104
+ },
+ "signature": "POST _search .hits.hits[]._id",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "mot0": {
+       "type": "match_only_text"
+      }
+     }
+    },
+    "settings": {
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m9-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m9-a"
+  },
+  {
+   "es": {
+    "body": {
+     "errors": false,
+     "items": [
+      {
+       "index": {
+        "_id": "20",
+        "_index": "diff-m9-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 2
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "21",
+        "_index": "diff-m9-a",
+        "_primary_term": 1,
+        "_seq_no": 1,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 2
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "22",
+        "_index": "diff-m9-a",
+        "_primary_term": 1,
+        "_seq_no": 2,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 2
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "23",
+        "_index": "diff-m9-a",
+        "_primary_term": 1,
+        "_seq_no": 3,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 2
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "30",
+        "_index": "diff-m9-a",
+        "_primary_term": 1,
+        "_seq_no": 4,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 2
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "31",
+        "_index": "diff-m9-a",
+        "_primary_term": 1,
+        "_seq_no": 5,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 2
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "33",
+        "_index": "diff-m9-a",
+        "_primary_term": 1,
+        "_seq_no": 6,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 2
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "35",
+        "_index": "diff-m9-a",
+        "_primary_term": 1,
+        "_seq_no": 7,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 2
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      }
+     ],
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": {
+      "_id": "20",
+      "_index": "diff-m9-a"
+     }
+    },
+    {
+     "dnanos0": "2024-04-29T11:00:00.577925811Z",
+     "flt0": 128.42,
+     "int0": 129,
+     "kw0": "rho",
+     "kw1": "alpha",
+     "long0": [
+      41,
+      -2
+     ],
+     "mot0": "engine over shard data the apple dog cat",
+     "text0": "index and fast roll red"
+    },
+    {
+     "index": {
+      "_id": "21",
+      "_index": "diff-m9-a"
+     }
+    },
+    {
+     "date0": "2025-01-13",
+     "int0": 77,
+     "kw0": "x-1",
+     "kw1": "Alpha",
+     "long0": 96,
+     "mot0": "slow elastic dog brown index over",
+     "text0": "query"
+    },
+    {
+     "index": {
+      "_id": "22",
+      "_index": "diff-m9-a",
+      "routing": "r1"
+     }
+    },
+    {
+     "date0": "2024-12-11T08:00:00Z",
+     "dnanos0": "2024-08-20T11:00:00.905512401Z",
+     "flt0": 129.29,
+     "int0": 108,
+     "kw0": "alpha",
+     "kw1": "alpha",
+     "mot0": "cats blue blue fox red running score the cats",
+     "text0": [
+      "fast banana elastic quick",
+      "red fast apple slow cats apple query",
+      "lazy cats"
+     ]
+    },
+    {
+     "index": {
+      "_id": "23",
+      "_index": "diff-m9-a"
+     }
+    },
+    {
+     "date0": 1712603880000,
+     "dnanos0": "2025-01-25T04:00:00Z",
+     "flt0": 119.09,
+     "int0": [
+      62,
+      77
+     ],
+     "kw0": "",
+     "kw1": [
+      "user@example.com",
+      "x-2"
+     ],
+     "long0": [
+      61,
+      23
+     ],
+     "mot0": "red and runs slow the dog shard fast roll",
+     "text0": [
+      "index over jumps",
+      "Dogs score index fast brown blue search shard dog",
+      "jumps brown query"
+     ]
+    },
+    {
+     "index": {
+      "_id": "30",
+      "_index": "diff-m9-a"
+     }
+    },
+    {
+     "date0": "2024-03-27T11:00:00Z",
+     "dnanos0": "2024-01-03T13:00:00.745934268Z",
+     "flt0": 170,
+     "int0": 91,
+     "kw0": [
+      "x-2",
+      "x-2"
+     ],
+     "kw1": "alpha",
+     "long0": 31,
+     "mot0": "dog slow cherry over roll quick",
+     "text0": [
+      "runs ran",
+      "quick score lazy score",
+      "ran Dogs dog score score shard apple index"
+     ]
+    },
+    {
+     "index": {
+      "_id": "31",
+      "_index": "diff-m9-a"
+     }
+    },
+    {
+     "date0": "2024-03-12T21:00:00Z",
+     "dnanos0": "2024-07-29T02:00:00Z",
+     "flt0": 65.2,
+     "int0": 53,
+     "kw0": "rho",
+     "long0": [
+      78,
+      0,
+      25
+     ],
+     "text0": "Quick query and elastic green fast the quick"
+    },
+    {
+     "index": {
+      "_id": "33",
+      "_index": "diff-m9-a",
+      "routing": "r1"
+     }
+    },
+    {
+     "date0": "2024-08-11",
+     "dnanos0": "2024-04-01T02:00:00Z",
+     "flt0": -44.15,
+     "int0": 163,
+     "kw0": [
+      "rho",
+      "rho"
+     ],
+     "long0": 56,
+     "text0": "slow lazy slow jumps"
+    },
+    {
+     "index": {
+      "_id": "35",
+      "_index": "diff-m9-a"
+     }
+    },
+    {
+     "date0": [
+      "2024-07-21T08:00:00Z",
+      "2024-11-30T01:18:00Z",
+      "2024-10-07T06:00:00Z"
+     ],
+     "dnanos0": "2024-11-20T20:00:00Z",
+     "flt0": 1.62,
+     "int0": 134,
+     "kw0": "beta",
+     "kw1": "user@example.com",
+     "long0": null,
+     "text0": "index engine green over red elastic"
+    }
+   ],
+   "method": "POST",
+   "path": "/_bulk"
+  },
+  {
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 2
+     }
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m9-a/_refresh"
+  },
+  {
+   "body": {
+    "query": {
+     "multi_match": {
+      "query": "engine",
+      "type": "phrase_prefix"
+     }
+    }
+   },
+   "capture": [
+    [
+     "scroll",
+     "/_scroll_id"
+    ]
+   ],
+   "es": {
+    "body": {
+     "_scroll_id": "FGluY2x1ZGVfY29udGV4dF91dWlkDXF1ZXJ5QW5kRmV0Y2gBFkFHMFM5Z1huUThLV1dldzREWks5V1EAAAAAAADdZxZHVEZ0S1JrTVNpLWxtMHIwUjR6dGJB",
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "35",
+        "_index": "diff-m9-a",
+        "_score": 2.0167708,
+        "_source": {
+         "date0": [
+          "2024-07-21T08:00:00Z",
+          "2024-11-30T01:18:00Z",
+          "2024-10-07T06:00:00Z"
+         ],
+         "dnanos0": "2024-11-20T20:00:00Z",
+         "flt0": 1.62,
+         "int0": 134,
+         "kw0": "beta",
+         "kw1": "user@example.com",
+         "long0": null,
+         "text0": "index engine green over red elastic"
+        }
+       },
+       {
+        "_id": "20",
+        "_index": "diff-m9-a",
+        "_score": 1.0,
+        "_source": {
+         "dnanos0": "2024-04-29T11:00:00.577925811Z",
+         "flt0": 128.42,
+         "int0": 129,
+         "kw0": "rho",
+         "kw1": "alpha",
+         "long0": [
+          41,
+          -2
+         ],
+         "mot0": "engine over shard data the apple dog cat",
+         "text0": "index and fast roll red"
+        }
+       }
+      ],
+      "max_score": 2.0167708,
+      "total": {
+       "relation": "eq",
+       "value": 2
+      }
+     },
+     "timed_out": false,
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m9-a/_search?scroll=1m"
+  }
+ ]
+}

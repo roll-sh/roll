@@ -1,0 +1,1452 @@
+{
+  "description": "The SQL plugin's PPL engine: schema order and types, commands, aggregations, errors, formats and the settings API (OpenSearch 3.9.0)",
+  "dialect": "opensearch",
+  "steps": [
+    {
+      "req": "PUT /esm-ppl",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "a": {
+              "type": "integer"
+            },
+            "b": {
+              "type": "keyword"
+            },
+            "c": {
+              "type": "text"
+            },
+            "d": {
+              "type": "date"
+            },
+            "e": {
+              "type": "double"
+            },
+            "f": {
+              "type": "long"
+            },
+            "zz": {
+              "type": "boolean"
+            },
+            "obj": {
+              "properties": {
+                "x": {
+                  "type": "short"
+                },
+                "y": {
+                  "type": "float"
+                }
+              }
+            },
+            "msg": {
+              "type": "text",
+              "fields": {
+                "keyword": {
+                  "type": "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-ppl"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /esm-ppl/_bulk?refresh=true",
+      "raw": "{\"index\": {\"_id\": \"1\"}}\n{\"a\": 1, \"b\": \"x\", \"c\": \"hello world\", \"d\": \"2024-01-02T03:04:05.123Z\", \"e\": 1.5, \"f\": 10, \"zz\": true, \"obj\": {\"x\": 3, \"y\": 2.5}, \"msg\": \"value=1\"}\n{\"index\": {\"_id\": \"2\"}}\n{\"a\": 2, \"b\": \"y\", \"d\": \"2024-01-03\", \"e\": 2, \"f\": 20, \"msg\": \"value=1.5\"}\n{\"index\": {\"_id\": \"3\"}}\n{\"a\": 3, \"b\": \"x\", \"c\": \"other text\", \"d\": \"2024-01-03T10:00:00Z\", \"e\": -4.25, \"f\": 30, \"zz\": false, \"obj\": {\"x\": 7, \"y\": 0.5}, \"msg\": \"value=abc\"}\n{\"index\": {\"_id\": \"4\"}}\n{\"a\": 4, \"b\": \"z\", \"d\": \"2024-02-01T00:00:00Z\", \"e\": 8, \"f\": 40, \"zz\": true, \"msg\": \"value=2\"}\n",
+      "headers": {
+        "content-type": "application/x-ndjson"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 40,
+        "errors": false,
+        "items": [
+          {
+            "index": {
+              "_index": "esm-ppl",
+              "_id": "1",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 1,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 0,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "esm-ppl",
+              "_id": "2",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 1,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 1,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "esm-ppl",
+              "_id": "3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 1,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 2,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "esm-ppl",
+              "_id": "4",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 1,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 3,
+              "_primary_term": 1,
+              "status": 201
+            }
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "msg",
+            "type": "string"
+          },
+          {
+            "name": "zz",
+            "type": "boolean"
+          },
+          {
+            "name": "a",
+            "type": "int"
+          },
+          {
+            "name": "b",
+            "type": "string"
+          },
+          {
+            "name": "c",
+            "type": "string"
+          },
+          {
+            "name": "d",
+            "type": "timestamp"
+          },
+          {
+            "name": "e",
+            "type": "double"
+          },
+          {
+            "name": "f",
+            "type": "bigint"
+          },
+          {
+            "name": "obj",
+            "type": "struct"
+          }
+        ],
+        "datarows": [
+          [
+            "value=1",
+            true,
+            1,
+            "x",
+            "hello world",
+            "2024-01-02 03:04:05.123",
+            1.5,
+            10,
+            {
+              "x": 3,
+              "y": 2.5
+            }
+          ],
+          [
+            "value=1.5",
+            null,
+            2,
+            "y",
+            null,
+            "2024-01-03 00:00:00",
+            2.0,
+            20,
+            null
+          ],
+          [
+            "value=abc",
+            false,
+            3,
+            "x",
+            "other text",
+            "2024-01-03 10:00:00",
+            -4.25,
+            30,
+            {
+              "x": 7,
+              "y": 0.5
+            }
+          ],
+          [
+            "value=2",
+            true,
+            4,
+            "z",
+            null,
+            "2024-02-01 00:00:00",
+            8.0,
+            40,
+            null
+          ]
+        ],
+        "total": 4,
+        "size": 4
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | fields a, obj, obj.x, b | sort - a"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "a",
+            "type": "int"
+          },
+          {
+            "name": "obj",
+            "type": "struct"
+          },
+          {
+            "name": "obj.x",
+            "type": "smallint"
+          },
+          {
+            "name": "b",
+            "type": "string"
+          }
+        ],
+        "datarows": [
+          [
+            4,
+            null,
+            null,
+            "z"
+          ],
+          [
+            3,
+            {
+              "x": 7,
+              "y": 0.5
+            },
+            7,
+            "x"
+          ],
+          [
+            2,
+            null,
+            null,
+            "y"
+          ],
+          [
+            1,
+            {
+              "x": 3,
+              "y": 2.5
+            },
+            3,
+            "x"
+          ]
+        ],
+        "total": 4,
+        "size": 4
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | where a > 1 and b = 'x' | fields a, b"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "a",
+            "type": "int"
+          },
+          {
+            "name": "b",
+            "type": "string"
+          }
+        ],
+        "datarows": [
+          [
+            3,
+            "x"
+          ]
+        ],
+        "total": 1,
+        "size": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | where not zz = false | fields a, zz"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "a",
+            "type": "int"
+          },
+          {
+            "name": "zz",
+            "type": "boolean"
+          }
+        ],
+        "datarows": [
+          [
+            1,
+            true
+          ],
+          [
+            2,
+            null
+          ],
+          [
+            4,
+            true
+          ]
+        ],
+        "total": 3,
+        "size": 3
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | eval p = a + a, q = obj.x * 2, r = e + 1, s = a / 2, t = concat(b, '-', cast(a as string)) | fields p, q, r, s, t"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "p",
+            "type": "bigint"
+          },
+          {
+            "name": "q",
+            "type": "bigint"
+          },
+          {
+            "name": "r",
+            "type": "double"
+          },
+          {
+            "name": "s",
+            "type": "int"
+          },
+          {
+            "name": "t",
+            "type": "string"
+          }
+        ],
+        "datarows": [
+          [
+            2,
+            6,
+            2.5,
+            0,
+            "x-1"
+          ],
+          [
+            4,
+            null,
+            3.0,
+            1,
+            "y-2"
+          ],
+          [
+            6,
+            14,
+            -3.25,
+            1,
+            "x-3"
+          ],
+          [
+            8,
+            null,
+            9.0,
+            2,
+            "z-4"
+          ]
+        ],
+        "total": 4,
+        "size": 4
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | stats count() as c, sum(a), avg(e), min(d), max(b), dc(b), median(a), percentile(f, 90) by zz"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "c",
+            "type": "bigint"
+          },
+          {
+            "name": "sum(a)",
+            "type": "bigint"
+          },
+          {
+            "name": "avg(e)",
+            "type": "double"
+          },
+          {
+            "name": "min(d)",
+            "type": "timestamp"
+          },
+          {
+            "name": "max(b)",
+            "type": "string"
+          },
+          {
+            "name": "dc(b)",
+            "type": "bigint"
+          },
+          {
+            "name": "median(a)",
+            "type": "int"
+          },
+          {
+            "name": "percentile(f, 90)",
+            "type": "bigint"
+          },
+          {
+            "name": "zz",
+            "type": "boolean"
+          }
+        ],
+        "datarows": [
+          [
+            1,
+            2,
+            2.0,
+            "2024-01-03 00:00:00",
+            "y",
+            1,
+            2,
+            20,
+            null
+          ],
+          [
+            1,
+            3,
+            -4.25,
+            "2024-01-03 10:00:00",
+            "x",
+            1,
+            3,
+            30,
+            false
+          ],
+          [
+            2,
+            5,
+            4.75,
+            "2024-01-02 03:04:05.123",
+            "z",
+            2,
+            4,
+            40,
+            true
+          ]
+        ],
+        "total": 3,
+        "size": 3
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | stats count() by span(d, 1d)"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "count()",
+            "type": "bigint"
+          },
+          {
+            "name": "span(d,1d)",
+            "type": "timestamp"
+          }
+        ],
+        "datarows": [
+          [
+            1,
+            "2024-01-02 00:00:00"
+          ],
+          [
+            2,
+            "2024-01-03 00:00:00"
+          ],
+          [
+            1,
+            "2024-02-01 00:00:00"
+          ]
+        ],
+        "total": 3,
+        "size": 3
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | stats avg(a) by b, span(a, 2)"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "avg(a)",
+            "type": "double"
+          },
+          {
+            "name": "span(a,2)",
+            "type": "int"
+          },
+          {
+            "name": "b",
+            "type": "string"
+          }
+        ],
+        "datarows": [
+          [
+            1.0,
+            0,
+            "x"
+          ],
+          [
+            3.0,
+            2,
+            "x"
+          ],
+          [
+            2.0,
+            2,
+            "y"
+          ],
+          [
+            4.0,
+            4,
+            "z"
+          ]
+        ],
+        "total": 4,
+        "size": 4
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | top b"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "b",
+            "type": "string"
+          },
+          {
+            "name": "count",
+            "type": "bigint"
+          }
+        ],
+        "datarows": [
+          [
+            "x",
+            2
+          ],
+          [
+            "y",
+            1
+          ],
+          [
+            "z",
+            1
+          ]
+        ],
+        "total": 3,
+        "size": 3
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | rare b"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "b",
+            "type": "string"
+          },
+          {
+            "name": "count",
+            "type": "bigint"
+          }
+        ],
+        "datarows": [
+          [
+            "y",
+            1
+          ],
+          [
+            "z",
+            1
+          ],
+          [
+            "x",
+            2
+          ]
+        ],
+        "total": 3,
+        "size": 3
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | dedup b | fields a, b"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "a",
+            "type": "int"
+          },
+          {
+            "name": "b",
+            "type": "string"
+          }
+        ],
+        "datarows": [
+          [
+            1,
+            "x"
+          ],
+          [
+            2,
+            "y"
+          ],
+          [
+            4,
+            "z"
+          ]
+        ],
+        "total": 3,
+        "size": 3
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | rename a as aa, b as bb | fields aa, bb"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "aa",
+            "type": "int"
+          },
+          {
+            "name": "bb",
+            "type": "string"
+          }
+        ],
+        "datarows": [
+          [
+            1,
+            "x"
+          ],
+          [
+            2,
+            "y"
+          ],
+          [
+            3,
+            "x"
+          ],
+          [
+            4,
+            "z"
+          ]
+        ],
+        "total": 4,
+        "size": 4
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | sort zz, - a | fields zz, a"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "zz",
+            "type": "boolean"
+          },
+          {
+            "name": "a",
+            "type": "int"
+          }
+        ],
+        "datarows": [
+          [
+            null,
+            2
+          ],
+          [
+            false,
+            3
+          ],
+          [
+            true,
+            4
+          ],
+          [
+            true,
+            1
+          ]
+        ],
+        "total": 4,
+        "size": 4
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | head 2 from 1 | fields a"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "a",
+            "type": "int"
+          }
+        ],
+        "datarows": [
+          [
+            2
+          ],
+          [
+            3
+          ]
+        ],
+        "total": 2,
+        "size": 2
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | rex field=msg 'value=(?<v>[\\\\w.]*)' | eval n = v * 10 | fields v, n"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "v",
+            "type": "string"
+          },
+          {
+            "name": "n",
+            "type": "double"
+          }
+        ],
+        "datarows": [
+          [
+            "1",
+            10.0
+          ],
+          [
+            "1.5",
+            15.0
+          ],
+          [
+            "abc",
+            null
+          ],
+          [
+            "2",
+            20.0
+          ]
+        ],
+        "total": 4,
+        "size": 4
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | eventstats sum(a) as total by b | fields a, b, total"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "a",
+            "type": "int"
+          },
+          {
+            "name": "b",
+            "type": "string"
+          },
+          {
+            "name": "total",
+            "type": "bigint"
+          }
+        ],
+        "datarows": [
+          [
+            1,
+            "x",
+            4
+          ],
+          [
+            3,
+            "x",
+            4
+          ],
+          [
+            2,
+            "y",
+            2
+          ],
+          [
+            4,
+            "z",
+            4
+          ]
+        ],
+        "total": 4,
+        "size": 4
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | bin a span=2 | stats count() by a"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "count()",
+            "type": "bigint"
+          },
+          {
+            "name": "a",
+            "type": "string"
+          }
+        ],
+        "datarows": [
+          [
+            1,
+            "0-2"
+          ],
+          [
+            2,
+            "2-4"
+          ],
+          [
+            1,
+            "4-6"
+          ]
+        ],
+        "total": 3,
+        "size": 3
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | timechart span=1d count() by b"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "text": "{\n  \"error\": {\n    \"context\": {\n      \"stage_description\": \"Parsing and validating the query\",\n      \"stage\": \"analyzing\",\n      \"requested_field\": \"@timestamp\",\n      \"available_fields\": [\n        \"msg\",\n        \"zz\",\n        \"a\",\n        \"b\",\n        \"c\",\n        \"d\",\n        \"e\",\n        \"f\",\n        \"obj\",\n        \"obj.x\",\n        \"obj.y\",\n        \"_id\",\n        \"_index\",\n        \"_score\",\n        \"_maxscore\",\n        \"_sort\",\n        \"_routing\"\n      ]\n    },\n    \"reason\": \"Field [@timestamp] not found.\",\n    \"details\": \"Field [@timestamp] not found.\",\n    \"location\": [\"while preparing and validating the query plan\"],\n    \"code\": \"FIELD_NOT_FOUND\",\n    \"type\": \"IllegalArgumentException\"\n  },\n  \"status\": 400\n}",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | patterns msg | fields msg, patterns_field"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "msg",
+            "type": "string"
+          },
+          {
+            "name": "patterns_field",
+            "type": "string"
+          }
+        ],
+        "datarows": [
+          [
+            "value=1",
+            "<*>=<*>"
+          ],
+          [
+            "value=1.5",
+            "<*>=<*>.<*>"
+          ],
+          [
+            "value=abc",
+            "<*>=<*>"
+          ],
+          [
+            "value=2",
+            "<*>=<*>"
+          ]
+        ],
+        "total": 4,
+        "size": 4
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | where like(msg, 'value=1%') | fields msg"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "msg",
+            "type": "string"
+          }
+        ],
+        "datarows": [
+          [
+            "value=1"
+          ],
+          [
+            "value=1.5"
+          ]
+        ],
+        "total": 2,
+        "size": 2
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | fields nope"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "text": "{\n  \"error\": {\n    \"reason\": \"Field [nope] not found.\",\n    \"code\": \"FIELD_NOT_FOUND\",\n    \"suggestion\": \"Did you mean: e\",\n    \"context\": {\n      \"stage_description\": \"Parsing and validating the query\",\n      \"stage\": \"analyzing\",\n      \"requested_field\": \"nope\",\n      \"available_fields\": [\n        \"msg\",\n        \"zz\",\n        \"a\",\n        \"b\",\n        \"c\",\n        \"d\",\n        \"e\",\n        \"f\",\n        \"obj\",\n        \"obj.x\",\n        \"obj.y\",\n        \"_id\",\n        \"_index\",\n        \"_score\",\n        \"_maxscore\",\n        \"_sort\",\n        \"_routing\"\n      ],\n      \"query_pos\": {\n        \"column\": 24,\n        \"line\": 1\n      }\n    },\n    \"details\": \"Field [nope] not found.\",\n    \"location\": [\"while preparing and validating the query plan\"],\n    \"type\": \"IllegalArgumentException\"\n  },\n  \"status\": 400\n}",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | where a IN ('a', 'b') | fields a"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "text": "{\n  \"error\": {\n    \"context\": {\n      \"stage\": \"analyzing\",\n      \"stage_description\": \"Parsing and validating the query\"\n    },\n    \"reason\": \"In expression types are incompatible: fields type INTEGER, values type [STRING, STRING]\",\n    \"details\": \"In expression types are incompatible: fields type INTEGER, values type [STRING, STRING]\",\n    \"location\": [\"while preparing and validating the query plan\"],\n    \"code\": \"UNKNOWN\",\n    \"type\": \"SemanticCheckException\"\n  },\n  \"status\": 400\n}",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | stats count(eval(a)) as c"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "text": "{\n  \"error\": {\n    \"context\": {\n      \"stage\": \"analyzing\",\n      \"stage_description\": \"Parsing and validating the query\"\n    },\n    \"reason\": \"Condition expected a boolean type, but got INTEGER\",\n    \"details\": \"Condition expected a boolean type, but got INTEGER\",\n    \"location\": [\"while preparing and validating the query plan\"],\n    \"code\": \"UNKNOWN\",\n    \"type\": \"ExpressionEvaluationException\"\n  },\n  \"status\": 400\n}",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | nosuchcommand"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "text": "{\n  \"error\": {\n    \"reason\": \"Invalid Query\",\n    \"details\": \"[nosuchcommand] is not a valid term at this part of the query: 'source=esm-ppl | nosuchcommand' <-- HERE. extraneous input 'nosuchcommand' expecting <EOF>\",\n    \"type\": \"SyntaxCheckException\"\n  },\n  \"status\": 400\n}",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl-missing"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 404,
+      "text": "{\n  \"error\": {\n    \"context\": {\n      \"stage\": \"analyzing\",\n      \"index_name\": \"esm-ppl-missing\",\n      \"stage_description\": \"Parsing and validating the query\"\n    },\n    \"reason\": \"no such index [esm-ppl-missing]\",\n    \"details\": \"no such index [esm-ppl-missing]\",\n    \"location\": [\n      \"while preparing and validating the query plan\",\n      \"while fetching index mappings\"\n    ],\n    \"code\": \"INDEX_NOT_FOUND\",\n    \"type\": \"IndexNotFoundException\"\n  },\n  \"status\": 404\n}",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | eval x = f + 9223372036854775807 | fields x"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "text": "{\n  \"error\": {\n    \"reason\": \"Invalid Query\",\n    \"details\": \"long overflow\",\n    \"type\": \"ArithmeticException\"\n  },\n  \"status\": 400\n}",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl?format=csv",
+      "body": {
+        "query": "source=esm-ppl | fields a, b, c | sort a"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "text": "a,b,c\n1,x,hello world\n2,y,\n3,x,other text\n4,z,",
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl?format=raw",
+      "body": {
+        "query": "source=esm-ppl | fields a, b | sort a"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "text": "a|b\n1|x\n2|y\n3|x\n4|z",
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl?format=viz",
+      "body": {
+        "query": "source=esm-ppl | fields a, b | sort a"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "data": {
+          "a": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "b": [
+            "x",
+            "y",
+            "x",
+            "z"
+          ]
+        },
+        "metadata": {
+          "fields": [
+            {
+              "name": "a",
+              "type": "integer"
+            },
+            {
+              "name": "b",
+              "type": "keyword"
+            }
+          ]
+        },
+        "size": 4,
+        "status": 200
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl?format=yaml",
+      "body": {
+        "query": "source=esm-ppl"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "text": "---\nerror:\n  root_cause:\n  - type: \"illegal_argument_exception\"\n    reason: \"Failed to create executor due to unknown response format: yaml\"\n  type: \"illegal_argument_exception\"\n  reason: \"Failed to create executor due to unknown response format: yaml\"\nstatus: 400\n",
+      "response_headers": {
+        "content-type": "application/yaml"
+      },
+      "skip": "roll renders this core error as JSON; OpenSearch applies the format parameter to it"
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "qury": "source=esm-ppl"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Failed to parse request payload"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Failed to parse request payload",
+          "caused_by": {
+            "type": "j_s_o_n_exception",
+            "reason": "JSONObject[\"query\"] not found."
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_ppl",
+      "mask": [
+        "took"
+      ],
+      "status": 405,
+      "response": {
+        "error": "Incorrect HTTP method for uri [/_plugins/_ppl] and method [GET], allowed: [POST]",
+        "status": 405
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8",
+        "allow": "POST"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_query/settings",
+      "body": {
+        "transient": {
+          "plugins.query.size_limit": 2
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "persistent": {},
+        "transient": {
+          "plugins": {
+            "query": {
+              "size_limit": "2"
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ppl",
+      "body": {
+        "query": "source=esm-ppl | fields a"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "schema": [
+          {
+            "name": "a",
+            "type": "int"
+          }
+        ],
+        "datarows": [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ],
+        "total": 2,
+        "size": 2
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_query/settings",
+      "body": {
+        "transient": {
+          "plugins.query.size_limit": null
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "persistent": {},
+        "transient": {}
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_query/settings",
+      "body": {
+        "transient": {
+          "cluster.routing.allocation.enable": "all"
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "action_request_validation_exception",
+              "reason": "Validation Failed: 1: no settings to update;"
+            }
+          ],
+          "type": "action_request_validation_exception",
+          "reason": "Validation Failed: 1: no settings to update;"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    }
+  ]
+}

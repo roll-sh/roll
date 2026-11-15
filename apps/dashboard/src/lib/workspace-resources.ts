@@ -9,6 +9,7 @@ import { appsApi, deployStatus, hostOf, instanceStateLabel, instanceTone, mainEn
 import { codeApi, type Repo } from "./code-api";
 import { DIALECT_LABEL, nosqlApi, type NosqlDb } from "./nosql-api";
 import { redisApi, type RedisDb } from "./redis-api";
+import { formatCount, searchApi, type SearchCluster } from "./search-api";
 import { api, call, formatBytes, maskUri, streams, type Product, type Project as PgProject, type StreamInfo } from "./roll-api";
 import { qapi, type VHost } from "./queues-api";
 import { storageApi, type Bucket } from "./storage-api";
@@ -46,6 +47,7 @@ export const KIND_LABEL: Record<ResourceKind, string> = {
   stream: "Stream",
   bucket: "Bucket",
   nosql: "NoSQL",
+  search: "Search",
   queue: "Queues",
   tasks: "Tasks",
   repo: "Repository",
@@ -58,6 +60,7 @@ const KIND_PRODUCT: Record<ResourceKind, Product> = {
   stream: "streams",
   bucket: "storage",
   nosql: "nosql",
+  search: "search",
   queue: "queues",
   tasks: "tasks",
   repo: "code",
@@ -182,6 +185,30 @@ function nosql(d: NosqlDb): ResourceView {
   };
 }
 
+function search(c: SearchCluster): ResourceView {
+  const loaded = c.status.state === "loaded";
+  const engine = c.flavor === "opensearch" ? "OpenSearch" : "Elasticsearch";
+  return {
+    kind: "search",
+    ref: c.id,
+    name: c.name,
+    sub: `${engine} · ${c.host}:${c.port}`,
+    state: loaded ? "online" : "idle",
+    stateLabel: loaded ? "Loaded" : "Scaled to zero",
+    meta: formatBytes(c.stored_bytes),
+    attached: `${c.indices} ${c.indices === 1 ? "index" : "indices"} · ${formatCount(c.docs)} docs`,
+    connect: c.url,
+    href: `/dashboard/search/${encodeURIComponent(c.id)}`,
+    facts: [
+      ["engine", engine],
+      ["user", c.username],
+      ["indices", String(c.indices)],
+      ["documents", formatCount(c.docs)],
+      ["sleeps after", c.idle_timeout_s ? `${Math.round(c.idle_timeout_s / 60)} min idle` : "never"],
+    ],
+  };
+}
+
 function repo(r: Repo): ResourceView {
   return {
     kind: "repo",
@@ -300,6 +327,7 @@ export async function loadInventory(): Promise<Inventory> {
     on("stream") ? streams.list().then((l) => l.map(stream), () => []) : [],
     on("bucket") ? storageApi.buckets().then((l) => l.map(bucket), () => []) : [],
     on("nosql") ? nosqlApi.list().then((l) => l.map(nosql), () => []) : [],
+    on("search") ? searchApi.list().then((l) => l.map(search), () => []) : [],
     on("queue") ? qapi.vhosts().then((l) => l.map(vhost), () => []) : [],
     on("tasks") ? call<{ tenants: string[] }>("GET", "/_roll/tenants").then((t) => t.tenants.map(tenant), () => []) : [],
     on("repo") ? codeApi.repos().then((l) => l.map(repo), () => []) : [],
@@ -320,12 +348,13 @@ export function resourcesByProduct(inv: Inventory): Record<string, { id: string;
 }
 
 /** What can be made from the canvas (repos are connected, not made, here; a service has its own flow). */
-export const CREATABLE: ResourceKind[] = ["service", "postgres", "redis", "nosql", "stream", "bucket"];
+export const CREATABLE: ResourceKind[] = ["service", "postgres", "redis", "nosql", "search", "stream", "bucket"];
 
 export const KIND_BLURB: Record<ResourceKind, string> = {
   postgres: "Branches, scales to zero",
   redis: "Cache, queues, pub/sub",
   nosql: "ScyllaDB / Cassandra",
+  search: "Elasticsearch-compatible",
   stream: "Kafka-compatible topics",
   bucket: "S3-compatible storage",
   queue: "RabbitMQ-compatible vhost",
@@ -336,7 +365,7 @@ export const KIND_BLURB: Record<ResourceKind, string> = {
 
 /** What a new resource of `kind` would be called in `project` (unique among `taken`). */
 export function suggestName(kind: ResourceKind, project: string, taken: Set<string>) {
-  const base = `${project}-${{ postgres: "db", redis: "cache", nosql: "nosql", stream: "events", bucket: "files", queue: "jobs", tasks: "tasks", repo: "repo", service: "web" }[kind]}`;
+  const base = `${project}-${{ postgres: "db", redis: "cache", nosql: "nosql", search: "search", stream: "events", bucket: "files", queue: "jobs", tasks: "tasks", repo: "repo", service: "web" }[kind]}`;
   let name = base;
   for (let i = 2; taken.has(name); i++) name = `${base}-${i}`;
   return name;
@@ -355,6 +384,8 @@ export async function createResource(kind: ResourceKind, name: string): Promise<
       return (await storageApi.createBucket(name)).name;
     case "nosql":
       return (await nosqlApi.create({ name })).id;
+    case "search":
+      return (await searchApi.create(name, {})).id;
     case "queue":
       await qapi.createVhost({ name });
       return name;
@@ -400,6 +431,8 @@ export async function spentThisMonth(kind: ResourceKind, ref: string, m: Month):
       return (await redisApi.usage(ref, days)).cost.total_usd;
     case "nosql":
       return (await nosqlApi.usage(ref, days)).cost.total_usd;
+    case "search":
+      return (await searchApi.usage(ref, days)).cost.total_usd;
     case "bucket":
       return (await storageApi.usage(ref, days)).cost.total_usd;
     case "stream": {

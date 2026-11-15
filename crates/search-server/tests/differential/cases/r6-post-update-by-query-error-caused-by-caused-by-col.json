@@ -1,0 +1,227 @@
+{
+ "found": {
+  "case": 63,
+  "case_seed": 124000435,
+  "seed": 124
+ },
+ "signature": "POST _update_by_query .error.caused_by.caused_by.col",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dnanos0": {
+       "type": "date_nanos"
+      },
+      "geo0": {
+       "type": "geo_point"
+      },
+      "int0": {
+       "type": "integer"
+      },
+      "irange0": {
+       "type": "integer_range"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "kwl0": {
+       "normalizer": "lowercase",
+       "type": "keyword"
+      },
+      "short0": {
+       "type": "short"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "term_vector": "with_positions_offsets",
+       "type": "text"
+      },
+      "ulong0": {
+       "type": "unsigned_long"
+      },
+      "vec0": {
+       "dims": 3,
+       "index_options": {
+        "type": "flat"
+       },
+       "similarity": "l2_norm",
+       "type": "dense_vector"
+      }
+     }
+    },
+    "settings": {
+     "merge.policy.segments_per_tier": 20,
+     "number_of_replicas": 0,
+     "number_of_shards": 3,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m14-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m14-a"
+  },
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dnanos0": {
+       "type": "date_nanos"
+      },
+      "geo0": {
+       "type": "geo_point"
+      },
+      "int0": {
+       "type": "integer"
+      },
+      "irange0": {
+       "type": "integer_range"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "kwl0": {
+       "normalizer": "lowercase",
+       "type": "keyword"
+      },
+      "short0": {
+       "type": "short"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "term_vector": "with_positions_offsets",
+       "type": "text"
+      },
+      "ulong0": {
+       "type": "unsigned_long"
+      },
+      "vec0": {
+       "dims": 3,
+       "index_options": {
+        "type": "flat"
+       },
+       "similarity": "l2_norm",
+       "type": "dense_vector"
+      }
+     }
+    },
+    "settings": {
+     "merge.policy.segments_per_tier": 20,
+     "number_of_replicas": 0,
+     "number_of_shards": 5,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m14-b",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m14-b"
+  },
+  {
+   "body": {
+    "query": {
+     "bool": {
+      "should": [
+       {
+        "bool": {
+         "must": [
+          {}
+         ],
+         "should": [
+          {
+           "multi_match": {
+            "tie_breaker": 0.5,
+            "type": "cross_fields"
+           }
+          }
+         ]
+        }
+       }
+      ]
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "error": {
+      "caused_by": {
+       "caused_by": {
+        "col": 103,
+        "line": 1,
+        "reason": "No text specified for multi_match query",
+        "type": "parsing_exception"
+       },
+       "reason": "[1:103] [bool] failed to parse field [should]",
+       "type": "x_content_parse_exception"
+      },
+      "reason": "[1:103] [bool] failed to parse field [should]",
+      "root_cause": [
+       {
+        "col": 103,
+        "line": 1,
+        "reason": "No text specified for multi_match query",
+        "type": "parsing_exception"
+       }
+      ],
+      "type": "x_content_parse_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m14-b/_update_by_query?refresh=true"
+  }
+ ]
+}

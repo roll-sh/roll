@@ -1,0 +1,840 @@
+{
+  "description" : "Review fixes: template alias {index}, constant_keyword and join merges, template names and _meta, framework flags, path parts as query parameters.",
+  "steps" : [
+    {
+      "req" : "PUT /_index_template/esm-rf-t",
+      "body" : {
+        "index_patterns" : [
+          "esm-rf-tp*"
+        ],
+        "template" : {
+          "aliases" : {
+            "esm-rf-tal-{index}" : { }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rf-tp1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rf-tp1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rf-tp1/_alias",
+      "status" : 200,
+      "response" : {
+        "esm-rf-tp1" : {
+          "aliases" : {
+            "esm-rf-tal-esm-rf-tp1" : { }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate_index/esm-rf-tp2?filter_path=template.aliases",
+      "status" : 200,
+      "response" : {
+        "template" : {
+          "aliases" : {
+            "esm-rf-tal-esm-rf-tp2" : { }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rf-tp3",
+      "body" : {
+        "aliases" : {
+          "esm-rf-req-{index}" : { }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rf-tp3"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rf-tp3/_alias",
+      "status" : 200,
+      "response" : {
+        "esm-rf-tp3" : {
+          "aliases" : {
+            "esm-rf-req-{index}" : { },
+            "esm-rf-tal-esm-rf-tp3" : { }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rf-tp1,esm-rf-tp3",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-rf-t",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rf-ck",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "constant_keyword",
+              "value" : "y"
+            },
+            "b" : {
+              "type" : "constant_keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rf-ck"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rf-ck/_mapping",
+      "body" : {
+        "properties" : {
+          "a" : {
+            "type" : "constant_keyword",
+            "value" : "x"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [a] conflicts with existing mapper:\n\tCannot update parameter [value] from [y] to [x]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [a] conflicts with existing mapper:\n\tCannot update parameter [value] from [y] to [x]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rf-ck/_mapping",
+      "body" : {
+        "properties" : {
+          "a" : {
+            "type" : "constant_keyword"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [a] conflicts with existing mapper:\n\tCannot update parameter [value] from [y] to [null]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [a] conflicts with existing mapper:\n\tCannot update parameter [value] from [y] to [null]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rf-ck/_mapping",
+      "body" : {
+        "properties" : {
+          "a" : {
+            "type" : "constant_keyword",
+            "value" : "y"
+          },
+          "b" : {
+            "type" : "constant_keyword",
+            "value" : "z"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rf-ck/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-rf-ck" : {
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "constant_keyword",
+                "value" : "y"
+              },
+              "b" : {
+                "type" : "constant_keyword",
+                "value" : "z"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rf-j",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "j" : {
+              "type" : "join",
+              "relations" : {
+                "p" : "c"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rf-j"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rf-j/_mapping",
+      "body" : {
+        "properties" : {
+          "j" : {
+            "type" : "join",
+            "relations" : {
+              "x" : "y"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [j] conflicts with existing mapper:\n\tConflict in parameter [relations]: Cannot remove parent [p]\n\tConflict in parameter [relations]: Cannot remove child [c]\n\tCannot update parameter [relations] from [[Relations[parent=p, children=[c]]]] to [[Relations[parent=x, children=[y]]]]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [j] conflicts with existing mapper:\n\tConflict in parameter [relations]: Cannot remove parent [p]\n\tConflict in parameter [relations]: Cannot remove child [c]\n\tCannot update parameter [relations] from [[Relations[parent=p, children=[c]]]] to [[Relations[parent=x, children=[y]]]]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rf-j/_mapping",
+      "body" : {
+        "properties" : {
+          "j" : {
+            "type" : "join",
+            "relations" : {
+              "p" : [
+                "c",
+                "d"
+              ]
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rf-j/_mapping",
+      "body" : {
+        "properties" : {
+          "j" : {
+            "type" : "join",
+            "relations" : {
+              "p" : [
+                "c",
+                "d"
+              ],
+              "c" : "e"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [j] conflicts with existing mapper:\n\tConflict in parameter [relations]: Cannot create parent [c] from an existing child\n\tCannot update parameter [relations] from [[Relations[parent=p, children=[c, d]]]] to [[Relations[parent=p, children=[c, d]], Relations[parent=c, children=[e]]]]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [j] conflicts with existing mapper:\n\tConflict in parameter [relations]: Cannot create parent [c] from an existing child\n\tCannot update parameter [relations] from [[Relations[parent=p, children=[c, d]]]] to [[Relations[parent=p, children=[c, d]], Relations[parent=c, children=[e]]]]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rf-j/_mapping",
+      "body" : {
+        "properties" : {
+          "j" : {
+            "type" : "join",
+            "relations" : {
+              "p" : "c",
+              "c" : "e"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [j] conflicts with existing mapper:\n\tConflict in parameter [relations]: Cannot remove child [d]\n\tConflict in parameter [relations]: Cannot create parent [c] from an existing child\n\tCannot update parameter [relations] from [[Relations[parent=p, children=[c, d]]]] to [[Relations[parent=p, children=[c]], Relations[parent=c, children=[e]]]]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [j] conflicts with existing mapper:\n\tConflict in parameter [relations]: Cannot remove child [d]\n\tConflict in parameter [relations]: Cannot create parent [c] from an existing child\n\tCannot update parameter [relations] from [[Relations[parent=p, children=[c, d]]]] to [[Relations[parent=p, children=[c]], Relations[parent=c, children=[e]]]]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rf-j/_mapping",
+      "body" : {
+        "properties" : {
+          "j" : {
+            "type" : "join"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [j] conflicts with existing mapper:\n\tConflict in parameter [relations]: Cannot remove parent [p]\n\tConflict in parameter [relations]: Cannot remove child [c]\n\tConflict in parameter [relations]: Cannot remove child [d]\n\tCannot update parameter [relations] from [[Relations[parent=p, children=[c, d]]]] to [[]]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [j] conflicts with existing mapper:\n\tConflict in parameter [relations]: Cannot remove parent [p]\n\tConflict in parameter [relations]: Cannot remove child [c]\n\tConflict in parameter [relations]: Cannot remove child [d]\n\tCannot update parameter [relations] from [[Relations[parent=p, children=[c, d]]]] to [[]]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rf-j/_mapping",
+      "body" : {
+        "properties" : {
+          "k" : {
+            "type" : "join",
+            "relations" : {
+              "q" : "r"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Only one [parent-join] field can be defined per index, got [j, k]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Only one [parent-join] field can be defined per index, got [j, k]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rf-j/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-rf-j" : {
+          "mappings" : {
+            "properties" : {
+              "j" : {
+                "type" : "join",
+                "eager_global_ordinals" : true,
+                "relations" : {
+                  "p" : [
+                    "c",
+                    "d"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rf-j2",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "join",
+              "relations" : {
+                "p" : "c"
+              }
+            },
+            "b" : {
+              "type" : "join",
+              "relations" : {
+                "q" : "r"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Only one [parent-join] field can be defined per index, got [a, b]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Only one [parent-join] field can be defined per index, got [a, b]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-rf-T",
+      "body" : {
+        "index_patterns" : [
+          "esm-rf-zzz*"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_index_template_exception",
+              "reason" : "index_template [esm-rf-T] invalid, cause [Validation Failed: 1: name must be lower cased;]"
+            }
+          ],
+          "type" : "invalid_index_template_exception",
+          "reason" : "index_template [esm-rf-T] invalid, cause [Validation Failed: 1: name must be lower cased;]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-rf-U%20x",
+      "body" : {
+        "index_patterns" : [
+          "esm-rf-zzz*",
+          "a b"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_index_template_exception",
+              "reason" : "index_template [esm-rf-U x] invalid, cause [Validation Failed: 1: name must not contain a space;2: name must be lower cased;3: index_patterns [a b] must not contain a space;4: index_pattern [a b] must not contain the following characters [' ','\"','*',',','/','<','>','?','\\','|'];]"
+            }
+          ],
+          "type" : "invalid_index_template_exception",
+          "reason" : "index_template [esm-rf-U x] invalid, cause [Validation Failed: 1: name must not contain a space;2: name must be lower cased;3: index_patterns [a b] must not contain a space;4: index_pattern [a b] must not contain the following characters [' ','\"','*',',','/','<','>','?','\\','|'];]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-rf-C1",
+      "body" : {
+        "template" : { }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_index_template_exception",
+              "reason" : "index_template [esm-rf-C1] invalid, cause [Validation Failed: 1: name must be lower cased;]"
+            }
+          ],
+          "type" : "invalid_index_template_exception",
+          "reason" : "index_template [esm-rf-C1] invalid, cause [Validation Failed: 1: name must be lower cased;]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_template/esm-rf-L1",
+      "body" : {
+        "index_patterns" : [
+          "esm-rf-zzz*"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_index_template_exception",
+              "reason" : "index_template [esm-rf-L1] invalid, cause [Validation Failed: 1: name must be lower cased;]"
+            }
+          ],
+          "type" : "invalid_index_template_exception",
+          "reason" : "index_template [esm-rf-L1] invalid, cause [Validation Failed: 1: name must be lower cased;]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Legacy index templates are deprecated in favor of composable templates.\""
+        ]
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-rf-m",
+      "raw" : "{\"index_patterns\":[\"esm-rf-zzz*\"],\"_meta\":\"x\"}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:43] [index_template] _meta doesn't support values of type: VALUE_STRING"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:43] [index_template] _meta doesn't support values of type: VALUE_STRING"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-rf-m",
+      "raw" : "{\"template\":{},\n \"_meta\":[1]}",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[2:10] [component_template] _meta doesn't support values of type: START_ARRAY"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[2:10] [component_template] _meta doesn't support values of type: START_ARRAY"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health?pretty=foo",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [foo] as only [true] or [false] are allowed."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse value [foo] as only [true] or [false] are allowed."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health?human=foo",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [foo] as only [true] or [false] are allowed."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse value [foo] as only [true] or [false] are allowed."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health?error_trace=foo",
+      "status" : 400,
+      "response" : {
+        "error" : "Failed to parse value [foo] as only [true] or [false] are allowed.",
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health?pretty=foo&error_trace=foo",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [foo] as only [true] or [false] are allowed."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse value [foo] as only [true] or [false] are allowed."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_nope?pretty=foo",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [foo] as only [true] or [false] are allowed."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse value [foo] as only [true] or [false] are allowed."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health?pretty=TRUE",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [TRUE] as only [true] or [false] are allowed."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse value [TRUE] as only [true] or [false] are allowed."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health?filter_path=status&pretty=&human=false&error_trace=true",
+      "status" : 200,
+      "response" : {
+        "status" : "yellow"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cat/indices?index=esm-rf-ck&h=index",
+      "status" : 200,
+      "text" : "esm-rf-ck\n",
+      "response_headers" : {
+        "content-type" : "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_settings?index=esm-rf-ck&filter_path=*.settings.index.number_of_shards",
+      "status" : 200,
+      "response" : {
+        "esm-rf-ck" : {
+          "settings" : {
+            "index" : {
+              "number_of_shards" : "1"
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rf-ck/_settings?name=index.number_of_*",
+      "status" : 200,
+      "response" : {
+        "esm-rf-ck" : {
+          "settings" : {
+            "index" : {
+              "number_of_shards" : "1",
+              "number_of_replicas" : "1"
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health?index=esm-rf-ck&filter_path=status",
+      "status" : 200,
+      "response" : {
+        "status" : "yellow"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health?filter_path=status;pretty",
+      "status" : 200,
+      "response" : {
+        "status" : "yellow"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rf-ck,esm-rf-j",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

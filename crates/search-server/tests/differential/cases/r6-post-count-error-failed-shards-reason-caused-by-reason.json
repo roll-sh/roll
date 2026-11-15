@@ -1,0 +1,121 @@
+{
+ "found": {
+  "case": 72,
+  "case_seed": 105000387,
+  "seed": 105
+ },
+ "signature": "POST _count .error.failed_shards[].reason.caused_by.reason",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "text0": {
+       "type": "text"
+      },
+      "text1": {
+       "analyzer": "stop",
+       "type": "text"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 2,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m0-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m0-a"
+  },
+  {
+   "body": {
+    "query": {
+     "span_near": {
+      "clauses": [
+       {
+        "span_not": {
+         "exclude": {
+          "span_term": {
+           "text0": "of"
+          }
+         },
+         "include": {
+          "span_term": {
+           "text1": "jumps"
+          }
+         }
+        }
+       },
+       {
+        "span_field_masking": {
+         "field": "text0",
+         "query": {
+          "span_term": {
+           "text0": "cherry"
+          }
+         }
+        }
+       }
+      ]
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "error": {
+      "failed_shards": [
+       {
+        "index": "diff-m0-a",
+        "node": "GTFtKRkMSi-lm0r0R4ztbA",
+        "reason": {
+         "caused_by": {
+          "reason": "Clauses must have same field.",
+          "type": "illegal_argument_exception"
+         },
+         "index": "diff-m0-a",
+         "index_uuid": "PMWDvykUQ0uHczJPBaeMrw",
+         "reason": "failed to create query: Clauses must have same field.",
+         "type": "query_shard_exception"
+        },
+        "shard": 0
+       }
+      ],
+      "grouped": true,
+      "phase": "query",
+      "reason": "all shards failed",
+      "root_cause": [
+       {
+        "index": "diff-m0-a",
+        "index_uuid": "PMWDvykUQ0uHczJPBaeMrw",
+        "reason": "failed to create query: Clauses must have same field.",
+        "type": "query_shard_exception"
+       }
+      ],
+      "type": "search_phase_execution_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m0-a/_count"
+  }
+ ]
+}

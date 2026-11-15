@@ -1,0 +1,136 @@
+{
+  "diff": {
+    "es": "dfs",
+    "path": ".error.phase",
+    "roll": "dfs_query"
+  },
+  "found": {
+    "case": 53,
+    "case_seed": 10000083,
+    "seed": 10
+  },
+  "roll": {
+    "body": {
+      "error": {
+        "failed_shards": [
+          {
+            "index": "diff-m2-a",
+            "node": "0Zr0L-l4THmSU_MWbe51EQ",
+            "reason": {
+              "caused_by": {
+                "reason": "In [combined_fields] query, at least one field must be provided",
+                "type": "illegal_argument_exception"
+              },
+              "index": "diff-m2-a",
+              "index_uuid": "dFWfGAKbTFCGvGiTiAuEOg",
+              "reason": "failed to create query: In [combined_fields] query, at least one field must be provided",
+              "type": "query_shard_exception"
+            },
+            "shard": 0
+          }
+        ],
+        "grouped": true,
+        "phase": "dfs_query",
+        "reason": "all shards failed",
+        "root_cause": [
+          {
+            "index": "diff-m2-a",
+            "index_uuid": "dFWfGAKbTFCGvGiTiAuEOg",
+            "reason": "failed to create query: In [combined_fields] query, at least one field must be provided",
+            "type": "query_shard_exception"
+          }
+        ],
+        "type": "search_phase_execution_exception"
+      },
+      "status": 400
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+  },
+  "signature": "POST _search .error.phase",
+  "steps": [
+    {
+      "body": {
+        "settings": {
+          "number_of_shards": 5,
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m2-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m2-a"
+    },
+    {
+      "body": {
+        "post_filter": {
+          "bool": {
+            "filter": [
+              {
+                "combined_fields": {
+                  "query": "dog"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "error": {
+            "failed_shards": [
+              {
+                "index": "diff-m2-a",
+                "node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "reason": {
+                  "caused_by": {
+                    "reason": "In [combined_fields] query, at least one field must be provided",
+                    "type": "illegal_argument_exception"
+                  },
+                  "index": "diff-m2-a",
+                  "index_uuid": "aIw4HquCTfqQuCQtd4yijg",
+                  "reason": "failed to create query: In [combined_fields] query, at least one field must be provided",
+                  "type": "query_shard_exception"
+                },
+                "shard": 0
+              }
+            ],
+            "grouped": true,
+            "phase": "dfs",
+            "reason": "all shards failed",
+            "root_cause": [
+              {
+                "index": "diff-m2-a",
+                "index_uuid": "aIw4HquCTfqQuCQtd4yijg",
+                "reason": "failed to create query: In [combined_fields] query, at least one field must be provided",
+                "type": "query_shard_exception"
+              }
+            ],
+            "type": "search_phase_execution_exception"
+          },
+          "status": 400
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 400
+      },
+      "method": "POST",
+      "path": "/diff-m2-a/_search?search_type=dfs_query_then_fetch"
+    }
+  ]
+}

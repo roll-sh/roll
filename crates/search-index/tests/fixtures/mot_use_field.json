@@ -1,0 +1,2847 @@
+{
+ "docs": [
+  {
+   "t": "red lazy"
+  },
+  {
+   "m": "brown over",
+   "t": "brown lazy brown red over quick cat brown"
+  },
+  {
+   "m": "cat quick cat cat over",
+   "t": "lazy quick"
+  },
+  {
+   "m": "dog over fox red",
+   "t": "cat dog red"
+  },
+  {
+   "m": "brown cat cat lazy",
+   "t": "brown red brown cat quick cat lazy"
+  },
+  {
+   "m": "red over jumps the cat the jumps dog lazy",
+   "t": "lazy brown cat dog"
+  },
+  {
+   "m": "jumps the dog cat brown brown red over fox",
+   "t": "fox the over quick brown red cat"
+  },
+  {
+   "m": "jumps jumps cat the cat the brown",
+   "t": "dog the brown"
+  },
+  {
+   "m": "dog cat",
+   "t": "dog over jumps quick the jumps fox cat brown"
+  },
+  {
+   "m": "quick lazy dog fox lazy over over the brown",
+   "t": "the over red dog"
+  },
+  {
+   "m": "over red dog over",
+   "t": "over lazy fox brown fox fox lazy"
+  },
+  {
+   "m": [
+    "quick the cat fox dog",
+    "fox dog"
+   ],
+   "t": "quick fox over red jumps cat"
+  },
+  {
+   "m": "fox red cat quick the red over",
+   "t": "over over brown the over quick lazy brown"
+  },
+  {
+   "t": "brown quick"
+  },
+  {
+   "m": "red brown jumps cat",
+   "t": "brown lazy"
+  },
+  {
+   "m": "fox dog jumps cat jumps the brown brown",
+   "t": "the the the dog brown fox brown jumps dog"
+  },
+  {
+   "m": "fox red quick lazy red jumps fox red quick",
+   "t": "brown dog red jumps fox jumps"
+  },
+  {
+   "m": "red red red jumps lazy",
+   "t": "lazy over lazy lazy red"
+  },
+  {
+   "m": "jumps quick quick dog the dog lazy cat jumps",
+   "t": "jumps jumps brown lazy brown lazy the lazy jumps"
+  },
+  {
+   "m": "the cat cat quick the",
+   "t": "brown brown over lazy the fox over"
+  },
+  {
+   "m": "brown over the over brown fox fox",
+   "t": "quick fox cat the"
+  },
+  {
+   "m": "cat cat the jumps",
+   "t": "red red fox quick"
+  },
+  {
+   "m": [
+    "brown red",
+    "fox dog"
+   ],
+   "t": "over lazy lazy quick"
+  },
+  {
+   "m": "lazy dog red lazy cat jumps",
+   "t": "red over fox quick jumps the"
+  },
+  {
+   "m": "red fox red fox red red quick the",
+   "t": "cat quick fox fox"
+  },
+  {
+   "m": "the cat brown red",
+   "t": "jumps red"
+  },
+  {
+   "t": "red quick brown the jumps cat red cat red"
+  },
+  {
+   "m": "dog the red red the",
+   "t": "red dog red lazy the"
+  },
+  {
+   "m": "over brown over the",
+   "t": "brown lazy over brown lazy dog brown"
+  },
+  {
+   "m": "jumps fox dog fox",
+   "t": "lazy brown over the fox lazy fox over red"
+  },
+  {
+   "m": "jumps over lazy jumps jumps brown jumps quick",
+   "t": "red the the quick over jumps red"
+  },
+  {
+   "m": "red brown brown lazy brown brown",
+   "t": "dog quick fox dog fox over"
+  },
+  {
+   "m": "over fox red red cat the",
+   "t": "brown dog quick fox over brown dog"
+  },
+  {
+   "m": [
+    "brown dog",
+    "fox dog"
+   ],
+   "t": "cat lazy brown"
+  },
+  {
+   "m": "brown the quick jumps red over",
+   "t": "cat fox quick red lazy brown"
+  },
+  {
+   "m": "dog quick fox lazy",
+   "t": "dog red lazy dog the red"
+  },
+  {
+   "m": "dog jumps quick dog",
+   "t": "quick quick"
+  },
+  {
+   "m": "red the lazy the brown",
+   "t": "the red over red dog lazy lazy jumps"
+  },
+  {
+   "m": "fox over jumps quick fox",
+   "t": "brown dog"
+  },
+  {
+   "t": "quick the fox fox dog the"
+  },
+  {
+   "m": "dog jumps",
+   "t": "red jumps lazy quick dog lazy jumps"
+  },
+  {
+   "m": "quick jumps over brown",
+   "t": "dog red lazy lazy red quick brown dog brown"
+  },
+  {
+   "m": "over cat quick over",
+   "t": "dog dog"
+  },
+  {
+   "m": "brown cat red fox cat",
+   "t": "jumps the fox dog cat fox quick red"
+  },
+  {
+   "m": [
+    "red fox red red cat quick cat lazy",
+    "fox dog"
+   ],
+   "t": "quick quick fox"
+  },
+  {
+   "m": "brown over the red quick quick red",
+   "t": "the dog quick the brown"
+  },
+  {
+   "m": "red brown the",
+   "t": "brown dog lazy lazy lazy the"
+  },
+  {
+   "m": "over brown the dog quick cat lazy brown cat",
+   "t": "jumps dog dog cat"
+  },
+  {
+   "m": "quick the quick the",
+   "t": "brown lazy the dog red dog"
+  },
+  {
+   "m": "the the brown red lazy dog brown the quick",
+   "t": "the brown red the dog over"
+  },
+  {
+   "m": "lazy brown cat brown fox",
+   "t": "jumps fox cat red dog brown"
+  },
+  {
+   "m": "lazy the the over quick fox quick",
+   "t": "the over dog fox over jumps over jumps brown"
+  },
+  {
+   "t": "dog jumps brown over over cat"
+  },
+  {
+   "m": "jumps over dog",
+   "t": "dog brown"
+  },
+  {
+   "m": "dog fox",
+   "t": "dog over red jumps lazy"
+  },
+  {
+   "m": [
+    "over quick over red red lazy brown",
+    "fox dog"
+   ],
+   "t": "over the"
+  },
+  {
+   "m": "dog the quick red",
+   "t": "fox the over jumps"
+  },
+  {
+   "m": "dog dog dog over lazy dog",
+   "t": "red over brown fox fox brown lazy red the"
+  },
+  {
+   "m": "the jumps the over fox",
+   "t": "lazy brown fox jumps red"
+  },
+  {
+   "m": "jumps lazy jumps",
+   "t": "cat lazy quick over over over"
+  }
+ ],
+ "cases": [
+  {
+   "query": {
+    "all_of": {
+     "intervals": [
+      {
+       "match": {
+        "query": "quick"
+       }
+      },
+      {
+       "match": {
+        "query": "fox",
+        "use_field": "t"
+       }
+      }
+     ]
+    }
+   },
+   "total": 8,
+   "hits": [
+    {
+     "id": "11",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:UNORDERED(quick,FIELD(t,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "34",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:UNORDERED(quick,FIELD(t,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "51",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:UNORDERED(quick,FIELD(t,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "16",
+     "score": 0.4285714,
+     "explanation": {
+      "value": 0.4285714,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.75,
+        "description": "S, the sloppy frequency of the interval query m:UNORDERED(quick,FIELD(t,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "19",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:UNORDERED(quick,FIELD(t,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "56",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:UNORDERED(quick,FIELD(t,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "24",
+     "score": 0.25,
+     "explanation": {
+      "value": 0.25,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.33333334,
+        "description": "S, the sloppy frequency of the interval query m:UNORDERED(quick,FIELD(t,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "44",
+     "score": 0.25,
+     "explanation": {
+      "value": 0.25,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.33333334,
+        "description": "S, the sloppy frequency of the interval query m:UNORDERED(quick,FIELD(t,fox))",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "all_of": {
+     "ordered": true,
+     "intervals": [
+      {
+       "match": {
+        "query": "brown"
+       }
+      },
+      {
+       "match": {
+        "query": "dog",
+        "use_field": "t"
+       }
+      }
+     ]
+    }
+   },
+   "total": 9,
+   "hits": [
+    {
+     "id": "15",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:ORDERED(brown,FIELD(t,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "31",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:ORDERED(brown,FIELD(t,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "45",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:ORDERED(brown,FIELD(t,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "47",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:ORDERED(brown,FIELD(t,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "50",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:ORDERED(brown,FIELD(t,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "49",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:ORDERED(brown,FIELD(t,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "43",
+     "score": 0.25,
+     "explanation": {
+      "value": 0.25,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.33333334,
+        "description": "S, the sloppy frequency of the interval query m:ORDERED(brown,FIELD(t,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "28",
+     "score": 0.19999999,
+     "explanation": {
+      "value": 0.19999999,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.25,
+        "description": "S, the sloppy frequency of the interval query m:ORDERED(brown,FIELD(t,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "41",
+     "score": 0.19999999,
+     "explanation": {
+      "value": 0.19999999,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.25,
+        "description": "S, the sloppy frequency of the interval query m:ORDERED(brown,FIELD(t,dog))",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "any_of": {
+     "intervals": [
+      {
+       "match": {
+        "query": "lazy cat",
+        "ordered": true
+       }
+      },
+      {
+       "match": {
+        "query": "red fox",
+        "use_field": "t",
+        "max_gaps": 1
+       }
+      }
+     ]
+    }
+   },
+   "total": 11,
+   "hits": [
+    {
+     "id": "23",
+     "score": 0.6,
+     "explanation": {
+      "value": 0.6,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.5,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MAXGAPS/1(UNORDERED(red,fox))),ORDERED(lazy,cat))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "18",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MAXGAPS/1(UNORDERED(red,fox))),ORDERED(lazy,cat))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "21",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MAXGAPS/1(UNORDERED(red,fox))),ORDERED(lazy,cat))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "50",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MAXGAPS/1(UNORDERED(red,fox))),ORDERED(lazy,cat))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "11",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MAXGAPS/1(UNORDERED(red,fox))),ORDERED(lazy,cat))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "16",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MAXGAPS/1(UNORDERED(red,fox))),ORDERED(lazy,cat))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "29",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MAXGAPS/1(UNORDERED(red,fox))),ORDERED(lazy,cat))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "34",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MAXGAPS/1(UNORDERED(red,fox))),ORDERED(lazy,cat))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "43",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MAXGAPS/1(UNORDERED(red,fox))),ORDERED(lazy,cat))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "47",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MAXGAPS/1(UNORDERED(red,fox))),ORDERED(lazy,cat))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "58",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MAXGAPS/1(UNORDERED(red,fox))),ORDERED(lazy,cat))",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match": {
+     "query": "quick fox",
+     "use_field": "t"
+    }
+   },
+   "total": 13,
+   "hits": [
+    {
+     "id": "11",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,UNORDERED(quick,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "20",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,UNORDERED(quick,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "21",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,UNORDERED(quick,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "23",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,UNORDERED(quick,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "24",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,UNORDERED(quick,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "31",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,UNORDERED(quick,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "32",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,UNORDERED(quick,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "34",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,UNORDERED(quick,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "43",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,UNORDERED(quick,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "44",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,UNORDERED(quick,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "39",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,UNORDERED(quick,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "6",
+     "score": 0.25,
+     "explanation": {
+      "value": 0.25,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.33333334,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,UNORDERED(quick,fox))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "8",
+     "score": 0.25,
+     "explanation": {
+      "value": 0.25,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.33333334,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,UNORDERED(quick,fox))",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "match": {
+     "query": "the dog",
+     "use_field": "t",
+     "ordered": true
+    }
+   },
+   "total": 9,
+   "hits": [
+    {
+     "id": "15",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,ORDERED(the,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "45",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,ORDERED(the,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "48",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,ORDERED(the,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "49",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,ORDERED(the,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "43",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,ORDERED(the,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "51",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,ORDERED(the,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "9",
+     "score": 0.25,
+     "explanation": {
+      "value": 0.25,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.33333334,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,ORDERED(the,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "39",
+     "score": 0.25,
+     "explanation": {
+      "value": 0.25,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.33333334,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,ORDERED(the,dog))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "37",
+     "score": 0.19999999,
+     "explanation": {
+      "value": 0.19999999,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.25,
+        "description": "S, the sloppy frequency of the interval query m:FIELD(t,ORDERED(the,dog))",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "all_of": {
+     "intervals": [
+      {
+       "match": {
+        "query": "fox dog",
+        "max_gaps": 2
+       }
+      },
+      {
+       "match": {
+        "query": "jumps",
+        "use_field": "t"
+       }
+      }
+     ]
+    }
+   },
+   "total": 3,
+   "hits": [
+    {
+     "id": "11",
+     "score": 0.5024631,
+     "explanation": {
+      "value": 0.5024631,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.009901,
+        "description": "S, the sloppy frequency of the interval query m:UNORDERED(MAXGAPS/2(UNORDERED(fox,dog)),FIELD(t,jumps))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "54",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:UNORDERED(MAXGAPS/2(UNORDERED(fox,dog)),FIELD(t,jumps))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "15",
+     "score": 0.14285713,
+     "explanation": {
+      "value": 0.14285713,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.16666667,
+        "description": "S, the sloppy frequency of the interval query m:UNORDERED(MAXGAPS/2(UNORDERED(fox,dog)),FIELD(t,jumps))",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "any_of": {
+     "intervals": [
+      {
+       "prefix": {
+        "prefix": "laz"
+       }
+      },
+      {
+       "prefix": {
+        "prefix": "re",
+        "use_field": "t"
+       }
+      }
+     ]
+    }
+   },
+   "total": 36,
+   "hits": [
+    {
+     "id": "9",
+     "score": 0.75,
+     "explanation": {
+      "value": 0.75,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 3.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "26",
+     "score": 0.75,
+     "explanation": {
+      "value": 0.75,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 3.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "30",
+     "score": 0.75,
+     "explanation": {
+      "value": 0.75,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 3.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "35",
+     "score": 0.75,
+     "explanation": {
+      "value": 0.75,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 3.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "37",
+     "score": 0.75,
+     "explanation": {
+      "value": 0.75,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 3.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "57",
+     "score": 0.75,
+     "explanation": {
+      "value": 0.75,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 3.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "4",
+     "score": 0.6666666,
+     "explanation": {
+      "value": 0.6666666,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 2.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "16",
+     "score": 0.6666666,
+     "explanation": {
+      "value": 0.6666666,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 2.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "21",
+     "score": 0.6666666,
+     "explanation": {
+      "value": 0.6666666,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 2.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "23",
+     "score": 0.6666666,
+     "explanation": {
+      "value": 0.6666666,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 2.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "27",
+     "score": 0.6666666,
+     "explanation": {
+      "value": 0.6666666,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 2.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "41",
+     "score": 0.6666666,
+     "explanation": {
+      "value": 0.6666666,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 2.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "49",
+     "score": 0.6666666,
+     "explanation": {
+      "value": 0.6666666,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 2.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "50",
+     "score": 0.6666666,
+     "explanation": {
+      "value": 0.6666666,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 2.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "0",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "1",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "3",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "5",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "6",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "11",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "17",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "18",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "25",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "29",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "31",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "34",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "40",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "43",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "44",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "47",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "48",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "51",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "54",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "55",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "58",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "59",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:or(FIELD(t,MultiTerm(re*)),MultiTerm(laz*))",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "query": {
+    "all_of": {
+     "intervals": [
+      {
+       "match": {
+        "query": "cat"
+       }
+      },
+      {
+       "wildcard": {
+        "pattern": "j*s",
+        "use_field": "t"
+       }
+      }
+     ],
+     "filter": {
+      "not_containing": {
+       "match": {
+        "query": "over"
+       }
+      }
+     }
+    }
+   },
+   "total": 8,
+   "hits": [
+    {
+     "id": "18",
+     "score": 0.5384615,
+     "explanation": {
+      "value": 0.5384615,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.1666666,
+        "description": "S, the sloppy frequency of the interval query m:NOT_CONTAINING(UNORDERED(cat,FIELD(t,MultiTerm(j*s))),over)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "8",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:NOT_CONTAINING(UNORDERED(cat,FIELD(t,MultiTerm(j*s))),over)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "23",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:NOT_CONTAINING(UNORDERED(cat,FIELD(t,MultiTerm(j*s))),over)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "25",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:NOT_CONTAINING(UNORDERED(cat,FIELD(t,MultiTerm(j*s))),over)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "43",
+     "score": 0.5,
+     "explanation": {
+      "value": 0.5,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "S, the sloppy frequency of the interval query m:NOT_CONTAINING(UNORDERED(cat,FIELD(t,MultiTerm(j*s))),over)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "11",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:NOT_CONTAINING(UNORDERED(cat,FIELD(t,MultiTerm(j*s))),over)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "50",
+     "score": 0.3333333,
+     "explanation": {
+      "value": 0.3333333,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.5,
+        "description": "S, the sloppy frequency of the interval query m:NOT_CONTAINING(UNORDERED(cat,FIELD(t,MultiTerm(j*s))),over)",
+        "details": []
+       }
+      ]
+     }
+    },
+    {
+     "id": "15",
+     "score": 0.19999999,
+     "explanation": {
+      "value": 0.19999999,
+      "description": "Saturation function on interval frequency, computed as w * S / (S + k) from:",
+      "details": [
+       {
+        "value": 1.0,
+        "description": "w, weight of this function",
+        "details": []
+       },
+       {
+        "value": 1.0,
+        "description": "k, pivot feature value that would give a score contribution equal to w/2",
+        "details": []
+       },
+       {
+        "value": 0.25,
+        "description": "S, the sloppy frequency of the interval query m:NOT_CONTAINING(UNORDERED(cat,FIELD(t,MultiTerm(j*s))),over)",
+        "details": []
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

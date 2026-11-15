@@ -1,0 +1,309 @@
+{
+  "diff": {
+    "es": 0,
+    "path": ".responses[2].hits.hits.length",
+    "roll": 1
+  },
+  "found": {
+    "case": 88,
+    "case_seed": 10000118,
+    "seed": 10
+  },
+  "roll": {
+    "body": {
+      "responses": [
+        {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 1,
+            "total": 1
+          },
+          "hits": {
+            "hits": [
+              {
+                "_id": "34",
+                "_index": "diff-m0-a",
+                "_score": 1.0,
+                "_source": {
+                  "text1": "cherry runs over index brown search Dogs"
+                }
+              }
+            ],
+            "max_score": 1.0,
+            "total": {
+              "relation": "eq",
+              "value": 1
+            }
+          },
+          "status": 200,
+          "timed_out": false,
+          "took": 0
+        },
+        {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 1,
+            "total": 1
+          },
+          "hits": {
+            "hits": [
+              {
+                "_id": "34",
+                "_index": "diff-m0-a",
+                "_score": 1.0,
+                "_source": {
+                  "text1": "cherry runs over index brown search Dogs"
+                }
+              }
+            ],
+            "max_score": 1.0,
+            "total": {
+              "relation": "eq",
+              "value": 1
+            }
+          },
+          "status": 200,
+          "timed_out": false,
+          "took": 0
+        },
+        {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 1,
+            "total": 1
+          },
+          "hits": {
+            "hits": [
+              {
+                "_id": "34",
+                "_index": "diff-m0-a",
+                "_score": 0.5753642,
+                "_source": {
+                  "text1": "cherry runs over index brown search Dogs"
+                }
+              }
+            ],
+            "max_score": 0.5753642,
+            "total": {
+              "relation": "eq",
+              "value": 1
+            }
+          },
+          "status": 200,
+          "timed_out": false,
+          "took": 0
+        }
+      ],
+      "took": 2
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "POST _msearch .responses[].hits.hits.length",
+  "steps": [
+    {
+      "body": {
+        "settings": {
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m0-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m0-a"
+    },
+    {
+      "es": {
+        "body": {
+          "errors": false,
+          "items": [
+            {
+              "index": {
+                "_id": "34",
+                "_index": "diff-m0-a",
+                "_primary_term": 1,
+                "_seq_no": 0,
+                "_shards": {
+                  "failed": 0,
+                  "successful": 1,
+                  "total": 2
+                },
+                "_version": 1,
+                "result": "created",
+                "status": 201
+              }
+            }
+          ],
+          "took": 200
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "lines": [
+        {
+          "index": {
+            "_id": "34",
+            "_index": "diff-m0-a"
+          }
+        },
+        {
+          "text1": "cherry runs over index brown search Dogs"
+        }
+      ],
+      "method": "POST",
+      "path": "/_bulk"
+    },
+    {
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "successful": 1,
+            "total": 2
+          }
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m0-a/_refresh"
+    },
+    {
+      "es": {
+        "body": {
+          "responses": [
+            {
+              "_shards": {
+                "failed": 0,
+                "skipped": 0,
+                "successful": 1,
+                "total": 1
+              },
+              "hits": {
+                "hits": [
+                  {
+                    "_id": "34",
+                    "_index": "diff-m0-a",
+                    "_score": 1.0,
+                    "_source": {
+                      "text1": "cherry runs over index brown search Dogs"
+                    }
+                  }
+                ],
+                "max_score": 1.0,
+                "total": {
+                  "relation": "eq",
+                  "value": 1
+                }
+              },
+              "status": 200,
+              "timed_out": false,
+              "took": 0
+            },
+            {
+              "_shards": {
+                "failed": 0,
+                "skipped": 0,
+                "successful": 1,
+                "total": 1
+              },
+              "hits": {
+                "hits": [
+                  {
+                    "_id": "34",
+                    "_index": "diff-m0-a",
+                    "_score": 1.0,
+                    "_source": {
+                      "text1": "cherry runs over index brown search Dogs"
+                    }
+                  }
+                ],
+                "max_score": 1.0,
+                "total": {
+                  "relation": "eq",
+                  "value": 1
+                }
+              },
+              "status": 200,
+              "timed_out": false,
+              "took": 0
+            },
+            {
+              "_shards": {
+                "failed": 0,
+                "skipped": 0,
+                "successful": 1,
+                "total": 1
+              },
+              "hits": {
+                "hits": [],
+                "max_score": null,
+                "total": {
+                  "relation": "eq",
+                  "value": 0
+                }
+              },
+              "status": 200,
+              "timed_out": false,
+              "took": 0
+            }
+          ],
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "lines": [
+        {
+          "index": "diff-m0-a"
+        },
+        {},
+        {
+          "index": "diff-m0-a"
+        },
+        {},
+        {
+          "index": "diff-m0-a"
+        },
+        {
+          "query": {
+            "match": {
+              "text1": {
+                "minimum_should_match": "2",
+                "operator": "and",
+                "query": "runs index"
+              }
+            }
+          }
+        }
+      ],
+      "method": "POST",
+      "path": "/_msearch"
+    }
+  ]
+}

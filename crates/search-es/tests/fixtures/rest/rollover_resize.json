@@ -1,0 +1,1630 @@
+{
+ "description": "rollover of aliases (conditions, naming, errors), shrink/split/clone, routing partition size, auto-expand replicas",
+ "steps": [
+  {
+   "req": "PUT /esm-r-000001",
+   "body": {
+    "aliases": {
+     "esm-r": {
+      "is_write_index": true
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-r-000001"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover",
+   "body": {
+    "conditions": {
+     "max_docs": 1,
+     "max_age": "24h",
+     "max_size": "1024mb",
+     "max_primary_shard_size": "1.5gb",
+     "min_docs": 0,
+     "min_age": "0ms",
+     "max_primary_shard_docs": 5,
+     "min_size": "0b",
+     "min_primary_shard_size": "1kb",
+     "min_primary_shard_docs": 0
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": false,
+    "shards_acknowledged": false,
+    "old_index": "esm-r-000001",
+    "new_index": "esm-r-000002",
+    "rolled_over": false,
+    "dry_run": false,
+    "lazy": false,
+    "conditions": {
+     "[max_size: 1gb]": false,
+     "[max_primary_shard_docs: 5]": false,
+     "[min_size: 0b]": true,
+     "[max_primary_shard_size: 1.5gb]": false,
+     "[max_age: 1d]": false,
+     "[min_docs: 0]": true,
+     "[min_primary_shard_docs: 0]": true,
+     "[min_age: 0s]": true,
+     "[max_docs: 1]": false,
+     "[min_primary_shard_size: 1kb]": false
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json",
+    "warning": [
+     "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Use of the [max_size] rollover condition has been deprecated in favour of the [max_primary_shard_size] condition and will be removed in a later version\""
+    ]
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover",
+   "body": {
+    "conditions": {
+     "min_docs": 0
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "action_request_validation_exception",
+       "reason": "Validation Failed: 1: at least one max_* rollover condition must be set when using min_* conditions;"
+      }
+     ],
+     "type": "action_request_validation_exception",
+     "reason": "Validation Failed: 1: at least one max_* rollover condition must be set when using min_* conditions;"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover",
+   "body": {
+    "conditions": {
+     "foo": 0
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "x_content_parse_exception",
+       "reason": "[1:16] [rollover_conditions] unknown field [foo]"
+      }
+     ],
+     "type": "x_content_parse_exception",
+     "reason": "[1:22] [rollover] failed to parse field [conditions]",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:16] [rollover_conditions] unknown field [foo]"
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover",
+   "body": {
+    "foo": 0
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "x_content_parse_exception",
+       "reason": "[1:2] [rollover] unknown field [foo]"
+      }
+     ],
+     "type": "x_content_parse_exception",
+     "reason": "[1:2] [rollover] unknown field [foo]"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover",
+   "body": {
+    "conditions": {
+     "max_age": "1x"
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "x_content_parse_exception",
+       "reason": "[1:26] [rollover_conditions] failed to parse field [max_age]"
+      }
+     ],
+     "type": "x_content_parse_exception",
+     "reason": "[1:26] [rollover] failed to parse field [conditions]",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:26] [rollover_conditions] failed to parse field [max_age]",
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "failed to parse setting [max_age] with value [1x] as a time value: unit is missing or unrecognized"
+      }
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover",
+   "body": {
+    "conditions": {
+     "max_docs": "x"
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "x_content_parse_exception",
+       "reason": "[1:27] [rollover_conditions] failed to parse field [max_docs]"
+      }
+     ],
+     "type": "x_content_parse_exception",
+     "reason": "[1:27] [rollover] failed to parse field [conditions]",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:27] [rollover_conditions] failed to parse field [max_docs]",
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "For input string: \"x\""
+      }
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover",
+   "body": {
+    "conditions": {
+     "max_docs": true
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "x_content_parse_exception",
+       "reason": "[1:27] [rollover_conditions] max_docs doesn't support values of type: VALUE_BOOLEAN"
+      }
+     ],
+     "type": "x_content_parse_exception",
+     "reason": "[1:27] [rollover] failed to parse field [conditions]",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:27] [rollover_conditions] max_docs doesn't support values of type: VALUE_BOOLEAN"
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover",
+   "body": {
+    "conditions": {
+     "max_age": 5
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "x_content_parse_exception",
+       "reason": "[1:26] [rollover_conditions] max_age doesn't support values of type: VALUE_NUMBER"
+      }
+     ],
+     "type": "x_content_parse_exception",
+     "reason": "[1:26] [rollover] failed to parse field [conditions]",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:26] [rollover_conditions] max_age doesn't support values of type: VALUE_NUMBER"
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover",
+   "body": {
+    "conditions": 5
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "x_content_parse_exception",
+       "reason": "[1:15] [rollover] conditions doesn't support values of type: VALUE_NUMBER"
+      }
+     ],
+     "type": "x_content_parse_exception",
+     "reason": "[1:15] [rollover] conditions doesn't support values of type: VALUE_NUMBER"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover",
+   "body": {
+    "conditions": {
+     "max_size": "5x"
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "parse_exception",
+       "reason": "failed to parse setting [max_size] with value [5x] as a size in bytes: unit is missing or unrecognized"
+      }
+     ],
+     "type": "x_content_parse_exception",
+     "reason": "[1:27] [rollover] failed to parse field [conditions]",
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:27] [rollover_conditions] failed to parse field [max_size]",
+      "caused_by": {
+       "type": "parse_exception",
+       "reason": "failed to parse setting [max_size] with value [5x] as a size in bytes: unit is missing or unrecognized"
+      }
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover",
+   "body": {
+    "settings": 5
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "x_content_parse_exception",
+       "reason": "[1:13] [rollover] settings doesn't support values of type: VALUE_NUMBER"
+      }
+     ],
+     "type": "x_content_parse_exception",
+     "reason": "[1:13] [rollover] settings doesn't support values of type: VALUE_NUMBER"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover",
+   "body": {
+    "mappings": {
+     "_doc": {
+      "properties": {}
+     }
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "x_content_parse_exception",
+       "reason": "[1:38] [rollover] failed to parse field [mappings]"
+      }
+     ],
+     "type": "x_content_parse_exception",
+     "reason": "[1:38] [rollover] failed to parse field [mappings]",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "The mapping definition cannot be nested under a type"
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover",
+   "body": [
+    1
+   ],
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "x_content_parse_exception",
+       "reason": "[1:1] [rollover] Expected START_OBJECT but was: START_ARRAY"
+      }
+     ],
+     "type": "x_content_parse_exception",
+     "reason": "[1:1] [rollover] Expected START_OBJECT but was: START_ARRAY"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover",
+   "body": {
+    "settings": {
+     "number_of_shards": 2
+    },
+    "aliases": {
+     "esm-r2": {}
+    },
+    "mappings": {
+     "properties": {
+      "a": {
+       "type": "keyword"
+      }
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "old_index": "esm-r-000001",
+    "new_index": "esm-r-000002",
+    "rolled_over": true,
+    "dry_run": false,
+    "lazy": false,
+    "conditions": {}
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-r*/_alias",
+   "status": 200,
+   "response": {
+    "esm-r-000002": {
+     "aliases": {
+      "esm-r": {
+       "is_write_index": true
+      },
+      "esm-r2": {}
+     }
+    },
+    "esm-r-000001": {
+     "aliases": {
+      "esm-r": {
+       "is_write_index": false
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-r-000002/_mapping",
+   "status": 200,
+   "response": {
+    "esm-r-000002": {
+     "mappings": {
+      "properties": {
+       "a": {
+        "type": "keyword"
+       }
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-r-000002/_settings?filter_path=*.settings.index.number_of_shards",
+   "status": 200,
+   "response": {
+    "esm-r-000002": {
+     "settings": {
+      "index": {
+       "number_of_shards": "2"
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover/esm-r-x",
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "old_index": "esm-r-000002",
+    "new_index": "esm-r-x",
+    "rolled_over": true,
+    "dry_run": false,
+    "lazy": false,
+    "conditions": {}
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover?lazy",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "index name [esm-r-x] does not match pattern '^.*-\\d+$'"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "index name [esm-r-x] does not match pattern '^.*-\\d+$'"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r-000001/_rollover",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "rollover target is a [concrete index] but one of [alias,data_stream] was expected"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "rollover target is a [concrete index] but one of [alias,data_stream] was expected"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-nope/_rollover",
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "resource_not_found_exception",
+       "reason": "rollover target [esm-nope] does not exist"
+      }
+     ],
+     "type": "resource_not_found_exception",
+     "reason": "rollover target [esm-nope] does not exist"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-r/_rollover?dry_run",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "index name [esm-r-x] does not match pattern '^.*-\\d+$'"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "index name [esm-r-x] does not match pattern '^.*-\\d+$'"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-rr",
+   "body": {
+    "aliases": {
+     "esm-rr-a": {}
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-rr"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rr-a/_rollover",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "index name [esm-rr] does not match pattern '^.*-\\d+$'"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "index name [esm-rr] does not match pattern '^.*-\\d+$'"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-rr2",
+   "body": {
+    "aliases": {
+     "esm-rr-b": {
+      "is_write_index": true
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-rr2"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rr-b/_rollover",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "index name [esm-rr2] does not match pattern '^.*-\\d+$'"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "index name [esm-rr2] does not match pattern '^.*-\\d+$'"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-rw-1",
+   "body": {
+    "aliases": {
+     "esm-rw": {}
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-rw-1"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-rw-2",
+   "body": {
+    "aliases": {
+     "esm-rw": {}
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-rw-2"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rw/_rollover",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "rollover target [esm-rw] does not point to a write index"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "rollover target [esm-rw] does not point to a write index"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-rs-1",
+   "body": {
+    "aliases": {
+     "esm-rs": {}
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-rs-1"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rs/_rollover",
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "old_index": "esm-rs-1",
+    "new_index": "esm-rs-000002",
+    "rolled_over": true,
+    "dry_run": false,
+    "lazy": false,
+    "conditions": {}
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-rs-*/_alias",
+   "status": 200,
+   "response": {
+    "esm-rs-000002": {
+     "aliases": {
+      "esm-rs": {}
+     }
+    },
+    "esm-rs-1": {
+     "aliases": {}
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_template/esm-rt",
+   "body": {
+    "index_patterns": [
+     "esm-rt-*"
+    ],
+    "aliases": {
+     "esm-rt": {}
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json",
+    "warning": [
+     "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Legacy index templates are deprecated in favor of composable templates.\""
+    ]
+   }
+  },
+  {
+   "req": "PUT /esm-rt-000001",
+   "body": {
+    "aliases": {
+     "esm-rt": {
+      "is_write_index": true
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-rt-000001"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rt/_rollover",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Rollover alias [esm-rt] can point to multiple indices, found duplicated alias [[esm-rt]] in index template [esm-rt]"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Rollover alias [esm-rt] can point to multiple indices, found duplicated alias [[esm-rt]] in index template [esm-rt]"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-rz",
+   "body": {
+    "settings": {
+     "number_of_shards": 4,
+     "number_of_replicas": 0,
+     "refresh_interval": "7s",
+     "analysis": {
+      "analyzer": {
+       "a": {
+        "type": "custom",
+        "tokenizer": "whitespace"
+       }
+      }
+     },
+     "routing.allocation.include._tier_preference": "data_hot",
+     "max_result_window": 500,
+     "blocks.read_only_allow_delete": false
+    },
+    "mappings": {
+     "properties": {
+      "t": {
+       "type": "text",
+       "analyzer": "a"
+      }
+     }
+    },
+    "aliases": {
+     "esm-rz-a": {}
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-rz"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_shrink/esm-rz-s1",
+   "status": 500,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_state_exception",
+       "reason": "index esm-rz must be read-only to resize index. use \"index.blocks.write=true\""
+      }
+     ],
+     "type": "illegal_state_exception",
+     "reason": "index esm-rz must be read-only to resize index. use \"index.blocks.write=true\""
+    },
+    "status": 500
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-rz/_settings",
+   "body": {
+    "index.blocks.write": true
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_shrink/esm-rz-s1",
+   "body": {
+    "settings": {
+     "index.number_of_shards": 3
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "the number of source shards [4] must be a multiple of [3]"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "the number of source shards [4] must be a multiple of [3]"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_shrink/esm-rz-s1",
+   "body": {
+    "settings": {
+     "index.number_of_shards": 8
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "the number of target shards [8] must be less that the number of source shards [4]"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "the number of target shards [8] must be less that the number of source shards [4]"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_shrink/esm-rz-s1",
+   "body": {
+    "settings": {
+     "index.number_of_shards": 2,
+     "index.mode": "standard"
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "can't change setting [index.mode] during resize"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "can't change setting [index.mode] during resize"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_shrink/esm-rz-s1",
+   "body": {
+    "settings": {
+     "index.number_of_shards": 2,
+     "index.routing_partition_size": 2
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "cannot provide a routing partition size value when resizing an index"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "cannot provide a routing partition size value when resizing an index"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_shrink/esm-rz-s1",
+   "body": {
+    "settings": {
+     "index.number_of_shards": 2
+    },
+    "aliases": {
+     "esm-rz-b": {}
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-rz-s1"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-rz-s1/_settings?flat_settings",
+   "status": 200,
+   "response": {
+    "esm-rz-s1": {
+     "settings": {
+      "index.analysis.analyzer.a.tokenizer": "whitespace",
+      "index.analysis.analyzer.a.type": "custom",
+      "index.blocks.read_only_allow_delete": "false",
+      "index.blocks.write": "true",
+      "index.creation_date": "1792527514725",
+      "index.max_result_window": "500",
+      "index.number_of_replicas": "1",
+      "index.number_of_shards": "2",
+      "index.provided_name": "esm-rz-s1",
+      "index.refresh_interval": "7s",
+      "index.routing.allocation.include._tier_preference": "data_hot",
+      "index.routing_partition_size": "1",
+      "index.uuid": "yk1mIyk8QUW8639blgXwgg",
+      "index.version.created": "9111000"
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-rz-s1/_mapping",
+   "status": 200,
+   "response": {
+    "esm-rz-s1": {
+     "mappings": {
+      "properties": {
+       "t": {
+        "type": "text",
+        "analyzer": "a"
+       }
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-rz-s1/_alias",
+   "status": 200,
+   "response": {
+    "esm-rz-s1": {
+     "aliases": {
+      "esm-rz-b": {}
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_split/esm-rz-s2",
+   "body": {
+    "settings": {
+     "index.number_of_shards": 6
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "the number of source shards [4] must be a factor of [6]"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "the number of source shards [4] must be a factor of [6]"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_split/esm-rz-s2",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "action_request_validation_exception",
+       "reason": "Validation Failed: 1: index.number_of_shards is required for split operations;"
+      }
+     ],
+     "type": "action_request_validation_exception",
+     "reason": "Validation Failed: 1: index.number_of_shards is required for split operations;"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_split/esm-rz-s2",
+   "body": {
+    "settings": {
+     "index.number_of_shards": 2
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "the number of source shards [4] must be less that the number of target shards [2]"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "the number of source shards [4] must be less that the number of target shards [2]"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_split/esm-rz-s2",
+   "body": {
+    "settings": {
+     "index.number_of_shards": 8
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-rz-s2"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-rz-s2/_settings?flat_settings",
+   "status": 200,
+   "response": {
+    "esm-rz-s2": {
+     "settings": {
+      "index.analysis.analyzer.a.tokenizer": "whitespace",
+      "index.analysis.analyzer.a.type": "custom",
+      "index.blocks.read_only_allow_delete": "false",
+      "index.blocks.write": "true",
+      "index.creation_date": "1792527514891",
+      "index.max_result_window": "500",
+      "index.number_of_replicas": "1",
+      "index.number_of_shards": "8",
+      "index.provided_name": "esm-rz-s2",
+      "index.refresh_interval": "7s",
+      "index.routing.allocation.include._tier_preference": "data_hot",
+      "index.routing_partition_size": "1",
+      "index.uuid": "AVjr-UT3T7qNMZ7PSRuWXw",
+      "index.version.created": "9111000"
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_clone/esm-rz-s3",
+   "body": {
+    "settings": {
+     "index.number_of_shards": 2
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "the number of target shards (2) must be the same as the number of  source shards ( 4)"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "the number of target shards (2) must be the same as the number of  source shards ( 4)"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_clone/esm-rz-s3",
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-rz-s3"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-rz-s3/_settings?flat_settings",
+   "status": 200,
+   "response": {
+    "esm-rz-s3": {
+     "settings": {
+      "index.analysis.analyzer.a.tokenizer": "whitespace",
+      "index.analysis.analyzer.a.type": "custom",
+      "index.blocks.read_only_allow_delete": "false",
+      "index.blocks.write": "true",
+      "index.creation_date": "1792527515239",
+      "index.max_result_window": "500",
+      "index.number_of_replicas": "1",
+      "index.number_of_shards": "4",
+      "index.provided_name": "esm-rz-s3",
+      "index.refresh_interval": "7s",
+      "index.routing.allocation.include._tier_preference": "data_hot",
+      "index.routing_partition_size": "1",
+      "index.uuid": "EWXzxTQCQGm_kjq-uHloxg",
+      "index.version.created": "9111000"
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_clone/esm-rz-s3",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "resource_already_exists_exception",
+       "reason": "index [esm-rz-s3/EWXzxTQCQGm_kjq-uHloxg] already exists",
+       "index_uuid": "EWXzxTQCQGm_kjq-uHloxg",
+       "index": "esm-rz-s3"
+      }
+     ],
+     "type": "resource_already_exists_exception",
+     "reason": "index [esm-rz-s3/EWXzxTQCQGm_kjq-uHloxg] already exists",
+     "index_uuid": "EWXzxTQCQGm_kjq-uHloxg",
+     "index": "esm-rz-s3"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-nope/_clone/esm-rz-s4",
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "index_not_found_exception",
+       "reason": "no such index [esm-nope]",
+       "index_uuid": "_na_",
+       "index": "esm-nope"
+      }
+     ],
+     "type": "index_not_found_exception",
+     "reason": "no such index [esm-nope]",
+     "index_uuid": "_na_",
+     "index": "esm-nope"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_split/esm-rz-s4",
+   "body": {
+    "settings": {
+     "index.sort.field": "t"
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "action_request_validation_exception",
+       "reason": "Validation Failed: 1: can't override index sort when resizing an index;2: index.number_of_shards is required for split operations;"
+      }
+     ],
+     "type": "action_request_validation_exception",
+     "reason": "Validation Failed: 1: can't override index sort when resizing an index;2: index.number_of_shards is required for split operations;"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_shrink/esm-rz-s4",
+   "body": {
+    "settings": {
+     "index.number_of_shards": 2
+    },
+    "max_primary_shard_size": "1gb"
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Cannot set both index.number_of_shards and max_primary_shard_size for the target index"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Cannot set both index.number_of_shards and max_primary_shard_size for the target index"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz/_shrink/esm-rz-s4",
+   "body": {
+    "max_primary_shard_size": "0b"
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "action_request_validation_exception",
+       "reason": "Validation Failed: 1: max_primary_shard_size must be greater than 0;"
+      }
+     ],
+     "type": "action_request_validation_exception",
+     "reason": "Validation Failed: 1: max_primary_shard_size must be greater than 0;"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-rz1",
+   "body": {
+    "settings": {
+     "number_of_shards": 1,
+     "blocks.write": true
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-rz1"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz1/_shrink/esm-rz-s5",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "can't shrink an index with only one shard"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "can't shrink an index with only one shard"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-rz1/_split/esm-rz-s5",
+   "body": {
+    "settings": {
+     "index.number_of_shards": 3,
+     "index.number_of_routing_shards": 6
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-rz-s5"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_cluster/state/metadata/esm-rz-s*?filter_path=metadata.indices.*.routing_num_shards",
+   "status": 200,
+   "response": {
+    "metadata": {
+     "indices": {
+      "esm-rz-s1": {
+       "routing_num_shards": 1024
+      },
+      "esm-rz-s3": {
+       "routing_num_shards": 1024
+      },
+      "esm-rz-s5": {
+       "routing_num_shards": 6
+      },
+      "esm-rz-s2": {
+       "routing_num_shards": 1024
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   },
+   "unordered": true
+  },
+  {
+   "req": "PUT /esm-rp",
+   "body": {
+    "settings": {
+     "number_of_shards": 2,
+     "number_of_routing_shards": 4,
+     "routing_partition_size": 2
+    },
+    "mappings": {
+     "_routing": {
+      "required": true
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-rp"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-rp3",
+   "body": {
+    "settings": {
+     "number_of_shards": 2,
+     "number_of_routing_shards": 4,
+     "routing_partition_size": 4
+    },
+    "mappings": {
+     "_routing": {
+      "required": true
+     }
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "routing partition size [4] should be a positive number less than the number of routing shards [4] for [esm-rp3]"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "routing partition size [4] should be a positive number less than the number of routing shards [4] for [esm-rp3]"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-rp6",
+   "body": {
+    "settings": {
+     "number_of_shards": 2,
+     "routing_partition_size": 2
+    },
+    "mappings": {
+     "properties": {
+      "a": {
+       "type": "keyword"
+      }
+     }
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "mapping type [_doc] must have routing required for partitioned index [esm-rp6]"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "mapping type [_doc] must have routing required for partitioned index [esm-rp6]"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-rp7",
+   "body": {
+    "settings": {
+     "number_of_shards": 1,
+     "routing_partition_size": 1024
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "routing partition size [1024] should be a positive number less than the number of routing shards [1024] for [esm-rp7]"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "routing partition size [1024] should be a positive number less than the number of routing shards [1024] for [esm-rp7]"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-ae",
+   "body": {
+    "settings": {
+     "auto_expand_replicas": "0-1"
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-ae"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-ae/_settings?flat_settings&filter_path=*.settings.index.number_of_replicas,*.settings.index.auto_expand_replicas",
+   "status": 200,
+   "response": {},
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-ae/_settings",
+   "body": {
+    "index.auto_expand_replicas": "1-3"
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-ae/_settings?flat_settings&filter_path=*.settings.index.number_of_replicas",
+   "status": 200,
+   "response": {},
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  }
+ ]
+}

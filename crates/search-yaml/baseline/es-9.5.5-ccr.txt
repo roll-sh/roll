@@ -1,0 +1,13 @@
+# Tests of Elasticsearch 9.5.5's `ccr` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (security users=ccr-user:ccr-user-password:superuser login=ccr-user:ccr-user-password).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+ccr:ccr/auto_follow/Test pause and resume auto follow pattern
+ccr:ccr/auto_follow/Test put and delete auto follow pattern
+ccr:ccr/auto_follow/Test put and delete auto follow pattern with exclusion patterns
+ccr:ccr/auto_follow/Test put and delete auto follow pattern without specifying exclusion patterns
+ccr:ccr/follow_and_unfollow/Test follow and unfollow an existing index
+ccr:ccr/follow_info/Test info
+ccr:ccr/follow_stats/Test stats
+ccr:ccr/forget_follower/Test forget follower
+ccr:ccr/index_directly_into_follower_index/Test indexing direcly into a follower index
+ccr:ccr/stats/Test stats

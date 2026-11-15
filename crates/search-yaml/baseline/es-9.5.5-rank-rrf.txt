@@ -1,0 +1,99 @@
+# Tests of Elasticsearch 9.5.5's `rank-rrf` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+rank-rrf:linear/10_linear_retriever/Linear retriever error handling - invalid normalizer
+rank-rrf:linear/10_linear_retriever/Linear retriever normalization with zero scores
+rank-rrf:linear/10_linear_retriever/Linear retriever with all normalizers applied to same data
+rank-rrf:linear/10_linear_retriever/Linear retriever with identity normalizer (no normalization)
+rank-rrf:linear/10_linear_retriever/Linear retriever with large score differences and L2 normalization
+rank-rrf:linear/10_linear_retriever/Linear retriever with mixed normalizers - inheritance test
+rank-rrf:linear/10_linear_retriever/basic linear weighted combination - interleaved results
+rank-rrf:linear/10_linear_retriever/basic linear weighted combination of a standard and knn retrievers
+rank-rrf:linear/10_linear_retriever/collapsing results
+rank-rrf:linear/10_linear_retriever/explain should provide info on weights and inner retrievers
+rank-rrf:linear/10_linear_retriever/linear retriever respects min_score after normalization
+rank-rrf:linear/10_linear_retriever/linear retriever with custom sort for nested retrievers
+rank-rrf:linear/10_linear_retriever/linear retriever with filters
+rank-rrf:linear/10_linear_retriever/linear retriever with filters on nested retrievers
+rank-rrf:linear/10_linear_retriever/linear retriever with high min_score excludes all docs
+rank-rrf:linear/10_linear_retriever/linear retriever with min_score zero includes all docs
+rank-rrf:linear/10_linear_retriever/linear retriever with top-level normalizer - empty results
+rank-rrf:linear/10_linear_retriever/linear retriever with top-level normalizer - l2_norm
+rank-rrf:linear/10_linear_retriever/linear retriever with top-level normalizer - minmax
+rank-rrf:linear/10_linear_retriever/linear retriever with top-level normalizer and per-retriever override
+rank-rrf:linear/10_linear_retriever/minmax normalization properly handles a single doc result set
+rank-rrf:linear/10_linear_retriever/multiple nested linear retrievers
+rank-rrf:linear/10_linear_retriever/pagination within a consistent rank_window_size
+rank-rrf:linear/10_linear_retriever/should handle all zero scores in normalization
+rank-rrf:linear/10_linear_retriever/should normalize initial scores
+rank-rrf:linear/10_linear_retriever/should normalize initial scores with l2_norm
+rank-rrf:linear/10_linear_retriever/should respect rank_window_size for normalization and returned hits
+rank-rrf:linear/10_linear_retriever/should throw on negative weights
+rank-rrf:linear/10_linear_retriever/should throw on unknown normalizer
+rank-rrf:linear/10_linear_retriever/should throw when rank_window_size is negative
+rank-rrf:linear/10_linear_retriever/should throw when rank_window_size less than size
+rank-rrf:rrf/100_rank_rrf/RRF rank should fail if rank_constant < 1
+rank-rrf:rrf/100_rank_rrf/RRF rank should fail if size > rank_window_size
+rank-rrf:rrf/100_rank_rrf/RRF rank should fail if we specify both rank and retriever
+rank-rrf:rrf/100_rank_rrf/Simple rank with bm25 search and kNN search
+rank-rrf:rrf/100_rank_rrf/Simple rank with multiple bm25 sub searches
+rank-rrf:rrf/100_rank_rrf/Simple rank with multiple bm25 sub_searches and a knn search
+rank-rrf:rrf/150_rank_rrf_pagination/Pagination within interleaved results
+rank-rrf:rrf/150_rank_rrf_pagination/Pagination within interleaved results, different result set sizes, rank_window_size covering all results
+rank-rrf:rrf/150_rank_rrf_pagination/Pagination within interleaved results, different result set sizes, rank_window_size not covering all results
+rank-rrf:rrf/150_rank_rrf_pagination/Standard pagination outside rank_window_size
+rank-rrf:rrf/150_rank_rrf_pagination/Standard pagination partially outside rank_window_size
+rank-rrf:rrf/150_rank_rrf_pagination/Standard pagination within rank_window_size
+rank-rrf:rrf/200_rank_rrf_script/RRF using multi-knn and single BM25 with a scripted metric aggregation
+rank-rrf:rrf/200_rank_rrf_script/RRF using multi-knn only with a scripted metric aggregation
+rank-rrf:rrf/200_rank_rrf_script/RRF using single knn and single BM25 with a scripted metric aggregation
+rank-rrf:rrf/300_rrf_retriever/rrf retriever with a standard retriever and a knn retriever
+rank-rrf:rrf/300_rrf_retriever/rrf retriever with a standard retriever with no query and no filter
+rank-rrf:rrf/300_rrf_retriever/rrf retriever with a standard retriever with no query but a sort
+rank-rrf:rrf/300_rrf_retriever/rrf retriever with multiple standard retrievers
+rank-rrf:rrf/300_rrf_retriever/rrf retriever with multiple standard retrievers and a knn retriever
+rank-rrf:rrf/300_rrf_retriever/rrf retriever with multiple standard retrievers and multiple knn retriever
+rank-rrf:rrf/300_rrf_retriever/rrf retriever with multiple standard retrievers and multiple knn retriever and a filter
+rank-rrf:rrf/300_rrf_retriever/rrf retriever with nested rrf retriever and pagination
+rank-rrf:rrf/320_rrf_weighted_retriever/Weighted RRF retriever allows optional weight field
+rank-rrf:rrf/320_rrf_weighted_retriever/Weighted RRF retriever changes result order
+rank-rrf:rrf/320_rrf_weighted_retriever/Weighted RRF retriever errors on negative weight
+rank-rrf:rrf/320_rrf_weighted_retriever/Weighted RRF retriever returns correct results
+rank-rrf:rrf/350_rrf_retriever_pagination/Pagination within interleaved results
+rank-rrf:rrf/350_rrf_retriever_pagination/Pagination within interleaved results, different result set sizes, rank_window_size covering all results
+rank-rrf:rrf/350_rrf_retriever_pagination/Pagination within interleaved results, different result set sizes, rank_window_size not covering all results
+rank-rrf:rrf/350_rrf_retriever_pagination/Standard pagination outside rank_window_size
+rank-rrf:rrf/350_rrf_retriever_pagination/Standard pagination partially outside rank_window_size
+rank-rrf:rrf/350_rrf_retriever_pagination/Standard pagination within rank_window_size
+rank-rrf:rrf/400_rrf_retriever_script/rrf retriever using a knn retriever and a standard retriever with a scripted metric aggregation
+rank-rrf:rrf/400_rrf_retriever_script/rrf retriever using multiple knn retrievers and a standard retriever with a scripted metric aggregation
+rank-rrf:rrf/400_rrf_retriever_script/rrf retriever using multiple knn retrievers with a scripted metric aggregation
+rank-rrf:rrf/500_rrf_retriever_explain/using a mix of named and unnamed retrievers
+rank-rrf:rrf/500_rrf_retriever_explain/using named retrievers
+rank-rrf:rrf/500_rrf_retriever_explain/using rrf retriever
+rank-rrf:rrf/550_rrf_sub_searches_explain/using a mix of named and unnamed queries
+rank-rrf:rrf/550_rrf_sub_searches_explain/using a top level knn and query
+rank-rrf:rrf/550_rrf_sub_searches_explain/using named sub_searches
+rank-rrf:rrf/550_rrf_sub_searches_explain/using named top level knn and query
+rank-rrf:rrf/550_rrf_sub_searches_explain/using sub_searches
+rank-rrf:rrf/600_rrf_retriever_profile/profile standard and knn dfs retrievers
+rank-rrf:rrf/600_rrf_retriever_profile/profile standard and knn query
+rank-rrf:rrf/600_rrf_retriever_profile/using query and dfs knn search
+rank-rrf:rrf/700_rrf_retriever_search_api_compatibility/nested compound retrievers with min_score correctly compute total_hits
+rank-rrf:rrf/700_rrf_retriever_search_api_compatibility/rrf retriever highlighting results
+rank-rrf:rrf/700_rrf_retriever_search_api_compatibility/rrf retriever with aggs
+rank-rrf:rrf/700_rrf_retriever_search_api_compatibility/rrf retriever with aggs - scripted metric using score
+rank-rrf:rrf/700_rrf_retriever_search_api_compatibility/rrf retriever with custom nested sort
+rank-rrf:rrf/700_rrf_retriever_search_api_compatibility/rrf retriever with filters to be passed to nested rrf retrievers
+rank-rrf:rrf/700_rrf_retriever_search_api_compatibility/rrf retriever with global min_score
+rank-rrf:rrf/700_rrf_retriever_search_api_compatibility/rrf retriever with inner-level collapse
+rank-rrf:rrf/700_rrf_retriever_search_api_compatibility/rrf retriever with inner_hits for sub-retriever
+rank-rrf:rrf/700_rrf_retriever_search_api_compatibility/rrf retriever with nested query
+rank-rrf:rrf/700_rrf_retriever_search_api_compatibility/rrf retriever with retriever-level min_score
+rank-rrf:rrf/700_rrf_retriever_search_api_compatibility/rrf retriever with top-level collapse
+rank-rrf:rrf/900_rrf_with_rescorer/RRF with rescorer retriever and aggs
+rank-rrf:rrf/900_rrf_with_rescorer/RRF with rescorer retriever and invalid window size
+rank-rrf:rrf/900_rrf_with_rescorer/RRF with rescorer retriever and prefilters
+rank-rrf:rrf/900_rrf_with_rescorer/RRF with rescorer retriever basic
+rank-rrf:rrf/950_pinned_interaction/rrf combined with pinned retriever
+rank-rrf:rrf/950_pinned_interaction/rrf with pinned retriever as a sub-retriever

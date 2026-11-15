@@ -1,0 +1,428 @@
+{
+  "diff": {
+    "es": "weight(n.text0:shard in <masked>) [PerFieldSimilarity], result of:",
+    "path": ".hits.hits[0]._explanation.details[0].description",
+    "roll": "sum of:"
+  },
+  "found": {
+    "case": 1,
+    "case_seed": 10000031,
+    "seed": 10
+  },
+  "roll": {
+    "body": {
+      "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 1,
+        "total": 1
+      },
+      "hits": {
+        "hits": [
+          {
+            "_explanation": {
+              "description": "Score based on 1 child docs in range from 0 to 2, using score mode Avg",
+              "details": [
+                {
+                  "description": "sum of:",
+                  "details": [
+                    {
+                      "description": "weight(n.text0:shard in 0) [PerFieldSimilarity], result of:",
+                      "details": [
+                        {
+                          "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                          "details": [
+                            {
+                              "description": "boost",
+                              "details": [],
+                              "value": 2.2
+                            },
+                            {
+                              "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                              "details": [
+                                {
+                                  "description": "n, number of documents containing term",
+                                  "details": [],
+                                  "value": 1
+                                },
+                                {
+                                  "description": "N, total number of documents with field",
+                                  "details": [],
+                                  "value": 3
+                                }
+                              ],
+                              "value": 0.98082924
+                            },
+                            {
+                              "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                              "details": [
+                                {
+                                  "description": "freq, occurrences of term within document",
+                                  "details": [],
+                                  "value": 1.0
+                                },
+                                {
+                                  "description": "k1, term saturation parameter",
+                                  "details": [],
+                                  "value": 1.2
+                                },
+                                {
+                                  "description": "b, length normalization parameter",
+                                  "details": [],
+                                  "value": 0.75
+                                },
+                                {
+                                  "description": "dl, length of field",
+                                  "details": [],
+                                  "value": 4.0
+                                },
+                                {
+                                  "description": "avgdl, average length of field",
+                                  "details": [],
+                                  "value": 5.3333335
+                                }
+                              ],
+                              "value": 0.50632906
+                            }
+                          ],
+                          "value": 1.0925692
+                        }
+                      ],
+                      "value": 1.0925692
+                    },
+                    {
+                      "description": "match on required clause, product of:",
+                      "details": [
+                        {
+                          "description": "# clause",
+                          "details": [],
+                          "value": 0.0
+                        },
+                        {
+                          "description": "_nested_path:n",
+                          "details": [],
+                          "value": 1.0
+                        }
+                      ],
+                      "value": 0.0
+                    }
+                  ],
+                  "value": 1.0925692
+                }
+              ],
+              "value": 1.0925692
+            },
+            "_id": "9",
+            "_index": "diff-m3-a",
+            "_node": "0Zr0L-l4THmSU_MWbe51EQ",
+            "_score": 1.0925692,
+            "_shard": "[diff-m3-a][0]",
+            "_source": {
+              "date0": "2024-03-27",
+              "dbl0": 40.42,
+              "kw0": "pi",
+              "kw1": [
+                "delta",
+                ""
+              ],
+              "n": [
+                {
+                  "kw0": "x-1",
+                  "text0": "Quick running banana shard"
+                },
+                {
+                  "kw0": "rho",
+                  "long0": 33,
+                  "text0": "apple over cats the blue query"
+                },
+                {
+                  "kw0": "delta",
+                  "long0": 95,
+                  "text0": "elastic cat of Dogs query dog"
+                }
+              ],
+              "short0": -268,
+              "text0": "running shard jumps red"
+            }
+          }
+        ],
+        "max_score": 1.0925692,
+        "total": {
+          "relation": "eq",
+          "value": 1
+        }
+      },
+      "timed_out": false,
+      "took": 2
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "POST _search .hits.hits[]._explanation.details[].description",
+  "steps": [
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "n": {
+              "type": "nested"
+            }
+          }
+        },
+        "settings": {
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m3-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m3-a"
+    },
+    {
+      "es": {
+        "body": {
+          "errors": false,
+          "items": [
+            {
+              "index": {
+                "_id": "9",
+                "_index": "diff-m3-a",
+                "_primary_term": 1,
+                "_seq_no": 0,
+                "_shards": {
+                  "failed": 0,
+                  "successful": 1,
+                  "total": 2
+                },
+                "_version": 1,
+                "result": "created",
+                "status": 201
+              }
+            }
+          ],
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "lines": [
+        {
+          "index": {
+            "_id": "9",
+            "_index": "diff-m3-a"
+          }
+        },
+        {
+          "date0": "2024-03-27",
+          "dbl0": 40.42,
+          "kw0": "pi",
+          "kw1": [
+            "delta",
+            ""
+          ],
+          "n": [
+            {
+              "kw0": "x-1",
+              "text0": "Quick running banana shard"
+            },
+            {
+              "kw0": "rho",
+              "long0": 33,
+              "text0": "apple over cats the blue query"
+            },
+            {
+              "kw0": "delta",
+              "long0": 95,
+              "text0": "elastic cat of Dogs query dog"
+            }
+          ],
+          "short0": -268,
+          "text0": "running shard jumps red"
+        }
+      ],
+      "method": "POST",
+      "path": "/_bulk"
+    },
+    {
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "successful": 1,
+            "total": 2
+          }
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m3-a/_refresh"
+    },
+    {
+      "body": {
+        "explain": true,
+        "query": {
+          "nested": {
+            "path": "n",
+            "query": {
+              "term": {
+                "n.text0": "shard"
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 1,
+            "total": 1
+          },
+          "hits": {
+            "hits": [
+              {
+                "_explanation": {
+                  "description": "Score based on 1 child docs in range from 0 to 2, using score mode Avg",
+                  "details": [
+                    {
+                      "description": "weight(n.text0:shard in 0) [PerFieldSimilarity], result of:",
+                      "details": [
+                        {
+                          "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                          "details": [
+                            {
+                              "description": "boost",
+                              "details": [],
+                              "value": 2.2
+                            },
+                            {
+                              "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                              "details": [
+                                {
+                                  "description": "n, number of documents containing term",
+                                  "details": [],
+                                  "value": 1
+                                },
+                                {
+                                  "description": "N, total number of documents with field",
+                                  "details": [],
+                                  "value": 3
+                                }
+                              ],
+                              "value": 0.98082924
+                            },
+                            {
+                              "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                              "details": [
+                                {
+                                  "description": "freq, occurrences of term within document",
+                                  "details": [],
+                                  "value": 1.0
+                                },
+                                {
+                                  "description": "k1, term saturation parameter",
+                                  "details": [],
+                                  "value": 1.2
+                                },
+                                {
+                                  "description": "b, length normalization parameter",
+                                  "details": [],
+                                  "value": 0.75
+                                },
+                                {
+                                  "description": "dl, length of field",
+                                  "details": [],
+                                  "value": 4.0
+                                },
+                                {
+                                  "description": "avgdl, average length of field",
+                                  "details": [],
+                                  "value": 5.3333335
+                                }
+                              ],
+                              "value": 0.50632906
+                            }
+                          ],
+                          "value": 1.0925692
+                        }
+                      ],
+                      "value": 1.0925692
+                    }
+                  ],
+                  "value": 1.0925692
+                },
+                "_id": "9",
+                "_index": "diff-m3-a",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_score": 1.0925692,
+                "_shard": "[diff-m3-a][0]",
+                "_source": {
+                  "date0": "2024-03-27",
+                  "dbl0": 40.42,
+                  "kw0": "pi",
+                  "kw1": [
+                    "delta",
+                    ""
+                  ],
+                  "n": [
+                    {
+                      "kw0": "x-1",
+                      "text0": "Quick running banana shard"
+                    },
+                    {
+                      "kw0": "rho",
+                      "long0": 33,
+                      "text0": "apple over cats the blue query"
+                    },
+                    {
+                      "kw0": "delta",
+                      "long0": 95,
+                      "text0": "elastic cat of Dogs query dog"
+                    }
+                  ],
+                  "short0": -268,
+                  "text0": "running shard jumps red"
+                }
+              }
+            ],
+            "max_score": 1.0925692,
+            "total": {
+              "relation": "eq",
+              "value": 1
+            }
+          },
+          "timed_out": false,
+          "took": 1
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m3-a/_search"
+    }
+  ]
+}

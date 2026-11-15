@@ -1,0 +1,1426 @@
+{
+  "description" : "Composable, component and legacy templates; simulate; overlap and validation errors.",
+  "steps" : [
+    {
+      "req" : "PUT /_component_template/esm-ct1",
+      "body" : {
+        "template" : {
+          "settings" : {
+            "number_of_shards" : 2
+          },
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        },
+        "version" : 3,
+        "_meta" : {
+          "m" : 1
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-ct2",
+      "body" : {
+        "template" : {
+          "mappings" : {
+            "properties" : {
+              "b" : {
+                "type" : "long"
+              }
+            }
+          },
+          "aliases" : {
+            "esm-tal" : { }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_component_template/esm-ct1",
+      "status" : 200,
+      "response" : {
+        "component_templates" : [
+          {
+            "name" : "esm-ct1",
+            "component_template" : {
+              "template" : {
+                "settings" : {
+                  "index" : {
+                    "number_of_shards" : "2"
+                  }
+                },
+                "mappings" : {
+                  "properties" : {
+                    "a" : {
+                      "type" : "keyword"
+                    }
+                  }
+                }
+              },
+              "version" : 3,
+              "_meta" : {
+                "m" : 1
+              },
+              "created_date_millis" : 1792521004554,
+              "modified_date_millis" : 1792521004554
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_component_template/esm-ct*",
+      "status" : 200,
+      "response" : {
+        "component_templates" : [
+          {
+            "name" : "esm-ct1",
+            "component_template" : {
+              "template" : {
+                "settings" : {
+                  "index" : {
+                    "number_of_shards" : "2"
+                  }
+                },
+                "mappings" : {
+                  "properties" : {
+                    "a" : {
+                      "type" : "keyword"
+                    }
+                  }
+                }
+              },
+              "version" : 3,
+              "_meta" : {
+                "m" : 1
+              },
+              "created_date_millis" : 1792521004554,
+              "modified_date_millis" : 1792521004554
+            }
+          },
+          {
+            "name" : "esm-ct2",
+            "component_template" : {
+              "template" : {
+                "mappings" : {
+                  "properties" : {
+                    "b" : {
+                      "type" : "long"
+                    }
+                  }
+                },
+                "aliases" : {
+                  "esm-tal" : { }
+                }
+              },
+              "created_date_millis" : 1792521004578,
+              "modified_date_millis" : 1792521004578
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_component_template/esm-nope",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "component template matching [esm-nope] not found"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "component template matching [esm-nope] not found"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "HEAD /_component_template/esm-ct1",
+      "status" : 200,
+      "text" : "",
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "HEAD /_component_template/esm-nope",
+      "status" : 404,
+      "text" : "",
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-ct3",
+      "body" : {
+        "template" : {
+          "settings" : {
+            "index.bogus" : 1
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unknown setting [index.bogus] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unknown setting [index.bogus] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-ct3",
+      "body" : {
+        "template" : {
+          "mappings" : {
+            "properties" : {
+              "x" : {
+                "type" : "bogus"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "The mapper type [bogus] declared on field [x] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation."
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: The mapper type [bogus] declared on field [x] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation.",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "The mapper type [bogus] declared on field [x] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation."
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-ct3",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Required [template]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Required [template]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-ct3",
+      "body" : {
+        "template" : { },
+        "bogus" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:16] [component_template] unknown field [bogus]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:16] [component_template] unknown field [bogus]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-ct1?create=true",
+      "body" : {
+        "template" : { }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "component template [esm-ct1] already exists"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "component template [esm-ct1] already exists"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-it1",
+      "body" : {
+        "index_patterns" : [
+          "esm-t-*"
+        ],
+        "composed_of" : [
+          "esm-ct1",
+          "esm-ct2"
+        ],
+        "priority" : 10,
+        "template" : {
+          "settings" : {
+            "number_of_replicas" : 0
+          },
+          "mappings" : {
+            "properties" : {
+              "c" : {
+                "type" : "text"
+              }
+            }
+          }
+        },
+        "_meta" : {
+          "x" : "y"
+        },
+        "version" : 7
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_index_template/esm-it1",
+      "status" : 200,
+      "response" : {
+        "index_templates" : [
+          {
+            "name" : "esm-it1",
+            "index_template" : {
+              "index_patterns" : [
+                "esm-t-*"
+              ],
+              "template" : {
+                "settings" : {
+                  "index" : {
+                    "number_of_replicas" : "0"
+                  }
+                },
+                "mappings" : {
+                  "properties" : {
+                    "c" : {
+                      "type" : "text"
+                    }
+                  }
+                }
+              },
+              "composed_of" : [
+                "esm-ct1",
+                "esm-ct2"
+              ],
+              "priority" : 10,
+              "version" : 7,
+              "_meta" : {
+                "x" : "y"
+              },
+              "created_date_millis" : 1792521004623,
+              "modified_date_millis" : 1792521004623
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_index_template/esm-it1?flat_settings=true",
+      "status" : 200,
+      "response" : {
+        "index_templates" : [
+          {
+            "name" : "esm-it1",
+            "index_template" : {
+              "index_patterns" : [
+                "esm-t-*"
+              ],
+              "template" : {
+                "settings" : {
+                  "index.number_of_replicas" : "0"
+                },
+                "mappings" : {
+                  "properties" : {
+                    "c" : {
+                      "type" : "text"
+                    }
+                  }
+                }
+              },
+              "composed_of" : [
+                "esm-ct1",
+                "esm-ct2"
+              ],
+              "priority" : 10,
+              "version" : 7,
+              "_meta" : {
+                "x" : "y"
+              },
+              "created_date_millis" : 1792521004623,
+              "modified_date_millis" : 1792521004623
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_index_template/esm-nope",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "index template matching [esm-nope] not found"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "index template matching [esm-nope] not found"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_index_template/esm-nope*",
+      "status" : 404,
+      "response" : {
+        "index_templates" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "HEAD /_index_template/esm-it1",
+      "status" : 200,
+      "text" : "",
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "HEAD /_index_template/esm-nope",
+      "status" : 404,
+      "text" : "",
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-it2",
+      "body" : {
+        "index_patterns" : [
+          "esm-t-a*"
+        ],
+        "priority" : 10
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "index template [esm-it2] has index patterns [esm-t-a*] matching patterns from existing templates [esm-it1] with patterns (esm-it1 => [esm-t-*]) that have the same priority [10], multiple index templates may not match during index creation, please use a different priority"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "index template [esm-it2] has index patterns [esm-t-a*] matching patterns from existing templates [esm-it1] with patterns (esm-it1 => [esm-t-*]) that have the same priority [10], multiple index templates may not match during index creation, please use a different priority"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-it2",
+      "body" : {
+        "index_patterns" : [
+          "esm-t-a*"
+        ],
+        "priority" : 11,
+        "composed_of" : [
+          "esm-missing"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_index_template_exception",
+              "reason" : "index_template [esm-it2] invalid, cause [index template [esm-it2] specifies component templates [esm-missing] that do not exist]"
+            }
+          ],
+          "type" : "invalid_index_template_exception",
+          "reason" : "index_template [esm-it2] invalid, cause [index template [esm-it2] specifies component templates [esm-missing] that do not exist]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-it2",
+      "body" : {
+        "index_patterns" : [
+          "esm t"
+        ],
+        "priority" : 11
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_index_template_exception",
+              "reason" : "index_template [esm-it2] invalid, cause [Validation Failed: 1: index_patterns [esm t] must not contain a space;2: index_pattern [esm t] must not contain the following characters [' ','\"','*',',','/','<','>','?','\\','|'];]"
+            }
+          ],
+          "type" : "invalid_index_template_exception",
+          "reason" : "index_template [esm-it2] invalid, cause [Validation Failed: 1: index_patterns [esm t] must not contain a space;2: index_pattern [esm t] must not contain the following characters [' ','\"','*',',','/','<','>','?','\\','|'];]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-it2",
+      "body" : {
+        "index_patterns" : [
+          "esm-q*"
+        ],
+        "priority" : -1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: index template priority must be >= 0;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: index template priority must be >= 0;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-it2",
+      "body" : {
+        "priority" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Required [index_patterns]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Required [index_patterns]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-it2",
+      "body" : {
+        "index_patterns" : [
+          "esm-q*"
+        ],
+        "bogus" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:30] [index_template] unknown field [bogus]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:30] [index_template] unknown field [bogus]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-it2",
+      "body" : {
+        "index_patterns" : [
+          "esm-q*"
+        ],
+        "template" : {
+          "settings" : {
+            "index.bogus" : 1
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_index_template_exception",
+              "reason" : "index_template [esm-it2] invalid, cause [Validation Failed: 1: unknown setting [index.bogus] please check that any required plugins are installed, or check the breaking changes documentation for removed settings;]"
+            }
+          ],
+          "type" : "invalid_index_template_exception",
+          "reason" : "index_template [esm-it2] invalid, cause [Validation Failed: 1: unknown setting [index.bogus] please check that any required plugins are installed, or check the breaking changes documentation for removed settings;]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-it2",
+      "body" : {
+        "index_patterns" : [
+          "esm-q*"
+        ],
+        "template" : {
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "long"
+              }
+            }
+          }
+        },
+        "composed_of" : [
+          "esm-ct1"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-it1?create=true",
+      "body" : {
+        "index_patterns" : [
+          "esm-zz*"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "index template [esm-it1] already exists"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "index template [esm-it1] already exists"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate_index/esm-t-1",
+      "status" : 200,
+      "response" : {
+        "template" : {
+          "settings" : {
+            "index" : {
+              "number_of_shards" : "2",
+              "number_of_replicas" : "0",
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_content"
+                  }
+                }
+              }
+            }
+          },
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "keyword"
+              },
+              "b" : {
+                "type" : "long"
+              },
+              "c" : {
+                "type" : "text"
+              }
+            }
+          },
+          "aliases" : {
+            "esm-tal" : { }
+          }
+        },
+        "overlapping" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate_index/esm-other",
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate/esm-it1",
+      "status" : 200,
+      "response" : {
+        "template" : {
+          "settings" : {
+            "index" : {
+              "number_of_shards" : "2",
+              "number_of_replicas" : "0",
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_content"
+                  }
+                }
+              }
+            }
+          },
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "keyword"
+              },
+              "b" : {
+                "type" : "long"
+              },
+              "c" : {
+                "type" : "text"
+              }
+            }
+          },
+          "aliases" : {
+            "esm-tal" : { }
+          }
+        },
+        "overlapping" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate",
+      "body" : {
+        "index_patterns" : [
+          "esm-t-*"
+        ],
+        "priority" : 20,
+        "template" : {
+          "settings" : {
+            "number_of_shards" : 5
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "template" : {
+          "settings" : {
+            "index" : {
+              "number_of_shards" : "5",
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_content"
+                  }
+                }
+              }
+            }
+          },
+          "aliases" : { }
+        },
+        "overlapping" : [
+          {
+            "name" : "esm-it1",
+            "index_patterns" : [
+              "esm-t-*"
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate/esm-nope",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unable to simulate template [esm-nope] that does not exist"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unable to simulate template [esm-nope] that does not exist"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t-1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-t-1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-t-1",
+      "status" : 200,
+      "response" : {
+        "esm-t-1" : {
+          "aliases" : {
+            "esm-tal" : { }
+          },
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "keyword"
+              },
+              "b" : {
+                "type" : "long"
+              },
+              "c" : {
+                "type" : "text"
+              }
+            }
+          },
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_content"
+                  }
+                }
+              },
+              "number_of_shards" : "2",
+              "provided_name" : "esm-t-1",
+              "creation_date" : "1792521004734",
+              "number_of_replicas" : "0",
+              "uuid" : "VkIRmHEKQbe1_6IFf_tbJw",
+              "version" : {
+                "created" : "9111000"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t-2",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "text"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-t-2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-t-2/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-t-2" : {
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "text"
+              },
+              "b" : {
+                "type" : "long"
+              },
+              "c" : {
+                "type" : "text"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_component_template/esm-ct1",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "component templates [esm-ct1] cannot be removed as they are still in use by index templates [esm-it1, esm-it2]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "component templates [esm-ct1] cannot be removed as they are still in use by index templates [esm-it1, esm-it2]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_component_template/esm-nope",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "esm-nope"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_template/esm-lt1",
+      "body" : {
+        "index_patterns" : [
+          "esm-l-*"
+        ],
+        "order" : 2,
+        "version" : 4,
+        "settings" : {
+          "number_of_shards" : 2
+        },
+        "mappings" : {
+          "properties" : {
+            "z" : {
+              "type" : "keyword"
+            }
+          }
+        },
+        "aliases" : {
+          "esm-lal" : { }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Legacy index templates are deprecated in favor of composable templates.\""
+        ]
+      }
+    },
+    {
+      "req" : "PUT /_template/esm-lt2",
+      "body" : {
+        "index_patterns" : [
+          "esm-l-1*"
+        ],
+        "order" : 1,
+        "settings" : {
+          "number_of_shards" : 3,
+          "number_of_replicas" : 0
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Legacy index templates are deprecated in favor of composable templates.\""
+        ]
+      }
+    },
+    {
+      "req" : "GET /_template/esm-lt1",
+      "status" : 200,
+      "response" : {
+        "esm-lt1" : {
+          "order" : 2,
+          "version" : 4,
+          "index_patterns" : [
+            "esm-l-*"
+          ],
+          "settings" : {
+            "index" : {
+              "number_of_shards" : "2"
+            }
+          },
+          "mappings" : {
+            "properties" : {
+              "z" : {
+                "type" : "keyword"
+              }
+            }
+          },
+          "aliases" : {
+            "esm-lal" : { }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_template/esm-lt*?flat_settings=true",
+      "status" : 200,
+      "response" : {
+        "esm-lt1" : {
+          "order" : 2,
+          "version" : 4,
+          "index_patterns" : [
+            "esm-l-*"
+          ],
+          "settings" : {
+            "index.number_of_shards" : "2"
+          },
+          "mappings" : {
+            "properties" : {
+              "z" : {
+                "type" : "keyword"
+              }
+            }
+          },
+          "aliases" : {
+            "esm-lal" : { }
+          }
+        },
+        "esm-lt2" : {
+          "order" : 1,
+          "index_patterns" : [
+            "esm-l-1*"
+          ],
+          "settings" : {
+            "index.number_of_replicas" : "0",
+            "index.number_of_shards" : "3"
+          },
+          "mappings" : { },
+          "aliases" : { }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_template/esm-nope",
+      "status" : 404,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "HEAD /_template/esm-lt1",
+      "status" : 200,
+      "text" : "",
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "HEAD /_template/esm-nope",
+      "status" : 404,
+      "text" : "",
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_template/esm-lt3",
+      "body" : {
+        "index_patterns" : [
+          "esm-t-*"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "legacy template [esm-lt3] has index patterns [esm-t-*] matching patterns from existing composable templates [esm-it1] with patterns (esm-it1 => [esm-t-*]), use composable templates (/_index_template) instead"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "legacy template [esm-lt3] has index patterns [esm-t-*] matching patterns from existing composable templates [esm-it1] with patterns (esm-it1 => [esm-t-*]), use composable templates (/_index_template) instead"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Legacy index templates are deprecated in favor of composable templates.\""
+        ]
+      }
+    },
+    {
+      "req" : "PUT /_template/esm-lt3",
+      "body" : {
+        "settings" : { }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: index patterns are missing;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: index patterns are missing;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Legacy index templates are deprecated in favor of composable templates.\""
+        ]
+      }
+    },
+    {
+      "req" : "PUT /_template/esm-lt3",
+      "body" : {
+        "index_patterns" : [
+          "esm-l3"
+        ],
+        "bogus" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "unknown key [bogus] in the template "
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "unknown key [bogus] in the template "
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Legacy index templates are deprecated in favor of composable templates.\""
+        ]
+      }
+    },
+    {
+      "req" : "PUT /esm-l-1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-l-1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"index [esm-l-1] matches multiple legacy templates [esm-lt1, esm-lt2], composable templates will only match a single template\""
+        ]
+      }
+    },
+    {
+      "req" : "GET /esm-l-1",
+      "status" : 200,
+      "response" : {
+        "esm-l-1" : {
+          "aliases" : {
+            "esm-lal" : { }
+          },
+          "mappings" : {
+            "properties" : {
+              "z" : {
+                "type" : "keyword"
+              }
+            }
+          },
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_content"
+                  }
+                }
+              },
+              "number_of_shards" : "2",
+              "provided_name" : "esm-l-1",
+              "creation_date" : "1792521005113",
+              "number_of_replicas" : "0",
+              "uuid" : "PeM3bH4TS9265nca3wGIFQ",
+              "version" : {
+                "created" : "9111000"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-it3",
+      "body" : {
+        "index_patterns" : [
+          "esm-l-*"
+        ],
+        "priority" : 50
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"index template [esm-it3] has index patterns [esm-l-*] matching patterns from existing older templates [esm-lt1,esm-lt2] with patterns (esm-lt1 => [esm-l-*],esm-lt2 => [esm-l-1*]); this template [esm-it3] will take precedence during new index creation\""
+        ]
+      }
+    },
+    {
+      "req" : "GET /_cat/templates/esm*?v&s=name&h=name,index_patterns,order,version,composed_of",
+      "status" : 200,
+      "text" : "name    index_patterns order version composed_of\nesm-it1 [esm-t-*]      10    7       [esm-ct1, esm-ct2]\nesm-it2 [esm-q*]       0             [esm-ct1]\nesm-it3 [esm-l-*]      50            []\nesm-lt1 [esm-l-*]      2     4       \nesm-lt2 [esm-l-1*]     1             \n",
+      "response_headers" : {
+        "content-type" : "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_template/esm-lt2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_template/esm-nope",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_template_missing_exception",
+              "reason" : "index_template [esm-nope] missing"
+            }
+          ],
+          "type" : "index_template_missing_exception",
+          "reason" : "index_template [esm-nope] missing"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-it1,esm-nope",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_template_missing_exception",
+              "reason" : "index_template [esm-nope] missing"
+            }
+          ],
+          "type" : "index_template_missing_exception",
+          "reason" : "index_template [esm-nope] missing"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-it1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-nope",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_template_missing_exception",
+              "reason" : "index_template [esm-nope] missing"
+            }
+          ],
+          "type" : "index_template_missing_exception",
+          "reason" : "index_template [esm-nope] missing"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-it*",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

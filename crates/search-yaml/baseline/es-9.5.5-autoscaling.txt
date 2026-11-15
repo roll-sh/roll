@@ -1,0 +1,22 @@
+# Tests of Elasticsearch 9.5.5's `autoscaling` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (security roles=x-pack/plugin/autoscaling/src/yamlRestTest/resources/autoscaling-roles.yml users=autoscaling-admin:autoscaling-admin-password:superuser,autoscaling-user:autoscaling-user-password:autoscaling login=autoscaling-user:autoscaling-user-password admin=autoscaling-admin:autoscaling-admin-password).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+autoscaling:autoscaling/delete_autoscaling_policy/Test delete all existing autoscaling policies
+autoscaling:autoscaling/delete_autoscaling_policy/Test delete all non-existing autoscaling policies
+autoscaling:autoscaling/delete_autoscaling_policy/Test delete autoscaling policies by wildcard
+autoscaling:autoscaling/delete_autoscaling_policy/Test delete autoscaling policy
+autoscaling:autoscaling/delete_autoscaling_policy/Test delete non-existent autoscaling policy
+autoscaling:autoscaling/get_autoscaling_capacity/Test get empty autoscaling capacity
+autoscaling:autoscaling/get_autoscaling_capacity/Test get fixed autoscaling capacity
+autoscaling:autoscaling/get_autoscaling_capacity/Test get fixed autoscaling capacity with processors
+autoscaling:autoscaling/get_autoscaling_capacity/Test get single node capacity
+autoscaling:autoscaling/get_autoscaling_policy/Test get autoscaling policy
+autoscaling:autoscaling/get_autoscaling_policy/Test get non-existent autoscaling policy
+autoscaling:autoscaling/put_autoscaling_policy/Test add autoscaling policy with deciders
+autoscaling:autoscaling/put_autoscaling_policy/Test add autoscaling policy with no roles
+autoscaling:autoscaling/put_autoscaling_policy/Test put autoscaling policy
+autoscaling:autoscaling/put_autoscaling_policy/Test put autoscaling policy with bad setting value
+autoscaling:autoscaling/put_autoscaling_policy/Test put autoscaling policy with no default deciders
+autoscaling:autoscaling/put_autoscaling_policy/Test put autoscaling policy with non-existent decider
+autoscaling:autoscaling/put_autoscaling_policy/Test put autoscaling policy with non-existent decider setting
+autoscaling:autoscaling/put_autoscaling_policy/Test put autoscaling policy with non-existent roles

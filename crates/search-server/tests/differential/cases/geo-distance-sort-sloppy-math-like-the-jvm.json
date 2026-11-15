@@ -1,0 +1,240 @@
+{
+  "diff": {
+    "es": 15523267.59921559,
+    "path": ".hits.hits[0].sort[0]",
+    "roll": 15523267.599215603
+  },
+  "found": {
+    "case": 89,
+    "case_seed": 11000122,
+    "seed": 11
+  },
+  "roll": {
+    "body": {
+      "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 1,
+        "total": 1
+      },
+      "hits": {
+        "hits": [
+          {
+            "_id": "20",
+            "_index": "diff-m2-a",
+            "_score": null,
+            "_source": {
+              "dbl0": 104.68,
+              "flt0": 120.42,
+              "geo0": {
+                "lat": 7.12,
+                "lon": -140.13
+              },
+              "kw0": [
+                "delta",
+                "x-2"
+              ],
+              "o": {
+                "int0": 57,
+                "kw0": null
+              },
+              "text0": "cat ran roll quick jumps",
+              "text1": "jumps score data fox apple score"
+            },
+            "sort": [
+              15523267.599215603
+            ]
+          }
+        ],
+        "max_score": null,
+        "total": {
+          "relation": "eq",
+          "value": 1
+        }
+      },
+      "timed_out": false,
+      "took": 0
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "POST _search .hits.hits[].sort[]",
+  "steps": [
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "geo0": {
+              "type": "geo_point"
+            }
+          }
+        },
+        "settings": {
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m2-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m2-a"
+    },
+    {
+      "es": {
+        "body": {
+          "errors": false,
+          "items": [
+            {
+              "index": {
+                "_id": "20",
+                "_index": "diff-m2-a",
+                "_primary_term": 1,
+                "_seq_no": 0,
+                "_shards": {
+                  "failed": 0,
+                  "successful": 1,
+                  "total": 2
+                },
+                "_version": 1,
+                "result": "created",
+                "status": 201
+              }
+            }
+          ],
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "lines": [
+        {
+          "index": {
+            "_id": "20",
+            "_index": "diff-m2-a"
+          }
+        },
+        {
+          "dbl0": 104.68,
+          "flt0": 120.42,
+          "geo0": {
+            "lat": 7.12,
+            "lon": -140.13
+          },
+          "kw0": [
+            "delta",
+            "x-2"
+          ],
+          "o": {
+            "int0": 57,
+            "kw0": null
+          },
+          "text0": "cat ran roll quick jumps",
+          "text1": "jumps score data fox apple score"
+        }
+      ],
+      "method": "POST",
+      "path": "/_bulk"
+    },
+    {
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "successful": 1,
+            "total": 2
+          }
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m2-a/_refresh"
+    },
+    {
+      "body": {
+        "sort": [
+          {
+            "_geo_distance": {
+              "geo0": {
+                "lat": 0.0,
+                "lon": 0.0
+              }
+            }
+          }
+        ]
+      },
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 1,
+            "total": 1
+          },
+          "hits": {
+            "hits": [
+              {
+                "_id": "20",
+                "_index": "diff-m2-a",
+                "_score": null,
+                "_source": {
+                  "dbl0": 104.68,
+                  "flt0": 120.42,
+                  "geo0": {
+                    "lat": 7.12,
+                    "lon": -140.13
+                  },
+                  "kw0": [
+                    "delta",
+                    "x-2"
+                  ],
+                  "o": {
+                    "int0": 57,
+                    "kw0": null
+                  },
+                  "text0": "cat ran roll quick jumps",
+                  "text1": "jumps score data fox apple score"
+                },
+                "sort": [
+                  15523267.59921559
+                ]
+              }
+            ],
+            "max_score": null,
+            "total": {
+              "relation": "eq",
+              "value": 1
+            }
+          },
+          "timed_out": false,
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m2-a/_search"
+    }
+  ]
+}

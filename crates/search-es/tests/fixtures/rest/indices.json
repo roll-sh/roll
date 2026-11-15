@@ -1,0 +1,988 @@
+{
+  "description": "Create, get, exists, delete indices; name and settings validation.",
+  "steps": [
+    {
+      "req": "PUT /esm-a",
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-a"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-a",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "resource_already_exists_exception",
+              "reason": "index [esm-a/Q4Oy1sisTRyNieQ43apZ4A] already exists",
+              "index_uuid": "Q4Oy1sisTRyNieQ43apZ4A",
+              "index": "esm-a"
+            }
+          ],
+          "type": "resource_already_exists_exception",
+          "reason": "index [esm-a/Q4Oy1sisTRyNieQ43apZ4A] already exists",
+          "index_uuid": "Q4Oy1sisTRyNieQ43apZ4A",
+          "index": "esm-a"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-b",
+      "body": {
+        "settings": {
+          "number_of_shards": 3,
+          "number_of_replicas": 0,
+          "index": {
+            "refresh_interval": "5s"
+          }
+        },
+        "mappings": {
+          "properties": {
+            "f": {
+              "type": "keyword"
+            }
+          }
+        },
+        "aliases": {
+          "esm-b-alias": {
+            "is_write_index": true
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-b"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-b",
+      "status": 200,
+      "response": {
+        "esm-b": {
+          "aliases": {
+            "esm-b-alias": {
+              "is_write_index": true
+            }
+          },
+          "mappings": {
+            "properties": {
+              "f": {
+                "type": "keyword"
+              }
+            }
+          },
+          "settings": {
+            "index": {
+              "routing": {
+                "allocation": {
+                  "include": {
+                    "_tier_preference": "data_content"
+                  }
+                }
+              },
+              "refresh_interval": "5s",
+              "number_of_shards": "3",
+              "provided_name": "esm-b",
+              "creation_date": "1792521000565",
+              "number_of_replicas": "0",
+              "uuid": "9lYk7FUzTCeEDkuDP5FRPw",
+              "version": {
+                "created": "9111000"
+              }
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-b?flat_settings=true",
+      "status": 200,
+      "response": {
+        "esm-b": {
+          "aliases": {
+            "esm-b-alias": {
+              "is_write_index": true
+            }
+          },
+          "mappings": {
+            "properties": {
+              "f": {
+                "type": "keyword"
+              }
+            }
+          },
+          "settings": {
+            "index.creation_date": "1792521000565",
+            "index.number_of_replicas": "0",
+            "index.number_of_shards": "3",
+            "index.provided_name": "esm-b",
+            "index.refresh_interval": "5s",
+            "index.routing.allocation.include._tier_preference": "data_content",
+            "index.uuid": "9lYk7FUzTCeEDkuDP5FRPw",
+            "index.version.created": "9111000"
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-a,esm-b?features=aliases",
+      "status": 200,
+      "response": {
+        "esm-a": {
+          "aliases": {},
+          "mappings": {},
+          "settings": {}
+        },
+        "esm-b": {
+          "aliases": {
+            "esm-b-alias": {
+              "is_write_index": true
+            }
+          },
+          "mappings": {},
+          "settings": {}
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-a?features=bogus",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Invalid features specified [bogus]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Invalid features specified [bogus]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-a/_settings?flat_settings=true&include_defaults=true&filter_path=*.defaults.index.number_of*,*.defaults.index.refresh_interval,*.defaults.index.max_result_window",
+      "status": 200,
+      "response": {},
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "HEAD /esm-a",
+      "status": 200,
+      "text": "",
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "HEAD /esm-nope",
+      "status": 404,
+      "text": "",
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-nope",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "index_not_found_exception",
+              "reason": "no such index [esm-nope]",
+              "resource.type": "index_or_alias",
+              "resource.id": "esm-nope",
+              "index_uuid": "_na_",
+              "index": "esm-nope"
+            }
+          ],
+          "type": "index_not_found_exception",
+          "reason": "no such index [esm-nope]",
+          "resource.type": "index_or_alias",
+          "resource.id": "esm-nope",
+          "index_uuid": "_na_",
+          "index": "esm-nope"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-nope?ignore_unavailable=true",
+      "status": 200,
+      "response": {},
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-nope*",
+      "status": 200,
+      "response": {},
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-nope*?allow_no_indices=false",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "index_not_found_exception",
+              "reason": "no such index [esm-nope*]",
+              "resource.type": "index_or_alias",
+              "resource.id": "esm-nope*",
+              "index_uuid": "_na_",
+              "index": "esm-nope*"
+            }
+          ],
+          "type": "index_not_found_exception",
+          "reason": "no such index [esm-nope*]",
+          "resource.type": "index_or_alias",
+          "resource.id": "esm-nope*",
+          "index_uuid": "_na_",
+          "index": "esm-nope*"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_nope",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "invalid_index_name_exception",
+              "reason": "Invalid index name [_nope], must not start with '_'.",
+              "index_uuid": "_na_",
+              "index": "_nope"
+            }
+          ],
+          "type": "invalid_index_name_exception",
+          "reason": "Invalid index name [_nope], must not start with '_'.",
+          "index_uuid": "_na_",
+          "index": "_nope"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /ESM-UPPER",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "invalid_index_name_exception",
+              "reason": "Invalid index name [ESM-UPPER], must be lowercase",
+              "index_uuid": "_na_",
+              "index": "ESM-UPPER"
+            }
+          ],
+          "type": "invalid_index_name_exception",
+          "reason": "Invalid index name [ESM-UPPER], must be lowercase",
+          "index_uuid": "_na_",
+          "index": "ESM-UPPER"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-x*",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "invalid_index_name_exception",
+              "reason": "Invalid index name [esm-x*], must not contain the following characters [' ','\"','*',',','/','<','>','?','\\','|']",
+              "index_uuid": "_na_",
+              "index": "esm-x*"
+            }
+          ],
+          "type": "invalid_index_name_exception",
+          "reason": "Invalid index name [esm-x*], must not contain the following characters [' ','\"','*',',','/','<','>','?','\\','|']",
+          "index_uuid": "_na_",
+          "index": "esm-x*"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /_esm",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "invalid_index_name_exception",
+              "reason": "Invalid index name [_esm], must not start with '_', '-', or '+'",
+              "index_uuid": "_na_",
+              "index": "_esm"
+            }
+          ],
+          "type": "invalid_index_name_exception",
+          "reason": "Invalid index name [_esm], must not start with '_', '-', or '+'",
+          "index_uuid": "_na_",
+          "index": "_esm"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-c",
+      "body": {
+        "settings": {
+          "number_of_shards": 0
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Failed to parse value [0] for setting [index.number_of_shards] must be >= 1"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Failed to parse value [0] for setting [index.number_of_shards] must be >= 1"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-c",
+      "body": {
+        "settings": {
+          "number_of_shards": "x"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Failed to parse value [x] for setting [index.number_of_shards]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Failed to parse value [x] for setting [index.number_of_shards]",
+          "caused_by": {
+            "type": "number_format_exception",
+            "reason": "For input string: \"x\""
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-c",
+      "body": {
+        "settings": {
+          "index.bogus": 1,
+          "index.other": 2
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "unknown setting [index.other] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "unknown setting [index.other] please check that any required plugins are installed, or check the breaking changes documentation for removed settings",
+          "suppressed": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "unknown setting [index.bogus] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
+            }
+          ]
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      },
+      "skip": "Elasticsearch orders the suppressed unknown-setting errors with a per-JVM random hash"
+    },
+    {
+      "req": "PUT /esm-c",
+      "body": {
+        "settings": {
+          "index.uuid": "x"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "unknown setting [index.uuid] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "unknown setting [index.uuid] please check that any required plugins are installed, or check the breaking changes documentation for removed settings"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-c",
+      "body": {
+        "settings": {
+          "index.version.created": "8000099"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "validation_exception",
+              "reason": "Validation Failed: 1: private index setting [index.version.created] can not be set explicitly;"
+            }
+          ],
+          "type": "validation_exception",
+          "reason": "Validation Failed: 1: private index setting [index.version.created] can not be set explicitly;"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-c",
+      "body": {
+        "settings": {
+          "refresh_interval": "5"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse setting [index.refresh_interval] with value [5] as a time value: unit is missing or unrecognized"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse setting [index.refresh_interval] with value [5] as a time value: unit is missing or unrecognized"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-c",
+      "body": {
+        "settings": {
+          "index.codec": "bogus"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "unknown value for [index.codec] must be one of [default, best_compression] but was: bogus"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "unknown value for [index.codec] must be one of [default, best_compression] but was: bogus"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-c",
+      "body": {
+        "bogus": {}
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "unknown key [bogus] for create index"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "unknown key [bogus] for create index"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-c",
+      "body": {
+        "settings": "x"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "key [settings] must be an object"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "key [settings] must be an object"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-c",
+      "body": {
+        "mappings": {
+          "properties": {
+            "f": {
+              "type": "bogus"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "The mapper type [bogus] declared on field [f] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation."
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: The mapper type [bogus] declared on field [f] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation.",
+          "caused_by": {
+            "type": "mapper_parsing_exception",
+            "reason": "The mapper type [bogus] declared on field [f] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation."
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-c",
+      "body": {
+        "settings": {
+          "number_of_shards": 2,
+          "number_of_routing_shards": 3
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "the number of source shards [2] must be a factor of [3]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "the number of source shards [2] must be a factor of [3]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-c",
+      "body": {
+        "settings": {
+          "number_of_shards": 2,
+          "number_of_routing_shards": 8
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-c"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_settings?flat_settings",
+      "status": 200,
+      "response": {
+        "esm-c": {
+          "settings": {
+            "index.creation_date": "1792521000764",
+            "index.number_of_replicas": "1",
+            "index.number_of_shards": "2",
+            "index.provided_name": "esm-c",
+            "index.routing.allocation.include._tier_preference": "data_content",
+            "index.uuid": "LPdD-9QnQU-DyVXVwHo_-A",
+            "index.version.created": "9111000"
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-d?wait_for_active_shards=bogus",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "cannot parse ActiveShardCount[bogus]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "cannot parse ActiveShardCount[bogus]",
+          "caused_by": {
+            "type": "number_format_exception",
+            "reason": "For input string: \"bogus\""
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-d?timeout=5",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse setting [timeout] with value [5] as a time value: unit is missing or unrecognized"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse setting [timeout] with value [5] as a time value: unit is missing or unrecognized"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-b-alias",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "invalid_index_name_exception",
+              "reason": "Invalid index name [esm-b-alias], already exists as alias",
+              "index_uuid": "_na_",
+              "index": "esm-b-alias"
+            }
+          ],
+          "type": "invalid_index_name_exception",
+          "reason": "Invalid index name [esm-b-alias], already exists as alias",
+          "index_uuid": "_na_",
+          "index": "esm-b-alias"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-e",
+      "body": {
+        "aliases": {
+          "esm-b": {}
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "invalid_alias_name_exception",
+              "reason": "Invalid alias name [esm-b]: an index, data stream, ESQL view, or ESQL dataset exists with the same name as the alias"
+            }
+          ],
+          "type": "invalid_alias_name_exception",
+          "reason": "Invalid alias name [esm-b]: an index, data stream, ESQL view, or ESQL dataset exists with the same name as the alias"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-e",
+      "body": {
+        "aliases": {
+          "esm-e": {}
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "alias name [esm-e] self-conflicts with index name"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "alias name [esm-e] self-conflicts with index name"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /%3Cesm-dm-%7Bnow%2Fd%7D%3E",
+      "mask": [
+        "index"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-dm-2026.10.20"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "DELETE /esm-*",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Wildcard expressions or all indices are not allowed"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Wildcard expressions or all indices are not allowed"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "DELETE /esm-b-alias",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "The provided expression [esm-b-alias] matches an alias, specify the corresponding concrete indices instead."
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "The provided expression [esm-b-alias] matches an alias, specify the corresponding concrete indices instead."
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "DELETE /esm-a,esm-nope",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "index_not_found_exception",
+              "reason": "no such index [esm-nope]",
+              "resource.type": "index_or_alias",
+              "resource.id": "esm-nope",
+              "index_uuid": "_na_",
+              "index": "esm-nope"
+            }
+          ],
+          "type": "index_not_found_exception",
+          "reason": "no such index [esm-nope]",
+          "resource.type": "index_or_alias",
+          "resource.id": "esm-nope",
+          "index_uuid": "_na_",
+          "index": "esm-nope"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "DELETE /esm-a,esm-nope?ignore_unavailable=true",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "DELETE /esm-a",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "index_not_found_exception",
+              "reason": "no such index [esm-a]",
+              "resource.type": "index_or_alias",
+              "resource.id": "esm-a",
+              "index_uuid": "_na_",
+              "index": "esm-a"
+            }
+          ],
+          "type": "index_not_found_exception",
+          "reason": "no such index [esm-a]",
+          "resource.type": "index_or_alias",
+          "resource.id": "esm-a",
+          "index_uuid": "_na_",
+          "index": "esm-a"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-b/_mapping",
+      "status": 200,
+      "response": {
+        "esm-b": {
+          "mappings": {
+            "properties": {
+              "f": {
+                "type": "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-b/_alias",
+      "status": 200,
+      "response": {
+        "esm-b": {
+          "aliases": {
+            "esm-b-alias": {
+              "is_write_index": true
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    }
+  ]
+}

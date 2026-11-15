@@ -1,0 +1,1244 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "DELETE",
+      "path": "/hw-sugdfs?ignore_unavailable=true",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/hw-sugdfs",
+      "body": {
+        "settings": {
+          "number_of_shards": 3,
+          "number_of_replicas": 0,
+          "refresh_interval": -1
+        },
+        "mappings": {
+          "properties": {
+            "text0": {
+              "type": "text",
+              "analyzer": "simple"
+            },
+            "comp0": {
+              "type": "completion"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "hw-sugdfs"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "0"
+          }
+        },
+        {
+          "text0": "query dog",
+          "comp0": "query dog"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "1"
+          }
+        },
+        {
+          "text0": "fox engine index engine banana engine query cats quick",
+          "comp0": "fox engine index engine banana engine query cats quick"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "2"
+          }
+        },
+        {
+          "text0": "jumps stream data engine",
+          "comp0": "jumps stream data engine"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "3"
+          }
+        },
+        {
+          "text0": "quick elastic stream apple green apple of Dogs of",
+          "comp0": "quick elastic stream apple green apple of Dogs of"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "4"
+          }
+        },
+        {
+          "text0": "cat dog runs",
+          "comp0": "cat dog runs"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "5"
+          }
+        },
+        {
+          "text0": "the cat sat",
+          "comp0": "the cat sat"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "6"
+          }
+        },
+        {
+          "text0": "dogs and cats",
+          "comp0": "dogs and cats"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "7"
+          }
+        },
+        {
+          "text0": "a quick brown fox",
+          "comp0": "a quick brown fox"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "8"
+          }
+        },
+        {
+          "text0": "cat dog 0",
+          "comp0": "cat dog 0"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "9"
+          }
+        },
+        {
+          "text0": "cat dog 1",
+          "comp0": "cat dog 1"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "10"
+          }
+        },
+        {
+          "text0": "cat dog 2",
+          "comp0": "cat dog 2"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "11"
+          }
+        },
+        {
+          "text0": "cat dog 3",
+          "comp0": "cat dog 3"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "12"
+          }
+        },
+        {
+          "text0": "cat dog 4",
+          "comp0": "cat dog 4"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "13"
+          }
+        },
+        {
+          "text0": "cat dog 5",
+          "comp0": "cat dog 5"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "14"
+          }
+        },
+        {
+          "text0": "cat dog 6",
+          "comp0": "cat dog 6"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "15"
+          }
+        },
+        {
+          "text0": "cat dog 7",
+          "comp0": "cat dog 7"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "16"
+          }
+        },
+        {
+          "text0": "cat dog 8",
+          "comp0": "cat dog 8"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "17"
+          }
+        },
+        {
+          "text0": "cat dog 9",
+          "comp0": "cat dog 9"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "18"
+          }
+        },
+        {
+          "text0": "cat dog 10",
+          "comp0": "cat dog 10"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "19"
+          }
+        },
+        {
+          "text0": "cat dog 11",
+          "comp0": "cat dog 11"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "20"
+          }
+        },
+        {
+          "text0": "quick dog",
+          "comp0": "quick dog"
+        },
+        {
+          "index": {
+            "_index": "hw-sugdfs",
+            "_id": "21"
+          }
+        },
+        {
+          "text0": "quick dogs fast",
+          "comp0": "quick dogs fast"
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "0",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "4",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "5",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "6",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "7",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 5,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "8",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "9",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "10",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "11",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 6,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "12",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "13",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 7,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "14",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "15",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "16",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "17",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 5,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "18",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 8,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "19",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "20",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 9,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-sugdfs",
+                "_id": "21",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 10,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-sugdfs/_search?search_type=query_then_fetch",
+      "body": {
+        "suggest": {
+          "p": {
+            "phrase": {
+              "field": "text0"
+            },
+            "text": "cat dogs"
+          },
+          "t": {
+            "term": {
+              "field": "text0"
+            },
+            "text": "dgo quik"
+          },
+          "c": {
+            "completion": {
+              "field": "comp0"
+            },
+            "prefix": "qu"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 25,
+          "timed_out": false,
+          "_shards": {
+            "total": 3,
+            "successful": 3,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "c": [
+              {
+                "text": "qu",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "query dog",
+                    "_index": "hw-sugdfs",
+                    "_id": "0",
+                    "_score": 1.0,
+                    "_source": {
+                      "text0": "query dog",
+                      "comp0": "query dog"
+                    }
+                  },
+                  {
+                    "text": "quick dog",
+                    "_index": "hw-sugdfs",
+                    "_id": "20",
+                    "_score": 1.0,
+                    "_source": {
+                      "text0": "quick dog",
+                      "comp0": "quick dog"
+                    }
+                  },
+                  {
+                    "text": "quick dogs fast",
+                    "_index": "hw-sugdfs",
+                    "_id": "21",
+                    "_score": 1.0,
+                    "_source": {
+                      "text0": "quick dogs fast",
+                      "comp0": "quick dogs fast"
+                    }
+                  },
+                  {
+                    "text": "quick elastic stream apple green apple of Dogs of",
+                    "_index": "hw-sugdfs",
+                    "_id": "3",
+                    "_score": 1.0,
+                    "_source": {
+                      "text0": "quick elastic stream apple green apple of Dogs of",
+                      "comp0": "quick elastic stream apple green apple of Dogs of"
+                    }
+                  }
+                ]
+              }
+            ],
+            "p": [
+              {
+                "text": "cat dogs",
+                "offset": 0,
+                "length": 8,
+                "options": [
+                  {
+                    "text": "cat dog",
+                    "score": 0.44913682
+                  }
+                ]
+              }
+            ],
+            "t": [
+              {
+                "text": "dgo",
+                "offset": 0,
+                "length": 3,
+                "options": []
+              },
+              {
+                "text": "quik",
+                "offset": 4,
+                "length": 4,
+                "options": [
+                  {
+                    "text": "quick",
+                    "score": 0.75,
+                    "freq": 5
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-sugdfs/_search?search_type=query_then_fetch",
+      "body": {
+        "query": {
+          "match": {
+            "text0": "cat"
+          }
+        },
+        "suggest": {
+          "p": {
+            "phrase": {
+              "field": "text0",
+              "size": 3
+            },
+            "text": "quick dgo"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 20,
+          "timed_out": false,
+          "_shards": {
+            "total": 3,
+            "successful": 3,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 14,
+              "relation": "eq"
+            },
+            "max_score": 0.87568814,
+            "hits": [
+              {
+                "_index": "hw-sugdfs",
+                "_id": "11",
+                "_score": 0.87568814,
+                "_source": {
+                  "text0": "cat dog 3",
+                  "comp0": "cat dog 3"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "13",
+                "_score": 0.87568814,
+                "_source": {
+                  "text0": "cat dog 5",
+                  "comp0": "cat dog 5"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "18",
+                "_score": 0.87568814,
+                "_source": {
+                  "text0": "cat dog 10",
+                  "comp0": "cat dog 10"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "4",
+                "_score": 0.7494973,
+                "_source": {
+                  "text0": "cat dog runs",
+                  "comp0": "cat dog runs"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "5",
+                "_score": 0.7494973,
+                "_source": {
+                  "text0": "the cat sat",
+                  "comp0": "the cat sat"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "9",
+                "_score": 0.7079357,
+                "_source": {
+                  "text0": "cat dog 1",
+                  "comp0": "cat dog 1"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "10",
+                "_score": 0.7079357,
+                "_source": {
+                  "text0": "cat dog 2",
+                  "comp0": "cat dog 2"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "19",
+                "_score": 0.7079357,
+                "_source": {
+                  "text0": "cat dog 11",
+                  "comp0": "cat dog 11"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "8",
+                "_score": 0.074107975,
+                "_source": {
+                  "text0": "cat dog 0",
+                  "comp0": "cat dog 0"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "12",
+                "_score": 0.074107975,
+                "_source": {
+                  "text0": "cat dog 4",
+                  "comp0": "cat dog 4"
+                }
+              }
+            ]
+          },
+          "suggest": {
+            "p": [
+              {
+                "text": "quick dgo",
+                "offset": 0,
+                "length": 9,
+                "options": []
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-sugdfs/_search?search_type=dfs_query_then_fetch",
+      "body": {
+        "suggest": {
+          "p": {
+            "phrase": {
+              "field": "text0"
+            },
+            "text": "cat dogs"
+          },
+          "t": {
+            "term": {
+              "field": "text0"
+            },
+            "text": "dgo quik"
+          },
+          "c": {
+            "completion": {
+              "field": "comp0"
+            },
+            "prefix": "qu"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 20,
+          "timed_out": false,
+          "_shards": {
+            "total": 3,
+            "successful": 3,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "c": [
+              {
+                "text": "qu",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "query dog",
+                    "_index": "hw-sugdfs",
+                    "_id": "0",
+                    "_score": 1.0,
+                    "_source": {
+                      "text0": "query dog",
+                      "comp0": "query dog"
+                    }
+                  },
+                  {
+                    "text": "quick dog",
+                    "_index": "hw-sugdfs",
+                    "_id": "20",
+                    "_score": 1.0,
+                    "_source": {
+                      "text0": "quick dog",
+                      "comp0": "quick dog"
+                    }
+                  },
+                  {
+                    "text": "quick dogs fast",
+                    "_index": "hw-sugdfs",
+                    "_id": "21",
+                    "_score": 1.0,
+                    "_source": {
+                      "text0": "quick dogs fast",
+                      "comp0": "quick dogs fast"
+                    }
+                  },
+                  {
+                    "text": "quick elastic stream apple green apple of Dogs of",
+                    "_index": "hw-sugdfs",
+                    "_id": "3",
+                    "_score": 1.0,
+                    "_source": {
+                      "text0": "quick elastic stream apple green apple of Dogs of",
+                      "comp0": "quick elastic stream apple green apple of Dogs of"
+                    }
+                  }
+                ]
+              }
+            ],
+            "p": [
+              {
+                "text": "cat dogs",
+                "offset": 0,
+                "length": 8,
+                "options": [
+                  {
+                    "text": "cat dog",
+                    "score": 0.44913682
+                  }
+                ]
+              }
+            ],
+            "t": [
+              {
+                "text": "dgo",
+                "offset": 0,
+                "length": 3,
+                "options": []
+              },
+              {
+                "text": "quik",
+                "offset": 4,
+                "length": 4,
+                "options": [
+                  {
+                    "text": "quick",
+                    "score": 0.75,
+                    "freq": 5
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-sugdfs/_search?search_type=dfs_query_then_fetch",
+      "body": {
+        "query": {
+          "match": {
+            "text0": "cat"
+          }
+        },
+        "suggest": {
+          "p": {
+            "phrase": {
+              "field": "text0",
+              "size": 3
+            },
+            "text": "quick dgo"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 16,
+          "timed_out": false,
+          "_shards": {
+            "total": 3,
+            "successful": 3,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 14,
+              "relation": "eq"
+            },
+            "max_score": 0.53418964,
+            "hits": [
+              {
+                "_index": "hw-sugdfs",
+                "_id": "11",
+                "_score": 0.53418964,
+                "_source": {
+                  "text0": "cat dog 3",
+                  "comp0": "cat dog 3"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "13",
+                "_score": 0.53418964,
+                "_source": {
+                  "text0": "cat dog 5",
+                  "comp0": "cat dog 5"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "18",
+                "_score": 0.53418964,
+                "_source": {
+                  "text0": "cat dog 10",
+                  "comp0": "cat dog 10"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "8",
+                "_score": 0.53418964,
+                "_source": {
+                  "text0": "cat dog 0",
+                  "comp0": "cat dog 0"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "12",
+                "_score": 0.53418964,
+                "_source": {
+                  "text0": "cat dog 4",
+                  "comp0": "cat dog 4"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "14",
+                "_score": 0.53418964,
+                "_source": {
+                  "text0": "cat dog 6",
+                  "comp0": "cat dog 6"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "15",
+                "_score": 0.53418964,
+                "_source": {
+                  "text0": "cat dog 7",
+                  "comp0": "cat dog 7"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "16",
+                "_score": 0.53418964,
+                "_source": {
+                  "text0": "cat dog 8",
+                  "comp0": "cat dog 8"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "17",
+                "_score": 0.53418964,
+                "_source": {
+                  "text0": "cat dog 9",
+                  "comp0": "cat dog 9"
+                }
+              },
+              {
+                "_index": "hw-sugdfs",
+                "_id": "9",
+                "_score": 0.53418964,
+                "_source": {
+                  "text0": "cat dog 1",
+                  "comp0": "cat dog 1"
+                }
+              }
+            ]
+          },
+          "suggest": {
+            "p": [
+              {
+                "text": "quick dgo",
+                "offset": 0,
+                "length": 9,
+                "options": []
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/hw-sugdfs",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}
