@@ -308,6 +308,8 @@ export interface DeviceRequest {
   scope?: string | null;
   /** The network it asked from (`203.0.113.0/24`), to tell it isn't yours. */
   network?: string | null;
+  /** Whether it asked from this browser's network: when not, someone may have sent you the code. */
+  same_network?: boolean;
   created_at: number;
   expires_at: number;
 }

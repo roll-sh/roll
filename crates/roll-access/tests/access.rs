@@ -806,11 +806,20 @@ async fn a_device_signs_in_with_a_code() {
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/oauth/devices/{refused}"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(poll(dev["device_code"].as_str().unwrap().to_string()).await.1["error"], "access_denied");
 
-    // Guessing: ten wrong codes a minute, then 429 (the used code above was one).
+    // Only a client registered without a redirect signs devices in.
+    let (_, redirecting) = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "client_name": "web app", "redirect_uris": ["http://127.0.0.1:9/cb"] }))).await;
+    let (_, refused_client) = d.form("/v1/access/oauth/device_authorization", &[("client_id", redirecting["client_id"].as_str().unwrap())]).await;
+    assert_eq!(refused_client["error"], "unauthorized_client", "{refused_client}");
+
+    // Guessing: ten wrong codes a minute (the used code above was one), then 429 for every code,
+    // a live one too, so nothing tells a hit from a miss.
+    let (_, live) = start().await;
     for _ in 0..9 {
         assert_eq!(d.call(OPERATOR, Method::GET, "/v1/access/oauth/devices/BCDF-GHJK", None).await.0, StatusCode::NOT_FOUND);
     }
     assert_eq!(d.call(OPERATOR, Method::GET, "/v1/access/oauth/devices/BCDF-GHJK", None).await.0, StatusCode::TOO_MANY_REQUESTS);
+    let live = live["user_code"].as_str().unwrap();
+    assert_eq!(d.call(OPERATOR, Method::GET, &format!("/v1/access/oauth/devices/{live}"), None).await.0, StatusCode::TOO_MANY_REQUESTS);
 }
 
 fn urlencoding(s: &str) -> String {

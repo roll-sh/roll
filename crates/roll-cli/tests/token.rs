@@ -158,10 +158,25 @@ async fn roll_login_signs_the_cli_in_through_the_browser() {
     let after: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert!(after[&api]["access_token"].as_str().unwrap() != before && after[&api]["expires_at"].as_i64().unwrap() > 0);
 
-    // Signing out revokes the connection, not just this machine's copy.
+    // Signing out revokes the connection, not just this machine's copy, and says so in its log.
     assert!(bare(&["logout"]).output().unwrap().status.success());
     let g: Value = http.get(format!("{api}/v1/access/tokens/{id}")).bearer_auth(OPERATOR).send().await.unwrap().json().await.unwrap();
     assert!(g["revoked_at"].is_number(), "{g}");
+    let mut revoked = false;
+    for _ in 0..50 {
+        let log: Value = http.get(format!("{api}/v1/access/audit?grant={id}")).bearer_auth(OPERATOR).send().await.unwrap().json().await.unwrap();
+        if log.as_array().unwrap().iter().any(|e| e["decision"] == "revoke" && e["args"]["by"] == "its client") {
+            revoked = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(revoked, "the client's revoke is in the token's log");
+    // An address that isn't the server's own (its issuer): no login, so a token is never kept
+    // under, and later sent to, an address other than the one that issued it.
+    let other = api.replace("127.0.0.1", "localhost");
+    let wrong = bare(&["login", "--no-browser"]).env("ROLL_API_URL", &other).stdin(std::process::Stdio::null()).output().unwrap();
+    assert!(!wrong.status.success() && String::from_utf8_lossy(&wrong.stderr).contains("says it's"), "{wrong:?}");
     assert!(!bare(&["db", "list"]).output().unwrap().status.success());
 
     // No browser here: a code to enter on roll, allowed by a person; the CLI's poll takes it.

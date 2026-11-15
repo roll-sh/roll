@@ -105,6 +105,12 @@ function Ask({ code, again }: { code: string; again: () => void }) {
               Only continue if you started this yourself, on a device in front of you, and its code matches. roll never sends you a code to
               enter: someone who asks you to is trying to get into your account.
             </p>
+            {request.network && !request.same_network && (
+              <p className="mt-2 text-[13px] text-danger">
+                It was asked from another network than the one you&apos;re on ({request.network}). That&apos;s expected for a server you
+                reach over SSH; if you didn&apos;t start it there, deny it.
+              </p>
+            )}
           </div>
         </section>
       )}

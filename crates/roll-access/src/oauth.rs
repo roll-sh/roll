@@ -425,10 +425,40 @@ async fn token(State(a): S, headers: HeaderMap, Form(f): Form<HashMap<String, St
     }
 }
 
-/// RFC 7009: always 200, whether or not the token existed.
+/// RFC 7009: always 200, whether or not the token existed. A connection its client ended (`roll
+/// logout`, an MCP client signing out) is in the audit log, as a person's revoke is.
 async fn revoke(State(a): S, Form(f): Form<HashMap<String, String>>) -> Response {
     if let Some(t) = f.get("token").cloned() {
-        let _ = tokio::task::spawn_blocking(move || a.store.revoke_secret(&t)).await;
+        let a2 = a.clone();
+        if let Ok(Ok(Some(id))) = tokio::task::spawn_blocking(move || a2.store.revoke_secret(&t)).await {
+            let a2 = a.clone();
+            let name = tokio::task::spawn_blocking(move || a2.store.get(&id).map(|g| (g.id, g.name))).await;
+            if let Ok(Ok((id, name))) = name {
+                let e = crate::store::AuditEvent {
+                    id: crate::new_id("aud"),
+                    at: code_sql::now_ms(),
+                    grant_id: Some(id),
+                    grant_name: Some(name),
+                    source: "access".into(),
+                    tool: None,
+                    method: "POST".into(),
+                    route: "/v1/access/oauth/revoke".into(),
+                    product: Some("access".into()),
+                    action: Some("admin".into()),
+                    resource: None,
+                    decision: "revoke".into(),
+                    approval: None,
+                    status: 200,
+                    args: Some(json!({ "by": "its client" })),
+                    ip: None,
+                    duration_ms: 0,
+                    client: None,
+                };
+                if let Some(e) = a.store.queue_audit(e) {
+                    let _ = tokio::task::spawn_blocking(move || a.store.audit(&e)).await;
+                }
+            }
+        }
     }
     StatusCode::OK.into_response()
 }
@@ -454,7 +484,10 @@ async fn device_authorization(State(a): S, req: axum::extract::Request) -> Respo
     // A scope is a hint for the page's preset: words only.
     let scope = f.get("scope").filter(|s| s.len() <= 200 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | ':'))).cloned();
     match known_client(&a, &client_id).await {
-        Ok(Some(_)) => {}
+        // Only a client registered to sign devices in (no redirect): one registered with a
+        // redirect is bound to it, and doesn't get tokens around it.
+        Ok(Some(c)) if c.redirect_uris.is_empty() => {}
+        Ok(Some(_)) => return Error::OAuth("unauthorized_client", "this client signs in with a redirect: register one without redirect_uris for the device flow".into()).into_response(),
         Ok(None) => return Error::OAuth("invalid_client", "unknown client_id: register first".into()).into_response(),
         Err(e) => return e.into_response(),
     }
@@ -487,6 +520,12 @@ async fn device_lookup(a: &Arc<Access>, ext: &Extensions, typed: &str) -> crate:
     if let crate::api::Who::Grant(_) = crate::api::who(a, ext)? {
         return Err(Error::Forbidden("a token never signs a device in".into()));
     }
+    // Past the limit, every code is refused, a right one too: otherwise guessing goes on at
+    // request rate, and a 200 among the 429s says which guess was live.
+    let key = crate::api::actor(ext);
+    if a.device_guesses.lock().unwrap_or_else(|e| e.into_inner()).full(&key, code_sql::now_ms(), GUESSES_PER_MINUTE) {
+        return Err(Error::TooMany("too many wrong codes: wait a minute".into()));
+    }
     let found = match crate::store::normalize_user_code(typed) {
         Some(code) => {
             let a2 = a.clone();
@@ -497,9 +536,7 @@ async fn device_lookup(a: &Arc<Access>, ext: &Extensions, typed: &str) -> crate:
     if let Some(r) = found {
         return Ok(r);
     }
-    if a.device_guesses.lock().unwrap_or_else(|e| e.into_inner()).admit(&crate::api::actor(ext), code_sql::now_ms(), GUESSES_PER_MINUTE).is_err() {
-        return Err(Error::TooMany("too many wrong codes: wait a minute".into()));
-    }
+    let _ = a.device_guesses.lock().unwrap_or_else(|e| e.into_inner()).admit(&key, code_sql::now_ms(), GUESSES_PER_MINUTE);
     Err(Error::NotFound("no device waits for that code: check it on the device, or start again there".into()))
 }
 
@@ -507,11 +544,14 @@ async fn device_lookup(a: &Arc<Access>, ext: &Extensions, typed: &str) -> crate:
 pub async fn device_view(State(a): S, ext: Extensions, axum::extract::Path(code): axum::extract::Path<String>) -> crate::Result<Json<Value>> {
     let r = device_lookup(&a, &ext, &code).await?;
     let client = known_client(&a, &r.client_id).await?.ok_or_else(|| Error::NotFound("the device's client is gone".into()))?;
+    let here = ext.get::<roll_auth::ClientIp>().and_then(|c| crate::store::network_of(&c.0.to_string()));
     Ok(Json(json!({
         "user_code": crate::store::show_user_code(&r.user_code),
         "client": { "id": client.id, "name": client.name, "uri": client.uri },
         "scope": r.scope,
         "network": r.network,
+        // Asked from another network than this browser's: someone may have sent the code.
+        "same_network": r.network.is_some() && r.network == here,
         "created_at": r.created_at,
         "expires_at": r.expires_at,
     })))
@@ -525,12 +565,12 @@ pub async fn device_approve(State(a): S, ext: Extensions, axum::extract::Path(co
     let client = known_client(&a, &r.client_id).await?.ok_or_else(|| Error::NotFound("the device's client is gone".into()))?;
     let Consented { new, by, user, asker } = consented(&a, &ext, &client, &allowed)?;
     let waits = asker.is_some();
-    let client_name = client.name.clone();
+    let (client_name, asked_from) = (client.name.clone(), r.network.clone());
     let a2 = a.clone();
     let grant_id = tokio::task::spawn_blocking(move || a2.store.approve_device(&r.user_code, &client, &new, crate::store::Issuer { created_by: &by, user: user.as_deref() }))
         .await
         .map_err(|e| Error::Internal(e.to_string()))??;
-    tell_consented(&a, &ext, asker, grant_id.clone(), crate::api::Added::Device(&client_name)).await;
+    tell_consented(&a, &ext, asker, grant_id.clone(), crate::api::Added::Device { client: &client_name, asked_from: asked_from.as_deref() }).await;
     let mut res = Json(json!({ "grant_id": grant_id, "pending": waits })).into_response();
     res.extensions_mut().insert(crate::api::Changed(grant_id));
     Ok(res)

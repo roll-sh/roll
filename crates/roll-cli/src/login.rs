@@ -69,8 +69,11 @@ fn save(all: &BTreeMap<String, Saved>) -> anyhow::Result<()> {
     let path = logins_path()?;
     let dir = path.parent().context("the config path has no directory")?;
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let tmp = dir.join(format!(".logins.json.{}", std::process::id()));
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+    // A fresh file of our own: never one someone left there, never through a symlink, 0600 even
+    // when a umask or an old file would say otherwise.
+    let tmp = dir.join(format!(".logins.json.{}", random(9)));
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+    f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     f.write_all(serde_json::to_string_pretty(all)?.as_bytes())?;
     f.sync_all()?;
     std::fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
@@ -118,7 +121,14 @@ fn random(n: usize) -> String {
 
 /// The access token of this API's login, refreshed when it ends within a minute; `None` when
 /// there's no login, or it ended (said once on stderr: the command goes on without it).
-pub async fn token(api: &str, http: &reqwest::Client) -> Option<String> {
+/// The client OAuth's calls go through: it never follows a redirect (a 307 from a token endpoint
+/// would send the refresh token wherever it points).
+fn oauth_client() -> reqwest::Client {
+    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap_or_default()
+}
+
+pub async fn token(api: &str) -> Option<String> {
+    let http = &oauth_client();
     let fresh = |s: &Saved| s.expires_at - now_ms() > 60_000;
     match load() {
         Ok(all) => match all.get(api) {
@@ -193,17 +203,23 @@ fn parse_callback(url: &url::Url) -> Callback {
     Callback { code: get("code"), state: get("state"), iss: get("iss"), error: get("error_description").or(get("error")) }
 }
 
-/// The first request to `/callback` on the loopback listener; other paths (a favicon) get a 404.
-async fn serve_callback(listener: tokio::net::TcpListener, base: &str) -> anyhow::Result<url::Url> {
+/// The next request to `/callback` on the loopback listener; other paths (a favicon) get a 404.
+/// A connection has 5 seconds to send its request line, so one that sends nothing stalls nothing.
+async fn serve_callback(listener: &tokio::net::TcpListener, base: &str) -> anyhow::Result<url::Url> {
     loop {
         let (mut conn, _) = listener.accept().await?;
         let mut buf = vec![0u8; 8192];
         let mut n = 0;
-        while n < buf.len() && !buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
-            match conn.read(&mut buf[n..]).await {
-                Ok(0) | Err(_) => break,
-                Ok(m) => n += m,
+        let read = async {
+            while n < buf.len() && !buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                match conn.read(&mut buf[n..]).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(m) => n += m,
+                }
             }
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(5), read).await.is_err() {
+            continue;
         }
         let head = String::from_utf8_lossy(&buf[..n]);
         let target = head.lines().next().and_then(|l| l.split(' ').nth(1)).unwrap_or("");
@@ -218,22 +234,20 @@ async fn serve_callback(listener: tokio::net::TcpListener, base: &str) -> anyhow
     }
 }
 
-/// A line pasted on stdin: the address the browser ended on, from a browser on another machine.
-async fn pasted() -> anyhow::Result<url::Url> {
-    // A thread of its own, not `spawn_blocking`: the runtime would wait for it at exit, and a
-    // login the browser answered must not wait for Enter.
-    let (tx, rx) = tokio::sync::oneshot::channel();
+/// Lines pasted on stdin (the address a browser on another machine ended on), from one thread of
+/// its own, not `spawn_blocking`: the runtime would wait for it at exit, and a login the browser
+/// answered must not wait for Enter. The channel closes at the end of input.
+fn pasted_lines() -> tokio::sync::mpsc::UnboundedReceiver<String> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = tx.send(std::io::stdin().read_line(&mut s).map(|_| s));
+        for line in std::io::stdin().lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
     });
-    let line = rx.await.unwrap_or_else(|_| Ok(String::new()))?;
-    let line = line.trim();
-    if line.is_empty() {
-        // No terminal to paste in: only the browser can answer.
-        std::future::pending::<()>().await;
-    }
-    url::Url::parse(line).context("that isn't the address the browser ended on")
+    rx
 }
 
 fn hostname() -> String {
@@ -290,13 +304,37 @@ fn saved(v: &Value, client_id: String, server: &Server) -> anyhow::Result<Saved>
     })
 }
 
+/// The server is the API this login is for (RFC 8414 3.3: its issuer is the address asked), and
+/// what gets tokens is on that origin. Otherwise one roll's metadata could name another's
+/// endpoints: the login, a real token, would be kept under the first's address and sent there.
+fn trusted(api: &str, server: &Server) -> anyhow::Result<()> {
+    let issuer = server.issuer.as_deref().unwrap_or_default().trim_end_matches('/');
+    if issuer != api {
+        bail!("{api} says it's {}: sign in to that address (ROLL_API_URL={})", if issuer.is_empty() { "nothing" } else { issuer }, if issuer.is_empty() { api } else { issuer });
+    }
+    let origin = |u: &str| url::Url::parse(u).ok().map(|u| u.origin());
+    let ours = origin(api);
+    for (what, u) in [("token", Some(&server.token)), ("registration", Some(&server.register)), ("revocation", Some(&server.revocation)), ("device authorization", server.device.as_ref())] {
+        if let Some(u) = u
+            && (ours.is_none() || origin(u) != ours)
+        {
+            bail!("{api}'s {what} endpoint is elsewhere ({u}): not signing in");
+        }
+    }
+    if !matches!(url::Url::parse(&server.authorize).map(|u| u.scheme().to_string()).as_deref(), Ok("https" | "http")) {
+        bail!("{api}'s sign-in page isn't a web address: not opening it");
+    }
+    Ok(())
+}
+
 /// Open `url` in this machine's browser: `$BROWSER` when set (as `gh` does), else the system's.
 fn open_browser(url: &str) -> bool {
     let opener = std::env::var("BROWSER").ok().filter(|b| !b.trim().is_empty()).unwrap_or_else(|| if cfg!(target_os = "macos") { "open" } else { "xdg-open" }.into());
     std::process::Command::new(opener).arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
-pub async fn login(api: &str, http: &reqwest::Client, json_out: bool, l: Login) -> anyhow::Result<()> {
+pub async fn login(api: &str, json_out: bool, l: Login) -> anyhow::Result<()> {
+    let http = &oauth_client();
     let meta = get_json(http, &format!("{api}/.well-known/oauth-authorization-server")).await.context("this roll doesn't sign in through the browser")?;
     let server = Server {
         issuer: meta["issuer"].as_str().map(str::to_string),
@@ -306,6 +344,7 @@ pub async fn login(api: &str, http: &reqwest::Client, json_out: bool, l: Login) 
         revocation: str_of(&meta, "revocation_endpoint")?,
         device: meta["device_authorization_endpoint"].as_str().map(str::to_string),
     };
+    trusted(api, &server)?;
     // Over SSH the browser is on another machine: a code to enter there beats a redirect to a
     // port it can't reach (as `gh auth login` does).
     let remote = std::env::var_os("SSH_CONNECTION").is_some() && std::env::var_os("BROWSER").is_none();
@@ -390,17 +429,32 @@ async fn browser_flow(http: &reqwest::Client, server: &Server, scope: &str, no_b
         eprintln!("Open this address in a browser (any machine) and choose what this CLI may do:\n\n  {url}\n");
         eprintln!("If the browser isn't on this machine, paste the address it ends on (http://127.0.0.1…) here:");
     }
-    let back = tokio::select! {
-        r = serve_callback(listener, &base) => r?,
-        r = pasted() => r?,
-        _ = tokio::time::sleep(std::time::Duration::from_secs(600)) => bail!("no answer from the browser in 10 minutes: run `roll login` again"),
+    // Until an answer for this login comes: one whose state isn't ours (a stray tab, a page that
+    // found the port) is ignored, not the end of the login.
+    let mut lines = pasted_lines();
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(600));
+    tokio::pin!(deadline);
+    let cb = loop {
+        let back = tokio::select! {
+            r = serve_callback(&listener, &base) => r?,
+            Some(line) = lines.recv() => match url::Url::parse(line.trim()) {
+                Ok(u) => u,
+                Err(_) if line.trim().is_empty() => continue,
+                Err(_) => {
+                    eprintln!("That isn't the address the browser ended on: paste all of it.");
+                    continue;
+                }
+            },
+            _ = &mut deadline => bail!("no answer from the browser in 10 minutes: run `roll login` again"),
+        };
+        let cb = parse_callback(&back);
+        if cb.state.as_deref() == Some(state.as_str()) {
+            break cb;
+        }
+        eprintln!("Ignored an answer that isn't for this login.");
     };
-    let cb = parse_callback(&back);
     if let Some(e) = cb.error {
         bail!("not signed in: {e}");
-    }
-    if cb.state.as_deref() != Some(state.as_str()) {
-        bail!("the answer isn't for this login (its state doesn't match): run `roll login` again");
     }
     // RFC 9207: the answer names who issued it, and it's who we asked.
     if let (Some(iss), Some(want)) = (&cb.iss, &server.issuer)
@@ -448,7 +502,8 @@ async fn finish(api: &str, http: &reqwest::Client, json_out: bool, saved: Saved)
     Ok(())
 }
 
-pub async fn logout(api: &str, http: &reqwest::Client, json_out: bool) -> anyhow::Result<()> {
+pub async fn logout(api: &str, json_out: bool) -> anyhow::Result<()> {
+    let http = &oauth_client();
     let gone = {
         let _lock = Lock::take()?;
         let mut all = load()?;
