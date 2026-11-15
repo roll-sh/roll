@@ -599,12 +599,15 @@ per ten minutes and 20 a person an hour; workload tokens capped per owner and a 
 before the limit; a refresh token's retry within its grace audited; apps settings that change what
 production runs, its source, build, start and pre-deploy commands, schedule, kind, port, volume and
 `run.public`, are deploy; `create_grant` refuses extensions that name no caller; the expiry digest
-leaves out tokens made for a day or less); an apps service's run settings fail closed: only size,
-scale, health checks, timers, alerts, rollout and restarts are write, every other run key is deploy,
-a new one too until it's listed (a list of deploy keys let `run.tcp`, a port on the internet,
-through as write, as it had `run.schedules`) (#24); setting a service's `run.schedules` (apps-next:
-commands run as jobs of the live deployment on a timer) is deploy, as a production job is (it was
-write: a token that couldn't run one production job could schedule one every minute), and
+leaves out tokens made for a day or less); Redis's `@dangerous` commands are admin (`MONITOR` and
+`SYNC` stream everyone's commands and data, `CLIENT` ends other connections, `SLOWLOG` shows others'
+arguments: they were write) and `SWAPDB` is delete; `run.rollback_on_crash` is deploy (it puts an
+older deployment live by itself; apps' review) (#24); an apps service's run settings fail closed:
+only size, scale, health checks, timers, alerts, rollout and restarts are write, every other run key
+is deploy, a new one too until it's listed (a list of deploy keys let `run.tcp`, a port on the
+internet, through as write, as it had `run.schedules`) (#24); setting a service's `run.schedules`
+(apps-next: commands run as jobs of the live deployment on a timer) is deploy, as a production job
+is (it was write: a token that couldn't run one production job could schedule one every minute), and
 `apps_update_service` says how to set it; `secrets_get_values` (one reveal for an environment, not
 one per key), `secrets_list_leases` and `secrets_end_lease`, and the secrets tools' descriptions
 brought up to date (secrets' seventeenth review) (#24); `secrets_set`, `secrets_delete` and
