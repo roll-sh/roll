@@ -731,6 +731,18 @@ impl DvNum {
         (s.global_doc_count() > 0).then(|| (s.global_min_value(), s.global_max_value()))
     }
 
+    /// The value of each doc of `docs` (any order) into `out` when every doc of the segment has
+    /// exactly one: [`load_batch`](Self::load_batch) without the positions and counts.
+    /// `false` (load the batch instead) otherwise.
+    #[inline]
+    pub fn load_every(&self, docs: &[u32], out: &mut Vec<i64>) -> bool {
+        match self {
+            DvNum::None => false,
+            DvNum::Single(n) => n.get_every(docs, out),
+            DvNum::Multi(m) => m.get_every(docs, out),
+        }
+    }
+
     /// Decodes the values of every doc of `docs` (non-decreasing) at once into `b`: one
     /// dispatch on the encoding and no per-doc rank lookups on dense fields (see
     /// [`DvBatch::fill`]).
@@ -900,6 +912,21 @@ impl Decode {
             Decode::HalfFloat => encode::sortable_f16(v as i16) as f64,
             // `ScaledFloatLeafFieldData`: times the inverse, which rounds unlike a division.
             Decode::Scaled(f) => v as f64 * (1.0 / f),
+        }
+    }
+
+    /// [`to_f64`](Self::to_f64) of each of `raw` into `out` (replacing it): the decoding is
+    /// picked once, and a scaled float's inverse computed once.
+    pub fn to_f64_into(self, raw: &[i64], out: &mut Vec<f64>) {
+        out.clear();
+        match self {
+            Decode::Long => out.extend(raw.iter().map(|&v| v as f64)),
+            Decode::Double => out.extend(raw.iter().map(|&v| encode::sortable_f64(v))),
+            Decode::Scaled(f) => {
+                let inverse = 1.0 / f;
+                out.extend(raw.iter().map(|&v| v as f64 * inverse));
+            }
+            other => out.extend(raw.iter().map(|&v| other.to_f64(v))),
         }
     }
 }

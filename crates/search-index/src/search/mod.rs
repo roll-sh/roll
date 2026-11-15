@@ -230,6 +230,15 @@ pub trait Scorer: Scorable + Send {
         }
     }
 
+    /// Fills `out` with the current doc and the following matches below `upto` that are live,
+    /// and leaves the scorer on the doc after the last one written; returns how many it wrote
+    /// (0: no match is left below `upto`). The scorer must be positioned. Doc-set scorers
+    /// override it to read their set a word at a time (Lucene's `DocIdStream` over a bit set);
+    /// the default iterates.
+    fn next_block(&mut self, upto: u32, live: Option<&LiveDocs>, out: &mut [u32]) -> usize {
+        next_block_per_doc(self, upto, live, out)
+    }
+
     /// Keeps the docs of the sorted batch `docs[..len]` this scorer matches, in order, adding
     /// its score to theirs in `scores`, and returns how many remain (Lucene's
     /// `ScorerUtil.applyRequiredClause`). Moves the scorer forward only. Term scorers override
@@ -261,6 +270,20 @@ pub fn apply_filter_per_doc<S: Scorer + ?Sized>(s: &mut S, docs: &mut [u32], sco
         }
     }
     k
+}
+
+/// [`Scorer::next_block`]'s default: a `next` per doc.
+pub fn next_block_per_doc<S: Scorer + ?Sized>(s: &mut S, upto: u32, live: Option<&LiveDocs>, out: &mut [u32]) -> usize {
+    let mut n = 0;
+    let mut d = s.doc();
+    while d < upto && n < out.len() {
+        if live.is_none_or(|l| l.is_live(d)) {
+            out[n] = d;
+            n += 1;
+        }
+        d = s.next();
+    }
+    n
 }
 
 /// [`Scorer::apply_required`] a doc at a time.
@@ -429,14 +452,8 @@ impl BulkScorer for DefaultBulkScorer {
         if let Some(score) = s.constant_score() {
             let mut block = [0u32; 256];
             while d < max {
-                let mut n = 0;
-                while n < block.len() && d < max {
-                    if live.is_none_or(|l| l.is_live(d)) {
-                        block[n] = d;
-                        n += 1;
-                    }
-                    d = s.next();
-                }
+                let n = s.next_block(max, live, &mut block);
+                d = s.doc();
                 if n > 0 {
                     collector.collect_block(&block[..n], score)?;
                 }
