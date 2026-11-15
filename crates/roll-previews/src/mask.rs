@@ -1,6 +1,7 @@
 //! Postgres column masks for a preview's branch (`masking` rules for `postgres:<ref>`): the
 //! columns are rewritten in the branch, once it's made or reset and before anything serves it.
-//! The parent is never touched. NoSQL masks are a read policy instead (`Brancher::mask`).
+//! The parent is never touched. NoSQL masks are a read policy instead (`Brancher::mask`), which
+//! can't hide a key column ([`nosql_key_masks`]).
 
 use std::collections::BTreeMap;
 
@@ -91,8 +92,103 @@ fn literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+/// The NoSQL masks (`keyspace.table.column`) that name a column of a primary key, in the
+/// parent's schema (roll nosql's `/schema`): the table, or a view of it keyed by that column,
+/// can't be read with it masked (a key reaches its reader however the rows are masked), so the
+/// preview's pages would fail. One line per problem; columns the schema doesn't have yet (a
+/// migration may add them) are none.
+pub fn nosql_key_masks(schema: &serde_json::Value, columns: &BTreeMap<String, String>) -> Vec<String> {
+    let has = |t: &serde_json::Value, column: &str| {
+        ["partition_key", "clustering_key"].iter().any(|k| t[k].as_array().is_some_and(|a| a.iter().any(|c| c == column)))
+    };
+    let mut out = Vec::new();
+    for path in columns.keys() {
+        let mut parts = path.splitn(3, '.');
+        let (Some(ks), Some(table), Some(column)) = (parts.next(), parts.next(), parts.next()) else { continue };
+        let Some(k) = schema["keyspaces"].as_array().into_iter().flatten().find(|k| k["name"] == ks) else { continue };
+        let tables = k["tables"].as_array().into_iter().flatten();
+        if tables.filter(|t| t["name"] == table).any(|t| has(t, column)) {
+            out.push(format!("{path} is in {ks}.{table}'s primary key, and a table can't be read with a key column masked: mask its other columns"));
+            continue;
+        }
+        for v in k["views"].as_array().into_iter().flatten().filter(|v| v["base_table"] == table && has(v, column)) {
+            out.push(format!("{path} is in the key of the view {ks}.{}, which can't be read with it masked: mask other columns, or drop the view from what the preview reads", v["name"].as_str().unwrap_or_default()));
+        }
+    }
+    out
+}
+
+/// A search mask's index and field (`index.field`): an index name can hold dots (`logs.2024`), so
+/// the split is after the longest prefix that's one of `indices` (the cluster's), else at the
+/// first dot.
+pub fn split_mask<'a>(spec: &'a str, indices: &[String]) -> Option<(&'a str, &'a str)> {
+    let longest = spec.match_indices('.').map(|(i, _)| i).filter(|&i| indices.iter().any(|x| x == &spec[..i])).max();
+    match longest {
+        Some(i) => Some((&spec[..i], &spec[i + 1..])),
+        None => spec.split_once('.'),
+    }
+}
+
+/// Search field masks that can't work against a `_mapping` answer (index → `mappings`): `redact`
+/// and `email` write a string, which only a text-like field takes (a `dense_vector`, a number, a
+/// date would refuse it and fail the masking, and the preview with it); such a field can only be
+/// `remove`d. One line per problem; a field the mapping doesn't have yet (a document may add it)
+/// is none.
+/// `indices`: the cluster's, so an index whose name has dots is split off whole ([`split_mask`]).
+pub fn search_field_masks(mapping: &serde_json::Value, fields: &BTreeMap<String, String>, indices: &[String]) -> Vec<String> {
+    // The types a string goes into (`constant_keyword` takes only its one value, so not it).
+    const TEXT: [&str; 8] = ["text", "keyword", "match_only_text", "wildcard", "search_as_you_type", "semantic_text", "completion", "token_count"];
+    let mut out = Vec::new();
+    for (spec, rule) in fields {
+        if rule == "remove" {
+            continue;
+        }
+        let Some((index, path)) = split_mask(spec, indices) else { continue };
+        // The index as named, or every index an alias or pattern answered for (`GET /<it>/_mapping`
+        // is keyed by the real names): the first that says the field isn't text.
+        let named: Vec<&serde_json::Value> = match mapping.get(index) {
+            Some(m) => vec![m],
+            None => mapping.as_object().into_iter().flatten().map(|(_, m)| m).collect(),
+        };
+        let Some(props) = named.iter().map(|m| &m["mappings"]["properties"]).find(|props| field_type(props, path).is_some_and(|t| !TEXT.contains(&t.as_str()) && t != "?")).or_else(|| named.first().map(|m| &m["mappings"]["properties"])) else { continue };
+        if let Some(t) = field_type(props, path).filter(|t| !TEXT.contains(&t.as_str()) && t != "?") {
+            let a = if t.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+            out.push(format!("{spec} is {a} {t} field: {rule} writes a string it won't take; use remove"));
+        }
+    }
+    out
+}
+
+/// A field's mapping type down `path` through objects' `properties` (nested ones too), if the
+/// mapping has it.
+fn field_type(props: &serde_json::Value, path: &str) -> Option<String> {
+    let mut at = props;
+    let parts: Vec<&str> = path.split('.').collect();
+    for (i, part) in parts.iter().enumerate() {
+        let f = at.get(*part)?;
+        if i == parts.len() - 1 {
+            return Some(f["type"].as_str().unwrap_or(if f.get("properties").is_some() { "object" } else { "?" }).to_string());
+        }
+        at = &f["properties"];
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_nosql_mask_on_a_key_column_is_named() {
+        let schema = serde_json::json!({ "keyspaces": [{ "name": "app",
+            "tables": [{ "name": "users", "partition_key": ["id"], "clustering_key": [] }],
+            "views": [{ "name": "users_by_email", "base_table": "users", "partition_key": ["email"], "clustering_key": ["id"] }],
+        }]});
+        let masks = |cols: &[&str]| cols.iter().map(|c| (c.to_string(), "mask_default()".to_string())).collect();
+        let got = super::nosql_key_masks(&schema, &masks(&["app.users.id", "app.users.email", "app.users.name", "app.later.x", "other.t.c"]));
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got[0].starts_with("app.users.email is in the key of the view app.users_by_email"), "{got:?}");
+        assert!(got[1].starts_with("app.users.id is in app.users's primary key"), "{got:?}");
+    }
+
     use std::collections::BTreeMap;
 
     /// Rules become one transaction per branch, names and values quoted whatever they hold.
@@ -117,5 +213,44 @@ mod tests {
         assert!(p.update.contains(r#"UPDATE "app"."we""ird" SET "ip" = NULL"#), "a quote in a name stays a name: {}", p.update);
         assert_eq!(p.after.len(), 4, "two tables' vacuums, the views, a checkpoint");
         assert!(super::postgres(&[("a.b.c".to_string(), "mask_default()".to_string())].into_iter().collect(), "s").is_err());
+    }
+
+    /// An index whose name has dots is split off whole; with no such index, at the first dot.
+    #[test]
+    fn a_dotted_index_name_is_split_off_whole() {
+        let indices = vec!["logs".to_string(), "logs.2024".to_string()];
+        assert_eq!(super::split_mask("logs.2024.user.email", &indices), Some(("logs.2024", "user.email")));
+        assert_eq!(super::split_mask("logs.level", &indices), Some(("logs", "level")));
+        assert_eq!(super::split_mask("other.a.b", &indices), Some(("other", "a.b")));
+        assert_eq!(super::split_mask("nodot", &indices), None);
+    }
+
+    /// A string mask on a vector, a number or an object is named with what it is; on text, or
+    /// `remove` on anything, or a field the mapping doesn't have, it isn't.
+    #[test]
+    fn search_masks_only_write_strings_into_text() {
+        let mapping = serde_json::json!({ "products": { "mappings": { "properties": {
+            "name": { "type": "text" }, "sku": { "type": "keyword" }, "emb": { "type": "dense_vector", "dims": 3 },
+            "price": { "type": "float" }, "owner": { "properties": { "email": { "type": "keyword" }, "age": { "type": "integer" } } },
+        } } } });
+        let rules: BTreeMap<String, String> = [
+            ("products.name", "redact"), ("products.sku", "email"), ("products.emb", "redact"), ("products.price", "remove"),
+            ("products.owner.email", "email"), ("products.owner.age", "redact"), ("products.owner", "redact"), ("products.later", "redact"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        assert_eq!(
+            super::search_field_masks(&mapping, &rules, &[]),
+            [
+                "products.emb is a dense_vector field: redact writes a string it won't take; use remove",
+                "products.owner is an object field: redact writes a string it won't take; use remove",
+                "products.owner.age is an integer field: redact writes a string it won't take; use remove",
+            ]
+        );
+        // An alias answers with its real index's name: that one is checked.
+        let aliased = serde_json::json!({ "products-v2": { "mappings": { "properties": { "emb": { "type": "dense_vector" } } } } });
+        let rule: BTreeMap<String, String> = [("products.emb".to_string(), "redact".to_string())].into_iter().collect();
+        assert_eq!(super::search_field_masks(&aliased, &rule, &[]).len(), 1, "through the alias");
     }
 }

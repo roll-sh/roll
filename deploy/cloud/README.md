@@ -267,6 +267,8 @@ running tag's `fetch-<tag>`; deploys don't touch them.
 | `roll-cloud-latency` | the slowest p99 time to the response head of code, postgres, redis, storage, nosql or tasks above `LatencyP99Ms`, in 3 of 5 minutes | yes |
 | `roll-cloud-handoff-failures` | a lease handoff failed (timed out with requests in flight, its release not written, or left by a drain), in the last 5 minutes | yes |
 | `roll-cloud-lease-takeovers` | a node took over leases their holder never released (it died or lost DynamoDB), in the last 5 minutes | yes |
+| `roll-cloud-preview-converge-failures` | over half of roll previews' converges failed, with at least 10 in each of three 5-minute periods (one project's broken `roll.toml` fails only its own) | no |
+| `roll-cloud-preview-screenshot-failures` | over half of roll previews' screenshots failed, with at least 4 in each of three 5-minute periods | no |
 
 The bake watches every alarm in the `DeployAlarms` output; ECS rolls a deploy back on all but
 `healthy-nodes`. The request and lease metrics come from rolld's JSON logs as Embedded Metric

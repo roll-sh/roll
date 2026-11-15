@@ -447,7 +447,7 @@ impl Code {
 
     /// Where `head` left the default branch: its first ancestor (first-parent walk) that's on
     /// the default branch.
-    pub(crate) fn merge_base(&self, r: &RepoRow, head: &ChangesetId) -> Result<Option<ChangesetId>> {
+    pub fn merge_base(&self, r: &RepoRow, head: &ChangesetId) -> Result<Option<ChangesetId>> {
         let Some(main) = self.head(r)? else { return Ok(None) };
         let mut cur = Some(*head);
         for _ in 0..MAX_MERGE_BASE_WALK {
