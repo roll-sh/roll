@@ -218,6 +218,10 @@ impl UserDict {
         if entries.is_empty() {
             return Ok(None);
         }
+        // Lucene sorts by the first field, which a line with an odd number of quotes lacks.
+        if entries.iter().any(Vec::is_empty) {
+            return Err(AnalysisError::other("array_index_out_of_bounds_exception", 500, "Index 0 out of bounds for length 0"));
+        }
         // `String.compareTo`: UTF-16 order.
         entries.sort_by(|a, b| a[0].encode_utf16().cmp(b[0].encode_utf16()));
         let mut word_id = CUSTOM_DICTIONARY_WORD_ID_OFFSET;
@@ -251,6 +255,18 @@ impl UserDict {
                 return Err(AnalysisError::other("runtime_exception", 500, format!(
                     "Illegal user dictionary entry {} - the concatenated segmentation ({}) does not match the surface form ({})",
                     values[0], concatenated, surface
+                )));
+            }
+            // The segments are cut from the matched surface, so they must fit in it (Lucene
+            // accepts the entry, then fails on text that matches it).
+            let surface_len = values[0].encode_utf16().count();
+            let seg_len: usize = segmentation.iter().map(|s| s.encode_utf16().count()).sum();
+            if seg_len > surface_len {
+                return Err(AnalysisError::other("runtime_exception", 500, format!(
+                    "Illegal user dictionary entry {} - the segmentation ({}) is longer than the surface form ({})",
+                    values[0],
+                    segmentation.join(" "),
+                    values[0]
                 )));
             }
             let mut seg = vec![word_id];
@@ -342,4 +358,25 @@ fn unquote_unescape(s: &str) -> String {
         }
     }
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(lines: &[&str]) -> Result<Option<Arc<UserDict>>> {
+        UserDict::parse(&lines.iter().map(|l| l.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn malformed_user_entries_are_errors_not_panics() {
+        // An odd number of quotes leaves no fields, which Lucene's sort trips over.
+        let e = parse(&["\"a,b,c,d", "x,x,x,名詞"]).err().unwrap();
+        assert!(e.to_string().contains("Index 0 out of bounds for length 0"), "{e}");
+        // A tab is stripped from the surface check but stays in its segment, which then runs
+        // past the surface.
+        let e = parse(&["ab,a\tb,x,名詞"]).err().unwrap();
+        assert!(e.to_string().contains("Illegal user dictionary entry ab"), "{e}");
+        assert!(parse(&["ab,a b,x y,名詞"]).unwrap().is_some());
+    }
 }

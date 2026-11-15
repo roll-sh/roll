@@ -78,32 +78,135 @@ impl Rule {
         left <= left2 && (right < right2 || (right == right2 && self.key.len() <= r2.key.len())) && region(left2 - left)
     }
 
-    /// Matches at `pos` of `t` (the text being transliterated) within `[0, limit)`.
-    fn matches_at(&self, t: &[char], pos: usize, limit: usize) -> bool {
-        if self.anchor_start && pos != self.ante.len() {
+    /// `TransliterationRule.matchAndReplace`'s match at the cursor: `done` is the text before
+    /// it, `rest` the text after it reversed, and the key must end within the next `run` chars
+    /// (the post context may go on to the end).
+    fn matches_at(&self, done: &[char], rest: &[char], run: usize) -> bool {
+        if self.anchor_start && done.len() != self.ante.len() {
             return false;
         }
-        if pos < self.ante.len() {
+        if done.len() < self.ante.len() || self.key.len() > run {
             return false;
         }
-        let a0 = pos - self.ante.len();
-        if !self.ante.iter().enumerate().all(|(i, e)| e.matches(t[a0 + i])) {
+        if !self.ante.iter().zip(&done[done.len() - self.ante.len()..]).all(|(e, &c)| e.matches(c)) {
             return false;
         }
-        let end = pos + self.key.len() + self.post.len();
-        if end > limit {
+        let n = self.key.len() + self.post.len();
+        if n > rest.len() || (self.anchor_end && n != rest.len()) {
             return false;
         }
-        if self.anchor_end && end != limit {
-            return false;
+        self.key.iter().chain(&self.post).zip(rest.iter().rev()).all(|(e, &c)| e.matches(c))
+    }
+}
+
+/// One pass of conversion rules (ICU's `RuleBasedTransliterator`).
+struct Pass {
+    rules: Vec<Rule>,
+    /// The ID ICU's errors name: the filter's name for a lone pass, `%Pass<n>` in a compound.
+    id: String,
+    /// Lucene's `ICUTransformFilter` gives a lone pass with no filter its source set (the
+    /// characters its keys match) as the filter, so the pass runs over the runs of those.
+    keys: Option<KeySet>,
+    /// Whether a pass that stops short is an error: ICU checks it everywhere except on the
+    /// unfiltered fast path (a lone pass whose source set is empty).
+    strict: bool,
+}
+
+/// The characters any rule's key matches.
+struct KeySet {
+    chars: std::collections::HashSet<char>,
+    sets: Vec<Arc<USet>>,
+}
+
+impl KeySet {
+    fn of(rules: &[Rule]) -> KeySet {
+        let mut k = KeySet { chars: Default::default(), sets: Vec::new() };
+        for e in rules.iter().flat_map(|r| &r.key) {
+            match e {
+                El::Char(c) => {
+                    k.chars.insert(*c);
+                }
+                El::Set(s, _) => {
+                    if !k.sets.iter().any(|x| Arc::ptr_eq(x, s)) {
+                        k.sets.push(s.clone());
+                    }
+                }
+            }
         }
-        self.key.iter().chain(&self.post).enumerate().all(|(i, e)| e.matches(t[pos + i]))
+        k
+    }
+    fn is_empty(&self) -> bool {
+        self.chars.is_empty() && self.sets.is_empty()
+    }
+    fn contains(&self, c: char) -> bool {
+        self.chars.contains(&c) || self.sets.iter().any(|s| s.contains(c as u32))
+    }
+}
+
+impl Pass {
+    /// `Transliterator.filteredTransliterate` over the whole text.
+    fn run(&self, t: &[char]) -> std::result::Result<Vec<char>, String> {
+        let mut done = Vec::with_capacity(t.len());
+        let mut rest: Vec<char> = t.iter().rev().copied().collect();
+        match &self.keys {
+            None => {
+                let n = rest.len();
+                if !self.handle(&mut done, &mut rest, n) && self.strict {
+                    return Err(self.incomplete());
+                }
+            }
+            Some(keys) => loop {
+                while let Some(&c) = rest.last()
+                    && !keys.contains(c)
+                {
+                    done.push(c);
+                    rest.pop();
+                }
+                let n = rest.iter().rev().take_while(|&&c| keys.contains(c)).count();
+                if n == 0 {
+                    break;
+                }
+                if !self.handle(&mut done, &mut rest, n) {
+                    return Err(self.incomplete());
+                }
+            },
+        }
+        done.extend(rest.into_iter().rev());
+        Ok(done)
+    }
+
+    /// `RuleBasedTransliterator.handleTransliterate` over the next `run` chars: rules are
+    /// tried in order at the cursor, at most `16 × run + 1` times (ICU's guard against rules
+    /// such as `a > b|a` that never finish). Whether the run was finished.
+    fn handle(&self, done: &mut Vec<char>, rest: &mut Vec<char>, mut run: usize) -> bool {
+        let limit = run.saturating_mul(16);
+        let mut count = 0;
+        while run > 0 && count <= limit {
+            match self.rules.iter().find(|r| r.matches_at(done, rest, run)) {
+                Some(r) => {
+                    rest.truncate(rest.len() - r.key.len());
+                    done.extend_from_slice(&r.out[..r.cursor]);
+                    rest.extend(r.out[r.cursor..].iter().rev());
+                    run = run - r.key.len() + (r.out.len() - r.cursor);
+                }
+                None => {
+                    done.extend(rest.pop());
+                    run -= 1;
+                }
+            }
+            count += 1;
+        }
+        run == 0
+    }
+
+    fn incomplete(&self) -> String {
+        format!("ERROR: Incomplete non-incremental transliteration by {}", self.id)
     }
 }
 
 /// A transliteration stage.
 enum Stage {
-    Rules { rules: Vec<Rule>, filter: Option<Arc<USet>> },
+    Rules(Pass),
     Norm(Normalizer, Option<Arc<USet>>),
     Lower(Option<Arc<USet>>),
     Upper(Option<Arc<USet>>),
@@ -117,7 +220,9 @@ pub(crate) struct Transliterator {
     filter: Option<Arc<USet>>,
 }
 
-fn by_runs(t: &[char], filter: Option<&Arc<USet>>, f: &mut dyn FnMut(&[char]) -> Vec<char>) -> Vec<char> {
+type Run<'a> = &'a mut dyn FnMut(&[char]) -> std::result::Result<Vec<char>, String>;
+
+fn by_runs(t: &[char], filter: Option<&Arc<USet>>, f: Run) -> std::result::Result<Vec<char>, String> {
     let Some(set) = filter else { return f(t) };
     let mut out = Vec::with_capacity(t.len());
     let mut i = 0;
@@ -125,57 +230,40 @@ fn by_runs(t: &[char], filter: Option<&Arc<USet>>, f: &mut dyn FnMut(&[char]) ->
         let inside = set.contains(t[i] as u32);
         let j = (i..t.len()).find(|&k| set.contains(t[k] as u32) != inside).unwrap_or(t.len());
         if inside {
-            out.extend(f(&t[i..j]));
+            out.extend(f(&t[i..j])?);
         } else {
             out.extend_from_slice(&t[i..j]);
         }
         i = j;
     }
-    out
+    Ok(out)
 }
 
 impl Stage {
-    fn apply(&self, t: &[char]) -> Vec<char> {
+    fn apply(&self, t: &[char]) -> std::result::Result<Vec<char>, String> {
         match self {
-            Stage::Null => t.to_vec(),
-            Stage::Remove(f) => by_runs(t, f.as_ref(), &mut |_| Vec::new()),
-            Stage::Lower(f) => by_runs(t, f.as_ref(), &mut |r| r.iter().collect::<String>().to_lowercase().chars().collect()),
-            Stage::Upper(f) => by_runs(t, f.as_ref(), &mut |r| r.iter().collect::<String>().to_uppercase().chars().collect()),
-            Stage::Norm(n, f) => by_runs(t, f.as_ref(), &mut |r| n.normalize(&r.iter().collect::<String>()).chars().collect()),
-            Stage::Rules { rules, filter } => by_runs(t, filter.as_ref(), &mut |r| {
-                let mut text = r.to_vec();
-                let mut pos = 0;
-                while pos < text.len() {
-                    let limit = text.len();
-                    match rules.iter().find(|rule| rule.matches_at(&text, pos, limit)) {
-                        Some(rule) => {
-                            text.splice(pos..pos + rule.key.len(), rule.out.iter().copied());
-                            pos += rule.cursor;
-                            if rule.cursor == 0 && rule.key.is_empty() {
-                                pos += 1;
-                            }
-                        }
-                        None => pos += 1,
-                    }
-                }
-                text
-            }),
+            Stage::Null => Ok(t.to_vec()),
+            Stage::Remove(f) => by_runs(t, f.as_ref(), &mut |_| Ok(Vec::new())),
+            Stage::Lower(f) => by_runs(t, f.as_ref(), &mut |r| Ok(r.iter().collect::<String>().to_lowercase().chars().collect())),
+            Stage::Upper(f) => by_runs(t, f.as_ref(), &mut |r| Ok(r.iter().collect::<String>().to_uppercase().chars().collect())),
+            Stage::Norm(n, f) => by_runs(t, f.as_ref(), &mut |r| Ok(n.normalize(&r.iter().collect::<String>()).chars().collect())),
+            Stage::Rules(p) => p.run(t),
         }
     }
 }
 
 impl Transliterator {
-    pub(crate) fn transliterate(&self, s: &str) -> String {
+    /// The transliterated text, or ICU's error for a rule pass that never finishes.
+    pub(crate) fn transliterate(&self, s: &str) -> std::result::Result<String, String> {
         let t: Vec<char> = s.chars().collect();
-        by_runs(&t, self.filter.as_ref(), &mut |run| {
+        let out = by_runs(&t, self.filter.as_ref(), &mut |run| {
             let mut cur = run.to_vec();
             for st in &self.stages {
-                cur = st.apply(&cur);
+                cur = st.apply(&cur)?;
             }
-            cur
-        })
-        .into_iter()
-        .collect()
+            Ok(cur)
+        })?;
+        Ok(out.into_iter().collect())
     }
 
     /// `Transliterator.getInstance(id, dir)`: a compound list of the built-in IDs.
@@ -204,9 +292,27 @@ impl Transliterator {
         Ok(Transliterator { stages, filter: global })
     }
 
-    /// `Transliterator.createFromRules(name, rules, dir)`.
-    pub(crate) fn from_rules(rules: &str, forward: bool) -> std::result::Result<Transliterator, String> {
-        Parser::new(forward).parse(rules)
+    /// `Transliterator.createFromRules(name, rules, dir)`, as `ICUTransformFilter` runs it.
+    pub(crate) fn from_rules(name: &str, rules: &str, forward: bool) -> std::result::Result<Transliterator, String> {
+        let mut t = Parser::new(forward).parse(rules)?;
+        let lone = t.stages.len() == 1;
+        let mut n = 0;
+        for st in &mut t.stages {
+            if let Stage::Rules(p) = st {
+                n += 1;
+                if lone {
+                    p.id = name.to_string();
+                    if t.filter.is_none() {
+                        let keys = KeySet::of(&p.rules);
+                        p.strict = !keys.is_empty();
+                        p.keys = p.strict.then_some(keys);
+                    }
+                } else {
+                    p.id = format!("%Pass{n}");
+                }
+            }
+        }
+        Ok(t)
     }
 }
 
@@ -381,7 +487,7 @@ impl Parser {
                 }
             }
         }
-        Ok(Stage::Rules { rules, filter: None })
+        Ok(Stage::Rules(Pass { rules, id: String::new(), keys: None, strict: true }))
     }
 
     /// One conversion rule, or None when it belongs to the other direction.
@@ -635,8 +741,16 @@ impl Filter for TransformFilter {
         if !input.next(t) {
             return false;
         }
-        t.term = self.0.transliterate(&t.term);
-        true
+        match self.0.transliterate(&t.term) {
+            Ok(s) => {
+                t.term = s;
+                true
+            }
+            Err(e) => {
+                t.error = Some(Box::new(AnalysisError::other("runtime_exception", 500, e)));
+                false
+            }
+        }
     }
 }
 
@@ -649,7 +763,7 @@ pub(crate) fn provider() -> Option<Provider<FilterBuilder>> {
             return Err(AnalysisError::illegal(format!("icu_transform filter [{name}] must not specify both [id] and [ruleset]")));
         }
         let t = match ruleset {
-            Some(r) => Transliterator::from_rules(&r, forward).map_err(|e| {
+            Some(r) => Transliterator::from_rules(name, &r, forward).map_err(|e| {
                 AnalysisError::illegal(format!("icu_transform filter [{name}] has invalid ruleset: {e}")).with_cause(AnalysisError::illegal(e))
             })?,
             None => Transliterator::from_id(id.as_deref().unwrap_or("Null"), forward).map_err(AnalysisError::illegal)?,
@@ -658,4 +772,26 @@ pub(crate) fn provider() -> Option<Provider<FilterBuilder>> {
         Ok(normalizing_fn(move || Box::new(TransformFilter(t.clone()))) as Arc<dyn FilterFactory>)
     };
     Some(Provider { build, requires_settings: false })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(rules: &str, text: &str) -> std::result::Result<String, String> {
+        Transliterator::from_rules("t", rules, true).unwrap().transliterate(text)
+    }
+
+    #[test]
+    fn rules_that_never_finish_stop_at_icus_loop_limit() {
+        // ICU4J through Lucene's `ICUTransformFilter`: an error where the pass has a filter
+        // (its source set, or a compound's), the text as far as it got where it has none.
+        for rules in ["a > |a ;", "a > a|a ;", "a > |b ; b > |a ;", ":: [a] ; a > |a ;"] {
+            assert_eq!(run(rules, "aaa xab").unwrap_err(), "ERROR: Incomplete non-incremental transliteration by t", "{rules}");
+        }
+        assert_eq!(run("a > |a ; :: Upper ;", "abc").unwrap_err(), "ERROR: Incomplete non-incremental transliteration by %Pass1");
+        assert_eq!(run("> x ;", "ab").unwrap(), format!("{}ab", "x".repeat(33)));
+        assert_eq!(run("> |x ;", "ab").unwrap(), format!("{}ab", "x".repeat(33)));
+        assert_eq!(run("a } b > |c ; c > d ;", "abab").unwrap(), "dbdb");
+    }
 }

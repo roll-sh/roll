@@ -590,6 +590,16 @@ pub(crate) struct Engine {
 
 const MAX_PHONEMES: usize = 20;
 
+/// The most characters encoded: an encoding's work grows with the square of its input (each
+/// rule copies up to 20 phonemes), so a longer token is encoded by its first `MAX_INPUT`
+/// characters. Lucene has no limit (docs/search/compatibility.md).
+const MAX_INPUT: usize = 255;
+
+/// The most generic-name prefixes (`d'`, `van `…) split off one input: each split encodes the
+/// rest of the name twice. Beyond it the rest is encoded as plain words; Lucene recurses
+/// without limit.
+const MAX_PREFIX_SPLITS: usize = 16;
+
 /// Java's `HashSet` iteration order of `PhoneticEngine.NAME_PREFIXES` for generic names (the
 /// first prefix the input starts with wins).
 const GENERIC_PREFIXES: &[&str] =
@@ -626,29 +636,69 @@ impl Engine {
 
     /// `PhoneticEngine.encode(input)`: languages guessed from the input.
     pub(crate) fn encode_guess(&self, input: &str) -> Option<String> {
-        let langs = self.guess(input);
-        self.encode(input, langs)
+        self.encode_names(input, None)
     }
 
     /// `PhoneticEngine.encode(input, languageSet)`; None where Java fails (no rules for a
     /// language).
     pub(crate) fn encode(&self, input: &str, langs: LangSet) -> Option<String> {
-        let rules = self.rule_map(RuleType::Rules, langs)?;
-        let t = tables(self.name_type);
-        let final1 = t.rules.get(&(self.rule_type, "common"))?;
-        let final2 = self.rule_map(self.rule_type, langs)?;
-        let input = input.to_lowercase().replace('-', " ");
-        let input = input.trim_matches(|c: char| c <= ' ');
-        if self.name_type == NameType::Generic {
-            if let Some(rest) = input.strip_prefix("d'") {
-                return Some(format!("({})-({})", self.encode_guess(rest)?, self.encode_guess(&format!("d{rest}"))?));
-            }
-            for l in GENERIC_PREFIXES {
-                if let Some(rest) = input.strip_prefix(l).and_then(|r| r.strip_prefix(' ')) {
-                    return Some(format!("({})-({})", self.encode_guess(rest)?, self.encode_guess(&format!("{l}{rest}"))?));
+        self.encode_names(input, Some(langs))
+    }
+
+    /// `PhoneticEngine.encode` with its recursion as a loop. A generic name starting with a
+    /// prefix is `(<rest>)-(<prefix glued to the rest>)`, both encoded with their languages
+    /// guessed again; `(`, `)-(` and `)` go on the stack between the two names.
+    fn encode_names(&self, input: &str, langs: Option<LangSet>) -> Option<String> {
+        enum Item {
+            Text(&'static str),
+            Name(String, Option<LangSet>),
+        }
+        let input: String = input.chars().take(MAX_INPUT).collect();
+        let mut stack = vec![Item::Name(input, langs)];
+        let mut splits = 0;
+        let mut out = String::new();
+        while let Some(item) = stack.pop() {
+            let (name, langs) = match item {
+                Item::Text(t) => {
+                    out.push_str(t);
+                    continue;
                 }
+                Item::Name(name, langs) => (name, langs),
+            };
+            let langs = langs.unwrap_or_else(|| self.guess(&name));
+            let rules = self.rule_map(RuleType::Rules, langs)?;
+            let final1 = tables(self.name_type).rules.get(&(self.rule_type, "common"))?;
+            let final2 = self.rule_map(self.rule_type, langs)?;
+            let name = name.to_lowercase().replace('-', " ");
+            let name = name.trim_matches(|c: char| c <= ' ');
+            match (splits < MAX_PREFIX_SPLITS).then(|| self.split_prefix(name)).flatten() {
+                Some((rest, glued)) => {
+                    splits += 1;
+                    stack.extend([Item::Text(")"), Item::Name(glued, None), Item::Text(")-("), Item::Name(rest, None), Item::Text("(")]);
+                }
+                None => out.push_str(&self.encode_words(name, langs, rules, final1, final2)?),
             }
         }
+        Some(out)
+    }
+
+    /// A generic name's leading `d'` or prefix word: the rest, and the rest with the prefix
+    /// glued on.
+    fn split_prefix(&self, name: &str) -> Option<(String, String)> {
+        if self.name_type != NameType::Generic {
+            return None;
+        }
+        if let Some(rest) = name.strip_prefix("d'") {
+            return Some((rest.to_string(), format!("d{rest}")));
+        }
+        GENERIC_PREFIXES.iter().find_map(|l| {
+            let rest = name.strip_prefix(l)?.strip_prefix(' ')?;
+            Some((rest.to_string(), format!("{l}{rest}")))
+        })
+    }
+
+    /// The rest of `PhoneticEngine.encode`, for a name without a prefix to split.
+    fn encode_words(&self, input: &str, langs: LangSet, rules: &RuleMap, final1: &RuleMap, final2: &RuleMap) -> Option<String> {
         let words = input.split([' ', '\t', '\n', '\u{b}', '\u{c}', '\r']).filter(|w| !w.is_empty());
         let words2: Vec<String> = match self.name_type {
             NameType::Sephardic => {
@@ -749,4 +799,20 @@ fn apply_final(phonemes: Vec<Phoneme>, rules: &RuleMap) -> Vec<Phoneme> {
         }
     }
     merged.into_values().map(|(text, langs)| Phoneme { text, langs }).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefixes_and_long_names_are_encoded_in_bounded_work() {
+        let e = Engine { name_type: NameType::Generic, rule_type: RuleType::Approx };
+        // Each `d'` or prefix word used to be a level of recursion that encoded the rest twice.
+        for name in ["d'".repeat(700), "van ".repeat(20_000), "a".repeat(100_000)] {
+            let out = e.encode_guess(&name).unwrap();
+            assert!(out.len() < 1 << 20, "{}", out.len());
+        }
+        assert_eq!(e.encode_guess("d'".repeat(700).as_str()).unwrap().matches(")-(").count(), MAX_PREFIX_SPLITS);
+    }
 }

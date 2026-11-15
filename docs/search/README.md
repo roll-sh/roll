@@ -443,3 +443,11 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    cluster: branches copy a cluster's state under a new id. Left, low: file service tokens are
    node-wide (off unless the operator sets `path.conf`), the inference `timeout` has no upper
    bound. (A simplified `rrf`/`linear` now expands only against indices the caller may read.)
+   A third review, of the analysis plugins, found five ways for one tenant to crash or exhaust a
+   shared node, and all five are fixed. A deeply nested `UnicodeSet` overflowed the stack: sets
+   now nest at most 101 deep, ICU's limit, checked before ICU4X parses them. Beider-Morse
+   recursed once per `d'`/prefix: it is now a loop with at most 16 splits over the first 255
+   characters. `icu_transform` rule sets such as `a > |a` looped forever: they now stop at ICU's
+   loop limit with its error. Kölner/Haase doubled their spellings per match: a token now has at
+   most 256 codes. Malformed kuromoji user dictionaries panicked: they are now errors. The caps
+   are in compatibility.md, under "Extended suites".

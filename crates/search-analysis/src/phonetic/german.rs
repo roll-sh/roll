@@ -2,8 +2,15 @@
 //! (`KoelnerPhonetik` and its subclass `HaasePhonetik` in the `analysis-phonetic` plugin): the
 //! Kölner Phonetik over every partition of the input and its spelling variations, codes joined
 //! by `_`.
+//!
+//! Each matched variation pattern doubles the spellings and each separator adds partitions, so
+//! a token has at most `MAX_CODES` codes: past it, partitions are dropped and patterns keep their
+//! original spelling (Elasticsearch has no limit; docs/search/compatibility.md).
 
 use crate::unicode;
+
+/// The most codes one token encodes to (ordinary names have a handful).
+const MAX_CODES: usize = 256;
 
 /// Which variant: the patterns, replacements and vowel code differ.
 #[derive(Clone, Copy)]
@@ -59,42 +66,52 @@ impl German {
             tmp.clear();
         }
         let n = tmp.len();
-        while !tmp.is_empty() {
+        'parts: for first in 0..n {
             let mut part = String::new();
-            for (i, t) in tmp.iter().enumerate() {
+            for (i, t) in tmp[first..].iter().enumerate() {
                 part.push_str(t);
+                // Java compares the index in the shrinking list with the first list's length.
                 if i + 1 != n {
+                    if parts.len() == MAX_CODES {
+                        break 'parts;
+                    }
                     parts.push(part.clone());
                 }
             }
-            tmp.remove(0);
         }
-        parts.iter().flat_map(|p| self.variations(p)).collect()
+        // Every part keeps at least its own spelling; the rest of the budget goes to the
+        // variations of the first parts.
+        let mut out = Vec::new();
+        for (k, p) in parts.iter().enumerate() {
+            let room = MAX_CODES - out.len() - (parts.len() - k - 1);
+            out.extend(self.variations(p, room));
+        }
+        out
     }
 
-    fn variations(self, s: &str) -> Vec<String> {
+    /// At most `room` (at least 1) spellings: once doubling would pass it, a pattern keeps its
+    /// original spelling only.
+    fn variations(self, s: &str, room: usize) -> Vec<String> {
         let (patterns, replacements) = self.tables();
+        // `Matcher.find` from the start, without overlaps, for each pattern.
+        let found: Vec<Vec<usize>> = patterns.iter().map(|p| find_all(s, p)).collect();
         let mut position = 0;
         let mut vars = vec![String::new()];
         while position < s.len() {
-            let mut i = 0;
-            let mut subst: Option<usize> = None;
-            while subst.is_none_or(|p| p < position) && i < patterns.len() {
-                for start in find_all(s, patterns[i]) {
-                    if subst.is_some_and(|p| p >= position) {
-                        break;
-                    }
-                    subst = Some(start);
-                }
-                i += 1;
-            }
-            match subst {
-                Some(sp) if sp >= position => {
-                    let i = i - 1;
+            // The first pattern (in order) with a match at or after `position`.
+            let next = found.iter().enumerate().find_map(|(i, f)| {
+                let k = f.partition_point(|&m| m < position);
+                f.get(k).map(|&m| (i, m))
+            });
+            match next {
+                Some((i, sp)) => {
                     let prev = &s[position..sp];
-                    let mut new = Vec::with_capacity(vars.len());
+                    let double = vars.len() * 2 <= room;
+                    let mut new = Vec::with_capacity(if double { vars.len() } else { 0 });
                     for v in vars.iter_mut() {
-                        new.push(format!("{v}{prev}{}", replacements[i]));
+                        if double {
+                            new.push(format!("{v}{prev}{}", replacements[i]));
+                        }
                         v.push_str(prev);
                         // The Java code appends the pattern's source and skips its length,
                         // anchors included.
@@ -103,7 +120,7 @@ impl German {
                     vars.extend(new);
                     position = sp + patterns[i].len();
                 }
-                _ => {
+                None => {
                     for v in vars.iter_mut() {
                         v.push_str(&s[position..]);
                     }
@@ -203,4 +220,21 @@ fn remove_sequences(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn variations_and_partitions_are_capped() {
+        // Each `RB` doubles the spellings, each separator adds partitions.
+        for word in ["RB".repeat(127), "a.".repeat(5000), "RB.".repeat(2000)] {
+            for g in [German::Koelner, German::Haase] {
+                assert!(g.encode(&word).split('_').count() <= MAX_CODES);
+            }
+        }
+        // Up to the cap, every spelling is there.
+        assert_eq!(German::Koelner.encode(&"RB".repeat(8)).split('_').count(), 256);
+    }
 }

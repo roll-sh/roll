@@ -355,6 +355,24 @@ privileges of `manage_autoscaling`, `manage_search_application`, `watcher_manage
 x-pack cluster privileges don't map to their actions (`autoscaling`, `ent-search` run as such
 users). `platinum`'s `security` misses one downsampling test (its task fails on roll).
 
+The analysis plugins bound work that Elasticsearch leaves to the input, so one tenant's
+settings or text can't exhaust a shared node. Ordinary input gives Elasticsearch's output
+(10,047 geonames names and prefix chains compared with the Java classes). Pathological input
+differs:
+- `unicode_set_filter`, `icu_transform` filters and rule sets, `icu_folding` and the ICU analyzer
+  refuse a `UnicodeSet` nested deeper than 101 levels (ICU's own limit, with its "Pattern nested
+  too deeply" error) and one longer than 64 KiB (ICU has no length limit).
+- `beider_morse` encodes a token's first 255 characters and splits off at most 16 generic-name
+  prefixes (`d'`, `van `…) per token, then encodes the rest as plain words. Lucene encodes the
+  whole token and recurses once per prefix.
+- `koelnerphonetik` and `haasephonetik` give a token at most 256 codes. Each spelling variation
+  doubles the codes in Elasticsearch: `RB` nine times gives 512 there, 256 here.
+- A kuromoji `user_dictionary_rules` entry whose segments are longer than its surface (a tab in
+  the segmentation) is refused when the analyzer is built. Lucene accepts it, then fails each
+  text that contains the surface.
+- `icu_transform` rules that never finish stop at ICU's loop limit (16 steps per character) with
+  ICU's `Incomplete non-incremental transliteration` error, as in Elasticsearch.
+
 Run-as (`es-security-runas-user`) is checked against the authenticating user's `run_as`
 privilege, then the request is authorized as the run-as user; `_authenticate` shows the
 authenticating realm as `authentication_realm` and the run-as user's as `lookup_realm`. API keys
