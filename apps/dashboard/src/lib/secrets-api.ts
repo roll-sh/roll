@@ -212,7 +212,7 @@ export function secretsApi(project: string) {
     addOutsideDatabase: (d: { name: string; url: string; roles: [string, string] | []; group?: string; ca?: string }) => req<OutsideDatabase>("POST", `${P}/outside-databases`, d),
     deleteOutsideDatabase: (id: string) => req<null>("DELETE", `${P}/outside-databases/${enc(id)}`),
     githubApps: () => req<GitHubApp[]>("GET", `${P}/github-apps`),
-    addGitHubApp: (a: { name: string; app_id: number; installation_id: number; private_key: string; api_base?: string }) => req<GitHubApp>("POST", `${P}/github-apps`, a),
+    addGitHubApp: (a: { name: string; app_id: number; installation_id: number; private_key: string; api_base?: string; repositories: string[]; permissions: Record<string, string> }) => req<GitHubApp>("POST", `${P}/github-apps`, a),
     deleteGitHubApp: (id: string) => req<null>("DELETE", `${P}/github-apps/${enc(id)}`),
     createSink: (url: string, fromStart = false) => req<Sink & { secret: string }>("POST", `${P}/audit/sinks`, { url, from_start: fromStart }),
     deleteSink: (id: string) => req<null>("DELETE", `${P}/audit/sinks/${enc(id)}`),

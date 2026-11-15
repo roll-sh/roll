@@ -646,6 +646,12 @@ pub enum GithubAppsCmd {
         /// GitHub Enterprise Server's API (https://github.example.com/api/v3).
         #[arg(long)]
         api_base: Option<String>,
+        /// A repository tokens may reach at most (repeat it).
+        #[arg(long = "repo", required = true)]
+        repositories: Vec<String>,
+        /// A permission tokens may have at most, `name:level` (`contents:read`; repeat it).
+        #[arg(long = "permission", required = true)]
+        permissions: Vec<String>,
     },
     Rm { id: String },
 }
@@ -1744,14 +1750,18 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} app {}  installation {}  {}", s(&a["id"]), s(&a["name"]), a["app_id"], a["installation_id"], s(&a["api_base"]));
                 }
             }
-            GithubAppsCmd::Add { name, app_id, installation, api_base } => {
+            GithubAppsCmd::Add { name, app_id, installation, api_base, repositories, permissions } => {
+                let permissions: serde_json::Map<String, Value> = permissions
+                    .iter()
+                    .map(|p| p.split_once(':').map(|(k, v)| (k.trim().to_string(), json!(v.trim()))).ok_or_else(|| anyhow::anyhow!("--permission is name:level (contents:read)")))
+                    .collect::<anyhow::Result<_>>()?;
                 // The private key: never an argument.
                 if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
                     eprint!("The App's private key (PEM), then Enter and Ctrl-D: ");
                 }
                 let mut key = String::new();
                 std::io::stdin().read_to_string(&mut key).context("reading the private key from stdin")?;
-                let v = c.call(Method::POST, &format!("{}/github-apps", c.base()), Some(json!({ "name": name, "app_id": app_id, "installation_id": installation, "private_key": key.trim(), "api_base": api_base }))).await?;
+                let v = c.call(Method::POST, &format!("{}/github-apps", c.base()), Some(json!({ "name": name, "app_id": app_id, "installation_id": installation, "private_key": key.trim(), "api_base": api_base, "repositories": repositories, "permissions": permissions }))).await?;
                 if json_out {
                     return print(&v);
                 }

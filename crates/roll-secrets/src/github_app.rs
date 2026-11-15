@@ -57,6 +57,9 @@ pub struct GitHubApp {
     pub app_id: u64,
     pub installation_id: u64,
     pub api_base: String,
+    /// The most a token may reach: links narrow within these, never past them.
+    pub repositories: Vec<String>,
+    pub permissions: BTreeMap<String, String>,
     pub created_at: i64,
     pub created_by: String,
 }
@@ -72,6 +75,10 @@ pub struct NewGitHubApp {
     /// GitHub Enterprise Server's API (`https://github.example.com/api/v3`); default github.com's.
     #[serde(default)]
     pub api_base: Option<String>,
+    /// The repositories (of the installation's owner) a token may reach at most.
+    pub repositories: Vec<String>,
+    /// The permissions a token may have at most (`{"contents": "read"}`).
+    pub permissions: BTreeMap<String, String>,
 }
 
 const GITHUB: &str = "https://api.github.com";
@@ -86,23 +93,48 @@ fn token_aad(project: &str, id: &str) -> String {
     format!("roll-secrets:github-app-token:{project}:{id}")
 }
 
-/// A link's repositories and permissions (`options.repositories`, `options.permissions`), checked.
-fn narrowing(link: &Link) -> Result<(Vec<String>, BTreeMap<String, String>)> {
+fn check_repositories(repositories: &[String]) -> Result<()> {
+    if repositories.len() > 500 || repositories.iter().any(|r| r.is_empty() || r.len() > 100 || !r.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))) {
+        return Err(Error::BadRequest("repositories names at most 500 repositories of the installation's owner (letters, digits, -, _ and .)".into()));
+    }
+    Ok(())
+}
+
+fn check_permissions(permissions: &BTreeMap<String, String>) -> Result<()> {
+    if permissions.len() > 64 || permissions.iter().any(|(k, v)| k.is_empty() || k.len() > 64 || !k.chars().all(|c| c.is_ascii_lowercase() || c == '_') || level(v).is_none()) {
+        return Err(Error::BadRequest("permissions maps a permission (contents, issues, pull_requests…) to read, write or admin".into()));
+    }
+    Ok(())
+}
+
+fn level(v: &str) -> Option<u8> {
+    ["read", "write", "admin"].iter().position(|l| *l == v).map(|i| i as u8)
+}
+
+/// A link's repositories and permissions (`options.repositories`, `options.permissions`), within
+/// the App's ceiling (absent: the ceiling itself). Never wider: an environment's admin narrows a
+/// token, only the project's admin who registered the App decides how far it may reach.
+fn narrowing(link: &Link, ceiling: (&[String], &BTreeMap<String, String>)) -> Result<(Vec<String>, BTreeMap<String, String>)> {
     let repositories: Vec<String> = match link.options.get("repositories") {
-        None => vec![],
+        None => ceiling.0.to_vec(),
         Some(Json::Array(xs)) => xs.iter().map(|x| x.as_str().map(str::to_string)).collect::<Option<_>>().ok_or_else(|| Error::BadRequest("options.repositories is a list of repository names".into()))?,
         Some(_) => return Err(Error::BadRequest("options.repositories is a list of repository names".into())),
     };
-    if repositories.len() > 500 || repositories.iter().any(|r| r.is_empty() || r.len() > 100 || !r.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))) {
-        return Err(Error::BadRequest("options.repositories names at most 500 repositories of the installation's owner (letters, digits, -, _ and .)".into()));
-    }
+    check_repositories(&repositories)?;
     let permissions: BTreeMap<String, String> = match link.options.get("permissions") {
-        None => BTreeMap::new(),
+        None => ceiling.1.clone(),
         Some(Json::Object(m)) => m.iter().map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect::<Option<_>>().ok_or_else(|| Error::BadRequest("options.permissions maps a permission to read, write or admin".into()))?,
         Some(_) => return Err(Error::BadRequest("options.permissions maps a permission to read, write or admin".into())),
     };
-    if permissions.len() > 64 || permissions.iter().any(|(k, v)| k.is_empty() || k.len() > 64 || !k.chars().all(|c| c.is_ascii_lowercase() || c == '_') || !["read", "write", "admin"].contains(&v.as_str())) {
-        return Err(Error::BadRequest("options.permissions maps a permission (contents, issues, pull_requests…) to read, write or admin".into()));
+    check_permissions(&permissions)?;
+    if repositories.is_empty() || permissions.is_empty() {
+        return Err(Error::BadRequest("a GitHub App token names its repositories and permissions (the App's registration gives the most they may be)".into()));
+    }
+    if let Some(r) = repositories.iter().find(|r| !ceiling.0.iter().any(|c| c.eq_ignore_ascii_case(r))) {
+        return Err(Error::BadRequest(format!("{r} isn't one of the App's repositories ({})", ceiling.0.join(", "))));
+    }
+    if let Some((p, v)) = permissions.iter().find(|(p, v)| ceiling.1.get(*p).and_then(|c| level(c)) < level(v)) {
+        return Err(Error::BadRequest(format!("{p}: {v} is more than the App allows ({})", ceiling.1.get(p).map(String::as_str).unwrap_or("none"))));
     }
     Ok((repositories, permissions))
 }
@@ -119,6 +151,8 @@ pub(crate) struct Provider {
 struct Opened {
     project: String,
     name: String,
+    repositories: Vec<String>,
+    permissions: BTreeMap<String, String>,
     app_id: u64,
     installation: u64,
     api_base: String,
@@ -126,22 +160,35 @@ struct Opened {
     dek: crate::crypto::Dek,
 }
 
+/// A registration's ceiling, as stored (JSON).
+fn ceiling_of(repositories: Option<String>, permissions: Option<String>) -> (Vec<String>, BTreeMap<String, String>) {
+    (repositories.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default(), permissions.and_then(|p| serde_json::from_str(&p).ok()).unwrap_or_default())
+}
+
 impl Provider {
     fn open(&self, id: &str) -> Result<Opened> {
-        type Row = (String, String, i64, i64, String, Vec<u8>, String);
+        type Row = (String, String, i64, i64, String, Vec<u8>, String, Option<String>, Option<String>);
         let row: Option<Row> = self.db.read(|c| {
             Ok::<_, Error>(c.query_row(
-                "SELECT g.project_id, g.name, g.app_id, g.installation_id, g.api_base, g.private_key, p.dek FROM github_apps g JOIN projects p ON p.project_id = g.project_id WHERE g.id = ?",
+                "SELECT g.project_id, g.name, g.app_id, g.installation_id, g.api_base, g.private_key, p.dek, g.repositories, g.permissions FROM github_apps g JOIN projects p ON p.project_id = g.project_id WHERE g.id = ?",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
             )
             .optional()?)
         })?;
-        let (project, name, app_id, installation, api_base, key, dek) = row.ok_or_else(|| Error::Link(format!("GitHub App {id} doesn't exist any more")))?;
+        let (project, name, app_id, installation, api_base, key, dek, repositories, permissions) = row.ok_or_else(|| Error::Link(format!("GitHub App {id} doesn't exist any more")))?;
         let inner = self.unwrap.inner(&project, &dek)?;
         let (dek, _) = self.keys.open_dek(&project, &inner)?;
         let key = dek.open(&key_aad(&project, id), &key)?;
-        Ok(Opened { project, name, app_id: app_id as u64, installation: installation as u64, api_base, key, dek })
+        let (repositories, permissions) = ceiling_of(repositories, permissions);
+        Ok(Opened { project, name, repositories, permissions, app_id: app_id as u64, installation: installation as u64, api_base, key, dek })
+    }
+
+    /// A registration's ceiling, without opening its key.
+    fn ceiling(&self, id: &str) -> Result<(Vec<String>, BTreeMap<String, String>)> {
+        let row: Option<(Option<String>, Option<String>)> = self.db.read(|c| c.query_row("SELECT repositories, permissions FROM github_apps WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        let (r, p) = row.ok_or_else(|| Error::BadRequest(format!("GitHub App {id} doesn't exist")))?;
+        Ok(ceiling_of(r, p))
     }
 }
 
@@ -171,12 +218,13 @@ impl LinkProvider for Provider {
         if link.ttl_minutes() > 60 {
             return Err(Error::BadRequest("a GitHub App token lasts an hour at most: ttl_minutes is 60 or less".into()));
         }
-        narrowing(link).map(|_| ())
+        let (repositories, permissions) = self.ceiling(&link.r#ref)?;
+        narrowing(link, (&repositories, &permissions)).map(|_| ())
     }
 
     fn issue(&self, r#ref: &str, _credential: &str, link: &Link, _label: &str, _ttl_minutes: Option<u64>) -> Result<Issued> {
-        let (repositories, permissions) = narrowing(link)?;
         let o = self.open(r#ref)?;
+        let (repositories, permissions) = narrowing(link, (&o.repositories, &o.permissions))?;
         let (token, expires_at) = self.github.token(&o.api_base, o.app_id, &o.key, o.installation, &repositories, &permissions).map_err(|why| Error::Link(format!("GitHub didn't give {} a token: {why}", o.name)))?;
         // Kept sealed: revoking it at the lease's end needs it.
         let sealed = base64::engine::general_purpose::STANDARD.encode(o.dek.seal(&token_aad(&o.project, r#ref), &token));
@@ -202,8 +250,9 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         self.db.read(|c| {
-            Ok(c.query("SELECT id, name, app_id, installation_id, api_base, created_at, created_by FROM github_apps WHERE project_id = ? ORDER BY name", [project], |r| {
-                Ok(GitHubApp { id: r.get(0)?, name: r.get(1)?, app_id: r.get::<_, i64>(2)? as u64, installation_id: r.get::<_, i64>(3)? as u64, api_base: r.get(4)?, created_at: r.get(5)?, created_by: r.get(6)? })
+            Ok(c.query("SELECT id, name, app_id, installation_id, api_base, created_at, created_by, repositories, permissions FROM github_apps WHERE project_id = ? ORDER BY name", [project], |r| {
+                let (repositories, permissions) = ceiling_of(r.get(7)?, r.get(8)?);
+                Ok(GitHubApp { id: r.get(0)?, name: r.get(1)?, app_id: r.get::<_, i64>(2)? as u64, installation_id: r.get::<_, i64>(3)? as u64, api_base: r.get(4)?, repositories, permissions, created_at: r.get(5)?, created_by: r.get(6)? })
             })?)
         })
     }
@@ -222,21 +271,27 @@ impl Secrets {
         }
         let api_base = n.api_base.as_deref().map(|b| b.trim().trim_end_matches('/').to_string()).filter(|b| !b.is_empty()).unwrap_or_else(|| GITHUB.to_string());
         github.check(&api_base).map_err(Error::BadRequest)?;
+        check_repositories(&n.repositories)?;
+        check_permissions(&n.permissions)?;
+        if n.repositories.is_empty() || n.permissions.is_empty() {
+            return Err(Error::BadRequest("repositories and permissions are the most a token may reach (a token for every repository with all the App's power is never handed out)".into()));
+        }
         let key = Value::new(key.to_string());
-        let (token, _) = github.token(&api_base, n.app_id, &key, n.installation_id, &[], &BTreeMap::new()).map_err(|why| Error::BadRequest(format!("GitHub didn't give App {} a token for installation {}: {why}", n.app_id, n.installation_id)))?;
+        // The ceiling's own token, at once revoked: GitHub refuses one wider than the installation.
+        let (token, _) = github.token(&api_base, n.app_id, &key, n.installation_id, &n.repositories, &n.permissions).map_err(|why| Error::BadRequest(format!("GitHub didn't give App {} a token for installation {}: {why}", n.app_id, n.installation_id)))?;
         let _ = github.revoke(&api_base, &token);
         let dek = self.project(project)?;
         let id = names::new_id("gha", 16);
         let sealed = dek.seal(&key_aad(project, &id), &key);
         let now = self.db.now_ms()?;
-        let app = GitHubApp { id: id.clone(), name: n.name, app_id: n.app_id, installation_id: n.installation_id, api_base, created_at: now, created_by: caller.principal.clone() };
+        let app = GitHubApp { id: id.clone(), name: n.name, app_id: n.app_id, installation_id: n.installation_id, api_base, repositories: n.repositories, permissions: n.permissions, created_at: now, created_by: caller.principal.clone() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM github_apps WHERE project_id = ? AND name = ?", [project, &app.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a GitHub App named {} exists", app.name)));
             }
             c.execute(
-                "INSERT INTO github_apps (id, project_id, name, app_id, installation_id, api_base, private_key, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, project, app.name, app.app_id as i64, app.installation_id as i64, app.api_base, sealed, now, app.created_by],
+                "INSERT INTO github_apps (id, project_id, name, app_id, installation_id, api_base, private_key, created_at, created_by, repositories, permissions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, project, app.name, app.app_id as i64, app.installation_id as i64, app.api_base, sealed, now, app.created_by, serde_json::to_string(&app.repositories).expect("JSON"), serde_json::to_string(&app.permissions).expect("JSON")],
             )?;
             audit::record(c, project, caller, "github_app.add", None, None, &[], &format!("added GitHub App {} (app {}, installation {})", app.name, app.app_id, app.installation_id), now)
         })?;
@@ -277,10 +332,16 @@ mod tests {
     #[test]
     fn a_links_narrowing_is_checked() {
         let link = |options: Json| Link { kind: KIND.into(), r#ref: "gha_1".into(), field: "token".into(), mode: Mode::Dynamic, options: options.as_object().cloned().unwrap_or_default() };
-        let (repos, perms) = narrowing(&link(json!({ "repositories": ["web", "api"], "permissions": { "contents": "read", "pull_requests": "write" } }))).unwrap();
-        assert_eq!((repos.len(), perms["contents"].as_str()), (2, "read"));
-        assert!(narrowing(&link(json!({ "repositories": ["acme/web"] }))).is_err(), "a name, not owner/name");
-        assert!(narrowing(&link(json!({ "permissions": { "contents": "everything" } }))).is_err());
-        assert!(narrowing(&link(json!({}))).unwrap().0.is_empty());
+        let repos = vec!["web".to_string(), "api".to_string()];
+        let perms = BTreeMap::from([("contents".to_string(), "write".to_string()), ("pull_requests".to_string(), "write".to_string())]);
+        let ceiling = (repos.as_slice(), &perms);
+        let (r, p) = narrowing(&link(json!({ "repositories": ["Web"], "permissions": { "contents": "read" } })), ceiling).unwrap();
+        assert_eq!((r.len(), p["contents"].as_str()), (1, "read"));
+        assert_eq!(narrowing(&link(json!({})), ceiling).unwrap(), (repos.clone(), perms.clone()), "absent: the ceiling");
+        assert!(narrowing(&link(json!({ "repositories": ["acme/web"] })), ceiling).is_err(), "a name, not owner/name");
+        assert!(narrowing(&link(json!({ "repositories": ["billing"] })), ceiling).is_err(), "not the App's");
+        assert!(narrowing(&link(json!({ "permissions": { "contents": "admin" } })), ceiling).is_err(), "past the App's level");
+        assert!(narrowing(&link(json!({ "permissions": { "administration": "read" } })), ceiling).is_err(), "a permission the App doesn't allow");
+        assert!(narrowing(&link(json!({ "permissions": { "contents": "everything" } })), ceiling).is_err());
     }
 }

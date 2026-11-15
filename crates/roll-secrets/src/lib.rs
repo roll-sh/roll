@@ -480,6 +480,9 @@ impl Secrets {
             links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), outside: outside.clone() }));
         }
         db.ensure_schema(github_app::SCHEMA)?;
+        // An App's ceiling: the repositories and permissions its tokens may reach at most.
+        db.add_column("github_apps", "repositories", "TEXT")?;
+        db.add_column("github_apps", "permissions", "TEXT")?;
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }

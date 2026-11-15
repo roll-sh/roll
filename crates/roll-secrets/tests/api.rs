@@ -1317,15 +1317,20 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
 async fn a_github_app_gives_each_lease_a_narrowed_token_that_ends_with_it() {
     let api = Api::new().await;
     let key = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----";
-    let (s, e) = api.call(Method::POST, "/github-apps", Some(json!({ "name": "deploy", "app_id": 1, "installation_id": 8, "private_key": key }))).await;
+    let (s, e) = api.call(Method::POST, "/github-apps", Some(json!({ "name": "deploy", "app_id": 1, "installation_id": 8, "private_key": key, "repositories": ["web", "api"], "permissions": { "contents": "write" } }))).await;
     assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("Integration not found") && !e.to_string().contains("MIIE"), "{e}");
-    let app = api.ok(Method::POST, "/github-apps", Some(json!({ "name": "deploy", "app_id": 1, "installation_id": 7, "private_key": key }))).await;
+    let app = api.ok(Method::POST, "/github-apps", Some(json!({ "name": "deploy", "app_id": 1, "installation_id": 7, "private_key": key, "repositories": ["web", "api"], "permissions": { "contents": "write" } }))).await;
     assert!(app.get("private_key").is_none() && app["api_base"] == "https://api.github.com", "{app}");
     assert!(api.github.0.lock().unwrap().is_empty(), "the check's token is revoked at once");
+    let (s, e) = api.call(Method::POST, "/github-apps", Some(json!({ "name": "wide", "app_id": 1, "installation_id": 7, "private_key": key, "repositories": [], "permissions": {} }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "an App names the most its tokens may reach: {e}");
 
     let link = |options: Value| json!({ "kind": "github_app", "ref": app["id"], "field": "token", "mode": "dynamic", "options": options });
     let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/GITHUB_TOKEN", Some(json!({ "link": link(json!({ "ttl_minutes": 120 })) }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "a lease can't outlive GitHub's hour: {e}");
+    // A link narrows within the App's ceiling, never past it.
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/GITHUB_TOKEN", Some(json!({ "link": link(json!({ "permissions": { "administration": "write" } })) }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
     let narrow = json!({ "repositories": ["web"], "permissions": { "contents": "read" } });
     api.ok(Method::PUT, "/environments/staging/secrets/GITHUB_TOKEN", Some(json!({ "link": link(narrow) }))).await;
     let a = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:release" }))).await;

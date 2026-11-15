@@ -879,19 +879,24 @@ GitHub plugin give: a release job gets `GITHUB_TOKEN` that reads one repository 
 requests in it, and nothing else, for as long as the job runs. Nobody keeps a personal access token
 in a secret.
 
-An admin registers the App's installation (`POST …/github-apps {name, app_id, installation_id,
-private_key, api_base?}`, `roll secrets github-apps add deploy --app-id 123 --installation 456 <
-key.pem`, or the Links tab): the App's private key, as GitHub gave it, is sealed with the project's
-key and bound to its row, and never shown again. roll gets one token with it first, and revokes it
-at once, so a wrong id or key is refused with GitHub's own reason. `api_base` names a GitHub
+A project admin registers the App's installation (`POST …/github-apps {name, app_id,
+installation_id, private_key, repositories, permissions, api_base?}`, `roll secrets github-apps
+add deploy --app-id 123 --installation 456 --repo web --permission contents:write < key.pem`, or
+the Syncs tab): the App's private key, as GitHub gave it, is sealed with the project's key and
+bound to its row, and never shown again. `repositories` and `permissions` are the most any token
+may reach, as Vault and Akeyless put the ceiling on the role: a link narrows within them, never
+past them, so an environment's admin can't mint a token the project's admin didn't allow, and no
+token ever reaches every repository with all the App's power. roll gets one token with the
+ceiling first, and revokes it at once, so a wrong id, key or a ceiling wider than the installation
+is refused with GitHub's own reason. `api_base` names a GitHub
 Enterprise Server's API (`https://github.example.com/api/v3`); rolld reaches it as it does every
 URL a tenant chose (public addresses only, no redirects, at most 64 KiB read).
 
-A key links to it `dynamic`, with field `token`. `options.repositories` names repositories of the
-installation's owner (`["web", "api"]`; none: every one the installation reaches), and
-`options.permissions` maps GitHub's permission names to `read`, `write` or `admin` (`{"contents":
-"read", "pull_requests": "write"}`; none: the App's own). GitHub refuses to widen what the App was
-granted. Each resolve signs a JWT as the App and gets an installation token narrowed that way
+A key links to it `dynamic`, with field `token`. `options.repositories` names some of the App's
+repositories (`["web"]`; none: all of the App's), and `options.permissions` maps permission names
+to `read`, `write` or `admin` within the App's (`{"contents": "read"}`; none: the App's). Code
+nobody vetted (checks, sandboxes, untrusted previews) never gets a token: an untrusted resolve
+issues no dynamic credential. Each resolve signs a JWT as the App and gets an installation token narrowed that way
 (`POST /app/installations/{id}/access_tokens`); the token is sealed in its lease, and the lease
 ending (revoked, expired or swept) ends the token (`DELETE /installation/token`). GitHub ends one
 after an hour on its own, so a link's `ttl_minutes` is 60 at most, and a lease can't be renewed:
@@ -2367,7 +2372,7 @@ isn't in the workspace is 404.
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
 | `GET /github-apps` | | `GitHubApp[]` (`read` on the project; never the key) |
-| `POST /github-apps` | `{name, app_id, installation_id, private_key, api_base?}` | 201 `GitHubApp` (`admin`; gets and revokes a token first: 400 with GitHub's reason) |
+| `POST /github-apps` | `{name, app_id, installation_id, private_key, repositories, permissions, api_base?}` | 201 `GitHubApp` (`admin`; gets and revokes a token first: 400 with GitHub's reason) |
 | `DELETE /github-apps/{id}` | | 204; 409 while a key links to it or a lease holds a token (`admin`) |
 | `GET /cloud-accounts` | | `CloudAccount[]` (`read` on the project) |
 | `POST /cloud-accounts` | `{name, cloud: "gcp", audience, service_account}` or `{name, cloud: "azure", tenant, client_id, scope?}` | 201 `CloudAccount` (`admin`; 400 when a made-up project's token is taken, or this project's isn't) |

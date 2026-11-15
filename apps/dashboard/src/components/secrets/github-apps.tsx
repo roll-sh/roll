@@ -1,6 +1,7 @@
 import { GitBranch, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { GitHubApp } from "@/lib/secrets-api";
+import { parsePermissions } from "./link-dialog";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, useLoad } from "./ui";
 
@@ -21,22 +22,29 @@ export function GitHubApps() {
   const [installation, setInstallation] = useState("");
   const [key, setKey] = useState("");
   const [apiBase, setApiBase] = useState("");
+  const [repos, setRepos] = useState("");
+  const [perms, setPerms] = useState("");
+  const repositories = repos.split(",").map((r) => r.trim()).filter(Boolean);
+  const permissions = parsePermissions(perms);
+  const ceilingOk = repositories.length > 0 && repositories.every((r) => /^[A-Za-z0-9._-]{1,100}$/.test(r)) && !!permissions && Object.keys(permissions).length > 0;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
-  const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && ID.test(appId) && ID.test(installation) && key.trim().startsWith("-----BEGIN") && (apiBase.trim() === "" || /^https:\/\/\S+$/.test(apiBase.trim()));
+  const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && ID.test(appId) && ID.test(installation) && key.trim().startsWith("-----BEGIN") && (apiBase.trim() === "" || /^https:\/\/\S+$/.test(apiBase.trim())) && ceilingOk;
 
   const add = async () => {
     setBusy(true);
     setError(null);
     try {
-      await api.addGitHubApp({ name, app_id: Number(appId), installation_id: Number(installation), private_key: key.trim(), api_base: apiBase.trim() || undefined });
+      await api.addGitHubApp({ name, app_id: Number(appId), installation_id: Number(installation), private_key: key.trim(), api_base: apiBase.trim() || undefined, repositories, permissions: permissions ?? {} });
       setAdding(false);
       setName("");
       setAppId("");
       setInstallation("");
       setKey("");
       setApiBase("");
+      setRepos("");
+      setPerms("");
       list.reload();
     } catch (e) {
       setError(errorText(e));
@@ -86,6 +94,16 @@ export function GitHubApps() {
               <input value={installation} onChange={(e) => setInstallation(e.target.value)} inputMode="numeric" placeholder="7890123" spellCheck={false} className={`${field} font-mono text-[12px]`} />
             </label>
           </div>
+          <div className="sm:col-start-2 grid gap-2 sm:grid-cols-2">
+            <label>
+              <span className="mb-1 block text-[11px] font-medium text-subtle">Repositories tokens may reach at most</span>
+              <input value={repos} onChange={(e) => setRepos(e.target.value)} placeholder="web, api" spellCheck={false} className={`${field} font-mono text-[12px]`} />
+            </label>
+            <label>
+              <span className="mb-1 block text-[11px] font-medium text-subtle">Permissions at most</span>
+              <input value={perms} onChange={(e) => setPerms(e.target.value)} placeholder="contents:read, pull_requests:write" spellCheck={false} className={`${field} font-mono text-[12px]`} />
+            </label>
+          </div>
           <label className="sm:col-start-2">
             <span className="mb-1 block text-[11px] font-medium text-subtle">Private key (kept sealed, never shown again)</span>
             <textarea value={key} onChange={(e) => setKey(e.target.value)} rows={4} placeholder="-----BEGIN RSA PRIVATE KEY-----" spellCheck={false} autoComplete="off" className={`${field} h-auto resize-y py-1.5 font-mono text-[11px]`} />
@@ -117,6 +135,9 @@ export function GitHubApps() {
                   app {a.app_id} · installation {a.installation_id}
                 </span>
                 {a.api_base !== GITHUB && <span className="font-mono text-[11px] text-muted">{a.api_base}</span>}
+                <span className="font-mono text-[11px] text-muted" title="The most a token may reach">
+                  {a.repositories.join(", ")} · {Object.entries(a.permissions).map(([k, v]) => `${k}:${v}`).join(", ")}
+                </span>
                 <span className="ml-auto text-[11px] text-subtle">
                   added {ago(a.created_at)} · <ActorMark who={a.created_by} />
                 </span>
