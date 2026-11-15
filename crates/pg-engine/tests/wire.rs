@@ -4787,7 +4787,7 @@ fn protocol_cases() {
             query("select relname, pg_stat_get_xact_numscans(oid), pg_stat_get_xact_tuples_returned(oid), pg_stat_get_xact_tuples_fetched(oid) from pg_class where relname in ('stc_pkey', 'stc_v') order by 1"),
             query("truncate stc"),
             query("select seq_scan from pg_stat_xact_user_tables where relname = 'stc'"),
-            query("select relation::regclass, mode from pg_locks where pid = pg_backend_pid() and locktype = 'relation' and relation::regclass::text like 'stc%' order by 1::text, 2"),
+            query("select relation::regclass, mode from pg_locks where pid = pg_backend_pid() and locktype = 'relation' and relation::regclass::text like 'stc%' order by relation::regclass::text, mode"),
             query("rollback"),
         ])),
     ];
