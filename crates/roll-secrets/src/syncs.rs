@@ -48,6 +48,8 @@ const RETRY_MS: i64 = 5 * 60_000;
 const PER_PROJECT: i64 = 50;
 /// Pushes one sweep makes (the rest wait for the next one).
 const PER_SWEEP: usize = 20;
+/// How many syncs a sweep claims for checking at a time.
+const CLAIM: usize = 25;
 /// How long one sweep spends checking environments' digests before it stops.
 const CHECK_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 /// The longest target, as JSON.
@@ -487,45 +489,61 @@ impl Secrets {
         let now = self.db.now_ms()?;
         // Syncs of deleted environments and projects go with them.
         self.db.write(|c| c.execute("DELETE FROM syncs WHERE env_id NOT IN (SELECT id FROM environments)", ()))?;
-        let rows = self.db.read(|c| {
-            // Least recently checked first: every sync gets its turn, however many there are.
-            c.query(
-                &format!("SELECT {COLUMNS} FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.running_until <= ? AND s.retry_at <= ? ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT 500"),
-                params![now, now],
-                row,
-            )
-        })?;
         let (mut pushed, mut failed) = (0, 0);
-        let mut checked: Vec<String> = vec![];
         // A digest of a large folder takes a tenth of a second: a sweep checks for so long, and
-        // the next one goes on from the least recently checked (every node sweeps).
+        // the next one goes on from the least recently checked. Every node sweeps: each claims a
+        // few at a time (marking them checked before it reads their digests), so nodes check
+        // different syncs instead of all the same oldest ones.
         let started = std::time::Instant::now();
-        for r in rows {
+        // Claimed but not reached: their turn is given back.
+        let mut unreached: Vec<(String, Option<i64>)> = vec![];
+        'sweep: loop {
             if pushed + failed >= PER_SWEEP || started.elapsed() >= CHECK_BUDGET {
                 break;
             }
-            checked.push(r.info.id.clone());
-            // Only a sync whose environment changed, or that never ran. One whose creator lost
-            // access fails here, and waits out `retry_at` like any failed push.
-            let digest = self.sync_caller(&r).and_then(|c| self.digest(&r.project, &r.info.environment, &r.info.path, &c));
-            if let Ok(d) = &digest
-                && r.info.last_digest.as_deref() == Some(d.as_str())
-            {
-                continue;
+            let batch: Vec<(Row, Option<i64>)> = self.db.write(|c| {
+                // Least recently checked first: every sync gets its turn, however many there are.
+                let rows = c.query(
+                    &format!("SELECT {COLUMNS}, s.checked_at FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.running_until <= ? AND s.retry_at <= ? AND COALESCE(s.checked_at, 0) < ? ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT {CLAIM}"),
+                    params![now, now, now],
+                    |r| Ok((row(r)?, r.get::<_, Option<i64>>(16)?)),
+                )?;
+                for (r, _) in &rows {
+                    c.execute("UPDATE syncs SET checked_at = ? WHERE id = ?", params![now, r.info.id])?;
+                }
+                Ok::<_, Error>(rows)
+            })?;
+            if batch.is_empty() {
+                break;
             }
-            let Some(hold) = self.claim_sync(&r.info.id, r.info.last_digest.as_deref())? else {
-                continue;
-            };
-            match self.push_sync(r, hold, digest.ok(), false) {
-                true => pushed += 1,
-                false => failed += 1,
+            let mut batch = batch.into_iter();
+            while let Some((r, was)) = batch.next() {
+                if pushed + failed >= PER_SWEEP || started.elapsed() >= CHECK_BUDGET {
+                    unreached.push((r.info.id, was));
+                    unreached.extend(batch.map(|(r, was)| (r.info.id, was)));
+                    break 'sweep;
+                }
+                // Only a sync whose environment changed, or that never ran. One whose creator lost
+                // access fails here, and waits out `retry_at` like any failed push.
+                let digest = self.sync_caller(&r).and_then(|c| self.digest(&r.project, &r.info.environment, &r.info.path, &c));
+                if let Ok(d) = &digest
+                    && r.info.last_digest.as_deref() == Some(d.as_str())
+                {
+                    continue;
+                }
+                let Some(hold) = self.claim_sync(&r.info.id, r.info.last_digest.as_deref())? else {
+                    continue;
+                };
+                match self.push_sync(r, hold, digest.ok(), false) {
+                    true => pushed += 1,
+                    false => failed += 1,
+                }
             }
         }
-        if !checked.is_empty() {
-            let at = self.db.now_ms()?;
+        if !unreached.is_empty() {
             self.db.write(|c| {
-                for id in &checked {
-                    c.execute("UPDATE syncs SET checked_at = ? WHERE id = ?", params![at, id])?;
+                for (id, was) in &unreached {
+                    c.execute("UPDATE syncs SET checked_at = ? WHERE id = ? AND checked_at = ?", params![was, id, now])?;
                 }
                 Ok::<_, Error>(())
             })?;

@@ -910,7 +910,9 @@ impl apps_control::integrations::SecretSource for ForApps {
     /// secrets doesn't have is no variables (a service needn't use secrets), and so is a project
     /// that doesn't stand for the service (`Workspace::trusts`). An unresolved reference fails the
     /// deploy, and so does a dynamic credential: it ends with its lease, and a service that scales
-    /// to zero can't renew it.
+    /// to zero can't renew it. An untrusted ephemeral environment (a preview of code nobody vetted)
+    /// reads as roll previews' own resolve does: no protected environment, no sensitive key, no
+    /// dynamic credential, and what doesn't resolve is left out rather than failing the deploy.
     async fn resolve(&self, project: &str, env: &str, service: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
         let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: deploy again in a moment"))?;
         let (project, env, service) = (project.to_string(), env.to_string(), service.to_string());
@@ -922,16 +924,22 @@ impl apps_control::integrations::SecretSource for ForApps {
             }
             let consumer = format!("app:{service}");
             let caller = roll_secrets::Caller::consumer(&consumer);
-            match secrets.environment(&project, &env, &caller) {
-                Ok(_) => {}
+            let untrusted = match secrets.environment(&project, &env, &caller) {
+                Ok(e) => e.kind == roll_secrets::EnvironmentKind::Ephemeral && !e.trusted,
                 Err(roll_secrets::Error::NotFound(_)) => return Ok(Vec::new()),
                 Err(e) => return Err(e.into()),
-            }
-            let v = secrets.values(&project, &env, "/", true, Some(&consumer), &caller)?;
-            if let Some(p) = v.problems.first() {
+            };
+            // roll secrets narrows an untrusted environment's reader itself (no protected
+            // environment, no sensitive key); dynamic keys are left out here.
+            let v = secrets.values_for(&project, &env, "/", true, Some(&consumer), !untrusted, &caller)?;
+            if untrusted {
+                for p in &v.problems {
+                    tracing::info!(%project, %env, key = %p.key, "apps: an untrusted preview's secret didn't resolve, so it's left out: {}", p.problem);
+                }
+            } else if let Some(p) = v.problems.first() {
                 anyhow::bail!("{} of {env}'s secrets didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);
             }
-            if let Some(k) = v.dynamic.first() {
+            if let Some(k) = v.dynamic.first().filter(|_| !untrusted) {
                 anyhow::bail!("{k} in {env} is a dynamic credential, which ends with its lease: link it as managed or live for a service");
             }
             // Linked keys are addresses as rolld sees them: apps rewrites them for the container.
