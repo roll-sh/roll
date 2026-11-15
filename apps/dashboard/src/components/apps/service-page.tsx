@@ -643,7 +643,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
             )}
           </p>
         ) : tab === "deployments" ? (
-          <Deployments service={service.id} env={env!} deploys={data.deploys} runner={runner} own={service.run.type === "web" && !service.run.volume} upload={service.source.kind === "upload"} />
+          <Deployments service={service.id} name={service.name} env={env!} deploys={data.deploys} runner={runner} own={service.run.type === "web" && !service.run.volume} upload={service.source.kind === "upload"} />
         ) : tab === "logs" ? (
           <RuntimeLogs service={service.id} env={envName} />
         ) : tab === "metrics" ? (

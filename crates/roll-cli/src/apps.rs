@@ -2133,7 +2133,9 @@ fn print_service(v: &Value) {
         };
         // Only a web service answers at a URL (a worker's and a cron's would only 404).
         let url = if kind == "web" { s(&e["url"]) } else { String::new() };
-        println!("  {:<12} {:<13} {url}{latest}", s(&e["name"]), state_word(&s(&e["state"]), &kind));
+        // A static site's live deployment has no instance: `none` with one live is its files.
+        let state = if s(&e["state"]) == "none" && !e["active"].is_null() { "serving files".to_string() } else { state_word(&s(&e["state"]), &kind) };
+        println!("  {:<12} {:<13} {url}{latest}", s(&e["name"]), state);
     }
 }
 

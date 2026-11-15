@@ -282,9 +282,31 @@ fn label(s: &str, max: usize) -> String {
     out.trim_matches('-').to_string()
 }
 
-/// The environment's variables' fingerprint (names and values, with the settings): a change
-/// means the active deployment no longer matches.
+/// The environment's variables' fingerprint (names and values, with what the settings set): a
+/// change means the active deployment no longer matches. Settings count by what differs from
+/// their defaults, so a setting roll adds later (at its default) moves no service's fingerprint.
+/// `2:` marks this form; a deployment's hash without it is from before ([`Apps::needs_deploy`]).
 fn fingerprint(vars: &[(String, String)], svc: &ServiceRow) -> String {
+    format!("2:{}", fingerprint_of(vars, &set_only(&svc.build, &Build::default()), &set_only(&svc.run, &Run::default())))
+}
+
+/// `value` as JSON without what equals `default` (objects compared key by key, nested too).
+fn set_only<T: serde::Serialize>(value: &T, default: &T) -> Value {
+    fn strip(v: &Value, d: &Value) -> Option<Value> {
+        match (v, d) {
+            (Value::Object(vo), Value::Object(dob)) => {
+                let kept: serde_json::Map<String, Value> = vo.iter().filter_map(|(k, x)| strip(x, dob.get(k).unwrap_or(&Value::Null)).map(|x| (k.clone(), x))).collect();
+                (!kept.is_empty()).then_some(Value::Object(kept))
+            }
+            _ if v == d => None,
+            _ => Some(v.clone()),
+        }
+    }
+    let (v, d) = (serde_json::to_value(value).expect("JSON"), serde_json::to_value(default).expect("JSON"));
+    strip(&v, &d).unwrap_or(Value::Object(Default::default()))
+}
+
+fn fingerprint_of(vars: &[(String, String)], build: &Value, run: &Value) -> String {
     let mut h = Sha256::new();
     let mut sorted: Vec<&(String, String)> = vars.iter().collect();
     sorted.sort();
@@ -294,8 +316,8 @@ fn fingerprint(vars: &[(String, String)], svc: &ServiceRow) -> String {
         h.update(v.as_bytes());
         h.update([0]);
     }
-    h.update(serde_json::to_string(&svc.build).expect("JSON").as_bytes());
-    h.update(serde_json::to_string(&svc.run).expect("JSON").as_bytes());
+    h.update(build.to_string().as_bytes());
+    h.update(run.to_string().as_bytes());
     hex(&h.finalize()[..12])
 }
 
@@ -882,7 +904,13 @@ impl Apps {
         let a = active.to_string();
         let dep = self.db(move |s| s.deployment(&a)).await?;
         let v = match self.resolve_vars(svc, r, &dep.id).await {
-            Ok(v) => fingerprint(&v.vars_for_hash(), svc) != dep.vars_hash,
+            Ok(v) if dep.vars_hash.starts_with("2:") => fingerprint(&v.vars_for_hash(), svc) != dep.vars_hash,
+            // From before settings counted by what they set: any setting added since moves its
+            // hash, so what `/pending` names decides (variables, run settings, secrets).
+            Ok(_) => self.pending(&r.service, &r.name).await.is_ok_and(|p| {
+                let vars = p["variables"].as_object().is_some_and(|m| m.values().any(|l| l.as_array().is_some_and(|a| !a.is_empty())));
+                vars || p["run"].as_array().is_some_and(|a| !a.is_empty()) || p["secrets"] == Value::Bool(true)
+            }),
             Err(_) => false,
         };
         // Kept only if nothing changed while it was worked out.
@@ -2472,4 +2500,19 @@ fn free_spot(ws: &roll_workspace::Workspace, project: &str) -> (f64, f64) {
         }
     }
     (48.0, 48.0)
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+
+    #[test]
+    fn only_what_differs_from_the_defaults_counts() {
+        let mut run = Run::default();
+        assert_eq!(set_only(&run, &Run::default()), json!({}));
+        run.memory_mb = 1024;
+        run.alerts.error_pct = 10;
+        // A nested setting counts alone: a sibling roll adds later doesn't change this.
+        assert_eq!(set_only(&run, &Run::default()), json!({"memory_mb": 1024, "alerts": {"error_pct": 10}}));
+    }
 }
