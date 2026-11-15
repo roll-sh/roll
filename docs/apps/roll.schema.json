@@ -154,6 +154,42 @@
         "rollback_on_crash": {
           "type": "boolean",
           "description": "Roll back when a new deployment crash-loops."
+        },
+        "schedules": {
+          "type": "array",
+          "maxItems": 20,
+          "description": "Commands on a schedule, each a job of the live deployment at its due times.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "schedule",
+              "command"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9-]{1,32}$"
+              },
+              "schedule": {
+                "type": "string",
+                "description": "Five fields, or @hourly, @daily \u2026"
+              },
+              "command": {
+                "type": "string"
+              },
+              "timezone": {
+                "type": "string",
+                "description": "IANA, e.g. Europe/Budapest; default UTC."
+              },
+              "timeout_s": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 86400
+              }
+            }
+          }
         }
       }
     },

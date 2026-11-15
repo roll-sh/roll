@@ -475,6 +475,22 @@ pub enum AppsCmd {
         follow: bool,
         #[arg(long, value_name = "JOB")]
         cancel: Option<String>,
+        /// Run a command on a schedule (Heroku Scheduler): `--schedule NAME --at "0 3 * * *"
+        /// --command "node cleanup.js"` adds or replaces it; each due time is a job.
+        #[arg(long, value_name = "NAME", requires_all = ["at", "command"], conflicts_with_all = ["logs", "cancel", "unschedule"])]
+        schedule: Option<String>,
+        /// With `--schedule`: five cron fields, or `@hourly`, `@daily` …
+        #[arg(long, requires = "schedule")]
+        at: Option<String>,
+        /// With `--schedule`: the command.
+        #[arg(long, requires = "schedule")]
+        command: Option<String>,
+        /// With `--schedule`: its time zone (IANA; default UTC).
+        #[arg(long, requires = "schedule")]
+        tz: Option<String>,
+        /// Remove a schedule by its name.
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["logs", "cancel"])]
+        unschedule: Option<String>,
     },
     /// What a build would detect (no build): the provider, its commands, the port and why. A
     /// directory here is read on this machine (`roll up`'s tree, before it's uploaded); `--repo`
@@ -2443,10 +2459,33 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Jobs { target, logs, follow, cancel } => {
+        AppsCmd::Jobs { target, logs, follow, cancel, schedule, at, command, tz, unschedule } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/jobs", env_path(&svc, &target.env));
-            if let Some(job) = cancel {
+            let mut schedules: Vec<Value> = svc["run"]["schedules"].as_array().cloned().unwrap_or_default();
+            if schedule.is_some() || unschedule.is_some() {
+                if let Some(name) = &unschedule {
+                    let before = schedules.len();
+                    schedules.retain(|x| x["name"] != name.as_str());
+                    anyhow::ensure!(schedules.len() < before, "{} has no schedule {name}", s(&svc["name"]));
+                }
+                if let Some(name) = schedule {
+                    schedules.retain(|x| x["name"] != name.as_str());
+                    let mut one = json!({ "name": name, "schedule": at, "command": command });
+                    if let Some(z) = tz {
+                        one["timezone"] = json!(z);
+                    }
+                    schedules.push(one);
+                }
+                let v = api.call(reqwest::Method::PATCH, &format!("/v1/apps/services/{}", enc(&s(&svc["id"]))), Some(json!({ "run": { "schedules": schedules } }))).await?;
+                if !json_out {
+                    for x in v["run"]["schedules"].as_array().into_iter().flatten() {
+                        println!("{:<16} {:<16} {}", s(&x["name"]), s(&x["schedule"]), s(&x["command"]));
+                    }
+                    return Ok(());
+                }
+                v["run"]["schedules"].clone()
+            } else if let Some(job) = cancel {
                 api.post(&format!("{base}/{}/cancel", enc(&job)), json!({})).await?
             } else if let Some(job) = logs {
                 let path = format!("{base}/{}/logs", enc(&job));
@@ -2464,6 +2503,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             } else {
                 let v = api.get(&base).await?;
                 if !json_out {
+                    for x in &schedules {
+                        let zone = x["timezone"].as_str().map(|z| format!(" ({z})")).unwrap_or_default();
+                        println!("on a schedule: {} at {}{zone}: {}", s(&x["name"]), s(&x["schedule"]), s(&x["command"]));
+                    }
                     for j in v.as_array().into_iter().flatten() {
                         let at = j["started_at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
                         let code = j["exit_code"].as_i64().map(|c| format!("exit {c}")).unwrap_or_default();

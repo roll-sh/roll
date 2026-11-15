@@ -3564,3 +3564,21 @@ async fn a_projects_owner_is_emailed_by_default() {
     let (st, _) = call(&w.api, "POST", &format!("/v1/apps/projects/{}/notifications", w.project), Some(json!({"kind": "email"}))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 }
+
+/// Any service runs a command on a schedule (Heroku Scheduler, Vercel crons): a job of its live
+/// deployment at each due time, counted from when the schedule was first seen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_web_service_runs_a_command_on_its_schedule() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "schedules": [{"name": "cleanup", "schedule": "*/5 * * * *", "command": "echo cleanup"}]})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let jobs = format!("/v1/apps/services/{id}/environments/production/jobs");
+    let now = code_sql::now_ms();
+    w.apps.cron_pass(now).await;
+    assert_eq!(call(&w.api, "GET", &jobs, None).await.1, json!([]), "nothing made up for the time before it was seen");
+    w.apps.cron_pass(now + 6 * 60_000).await;
+    let list = get_until(&w.api, &jobs, |j| j.as_array().is_some_and(|a| !a.is_empty())).await;
+    assert_eq!(list[0]["command"], "echo cleanup", "{list}");
+    let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"schedules": [{"name": "Bad Name", "schedule": "@daily", "command": "x"}]}}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+}

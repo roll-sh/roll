@@ -236,6 +236,9 @@ type Run = {
    *  one before it (a rollback: its image, no build, actor "crash loop"); a rollback's own
    *  deployment never is, so there are no two in a row. */
   rollback_on_crash?: boolean;
+  /** Commands on a schedule on any service: each a job of the live deployment at its due times, skipped while its
+   *  last job runs; at most 20; name a-z, 0-9 and - (unique, 32 at most), command 1–2000, timeout_s 1–86400. */
+  schedules?: { name: string; schedule: string; command: string; timezone?: string; timeout_s?: number }[];
 };
 
 type Service = {

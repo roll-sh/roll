@@ -94,6 +94,17 @@ export interface Run {
   rollback_on_crash?: boolean;
   /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
   scale?: { stream: string; group: string; per_instance?: number };
+  /** Commands on a schedule, each a job of the live deployment at its due times (Heroku Scheduler); at most 20. */
+  schedules?: Scheduled[];
+}
+
+/** A command on a schedule: `name` a-z, 0-9 and - (unique), `schedule` five fields or `@daily`, `timezone` IANA (default UTC). */
+export interface Scheduled {
+  name: string;
+  schedule: string;
+  command: string;
+  timezone?: string;
+  timeout_s?: number;
 }
 
 export type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
