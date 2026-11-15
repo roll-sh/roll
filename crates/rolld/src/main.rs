@@ -510,14 +510,32 @@ async fn run() -> anyhow::Result<()> {
     // Accounts and sign-in: always on; the gate resolves their session cookies. (Before the
     // evaluator joins the gate: setting sessions makes the gate anew.)
     let accounts = accounts::open(&args, &home, code.as_ref().map(|c| c.code.clone()), !auth.enforcing()).await?;
-    auth.sessions(accounts.sessions(), &accounts.config().api_url);
+    let sessions = accounts.sessions();
+    auth.sessions(sessions.clone(), &accounts.config().api_url);
+    // roll apps emails a project's owner what needs them, through their account.
+    if let Some(a) = &apps {
+        a.apps.set_mailbox(std::sync::Arc::new(apps::AccountsMail(accounts.clone())));
+    }
     router = router.merge(roll_accounts::router(accounts.clone()));
+    // The products this node runs, as rules name them: MCP lists their tools, the token builder
+    // offers them.
+    let mut mcp_products: Vec<String> = Product::ALL.into_iter().filter(|p| on.on(*p)).map(|p| p.name().to_string()).collect();
+    if on.on(Product::Code) {
+        mcp_products.push("agents".into());
+    }
+    // roll previews runs with roll code (no switch of its own).
+    if preview_hosts.is_some() {
+        mcp_products.push("previews".into());
+    }
+    // roll secrets is always on (no ROLL_PRODUCTS switch): its tools always show.
+    mcp_products.push("secrets".into());
     // Scoped tokens, approvals, audit and OAuth (access.rs): the evaluator joins the gate.
     let secrets_envs = access::SecretsEnvs::default();
     let access = access::open(
         &args,
         &home,
         &auth,
+        &mcp_products,
         access::Products {
             postgres: postgres.as_ref().map(|p| p.control.clone()),
             redis: redis.as_ref().map(|r| r.control.clone()),
@@ -531,6 +549,11 @@ async fn run() -> anyhow::Result<()> {
         workspace.clone(),
     )?;
     router = router.merge(roll_access::api::router(access.clone()));
+    // Users' own tokens act as them, as they are now (docs/permissions.md, "Users' own tokens").
+    let _ = access.people.set(sessions);
+    // A grant's rate is shared among the nodes serving requests (each enforces its share).
+    let nodes = cluster.clone();
+    let _ = access.nodes.set(Box::new(move || nodes.nodes().len()));
     // roll secrets: always on (secrets also take their scoped tokens). Its links call the
     // products' routes in process, through the copy taken below: every product's router merges
     // above this line, or its links 404.
@@ -564,12 +587,6 @@ async fn run() -> anyhow::Result<()> {
         access::leaks(&access, &c.code);
     }
     // roll's MCP server: each tool call is a request through the gated API.
-    let mut mcp_products: Vec<String> = Product::ALL.into_iter().filter(|p| on.on(*p)).map(|p| p.name().to_string()).collect();
-    if on.on(Product::Code) {
-        mcp_products.push("agents".into());
-    }
-    // roll secrets is always on (no ROLL_PRODUCTS switch): its tools always show.
-    mcp_products.push("secrets".into());
     let tool_sets: Vec<std::sync::Arc<dyn roll_mcp::ToolSet>> = match &code {
         Some(_) => vec![std::sync::Arc::new(access::CodeTools)],
         None => Vec::new(),
@@ -593,6 +610,11 @@ async fn run() -> anyhow::Result<()> {
     let mut router = auth.cors(router).layer(axum::middleware::from_fn(logs::access));
     if let Some(c) = &code {
         router = c.router(router);
+    }
+    // roll apps' public traffic another node forwarded to this one (a service it owns): to apps'
+    // public router, not the API (which has no route for an app's paths).
+    if let Some(a) = &apps {
+        router = apps_control::public::with_forwarded(router, a.apps.clone());
     }
     if let Some(rt) = &preview_hosts {
         router = router.layer(axum::middleware::from_fn_with_state(rt.clone(), roll_previews::runtime::route));

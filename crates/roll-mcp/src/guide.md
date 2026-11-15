@@ -18,6 +18,9 @@ can use at all; a tool being listed doesn't mean every resource is allowed.
   the CLI.
 - `postgres_query` is read-only; `postgres_execute` changes data.
 - Credentials come back as `[redacted]` unless your connection may reveal them.
+- A secret tagged `sensitive` is never returned to a person or a token: reading it is `403`, and a
+  list of values names it in `withheld`. Only running services get it. That's expected, not a
+  failure to work around. An apps variable that's sealed is the same: never readable again.
 - `apps_deploy` takes an `idempotency_key`: reuse it when you retry, and the deploy runs once.
 
 ## When a person must approve
