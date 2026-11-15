@@ -215,6 +215,16 @@ fn check_ca(ca: Option<String>) -> Result<Option<String>> {
     Ok(ca)
 }
 
+/// How many keys link to a registration and leases of it are live (it can't move servers then).
+fn in_use(c: &code_sql::Conn<'_>, project: &str, id: &str) -> code_sql::Result<i64> {
+    let like = (format!("%\"kind\":\"{KIND}\"%"), format!("%\"ref\":\"{id}\"%"));
+    c.query_row(
+        "SELECT (SELECT COUNT(*) FROM secrets WHERE project_id = ? AND link LIKE ? AND link LIKE ?) + (SELECT COUNT(*) FROM leases WHERE project_id = ? AND revoked_at IS NULL AND link LIKE ? AND link LIKE ?)",
+        params![project, like.0, like.1, project, like.0, like.1],
+        |r| r.get(0),
+    )
+}
+
 fn check_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
         return Err(Error::BadRequest("a database's name is letters, digits, - and _ (64 at most)".into()));
@@ -531,6 +541,10 @@ impl Secrets {
                 let scheme = |x: &str| x.split("://").next().unwrap_or_default().trim_end_matches("ql").to_string();
                 let current: Vec<u8> = self.db.read(|c| c.query_row("SELECT url FROM outside_dbs WHERE id = ?", [id], |r| r.get(0)))?;
                 let moved = host != d.host || scheme(u) != scheme(dek.open(&aad(project, id), &current)?.expose());
+                // Refused before the server is asked (the write checks again: it decides).
+                if moved && self.db.read(|c| in_use(c, project, id))? > 0 {
+                    return Err(Error::Conflict("in_use", format!("{} moves to another server only once no key links to it and no lease is live: its logins are on {}", d.name, d.host)));
+                }
                 outside.check(u, ca.as_deref(), &d.roles, d.group.as_deref()).map_err(|why| Error::BadRequest(format!("roll couldn't use the database: {why}")))?;
                 Some((host, dek.seal(&aad(project, id), &Value::new(u.to_string())), moved))
             }
@@ -558,16 +572,8 @@ impl Secrets {
                 }
                 // Its roles' passwords and its leases' logins live on this server: moving to another
                 // would leave them behind, never dropped (checked here, in the write).
-                if *moved {
-                    let like = (format!("%\"kind\":\"{KIND}\"%"), format!("%\"ref\":\"{id}\"%"));
-                    let used: i64 = c.query_row(
-                        "SELECT (SELECT COUNT(*) FROM secrets WHERE project_id = ? AND link LIKE ? AND link LIKE ?) + (SELECT COUNT(*) FROM leases WHERE project_id = ? AND revoked_at IS NULL AND link LIKE ? AND link LIKE ?)",
-                        params![project, like.0, like.1, project, like.0, like.1],
-                        |r| r.get(0),
-                    )?;
-                    if used > 0 {
-                        return Err(Error::Conflict("in_use", format!("{} moves to another server only once no key links to it and no lease is live: its logins are on {}", d.name, d.host)));
-                    }
+                if *moved && in_use(c, project, id)? > 0 {
+                    return Err(Error::Conflict("in_use", format!("{} moves to another server only once no key links to it and no lease is live: its logins are on {}", d.name, d.host)));
                 }
                 c.execute("UPDATE outside_dbs SET url = ?, host = ? WHERE id = ?", params![sealed, host, id])?;
                 changed.push("admin URL");
