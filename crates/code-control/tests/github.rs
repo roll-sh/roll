@@ -467,6 +467,24 @@ fn fast_mirror() -> MirrorConfig {
     }
 }
 
+/// A preview backend that records visual reviews accepted through it.
+#[derive(Default)]
+struct Accepted(Mutex<Vec<(String, String, String)>>);
+
+#[async_trait::async_trait]
+impl code_control::PreviewBackend for Accepted {
+    async fn create(&self, _: &code_control::model::RepoRow, _: &code_control::model::Change, _: &std::path::Path) -> anyhow::Result<code_control::model::Preview> {
+        anyhow::bail!("not in this test")
+    }
+    async fn delete(&self, _: &code_control::model::RepoRow, _: &code_control::model::Change) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn accept_visual(&self, change: &code_control::model::Change, by: &str, head: &str) -> anyhow::Result<()> {
+        self.0.lock().push((change.id.clone(), by.to_string(), head.to_string()));
+        Ok(())
+    }
+}
+
 async fn hook(a: &App, event: &str, delivery: &str, body: &Value, secret: &str) -> StatusCode {
     let body = body.to_string();
     let sig = code_github::webhook::sign(secret.as_bytes(), body.as_bytes());
@@ -682,9 +700,22 @@ async fn connect_import_webhooks_and_mirror() {
             github: Default::default(),
             head: None,
             schema_changes: None,
+            schema_risks: Vec::new(),
+            release_ms: None,
+            release_before_ms: None,
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
+            visual_change: None,
+            page_speed: None,
+            page_health: None,
+            page_a11y: None,
+            page_links: None,
+            base_change: None,
+            diff_url: None,
+            pages: Vec::new(),
+            speed_budget: None,
+            visual_review: None,
         }),
     };
     let preview_calls = |path: &str| g.mock.calls.lock().iter().filter(|(_, p, _)| p.contains(path)).cloned().collect::<Vec<_>>();
@@ -701,6 +732,33 @@ async fn connect_import_webhooks_and_mirror() {
     .await;
     assert_eq!(preview_calls("/issues/5/comments").len(), 1, "one comment, edited in place");
     assert_eq!(preview_calls("/deployments").iter().filter(|(_, p, _)| p.ends_with("/deployments")).count(), 1, "one deployment per head");
+
+    // A visual change waiting for a review: `roll/visual`, a check run with Accept. A click is
+    // accepted for a writer who isn't the change's author, through the preview backend.
+    let accepted = Arc::new(Accepted::default());
+    a.code.set_preview_backend(accepted.clone());
+    let mut waiting = env("ready");
+    waiting.environment.as_mut().unwrap().visual_review =
+        Some(code_control::model::PreviewVisualReview { state: "changed".into(), branch: "main".into(), percent: 8.0, by: None, required: false, head: Some("cs_seen".into()), pages: Vec::new() });
+    a.code.report_environment(c5_id, Some(&waiting)).unwrap();
+    let visual = || g.mock.calls.lock().iter().filter(|(m, p, b)| m == "POST" && p.ends_with("/check-runs") && b["name"] == "roll/visual").map(|(_, _, b)| b.clone()).collect::<Vec<_>>();
+    until("the roll/visual check run", || async { !visual().is_empty() }).await;
+    let run = visual().remove(0);
+    assert_eq!((run["conclusion"].clone(), run["actions"][0]["identifier"].clone(), run["external_id"].clone()), (json!("action_required"), json!("accept"), json!(c5_id)));
+    let sha = run["head_sha"].as_str().unwrap().to_string();
+    let click = |login: &str, sha: &str| json!({ "action": "requested_action", "check_run": { "id": 1, "name": "roll/visual", "head_sha": sha, "external_id": c5_id },
+        "requested_action": { "identifier": "accept" }, "repository": repo_json(&g.mock), "installation": { "id": INSTALLATION }, "sender": { "login": login } });
+    let author = c5["author"].as_str().unwrap().to_string();
+    g.mock.perms.lock().insert(author.clone(), "write".into());
+    g.mock.perms.lock().insert("reader".into(), "read".into());
+    g.mock.perms.lock().insert("rev".into(), "write".into());
+    // Its author, a reader, a writer on an older push's check run, then a writer on this one's.
+    let stale = "0".repeat(40);
+    for (i, (who, sha)) in [(author.as_str(), sha.as_str()), ("reader", sha.as_str()), ("rev", stale.as_str()), ("rev", sha.as_str())].into_iter().enumerate() {
+        assert_eq!(hook(&a, "check_run", &format!("d-visual-{i}"), &click(who, sha), SECRET).await, StatusCode::OK);
+    }
+    until("the writer's Accept", || async { !accepted.0.lock().is_empty() }).await;
+    assert_eq!(*accepted.0.lock(), vec![(c5_id.to_string(), "rev".to_string(), "cs_seen".to_string())], "not its author's, a reader's or an older push's");
     a.code.report_environment(c5_id, None).unwrap();
     until("the deployment inactive", || async { preview_calls("/deployments/").iter().any(|(_, _, b)| b["state"] == "inactive") }).await;
     // Removed before it was ready, its pending status is settled: nothing waits on that commit.
@@ -711,6 +769,16 @@ async fn connect_import_webhooks_and_mirror() {
     a.code.report_environment(c5_id, None).unwrap();
     until("the pending status settled", || async {
         preview_calls("/statuses/").iter().any(|(_, _, b)| b["state"] == "success" && b["description"] == "Preview removed before it was ready")
+    })
+    .await;
+    // Gone with its teardown failing: the comment says so, in a fence its output can't close.
+    a.code.report_environment(c5_id, Some(&env("ready"))).unwrap();
+    a.code.report_environment_gone(c5_id, Some("the teardown command failed with exit code 3\n\n```\nwebhook still registered")).unwrap();
+    until("the comment names the failed teardown", || async {
+        preview_calls("/issues/comments/").iter().any(|(_, _, b)| {
+            let body = b["body"].as_str().unwrap_or("");
+            body.starts_with("**roll preview**: deleted. Its teardown failed:") && body.contains("exit code 3") && body.matches("```").count() == 2
+        })
     })
     .await;
 

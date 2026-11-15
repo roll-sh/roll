@@ -1,0 +1,6 @@
+apiVersion: v2
+name: roll-secrets-csi-provider
+description: roll secrets' provider for the Secrets Store CSI Driver; a pod's volume gets an environment's values as files, logged in with the pod's own service account.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

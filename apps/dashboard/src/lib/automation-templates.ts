@@ -349,6 +349,30 @@ export const TEMPLATES: AutomationTemplate[] = [
     },
   },
   {
+    id: "visual-review-waits",
+    title: "Tell me when a visual change waits for a review",
+    description: "A notice when a change's preview looks different from main and nobody has accepted it yet (roll previews' visual review), with a link to its screenshots.",
+    trigger: "code",
+    steps: ["notify"],
+    build: (ctx) => {
+      const p = ctx.projects.find((x) => x.repo) ?? ctx.projects[0];
+      return spec(
+        "Visual changes to review",
+        "A notice for every change whose pages differ from main's.",
+        { type: "code", events: ["preview"], repos: p?.repo ? [p.repo] : [] },
+        [
+          step("tell", "notify", {
+            title: "A visual change waits for a review",
+            body: "Its pages differ from {{ event.data.preview.environment.visual_review.branch }} by {{ event.data.preview.environment.visual_review.percent }}%.",
+            level: "info",
+            link: "{{ event.data.preview.environment.dashboard_url }}",
+          }),
+        ],
+        { filters: [{ field: "event.data.preview.environment.visual_review.state", op: "equals", value: "changed" }] },
+      );
+    },
+  },
+  {
     id: "tell-on-failure",
     title: "Tell me when an agent fails",
     description: "A notice the moment any thread fails, with its error and a link straight to it.",
