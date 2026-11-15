@@ -1,0 +1,6 @@
+apiVersion: v2
+name: roll-secrets-operator
+description: Keeps Kubernetes Secrets in step with roll secrets environments, pulled with the cluster's own identity.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

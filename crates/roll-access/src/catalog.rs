@@ -1101,14 +1101,61 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/leaks", "secrets", R, one(&["project"], "project")).filters_itself(),
     // Rotators: URLs roll calls to issue and revoke values that live outside roll. Listing shows
     // names and hosts; adding one answers its signing secret once; both changes are admin.
+    row("GET", "/v1/secrets/projects/{project}/rotations", "secrets", R, one(&["project"], "project")),
+    // A customer-managed key wrapping the project's data key: seeing, setting and removing it are
+    // the project admin's (it decides whether roll can read the project at all).
+    row("*", "/v1/secrets/projects/{project}/kms", "secrets", ADMIN, one(&["project"], "project")),
+    // AWS roles a project registers for dynamic credentials: listing is a read; adding one (roll
+    // assumes it to check) and deleting one are admin.
+    row("GET", "/v1/secrets/projects/{project}/aws-roles", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/aws-roles", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/aws-roles/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/aws-users", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/aws-users", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/aws-users/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/rotators", "secrets", R, one(&["project"], "project")),
-    row("POST", "/v1/secrets/projects/{project}/rotators", "secrets", ADMIN, one(&["project"], "project")),
+    // A signing secret signs calls that mint vendor keys: shown only to who may also reveal.
+    row("POST", "/v1/secrets/projects/{project}/rotators", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
     row("DELETE", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/transit", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/transit/{name}", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/transit/{name}", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/rotate", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/encrypt", "secrets", W, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/rewrap", "secrets", W, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/decrypt", "secrets", REVEAL, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/datakey", "secrets", REVEAL, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/sign", "secrets", W, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/verify", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/hmac", "secrets", W, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/hmac/verify", "secrets", W, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/transit/{name}/public", "secrets", R, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/cas", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/cas", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/cas/{id}/sign", "secrets", W, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/cas/{id}/certificates", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/cas/{id}/revoke", "secrets", W, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/cas/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/ssh-cas", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/ssh-cas", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/ssh-cas/{id}/sign-host", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/ssh-cas/{id}/sign-user", "secrets", REVEAL, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/ssh-cas/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/cloud-accounts", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/cloud-accounts", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/cloud-accounts/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/outside-databases", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/outside-databases", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
     // A backup seals every environment's values to a key the caller chooses; a restore loads a
     // whole project. Both are admin in secrets too.
     row("POST", "/v1/secrets/projects/{project}/backup", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/restore", "secrets", ADMIN, one(&["project"], "project")),
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/policy", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
+    row("GET", "/v1/secrets/projects/{project}/environments/{env}/folder-policies", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")),
+    row("PUT", "/v1/secrets/projects/{project}/environments/{env}/folder-policies", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
+    row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/folder-policies", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/review", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
@@ -1117,19 +1164,23 @@ static ROWS: &[Row] = &[
     // elsewhere), audit sinks and required keys are admin; a share link of a value reveals it.
     row("*", "/v1/secrets/projects/{project}/tokens", "secrets", ADMIN, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/tokens/", "secrets", ADMIN, one(&["project"], "project")),
-    row("*", "/v1/secrets/projects/{project}/syncs", "secrets", ADMIN, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/syncs", "secrets", ADMIN, one(&["project"], "project")).reveals(&["signing_secret"]),
     row("GET", "/v1/secrets/projects/{project}/syncs", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/syncs/", "secrets", ADMIN, one(&["project"], "project")),
-    row("*", "/v1/secrets/projects/{project}/audit/sinks", "secrets", ADMIN, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/audit/sinks", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
     row("*", "/v1/secrets/projects/{project}/audit/sinks/", "secrets", ADMIN, one(&["project"], "project")),
     row("PUT", "/v1/secrets/projects/{project}/required", "secrets", ADMIN, one(&["project"], "project")),
     // Identities mint tokens, as `tokens` does: seeing or changing them is the project admin's.
     row("*", "/v1/secrets/projects/{project}/identities", "secrets", ADMIN, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/identities/", "secrets", ADMIN, one(&["project"], "project")),
+    // Pinning an issuer's keys decides which tokens log in as the identity: the identity's admin.
+    row("PUT", "/v1/secrets/projects/{project}/identities/{id}/jwks", "secrets", ADMIN, one(&["project"], "project")),
     // Renewing a lease extends a credential whoever could read it holds.
     row("POST", "/v1/secrets/projects/{project}/leases/{id}/renew", "secrets", REVEAL, one(&["project"], "project")),
     // Exporting an environment's folder shares it with another project.
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/exports", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
+    // Who and what can read a folder: the project's credentials, as the tokens list (a project admin's).
+    row("GET", "/v1/secrets/projects/{project}/environments/{env}/reach", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/shares", "secrets", REVEAL, one(&["project"], "project")),
     // Purging a secret's history can't be undone.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),

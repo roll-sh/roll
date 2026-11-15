@@ -74,17 +74,36 @@ fn open_raw(c: &Aes256Gcm, aad: &str, raw: &[u8]) -> Result<Zeroizing<Vec<u8>>, 
     c.decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad: aad.as_bytes() }).map(Zeroizing::new).map_err(|_| CryptoError::Open)
 }
 
+/// AES-256-GCM with a key of the caller's (transit.rs): a random nonce first, `aad` bound in.
+pub(crate) fn seal_with(key: &[u8; 32], aad: &str, msg: &[u8]) -> Vec<u8> {
+    seal_raw(&cipher(key), aad, msg)
+}
+
+pub(crate) fn open_with(key: &[u8; 32], aad: &str, raw: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    open_raw(&cipher(key), aad, raw)
+}
+
 /// The key-encryption keys: the current one, and the previous one while data keys are resealed.
 #[derive(Clone)]
 pub struct Keyring {
     current: Aes256Gcm,
     previous: Option<Aes256Gcm>,
+    /// What tells the current key from others without revealing it (a customer-wrapped data key
+    /// records which deployment key sealed it inside: kms.rs).
+    current_id: String,
 }
 
 impl std::fmt::Debug for Keyring {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Keyring")
     }
+}
+
+/// A deployment key's id: 12 hex characters derived from it (it reveals nothing of the key).
+fn kek_id(secret: &str) -> String {
+    let mut id = [0u8; 6];
+    hkdf::Hkdf::<Sha256>::new(Some(b"roll-secrets"), secret.trim().as_bytes()).expand(b"kek:id:v1", &mut id).expect("6 bytes");
+    id.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn kek(secret: &str) -> Result<Aes256Gcm, CryptoError> {
@@ -99,7 +118,12 @@ fn kek(secret: &str) -> Result<Aes256Gcm, CryptoError> {
 
 impl Keyring {
     pub fn new(current: &str, previous: Option<&str>) -> Result<Keyring, CryptoError> {
-        Ok(Keyring { current: kek(current)?, previous: previous.filter(|p| !p.trim().is_empty()).map(kek).transpose()? })
+        Ok(Keyring { current: kek(current)?, previous: previous.filter(|p| !p.trim().is_empty()).map(kek).transpose()?, current_id: kek_id(current) })
+    }
+
+    /// The current deployment key's id.
+    pub fn current_id(&self) -> &str {
+        &self.current_id
     }
 
     /// A fresh data key for `project`, and its sealed form to store.

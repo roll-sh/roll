@@ -1,0 +1,47 @@
+name: roll secrets
+description: An environment of roll secrets in the job, masked, through a workload identity (no stored token).
+branding:
+  icon: lock
+  color: blue
+inputs:
+  api-url:
+    description: rolld's API, e.g. https://api.roll.example.
+    required: true
+  identity:
+    description: The workload identity (idn_…) the job logs in as with its own OIDC token. The job needs `permissions: id-token: write`.
+    required: false
+  token:
+    description: A roll token with a rule on the project, instead of an identity (keep it in the repository's secrets).
+    required: false
+  project:
+    description: The project (prj_…). An identity's or a token's own project when left out.
+    required: false
+  environment:
+    description: The environment to export, e.g. staging (not needed with scan).
+    required: false
+  path:
+    description: The folder (default /).
+    required: false
+    default: /
+  audience:
+    description: The OIDC token's audience (default the API's URL, as the identity expects).
+    required: false
+  export:
+    description: Export the values to the job's later steps as environment variables (true) or only to this step's outputs file (false).
+    required: false
+    default: "true"
+  scan:
+    description: Instead of exporting, fail when a line this change adds holds one of the project's stored values (fingerprints only; check out with `fetch-depth: 0`).
+    required: false
+    default: "false"
+  base:
+    description: What scan compares against (default the pull request's base branch, else the previous commit).
+    required: false
+outputs:
+  keys:
+    description: The names of the keys it read, comma-separated (never their values).
+  leaks:
+    description: With scan, how many stored values the change adds.
+runs:
+  using: node20
+  main: index.js
