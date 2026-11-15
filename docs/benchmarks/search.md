@@ -116,7 +116,9 @@ How the numbers were checked:
 
 - **The work happened.** After every race the harness logged the indices: every engine indexed
   every document in every round (nyc_taxis 2,000,000, so 1,000,000, http_logs 4,948,746,
-  geonames 1,160,000), and Rally recorded no errors except OpenSearch's `terms_enum` (below).
+  geonames 1,160,000); on the other tracks (whose indices the harness's name pattern missed) Rally
+  recorded no bulk errors. Rally recorded no task errors except OpenSearch's `terms_enum` (below)
+  and the vector tracks' recall and script-score tasks, which fail on every target.
 - **Load.** The host ran other sessions' builds and benchmarks (1-minute load 17-53 on 36
   threads). A sampler of the lane's CPUs found the server CPUs 26-83% and the client CPUs
   38-79% busy before the first race had started (other sessions' unpinned processes, and
@@ -164,7 +166,9 @@ How the numbers were checked:
   host: Round 7's 162k was a roll-only run; in this alternating run roll still leads
   Elasticsearch 130k to 95k. nyc_taxis and so are not affected (so: 118-121 µs per document at
   `83fac5982` against 122-125 at `91e1ef318`; nyc_taxis 48-50 against 74-78, the direct
-  parser's scaled floats).
+  parser's scaled floats); noaa, whose mapping has 84 fields, pays more: +14% CPU per document
+  at `dbe79f8f7` against its parent's code (the noaa table). Fixed after this run by `6c2834a3e`
+  (a walk that stops at the first `semantic_text` field and builds nothing).
 - **geonames population sorts: `5942eea08`** (top-k numeric sorts collect by bands). Rally's
   `desc_sort_population` sat at 5.5-5.7 ms (Round 7's roll runs: 3.3-5.0) and
   `asc_sort_population` rose against Elasticsearch's. The same 1.16M documents in one data
@@ -180,20 +184,39 @@ How the numbers were checked:
 **Where roll loses** (roll / best of the other two above 1, ranked by how much; "tie" where the
 ranges overlap):
 
-1. nyc_taxis `distance_amount_agg`: 1.27x Elasticsearch (103.2 ms against 81.1; the ranges are
+1. noaa `range_field_conjunction_big_range_big_term_query`: 5.12x Elasticsearch (49.4 ms against
+   9.6; the other seven range-field queries lead, from Round 6's 3.5-12x losses).
+2. nested `randomized-nested-queries-with-inner-hits_default_big_size`: 2.25x Elasticsearch (49.3
+   against 21.9; Round 6: 2.3x); `..._default`: 1.20x (11.2 against 9.4).
+3. dense_vector `knn-search-100-1000_multiple_segments`: 2.09x Elasticsearch (13.7 against 6.5).
+4. so_vector: 25 of its 32 `knn` tasks, 1.03-1.92x Elasticsearch (15 with the ranges apart; the
+   `css` filter 1.92x, `concurrency` 1.5-1.8x, the 10%-random filters 1.2-1.6x; Round 6: 4-9x).
+   The vector-speed item of docs/search/README.md's Next list holds the plan (since this run,
+   `66d16fce6` searches a knn query's segments concurrently).
+5. nested `randomized-sorted-term-queries`: 1.62x OpenSearch (13.9 against 8.5; Elasticsearch
+   17.5).
+6. noaa indexing: Elasticsearch indexes 1.29x roll's docs/s (67.5k against 52.5k), on less CPU:
+   the general document path for `double_range` and `dbe79f8f7`'s mapping walk (the noaa
+   table's notes).
+7. nyc_taxis `distance_amount_agg`: 1.27x Elasticsearch (103.2 ms against 81.1; the ranges are
    apart). One thread per shard against Elasticsearch's concurrent segments (above).
-2. nyc_taxis `autohisto_agg`: 1.19x OpenSearch (9.0 against 7.6, tie). The points-tree count
+8. nyc_taxis `autohisto_agg`: 1.19x OpenSearch (9.0 against 7.6, tie). The points-tree count
    doesn't apply to Rally's 0.8M+ document segments (above).
-3. http_logs `sort-size-desc-after-force-merge-1-seg`: 1.12x OpenSearch (6.37 against 5.69, tie).
-4. geonames `asc_sort_population`: 1.11x Elasticsearch (4.25 against 3.83, tie), and
-   `desc_sort_population`: 1.07x (5.59 against 5.25, tie). The bands' cost (above).
-5. The bulk tasks' p50 service time on nyc_taxis and so: 1.04x Elasticsearch (ties; roll's
-   throughput leads on both).
-6. http_logs `scroll`: 1.03x OpenSearch (456.9 against 442.4, tie; Elasticsearch 455.9).
+9. nested `nested-date-histo`: 1.17x OpenSearch (324 against 277, tie; Elasticsearch 302; Round
+   6: 2.6x).
+10. http_logs `sort-size-desc-after-force-merge-1-seg`: 1.12x OpenSearch (6.37 against 5.69,
+    tie).
+11. geonames `asc_sort_population`: 1.11x Elasticsearch (4.25 against 3.83, tie), and
+    `desc_sort_population`: 1.07x (5.59 against 5.25, tie). The bands' cost (above).
+12. The bulk tasks' p50 service time on nested (1.23x), pmc (1.06x), nyc_taxis and so (1.04x):
+    ties, with roll's throughput ahead or tied.
+13. http_logs `scroll`: 1.03x OpenSearch (456.9 against 442.4, tie; Elasticsearch 455.9).
 
-Everything else in the four tables roll leads, most by 1.3-4x. Indexing leads Elasticsearch by
-1.05-1.48x in docs/s (nyc_taxis 61.3k against 58.4k is a tie: Elasticsearch's three rounds
-spread 34.7k-73.8k), on 0.63-0.95x its server CPU per race.
+Everything else in the tables roll leads, most by 1.3-4x (percolator, pmc and the term, match and
+nested queries by up to 10x; percolator `ignore_me` by 300x). Indexing leads Elasticsearch by
+1.05-2.6x in docs/s on every track but noaa (the top: dense_vector's whole-load rate; nyc_taxis
+61.3k against 58.4k and pmc are ties, Elasticsearch's nyc_taxis rounds spreading 34.7k-73.8k),
+on 0.63-0.95x its server CPU per race on the core tracks.
 
 **Server CPU per race** (the container's CPU time over the whole race: indexing, merges and every
 query task; Elasticsearch's and OpenSearch's include their JIT and GC), median (min-max) of 3, in
@@ -300,9 +323,129 @@ unthrottled):
 | sort_country_code_can_match_shortcut | p50 ms | 5.95 (5.56-6.22) | 6.32 (6.27-10.87) | 8.49 (7.38-12.34) | 0.94 |
 | sort_country_code_no_can_match_shortcut | p50 ms | 5.44 (4.72-6.66) | 6.70 (6.01-9.43) | 7.41 (6.24-10.12) | 0.81 (tie) |
 
-The other standard tracks of Round 6's table (`percolator`, `nested`, `noaa`, `pmc`,
-`so_vector`, `dense_vector`) are running with the same harness; their tables replace Round 6's
-when they finish.
+The other standard tracks (Round 6 ran them against Elasticsearch only, on 8 hardware
+threads): subsets as in the methodology (`nested` 2M documents, `noaa` 5M, `pmc` 100k,
+`so_vector` 200k, `dense_vector` 1M of which the track indexes 20%, the whole `percolator`
+corpus), three rounds each, all three targets except the vector tracks: OpenSearch has no
+`dense_vector` type (its vectors are `knn_vector`), so those are roll against Elasticsearch.
+The vector tracks' `knn-recall-*` and `script-score-query*` tasks fail on both targets with the
+tracks' parameters (as in Round 6) and are left out.
+
+`percolator` (2M stored queries, 1 shard). Elasticsearch spends 12.8 s and OpenSearch 18.9 s on
+every `percolator_with_content_ignore_me` request (roll 40.1 ms: it verifies each distinct
+stored query once, Round 6's tuning log):
+
+| task | metric | roll | Elasticsearch | OpenSearch | roll / best |
+|---|---|---:|---:|---:|---:|
+| index | docs/s | 96986 (88340-104490) | 62213 (39050-66170) | 48639 (40690-73017) | 0.64 |
+| index | p50 ms | 391.1 (360.3-420.6) | 435.1 (414.0-568.7) | 564.0 (392.9-628.4) | 0.90 (tie) |
+| percolator_with_content_president_bush | p50 ms | 8.06 (7.60-8.57) | 16.12 (12.70-24.83) | 19.02 (13.26-42.19) | 0.50 |
+| percolator_with_content_saddam_hussein | p50 ms | 3.17 (2.75-3.37) | 5.70 (5.27-5.98) | 5.72 (4.53-9.63) | 0.56 |
+| percolator_with_content_hurricane_katrina | p50 ms | 6.72 (6.43-6.90) | 13.00 (10.80-13.11) | 15.11 (13.34-22.99) | 0.52 |
+| percolator_with_content_google | p50 ms | 6.81 (6.69-6.93) | 68.87 (66.68-72.74) | 70.31 (67.52-106.3) | 0.10 |
+| percolator_no_score_with_content_google | p50 ms | 6.60 (6.56-6.80) | 6.75 (6.64-8.28) | 7.68 (6.55-10.02) | 0.98 (tie) |
+| percolator_with_highlighting | p50 ms | 5.62 (5.42-5.63) | 11.38 (10.16-13.91) | 16.83 (9.55-17.47) | 0.49 |
+| percolator_with_content_ignore_me | p50 ms | 40.11 (38.57-40.33) | 12773 (11259-12939) | 18915 (18346-22366) | 0.00 |
+| percolator_no_score_with_content_ignore_me | p50 ms | 8.32 (8.00-9.45) | 11.54 (9.41-14.88) | 10.02 (8.02-10.30) | 0.83 (tie) |
+
+`nested` (`RALLY_DOCS=2000000`):
+
+| task | metric | roll | Elasticsearch | OpenSearch | roll / best |
+|---|---|---:|---:|---:|---:|
+| index-append | docs/s | 40984 (29347-50956) | 23621 (20674-36220) | 22235 (20272-32489) | 0.58 (tie) |
+| index-append | p50 ms | 460.1 (361.4-567.0) | 375.1 (343.5-418.6) | 690.6 (524.6-718.8) | 1.23 (tie) |
+| randomized-nested-queries | p50 ms | 7.19 (6.36-7.37) | 8.45 (8.12-8.57) | 10.71 (10.51-12.26) | 0.85 |
+| randomized-term-queries | p50 ms | 1.76 (1.58-2.13) | 3.32 (3.09-3.45) | 3.17 (3.14-3.36) | 0.56 |
+| randomized-sorted-term-queries | p50 ms | 13.85 (12.91-14.42) | 17.50 (15.51-22.96) | 8.54 (7.70-9.02) | 1.62 |
+| match-all | p50 ms | 1.72 (1.65-1.78) | 3.55 (3.42-3.55) | 2.69 (2.66-3.03) | 0.64 |
+| nested-date-histo | p50 ms | 324.2 (283.2-357.8) | 302.0 (255.2-372.1) | 277.1 (256.0-295.3) | 1.17 (tie) |
+| randomized-nested-queries-with-inner-hits_default | p50 ms | 11.21 (11.02-12.98) | 9.36 (8.53-9.97) | 12.63 (11.56-12.87) | 1.20 |
+| randomized-nested-queries-with-inner-hits_default_big_size | p50 ms | 49.25 (47.64-52.08) | 21.86 (21.73-25.75) | 30.31 (27.92-33.17) | 2.25 |
+
+`noaa` (`RALLY_DOCS=5000000`, 1 shard). Indexing loses: noaa's two `double_range` fields have
+no kind in the direct parser (`document/fast.rs` `kind_of`), so every document takes the general
+path, as nyc_taxis' scaled floats did before `3735abaac`; and `dbe79f8f7`'s mapping walk per
+bulk item (above) costs more on noaa's 84 fields: 1M documents, 8 clients, 6 interleaved rounds
+on the build CPUs, 59.5-64.4 µs of server CPU per document on its parent's code against
+67.8-77.3 (+14%; `83fac5982` 68.7-75.2), identical aggregations.
+
+| task | metric | roll | Elasticsearch | OpenSearch | roll / best |
+|---|---|---:|---:|---:|---:|
+| index | docs/s | 52474 (50723-54088) | 67494 (58102-69737) | 40912 (39408-50796) | 1.29 |
+| index | p50 ms | 739.4 (694.9-767.1) | 487.6 (476.6-526.4) | 814.0 (725.8-839.6) | 1.52 |
+| range_field_big_range | p50 ms | 4.53 (3.25-5.74) | 8.73 (7.28-12.06) | 12.15 (10.62-12.91) | 0.52 |
+| range_field_small_range | p50 ms | 4.43 (3.15-6.48) | 7.75 (7.47-9.12) | 9.91 (9.51-10.19) | 0.57 |
+| range_field_conjunction_big_range_small_term_query | p50 ms | 5.28 (4.21-6.68) | 7.01 (6.75-7.73) | 9.29 (9.14-9.31) | 0.75 |
+| range_field_conjunction_small_range_small_term_query | p50 ms | 4.89 (4.00-6.37) | 8.55 (6.30-9.36) | 11.09 (10.92-13.16) | 0.57 (tie) |
+| range_field_conjunction_small_range_big_term_query | p50 ms | 9.31 (8.00-11.85) | 9.53 (7.66-9.91) | 11.65 (10.46-11.70) | 0.98 (tie) |
+| range_field_conjunction_big_range_big_term_query | p50 ms | 49.40 (48.82-51.28) | 9.64 (9.05-13.44) | 12.45 (11.96-14.65) | 5.12 |
+| range_field_disjunction_small_range_small_term_query | p50 ms | 4.74 (4.03-6.66) | 9.56 (7.41-10.21) | 10.67 (9.30-12.72) | 0.50 |
+| range_field_disjunction_big_range_small_term_query | p50 ms | 5.37 (3.97-7.37) | 9.32 (9.20-11.19) | 11.90 (10.31-13.29) | 0.58 |
+
+`pmc` (`RALLY_DOCS=100000`: 100k articles, 5 shards):
+
+| task | metric | roll | Elasticsearch | OpenSearch | roll / best |
+|---|---|---:|---:|---:|---:|
+| index-append | docs/s | 768.6 (753.6-870.5) | 730.2 (719.9-744.5) | 736.7 (690.8-777.9) | 0.96 (tie) |
+| index-append | p50 ms | 4986 (4904-5338) | 4706 (4114-5057) | 5830 (5400-6607) | 1.06 (tie) |
+| default | p50 ms | 4.88 (4.13-5.14) | 5.75 (5.32-6.21) | 9.78 (7.81-10.02) | 0.85 |
+| term | p50 ms | 3.52 (3.23-4.38) | 6.35 (6.33-6.69) | 6.33 (6.05-7.59) | 0.56 |
+| phrase | p50 ms | 3.91 (3.71-4.92) | 6.84 (6.63-7.49) | 7.55 (6.66-7.63) | 0.57 |
+| articles_monthly_agg_uncached | p50 ms | 5.01 (3.54-5.12) | 9.11 (7.61-9.19) | 6.51 (6.49-6.80) | 0.77 |
+| articles_monthly_agg_cached | p50 ms | 1.37 (1.35-1.59) | 3.35 (3.06-3.93) | 3.32 (3.31-3.39) | 0.41 |
+| scroll | p50 ms | 503.9 (489.8-530.0) | 578.5 (547.9-683.8) | 677.2 (644.3-686.9) | 0.87 |
+
+`so_vector` (`RALLY_DOCS=200000`, both targets' default index options):
+
+| task | metric | roll | Elasticsearch | roll / best |
+|---|---|---:|---:|---:|
+| index-append | docs/s | 1995 (1716-2033) | 1268 (1202-1304) | 0.64 |
+| index-append | p50 ms | 211.0 (188.6-229.5) | 399.7 (360.3-417.2) | 0.53 |
+| knn-search-default-match-all | p50 ms | 5.74 (5.38-7.56) | 9.47 (5.98-13.11) | 0.61 (tie) |
+| knn-search-default-match-all-multi-client | p50 ms | 9.21 (6.88-9.32) | 20.10 (9.74-40.45) | 0.46 |
+| knn-search-10-50-match-all | p50 ms | 8.11 (6.99-9.75) | 6.82 (6.34-8.34) | 1.19 (tie) |
+| knn-search-100-300-match-all | p50 ms | 19.15 (17.81-22.41) | 14.81 (12.55-15.80) | 1.29 |
+| knn-search-100-300-match-all-multi-client | p50 ms | 33.67 (32.87-37.61) | 32.34 (30.04-37.01) | 1.04 (tie) |
+| knn-search-10-50-acceptedAnswerId | p50 ms | 8.22 (8.19-10.13) | 8.00 (7.36-8.48) | 1.03 (tie) |
+| knn-search-10-50-java | p50 ms | 11.29 (10.09-11.99) | 9.16 (7.79-9.65) | 1.23 |
+| knn-search-10-50-css | p50 ms | 12.05 (10.26-13.42) | 6.28 (5.46-6.55) | 1.92 |
+| knn-search-10-50-concurrency | p50 ms | 9.31 (7.76-9.77) | 5.96 (5.46-5.96) | 1.56 |
+| knn-search-10-50-concurrency-multi-client | p50 ms | 11.66 (11.51-11.72) | 7.66 (5.31-9.13) | 1.52 |
+| knn-search-10-50-random-10-percent | p50 ms | 9.85 (9.27-10.06) | 6.94 (6.62-6.96) | 1.42 |
+| knn-search-10-50-random-10-percent-multi-client | p50 ms | 12.57 (12.48-17.53) | 16.22 (11.04-18.80) | 0.77 (tie) |
+| knn-search-default-random-20-percent | p50 ms | 7.40 (6.43-7.88) | 6.84 (6.14-7.00) | 1.08 (tie) |
+| knn-search-10-50-random-20-percent | p50 ms | 7.85 (7.47-8.18) | 6.88 (6.87-7.60) | 1.14 (tie) |
+| knn-search-100-300-random-10-percent | p50 ms | 20.74 (19.32-22.58) | 13.97 (13.77-16.40) | 1.49 |
+| knn-search-100-300-random-20-percent | p50 ms | 17.26 (16.96-19.21) | 14.39 (13.64-14.74) | 1.20 |
+| knn-search-default-match-all-force-merge | p50 ms | 5.35 (4.83-5.41) | 5.04 (4.54-9.82) | 1.06 (tie) |
+| knn-search-default-match-all-multi-client-force-merge | p50 ms | 4.58 (4.41-12.27) | 5.27 (4.80-12.28) | 0.87 (tie) |
+| knn-search-10-50-match-all-force-merge | p50 ms | 6.09 (5.59-6.35) | 4.90 (4.44-5.18) | 1.24 |
+| knn-search-100-300-match-all-force-merge | p50 ms | 13.04 (9.56-14.01) | 12.58 (12.32-14.27) | 1.04 (tie) |
+| knn-search-100-300-match-all-multi-client-force-merge | p50 ms | 17.17 (15.16-17.68) | 19.31 (17.46-19.47) | 0.89 (tie) |
+| knn-search-10-50-acceptedAnswerId-force-merge | p50 ms | 6.98 (5.08-7.01) | 4.80 (4.20-5.12) | 1.46 (tie) |
+| knn-search-10-50-java-force-merge | p50 ms | 7.00 (5.91-7.23) | 5.76 (4.63-6.22) | 1.22 (tie) |
+| knn-search-10-50-css-force-merge | p50 ms | 6.86 (6.38-8.97) | 5.71 (5.60-5.86) | 1.20 |
+| knn-search-10-50-concurrency-force-merge | p50 ms | 9.43 (7.13-9.81) | 5.50 (4.65-6.56) | 1.71 |
+| knn-search-10-50-concurrency-multi-client-force-merge | p50 ms | 10.92 (10.63-12.82) | 5.95 (5.51-9.20) | 1.83 |
+| knn-search-10-50-random-10-percent-force-merge | p50 ms | 4.82 (4.11-7.04) | 5.02 (5.02-5.27) | 0.96 (tie) |
+| knn-search-10-50-random-10-percent-multi-client-force-merge | p50 ms | 8.16 (7.17-8.56) | 4.96 (4.63-6.10) | 1.64 |
+| knn-search-default-random-20-percent-force-merge | p50 ms | 4.39 (4.17-6.16) | 4.87 (4.37-5.13) | 0.90 (tie) |
+| knn-search-10-50-random-20-percent-force-merge | p50 ms | 5.98 (5.77-6.91) | 4.55 (4.52-4.76) | 1.32 |
+| knn-search-100-300-random-10-percent-force-merge | p50 ms | 14.20 (13.81-14.23) | 11.96 (11.39-13.40) | 1.19 |
+| knn-search-100-300-random-20-percent-force-merge | p50 ms | 12.98 (10.95-14.60) | 11.53 (11.25-14.91) | 1.13 (tie) |
+
+`dense_vector` (`RALLY_DOCS=1000000`; the track indexes 20%, 200k vectors, with one client).
+roll's load ended inside the track's 40 s bulk warm-up in every round (13.8-16.0 s; the
+harness's 10 s warm-up rewrite doesn't match this track's templated value), so Rally kept no
+throughput sample for it; the first row is the whole load's rate from Rally's log for both:
+
+| task | metric | roll | Elasticsearch | roll / best |
+|---|---|---:|---:|---:|
+| index-append | docs/s, whole load (200,000 / task time) | 14.4k (12.5k-14.5k) | 5.5k (4.5k-5.8k) | 0.38 |
+| knn-search-10-100_multiple_segments | p50 ms | 4.52 (4.23-5.10) | 4.27 (4.25-4.42) | 1.06 (tie) |
+| knn-search-100-1000_multiple_segments | p50 ms | 13.66 (13.15-15.07) | 6.54 (6.20-6.62) | 2.09 |
+| knn-search-10-100 | p50 ms | 2.52 (2.46-2.90) | 3.73 (3.68-3.76) | 0.67 |
+| knn-search-100-1000 | p50 ms | 6.25 (6.03-6.72) | 6.39 (5.86-6.62) | 0.98 (tie) |
 
 ## Round 7: roll, Elasticsearch 9.5.5 and OpenSearch 3.9 (2026-11-12)
 
@@ -457,49 +600,11 @@ the first search answers, so on S3 the wake is bounded by object throughput (abo
 here); opening shards on their headers and fetching only what the first query reads is the
 next step for large indices.
 
-(Round 8 is rerunning these tracks with all three targets; its tables replace this one when
-they finish.)
-
-**Rally, the other standard tracks** (`base`, two rounds, p50 service time in ms unless noted;
-subsets as listed under Methodology; vector tracks with the tracks' default index types):
-
-| track | task | roll | Elasticsearch |
-|---|---|---:|---:|
-| percolator | index (docs/s, p50) | 170k, 205 ms | 127k, 234 ms |
-| percolator | president_bush / saddam_hussein / hurricane_katrina / highlighting | 10.1 / 3.0 / 8.5 / 5.5 | 20.6 / 6.6 / 15.4 / 12.1 |
-| percolator | google / no_score_google | 52.9 / 51.5 | 46.9 / 6.9 |
-| percolator | ignore_me / no_score_ignore_me | 6,794 / 6,824 (`r5` on the same index: 15.2 / 5.6) | 4,618 / 8.6 |
-| pmc | index-append (docs/s, p50) | 1,157, 3,133 ms | 1,050, 3,409 ms |
-| pmc | default / term / phrase | 3.69 / 3.35 / 3.39 | 6.20 / 5.85 / 6.47 |
-| pmc | articles_monthly_agg uncached / cached | 4.71 / 0.97 | 6.17 / 2.74 |
-| pmc | scroll | 441 | 477 |
-| nested | index-append (docs/s, p50) | 81.1k, 239 ms | 78.0k, 199 ms |
-| nested | randomized-term-queries / match-all | 1.59 / 1.37 | 2.10 / 2.44 |
-| nested | randomized-nested-queries / sorted-term-queries | 7.70 / 15.06 | 6.98 / 14.47 |
-| nested | nested-date-histo | 426.6 | 163.6 |
-| nested | inner hits default / big size | 11.8 / 46.7 | 8.8 / 20.5 |
-| noaa | index (docs/s, p50) | 103.2k, 373 ms | 106.5k, 280 ms |
-| noaa | range_field (`double_range`) big / small range | 24.2 / 24.9 | 6.8 / 5.8 |
-| noaa | range_field conjunctions / disjunctions | 26.9–93.5 / 26.2–26.4 | 6.2–7.6 / 6.5–6.8 |
-| so | index-append (docs/s, p50) | 34.2k, 1,226 ms (`r5`: see Indexing) | 43.1k, 711 ms |
-| nyc_taxis | index (docs/s, p50) | 95.3k, 782 ms | 89.3k, 711 ms |
-| nyc_taxis | default / default_1k | 1.55 / 7.54 | 6.12 / 14.75 |
-| nyc_taxis | range / date_histogram_agg | 25.7 / 57.2 | 9.1 / 10.4 |
-| nyc_taxis | autohisto_agg / distance_amount_agg | 107.0 / 829.0 | 31.2 / 311.1 |
-| so_vector | index-append (docs/s, p50) | 1,406, 190 ms | 1,568, 361 ms |
-| so_vector | knn 10-50 / 100-300 (match_all) | 26.8 / 85.1 | 4.8 / 10.7 |
-| so_vector | knn force-merged 10-50 / 100-300 | 16.1 / 69.2 | 4.0 / 9.5 |
-| so_vector | knn filtered (10-50: acceptedAnswerId, java, css, random 10/20%) | 22.7–30.7 | 4.2–5.9 |
-| dense_vector | knn 10-100 / 100-1000 | 4.50 / 7.41 | 2.47 / 4.29 |
-| dense_vector | knn multiple segments 10-100 / 100-1000 | 6.73 / 24.3 | 3.17 / 5.07 |
-
-(`script-score-query` tasks of the vector tracks fail on both sides with the track's
-parameters.) roll wins `pmc` outright and every term, match-all and plain `default` task;
-the losses are in five query families, handed to the query lanes with profiles: k-NN search
-on HNSW (4–9x on `so_vector`'s BBQ index, 2–5x on `dense_vector`'s int8), `range` queries on
-range fields (`noaa`, 3.5–12x), histogram and date-histogram aggregations over range filters
-(`nyc_taxis`, 2.7–5.5x), nested aggregations and inner hits (`nested`, 1.3–2.6x), and the
-percolator's verified-match shortcut, fixed here.
+**Rally, the other standard tracks**: superseded by Round 8, which reran `percolator`, `pmc`,
+`nested`, `noaa`, `so_vector` and `dense_vector` against all three targets. This round's losses
+there (k-NN 4-9x, `noaa` range fields 3.5-12x, nyc_taxis histograms 2.7-5.5x, nested aggregations
+and inner hits 1.3-2.6x, the percolator's `ignore_me` 1.5x) went to the query lanes; the
+percolator fix is in the table above.
 
 ## Final run (end of the phase 3–5 round, 2026-10-26)
 
