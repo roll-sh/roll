@@ -402,7 +402,8 @@ tps -5.8%, -15.5%, -1.2% (the stack's runs had the more foreign load in the firs
 clients instructions -1.95%, -1.77%, +1.51% (median -1.77%), cycles -7.1%, -8.4%, -11.3%,
 tps -4.3%, +15.1%, +19.0%. A last step, waking the commit that fsyncs next before the ones an
 fsync covered (`wake-next-first.patch`), was neutral against it at 8 clients (4 pairs: tps
-+0.1%, instructions -0.92%, cycles -1.4%, the quiet pairs +1.6% and -1.3% tps): dropped.
++0.1%, instructions -0.92%, cycles -1.4%, the quiet pairs +1.6% and -1.3% tps) and at 32
+(3 pairs: tps +2.6%, instructions +0.65%, cycles 0.0%): dropped.
 
 **Three servers, same day** (`tri3`, 2026-11-15 08:33-10:20, three rounds, each server's
 order rotated; medians, the three runs' tps in brackets; "this round" is `1799da4ea`, the
@@ -577,6 +578,88 @@ between the two runs of a pair, with instructions within 2%.
 `*`: runs with 2.4-3.1 foreign cores on the server CPUs (not comparable). At 8 clients roll's
 plain dist build is 1.06x pgrust's throughput (0.82x in agent 230's round 5) at the same CPU a
 read; at 32 clients 0.63x (roll's latency tail: p99 5.2 ms against 1.0, the lane busy).
+## Size models, round 8 (2026-11-15, agent 237)
+
+HANDOFF "Size models, round 8: btrees and heap order past the model" has what changed. **base**
+is `af42e8495` (origin's head at the round's start), **n009** the round's change on it (pushed
+rebased onto `5526bfef4` as one commit). Plain dist builds with line tables, one target dir.
+Harnesses: agent 234's `bulk2.sh` (lane C; `~/.cache/a237/bench`, a second `min(a), max(a)`
+step added: `minmax2`), its TPC-H gate pass on agent 236's SF1 data (`~/.cache/a237/tpch`),
+its lane A pgbench smoke. Other sessions' builds ran all night: foreign load was above 1.0
+core in most lane C steps (the server cgroup's user instructions don't see it: each step's
+count repeats within 0.1% from run to run), 0.8-2.1 cores in the TPC-H passes.
+
+### Sizes and plans against PostgreSQL 18.6 (the bulk script, 1M rows, `hist.sh`)
+
+| after | bulk pages PG / base / n009 | bulk_a PG / base / n009 | bulk_id PG / base / n009 | count(*) plan base / n009 |
+|---|---|---|---|---|
+| COPY, indexes | 8,392 / 8,392 / 8,392 | 1,157 / 1,157 / 1,157 | 2,745 / 2,745 / 2,745 | seq / seq |
+| UPDATE half | 12,501 / 12,559 / 12,501 | 2,310 / 1,157 / 2,310 | 5,486 / 2,745 / 5,487 | seq / seq |
+| DELETE quarter, VACUUM | 12,501 / 12,559 / 12,501 | 2,310 / 1,157 / 2,310 | 5,486 / 2,745 / 5,487 | index only / seq (PG: seq) |
+
+VACUUM's index reltuples: PostgreSQL 750,000, base 1,000,000, n009 750,000. Serial `sum(c)`
+after VACUUM: PostgreSQL 54035714.285715684, base 54035714.28571466, n009 54035714.285715684;
+md5 of the serial scan's ids: base differs from PostgreSQL's at every step after the UPDATE,
+n009 equal at every step. Other histories (HANDOFF lists them): bulk INSERT equal but bulk_id
+3,292 / 3,293; small UPDATEs sizes equal, order differs (25 HOT rows); DELETE half sizes equal;
+TRUNCATE + COPY into the indexed table bulk_a 4,402 against 1,178 (base 1).
+
+### The step table (G user instructions, medians; base and n009 5 alternating pairs, PostgreSQL and pgrust 2 runs each, same day, lane C)
+
+| step | pg | pgrust | base | n009 | n009 / base, per pair % | n009 /PG, /pgrust |
+|---|---|---|---|---|---|---|
+| copy_in | 6.476 | 4.921 | 10.227 | 10.392 | +1.6 x5 | 1.60, 2.11 |
+| create_index | 3.126 | 2.779 | 6.168 | 6.182 | +0.1 to +0.3 | 1.98, 2.22 |
+| create_unique_index | 2.244 | 1.784 | 4.376 | 4.448 | +1.5 to +2.4 | 1.98, 2.49 |
+| copy_out | 3.210 | 1.978 | 3.113 | 3.113 | +0.0 | 0.97, 1.57 |
+| insert_select | 4.314 | 4.310 | 7.028 | 7.096 | +0.7 to +1.4 | 1.64, 1.65 |
+| update_half | 27.496 | 22.773 | 13.393 | 14.692 | +9.3 to +9.8 | 0.53, 0.65 |
+| delete_quarter | 1.668 | 1.501 | 6.437 | 6.447 | -5.1 to +2.4 | 3.87, 4.30 |
+| bg after DELETE | 0.001 | 0.042 | 6.785 | 7.002 | (compaction; noise) | |
+| vacuum | 2.528 | 3.050 | 2.051 | 2.051 | +0.0 | 0.81, 0.67 |
+| analyze | 0.601 | 0.746 | 0.529 | 0.529 | +0.0 | 0.88, 0.71 |
+| count_after | 0.489 | 0.169 | 0.495 | 0.495 | +0.0 | 1.01, 2.93 |
+| count_star | 0.284 | 0.058 | 2.015 | 0.251 | -87.5 x5 | 0.88, 4.33 |
+| count_b | 0.416 | 0.102 | 0.451 | 0.451 | +0.0 | 1.08, 4.42 |
+| sum_a | 0.394 | 0.095 | 1.594 | 0.445 | -72.1 x5 | 1.13, 4.68 |
+| avg_c | 0.520 | 0.209 | 0.487 | 0.487 | +0.0 | 0.94, 2.33 |
+| minmax_a | 0.009 | 0.021 | 0.013 | 0.075 | (cold index blocks) | |
+| minmax2 (again) | 0.009 | 0.018 | 0.010 | 0.013 | noise | 1.44, 0.72 |
+| group_b | 1.360 | 0.587 | 1.455 | 1.454 | -0.2 to +0.1 | 1.07, 2.48 |
+
+`count_star` and `sum_a` compare different plans before the round (base: Parallel Index Only
+Scan of bulk_a) and the same plan after it (Parallel Seq Scan, as PostgreSQL). `minmax_a` is
+the first read of bulk_a's blocks after n009's count(*) / sum(a) stopped reading the index:
+cold, base 128 M and n009 142 M instructions after a restart; warm both 8.8 M (`minmax2`).
+One n009 run's "bg after DELETE" counted 86 G in 0.29 s of the cgroup's CPU (per thread: 6.5
+G, as usual): a counter fault, left out of the median (base had one too in the n007 gate:
+15.96 G at 0.26 s).
+
+The UPDATE's cost (n009 +1.3 G, base 13.39): every updated row's new version gets an entry
+in both btree summaries (the key's encoding and size, a leaf search, a split now and then)
+and a place in the estimate (a map insert for a version out of key order). Before the
+rework the round's first builds stored each version's TID in its row: every later scan paid
+for it (n005: count_after, count(b), avg(c) +4.6-5.1%, VACUUM +10%, COPY +2.6%) and a
+DELETE's scan ran the heap-order merge (+45%): dropped (HANDOFF).
+
+### TPC-H q01 and q06 (a fresh engine, a warm-up, 5 runs in one perf window; 3 alternating pairs)
+
+| | q01 G ins | q01 G cycles | q06 G ins | q06 G cycles | foreign |
+|---|---|---|---|---|---|
+| base | 11.367 / 11.366 / 11.367 | 6.43 / 6.64 / 6.97 | 8.259 / 8.262 / 8.262 | 4.88 / 4.72 / 5.29 | 0.92 / 0.86 / 1.61 |
+| n009 | 11.367 / 11.367 / 11.367 | 7.01 / 6.16 / 7.30 | 8.265 / 8.262 / 8.262 | 5.20 / 5.01 / 5.62 | 1.57 / 0.78 / 2.13 |
+
+Instructions equal within 0.07%; cycles follow the foreign load (the one pair under 1.0 core
+both ways: q01 6.16 against 6.64, q06 5.01 against 4.72).
+
+### Point reads (lane A: pgbench scale 10, select-only prepared, 8 clients, 20 s, a fresh engine each)
+
+User instructions a transaction, 5 alternating pairs (base / n009): 43,304 / 42,984, 43,411 /
+43,144, 43,133 / 43,005, 43,051 / 43,079, 42,957 / 42,975 (per pair -0.74, -0.62, -0.30,
++0.07, +0.04%). One more pair ran first in place of the second: its n009 run went at 14,954
+tps (0.54 ms a transaction, the lane contended) and 48,049 instructions (the connections'
+polling), base 43,084: replaced by the sixth pair. tps base 57,621-87,692, n009 70,408-85,654.
+
 ## Batch aggregation, round 3 (2026-11-14, agent 234)
 
 HANDOFF "Batch aggregation, round 3" has what changed. **base** is `2947ce5a4` (origin's head

@@ -9475,6 +9475,163 @@ pgbench's CPU are at it.
   `KeyMap::key` / `Heap::key_at` to stop lending `&[u8]`. Page counts at 10M rows wait for the
   lift; lineitem's index-only `count(*)` too.
 
+## Size models, round 8: btrees and heap order past the model (agent 237)
+
+BENCH.md "Size models, round 8" has the numbers. Agent 234 found two differences on the
+1M-row bulk script (its table is past the 400,000-version model limit, so its sizes are
+estimates): the planner chose a Parallel Index Only Scan of `bulk_a` for `count(*)` and
+`sum(a)` where PostgreSQL scans the table, and serial float sums differed in the last digits.
+
+**Cause of the plan difference.** A table too big to model kept each btree's size as its
+last measure (CREATE INDEX, REINDEX): 1,157 / 2,745 pages for `bulk_a` / `bulk_id` after the
+UPDATE of half the rows, where PostgreSQL's files grow to 2,310 / 5,486 (every non-HOT new
+version adds an entry; full leaves split) and VACUUM keeps them. The planner reads the
+index's file size (`RelationGetNumberOfBlocks`), so the index-only scan cost
+(2310 - 1157) * 4 less than PostgreSQL's (15,878 against 20,490, the parallel seq scan
+17,407). VACUUM also left the indexes' reltuples at 1,000,000 (PostgreSQL: 750,000), and the
+heap estimate ignored the bulk extension's 58 unused pages after COPY (12,559 pages after
+the UPDATE against 12,501).
+
+What changed:
+- **Btree leaf summaries** (`exec/sizing/btest.rs`, `RelFiles::est_btrees`). Each btree of a
+  table past the model keeps its leaves as a summary: per leaf its low key (the sort key's
+  first 16 bytes), greatest key, items' bytes, tuples, heap TIDs and distinct keys (a few
+  dozen bytes a leaf, in flat sorted arrays). The index build lays it out as its sorted build
+  does (`relsize::LevelFill`, now shared with `btree_pages`; `vacuum::btree_pages_est`, the
+  serial and the parallel build); a table that grows past the model keeps its btrees' shapes
+  (`Btree::leaf_summaries`, `BtEst::from_model`), and a load's rows waiting for its end when
+  it does go in too (`past_model`, `est_inserted`). Writes add their entries
+  (`untracked_write`, `est_entries`): every index for an insert, every index for an update
+  but a heap-only tuple's; a full leaf is deduplicated (posting sizes by MAXALIGN steps)
+  when that makes room, else split as nbtsplitloc does (a rightmost leaf taking a key past
+  its last at the fillfactor, any other evenly), the split key interpolated in the leaf's
+  key range. VACUUM takes the dead entries out of every leaf alike (empty leaves deleted,
+  their pages reused by later splits) and writes relpages / reltuples for indexes that had
+  dead entries (btvacuumcleanup skips the others). pg_relation_size, the planner and VACUUM
+  read the summary's blocks.
+- **Heap estimate** (`EstHeap`): a fill page with its room and line pointers, the bulk
+  extension's fresh pages (filled before the file grows; a COPY past the model extends by
+  its bulk state's count, `Bistate::extend`), and the page being filled continued when a
+  load crosses the limit. VACUUM's relallvisible leaves out never-used fresh pages.
+
+**Cause of the result difference.** Past the model the engine read rows in key order (the
+rows past the limit have no TID stored; their ctid is a hash of the key). PostgreSQL's
+serial scan reads in heap order: after the UPDATE, the rows whose pages had no room are at
+the end (the bulk extension's pages first), the 20 even rows of the COPY's last, half-full
+page stay on it (HOT, offsets 41-60).
+
+What changed:
+- **Places of versions past the model** (`EstHeap::add_in`, `Put`, `EstHeap::placed`): each
+  version put at the end of the file gets the TID PostgreSQL gives it: a load's rows page
+  by page; an update's new version on its old version's page when that is the page being
+  filled or the last page a load filled in key order (`Tail`) and has room (HOT when no
+  indexed column changed), else on the fresh pages first (a writer other than the bulk load
+  has no target page: the free space map gives it the fresh pages), else at the end. The
+  places are kept in the estimate, not in the rows (no row is rewritten, none grows): rows
+  that went in in key order by the page their run began on (`runs`: one key a page, the
+  offsets counted on in storage order), versions put out of key order by a hash of their
+  keys (`moved`, at most 2M of them, about 20 bytes each); a load's rows that wait for its
+  end when it goes past the model are placed from their keys then (`past_model`). Space a
+  VACUUM freed isn't placed (no per-page free space past the model): the table's rows come
+  as stored from then on (`EstOrder::Unplaced`), as after a restart (the places are in
+  memory only) or a rewrite.
+- **Heap order** (`EstOrder`, `estimated_order`, `estimated_rank`): `InOrder` while every
+  version went in at the end in key order; `Placed` once one didn't. A plain serial scan
+  of a `Placed` table under a snapshot reads in heap order with the modelled heaps'
+  streaming merge (`next_heap_ordered`: each row's rank, the longest run as stored, the
+  others held and merged in; the ranks kept for the merge, 8 bytes a row); what it finds
+  (in order after all, or a row it can't place) is kept until the next write. An
+  aggregation that sees its rows' order (`Spec::unordered` false: float sums, min / max)
+  on a serial scan of such a table takes the serial path; counts and integer sums keep the
+  batch path. An UPDATE's or DELETE's scan reads as stored (their rows' order isn't seen;
+  a second UPDATE's new versions are placed in key order, not PostgreSQL's heap order).
+  ctid past the model is still the key's hash.
+- With workers, chunks are read as stored and their parts merged in chunk order: the result
+  is the same from run to run, the key-order sum (`count(*), sum(c)`: 54035714.28571466 in
+  three runs), where PostgreSQL's own parallel float sums vary with the workers' timing
+  (71361142.85714288, ...285, ...288 on one table). Serial (`max_parallel_workers_per_gather
+  = 0`) is PostgreSQL's value.
+
+Matched against PostgreSQL 18.6 (`a237-pg`; `~/.cache/a237/bench/hist.sh`, every step's
+pg_class, pg_relation_size, EXPLAIN, serial `count/sum`, row order md5 and first rows):
+- The bulk script: every pg_class and size value, both plans (Parallel Seq Scan, equal
+  costs), serial row order (md5 of every id) and `sum(c)` (54035714.285715684) at every step;
+  `bulk_id` is one inner page over (5,487 against 5,486).
+- Bulk INSERT of 200,000 rows: heap 10,001, `bulk_a` 1,157 (its keys repeat: posting lists
+  absorb them), `bulk_id` 3,292 (PostgreSQL 3,293).
+- 4,000 single-row UPDATEs: sizes match; 25 rows PostgreSQL keeps HOT on their own pages
+  where the COPY left room for one more tuple go to the fresh pages instead (row order and
+  the float sum differ: the estimate has no per-page free space and the update path no old
+  TID).
+- DELETE of half, VACUUM: sizes and reltuples match; an INSERT after it fills freed space
+  (PostgreSQL's free space map interleaves the rows): unplaced, rows as stored, order differs;
+  `bulk_id` 3,018 against 3,019. VACUUM FULL / REINDEX: `bulk_a` 638 against 630 (as before
+  the round: the sorted build's measure). TRUNCATE then COPY into the indexed table: heap
+  8,392 and `bulk_id` 2,738 (2,745), but `bulk_a` 4,402 against 1,178 (before: 1 page, the
+  relstats of the empty table).
+
+Measured (BENCH.md "Size models, round 8"; plain dist, base `af42e8495` against the change
+on it, lane C 5 alternating pairs, user instructions of the server's cgroup):
+- Planner: count(*) 2.015 -> 0.251 G (-87.5% in every pair; PostgreSQL 0.284), sum(a) 1.594 ->
+  0.445 (-72.1%; PostgreSQL 0.394): PostgreSQL's plan.
+- Scans unchanged: count_after, count(b), avg(c), GROUP BY b, COPY out, VACUUM, ANALYZE
+  within +-0.2%; TPC-H q01 / q06 instructions equal within 0.07% (3 pairs); pgbench
+  select-only within -0.74 to +0.07% a transaction.
+- Writes past the model pay the summaries' upkeep: UPDATE of half the rows 13.39 -> 14.69 G
+  (+9.3 to +9.8%; PostgreSQL 27.50), COPY in +1.6%, CREATE UNIQUE INDEX +1.5 to +2.4%,
+  INSERT ... SELECT +0.7 to +1.4%, DELETE within noise.
+
+Tests: `big_tables::sizes_and_heap_order_past_the_model` (the script's history at 30,000
+rows, the model's limit at 2,000: sizes, pg_class, serial sums, first rows and the row order's
+md5 recorded from PostgreSQL 18.6; `t_id` within a page), `btest`'s unit tests (a bulk UPDATE
+doubles a unique index, appended keys fill to the fillfactor). `parallel_scan`'s serial /
+parallel comparison takes rows without ORDER BY in either order and float8 values to 12
+digits, and its parallel run's seq_tup_read within 1,000 of three serial runs': past the model
+an updated table's serial scan is in heap order, the workers' in storage order, so a sum's
+last digits and where an error stops the scan (`sum(id * 100000)`: 21,057 rows read serially,
+as PostgreSQL's heap order meets the first bad row, 21,267 in parallel) differ.
+
+Verification: the verification train on `6e145ea07` (the change rebased onto `5526bfef4`,
+`TRAIN_NO_CHECKOUT=1`): crash_random seeds 1-30 x 4 and the power stage pass; regress 51,148 /
+51,150 with 0 newly differing units; isolation 1647 / 1648 permutations; pg_dump_tap 14,609
+passed, 0 failed; Clippy 21 warnings, one in a changed file (fixed after). Release and debug
+crate tests failed only in the two tests above (fixed after: the kept places' cap was the
+model's limit times four, 8,000 under the test's limit; `parallel_scan` as above) and, in the
+release run only, `pgvector_hnsw::truncate_reindex_and_reopen` (an SST block checksum at
+reopen; it passed in the debug run and again after). On the final tree, release: the `sizing`
+(4) and `heaporder` (1) unit tests, big_tables 20 / 20, parallel_scan 13 / 13, heap_order_scan,
+pgvector_hnsw 7 / 7, models_kept 6 / 6 pass; Clippy has no warning in a changed file. The full
+train was not run again for those fixes. The gates ran on the tree before them (the
+transition's places, the cap, the tests), which touch no measured path.
+
+Dropped (patches in `~/.cache/a237/patches/`): `n005-stamped-tids.patch`, each version's TID
+stored in its row (ROW_HEADER_TID) for ctid and heap order: every later scan of the rows
+paid for the longer header (count_after, count(b), avg(c) +4.6-5.1%, VACUUM +10%, COPY in
++2.6%, n005 against base, 5 pairs), and the heap-order merge ran for DELETE's scan (+45%).
+The places now live in the estimate (above).
+
+Left:
+1. Loads into an index of repeating values past the model (the reload above): a key's first
+   rows look new until its duplicate ratio builds up; a presence filter of the keys (a Bloom
+   filter, ~1 byte a distinct key) would decide it, and PostgreSQL's split strategy for
+   leaves of duplicates (_bt_strategy) is still not modelled (exact presence gives 1,631
+   leaves against 1,178).
+2. HOT on pages with room past the model (the small updates): the old version's TID at the
+   update (the scan's stored row has it) and a per-page free-space array (2 bytes a page).
+3. Writes into space a VACUUM freed (the free space map's order) stay unplaced.
+4. The summaries and places live in memory: after a restart a big table's btrees are their
+   last measure again (until CREATE INDEX / REINDEX), and its heap order state starts as
+   `Unplaced` (rows as stored). Keeping them would need a record like the kept models'
+   (`kept`), written at close.
+5. Inner pages are estimated from the leaf count (one page off at 5,000 leaves).
+6. The write cost (measured: the bulk UPDATE +9.4% user instructions): per index entry the
+   key's encoding and tuple size, the leaf's search (a hint for keys in order) and per moved
+   version a map insert. A second UPDATE's scan reads as stored, so its new versions are
+   placed in key order (PostgreSQL's in heap order): giving it heap order would cost the
+   heap-order merge on every big UPDATE.
+7. ctid past the model: the estimate's TIDs could be shown (`estimated_rank` gives them) for
+   the system column.
+
 ## Planner round 9 (agent 155)
 
 BENCH.md "Planner, round 9" has the measurements. What changed in batch 1:
@@ -10701,7 +10858,8 @@ What is left, by size:
 Dropped (patches in `~/.cache/a235/patches/`):
 
 - *The commit that fsyncs next woken first* (`wake-next-first.patch`, on step 2): against the
-  rebased stack at 8 clients neutral (tps +0.1%, instructions -0.92%, cycles -1.4%, 4 pairs).
+  rebased stack neutral at 8 clients (tps +0.1%, instructions -0.92%, cycles -1.4%, 4 pairs)
+  and at 32 (tps +2.6%, instructions +0.65%, cycles 0.0%, 3 pairs).
 
 - *nextval's logged-ahead value written without waiting for an fsync*
   (`nextval-unwaited-log.patch`, with a power-cut case `power_cut_keeps_returned_sequence_values`

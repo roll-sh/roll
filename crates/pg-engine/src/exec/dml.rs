@@ -3946,11 +3946,14 @@ impl StoredInsert {
         let Some(len) = crate::storage::row::stored_tuple_len(data, &self.types, &self.none) else {
             return Ok(false);
         };
-        if !super::sizing::inserted_stored(t, len, ctx) {
+        let Some(run) = super::sizing::inserted_stored(t, len, ctx) else {
             return Ok(false);
-        }
+        };
         let rowid = ctx.sess.db.nextval_by_one(t.oid, || crate::session::ddl::rowid_sequence(t))?;
         let dkey = data_key(t, &[], Some(rowid));
+        if run {
+            super::sizing::stored_run_key(t, &dkey, &ctx.sess.db);
+        }
         plain_counts.set(plain_counts.get() + 1);
         let mut txn = ctx.txn.borrow_mut();
         let xid = txn.cur_xid();
