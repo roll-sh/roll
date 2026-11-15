@@ -69,6 +69,8 @@ export interface Grant {
   decided_by?: string | null;
   /** What its secret looks like (`rlt_…a1b2`), to match one found in a config to this row. */
   hint?: string | null;
+  /** The person it's theirs (`usr_…`), when it isn't the operator's. */
+  user?: string | null;
   ip_allow: string[];
   /** "operator", or the grant that made it. */
   created_by: string;
@@ -433,6 +435,20 @@ export const accessApi = {
 };
 
 // ── pure helpers (tested in access-api.test.ts) ──
+
+/**
+ * Whether a token matches what someone typed in the list's filter: every word in its name, id,
+ * hint, client, person or the products it reaches. A whole secret pasted in matches the token it
+ * is by its hint (prefix and last four), so a token found in a config finds its row; it's only
+ * compared here, never sent.
+ */
+export function grantMatches(g: Pick<Grant, "name" | "id" | "hint" | "client" | "user" | "created_by" | "rules">, typed: string): boolean {
+  const q = typed.trim().toLowerCase();
+  if (!q) return true;
+  if (/^rl[a-z]_[a-z2-7]{30,}$/.test(q)) return Boolean(g.hint) && g.hint === `${q.slice(0, q.indexOf("_") + 1)}…${q.slice(-4)}`;
+  const hay = [g.name, g.id, g.hint ?? "", g.client?.name ?? "", g.user ?? "", g.created_by, ...g.rules.map((r) => r.product)].join(" ").toLowerCase();
+  return q.split(/\s+/).every((w) => hay.includes(w));
+}
 
 /** Who an audit row is by: a change's person (`args.by`), else a request's grant, else the operator. */
 export function auditWho(e: AuditEvent): string {

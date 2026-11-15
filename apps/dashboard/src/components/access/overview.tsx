@@ -8,6 +8,7 @@ import {
   CLIENTS,
   describeRule,
   expiringSoon,
+  grantMatches,
   mcpConfig,
   byConcern,
   FIX_LABEL,
@@ -237,8 +238,10 @@ function Attention({ list, refresh }: { list: Checkup[]; refresh: () => Promise<
 }
 
 function Grants({ grants, refresh }: { grants: Grant[]; refresh: () => Promise<void> }) {
-  const live = grants.filter((g) => statusOf(g) === "active");
-  const old = grants.filter((g) => statusOf(g) !== "active");
+  const [typed, setTyped] = useState("");
+  const shown = grants.filter((g) => grantMatches(g, typed));
+  const live = shown.filter((g) => statusOf(g) === "active");
+  const old = shown.filter((g) => statusOf(g) !== "active");
   const [showOld, setShowOld] = useState(false);
   if (grants.length === 0) {
     return (
@@ -258,6 +261,20 @@ function Grants({ grants, refresh }: { grants: Grant[]; refresh: () => Promise<v
   const soon = expiringSoon(live);
   return (
     <Panel title="Tokens and connections" aside={<span className="font-mono text-[12px] text-subtle">{live.length} active</span>}>
+      {grants.length > 5 && (
+        <div className="border-b border-line px-5 py-2.5">
+          <input
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            placeholder="Filter by name, product, client or person, or paste a token to find it"
+            aria-label="Filter tokens"
+            spellCheck={false}
+            autoComplete="off"
+            className={`${input} w-full text-[12px]`}
+          />
+          {typed && shown.length === 0 && <p className="mt-2 text-[12px] text-subtle">No token matches.</p>}
+        </div>
+      )}
       {soon.length > 0 && (
         <p className="border-b border-line px-5 py-2.5 text-[12px] text-muted">
           {soon.length === 1 ? "One expires" : `${soon.length} expire`} within a week:{" "}
