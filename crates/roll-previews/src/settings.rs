@@ -198,7 +198,14 @@ pub struct GithubRule {
     /// tests): each taken, compared with main's and reviewed like a page (`state:<name>`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub states: Vec<StateRule>,
+    /// More browsers the first page is taken in besides Chromium (Percy's and Chromatic's
+    /// browsers): `firefox`, `webkit`, each a page of its own (`browser:<name>`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub browsers: Vec<String>,
 }
+
+/// The browsers `github.browsers` may name (Chromium always takes the screenshot).
+pub const BROWSERS: [&str; 2] = ["firefox", "webkit"];
 
 /// A page state (`github.states`): `page` of the first service's, then its steps.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -367,7 +374,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None, endpoints: Vec::new(), states: Vec::new() }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None, endpoints: Vec::new(), states: Vec::new(), browsers: Vec::new() }
     }
 }
 
@@ -541,6 +548,10 @@ impl Settings {
                 STEP_KEYS.join(", ")
             ));
         }
+        let br = &self.github.browsers;
+        if br.iter().enumerate().any(|(i, b)| !BROWSERS.contains(&b.as_str()) || br[..i].contains(b)) {
+            return bad(format!("github.browsers: some of {}, each once (Chromium always takes the screenshot)", BROWSERS.join(", ")));
+        }
         let eps = &self.github.endpoints;
         if eps.len() > MAX_ENDPOINTS || eps.iter().any(|p| !page_path_ok(p)) || eps.iter().enumerate().any(|(i, p)| eps[..i].contains(p)) {
             return bad(format!("github.endpoints: at most {MAX_ENDPOINTS} different GET paths of the first service's (/api/users), up to 200 characters, no #, quotes or spaces"));
@@ -588,10 +599,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Page states are a few, named, each a page of the first service's and a few known steps;
-    /// anything past that is refused when set.
+    /// Page states are a few, named, each a page of the first service's and a few known steps,
+    /// and other browsers are Firefox and WebKit; anything past that is refused when set.
     #[test]
-    fn page_states_are_few_and_their_steps_known() {
+    fn page_states_and_browsers_are_bounded() {
         let ok = |states: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "states": states } })).is_ok();
         assert!(ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [{ "click": "#open" }, { "type": ["#q", "shoes"] }, { "press": "Enter" }, { "wait": 500 }] }])));
         assert!(!ok(serde_json::json!([{ "name": "Cart", "page": "/", "steps": [{ "click": "#open" }] }])), "a name of a-z, 0-9 and -");
@@ -602,6 +613,9 @@ mod tests {
         assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [] }])), "a step at least");
         let four: Vec<serde_json::Value> = (0..4).map(|i| serde_json::json!({ "name": format!("s{i}"), "page": "/", "steps": [{ "wait": 1 }] })).collect();
         assert!(!ok(serde_json::json!(four)), "at most 3");
+        let browsers = |b: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "browsers": b } })).is_ok();
+        assert!(browsers(serde_json::json!(["firefox", "webkit"])));
+        assert!(!browsers(serde_json::json!(["chrome"])) && !browsers(serde_json::json!(["webkit", "webkit"])), "the two other browsers, each once");
     }
 
     #[test]

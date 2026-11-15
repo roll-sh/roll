@@ -82,6 +82,12 @@ pub const SCREENSHOT_IMAGE: &str = "mcr.microsoft.com/playwright:v1.64.1-noble";
 /// (`shot.js`, in `$ROLL_SHOT_JS`). A command of an operator's own only needs to write `$OUT`.
 pub const SCREENSHOT_COMMAND: &str = r#"CHROME="$(ls -d /ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell | head -1)" node -e "$ROLL_SHOT_JS""#;
 const SHOT_JS: &str = include_str!("shot.js");
+/// The screenshot image with `playwright-core` added (Firefox and WebKit are in the base image,
+/// but only Playwright drives them): built once per node from [`BROWSERS_DOCKERFILE`] when a
+/// project asks for other browsers (`github.browsers`).
+pub const BROWSERS_IMAGE: &str = "roll-previews-shot:1.64.1";
+const BROWSERS_DOCKERFILE: &str = "FROM mcr.microsoft.com/playwright:v1.64.1-noble\nRUN npm install -g --no-audit --no-fund playwright-core@1.64.1 && npm cache clean --force\nENV NODE_PATH=/usr/lib/node_modules\n";
+const BROWSERS_JS: &str = include_str!("browsers.js");
 /// axe-core's WCAG rules for the screenshot's session (vendored, MPL-2.0): 640 KB, past what one
 /// environment variable may hold, so it goes in on the container's stdin.
 const AXE_JS: &str = include_str!("../vendor/axe-core/axe.min.js");
@@ -1013,7 +1019,68 @@ impl Runtime {
         let png = b64e.decode(b64.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
         anyhow::ensure!(png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX, "the screenshot isn't a PNG of at most {SCREENSHOT_MAX} bytes");
         let phone = b64e.decode(phone.trim()).ok().filter(|p| p.starts_with(b"\x89PNG") && p.len() <= SCREENSHOT_MAX);
-        Ok(crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed), a11y: crate::PageA11y::parse(speed), text: crate::page_text(speed), links: crate::PageLinks::parse(speed), api: crate::openapi::lines(speed), phone, pages: page_shots(&pages, said, lines) })
+        let mut shot = crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed), a11y: crate::PageA11y::parse(speed), text: crate::page_text(speed), links: crate::PageLinks::parse(speed), api: crate::openapi::lines(speed), phone, pages: page_shots(&pages, said, lines) };
+        // The other browsers the project asked for, best effort: Chromium's screenshot stands.
+        if !opts.browsers.is_empty() {
+            match self.other_browsers(name, port, opts).await {
+                Ok(more) => shot.pages.extend(more),
+                Err(e) => tracing::warn!(container = name, error = %e, "previews: other browsers' screenshots"),
+            }
+        }
+        Ok(shot)
+    }
+
+    /// The first page in the other browsers `opts.browsers` names (`browser:<name>` pages), in the
+    /// service's network as Chromium's run is, locked down the same way.
+    async fn other_browsers(&self, name: &str, port: u16, opts: &crate::ports::ShotOptions) -> anyhow::Result<Vec<crate::ports::PageShot>> {
+        use base64::Engine as _;
+        if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", BROWSERS_IMAGE]).await.is_err() {
+            let label = format!("{}=preview", code_preview::docker::LABEL);
+            docker_with_input(&["build", "--quiet", "--label", &label, "-t", BROWSERS_IMAGE, "-"], BROWSERS_DOCKERFILE.as_bytes(), 1 << 20).await?;
+        }
+        let browsers: Vec<&String> = opts.browsers.iter().filter(|b| crate::settings::BROWSERS.contains(&b.as_str())).collect();
+        let hide: Vec<&String> = opts.hide.iter().filter(|s| crate::settings::selector_ok(s)).take(crate::settings::MAX_HIDE).collect();
+        let run = format!("roll-previews-browsers-{}", name.trim_start_matches("roll-previews-"));
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--name".into(), run.clone(), "--network".into(), format!("container:{name}")];
+        args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL)]);
+        if let Some(l) = code_preview::docker::home_label() {
+            args.extend(["--label".into(), l]);
+        }
+        args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=512m".into()]);
+        args.extend(code_preview::docker::limits(1024, 1.0));
+        args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "HOME=/tmp".into()]);
+        args.extend(["--env".into(), format!("BROWSERS={}", serde_json::to_string(&browsers)?), "--env".into(), format!("HIDE={}", serde_json::to_string(&hide)?)]);
+        args.extend(["--env".into(), format!("ROLL_BROWSERS_JS={BROWSERS_JS}"), BROWSERS_IMAGE.into(), "sh".into(), "-c".into(), r#"node -e "$ROLL_BROWSERS_JS""#.into()]);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let within = Duration::from_secs(30 + 40 * browsers.len() as u64);
+        let max = browsers.len() * (SCREENSHOT_MAX * 4 / 3 + 4096);
+        let out = match tokio::time::timeout(within, docker_with_input(&argv, b"", max)).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => {
+                code_preview::docker::remove(&run).await;
+                return Err(e);
+            }
+            Err(_) => {
+                code_preview::docker::remove(&run).await;
+                anyhow::bail!("the other browsers took over {} s", within.as_secs());
+            }
+        };
+        #[derive(serde::Deserialize)]
+        struct Line {
+            browser: String,
+            #[serde(default)]
+            errors: u32,
+            png: String,
+        }
+        let mut pages: Vec<crate::ports::PageShot> = Vec::new();
+        for l in out.lines().filter_map(|l| serde_json::from_str::<Line>(l).ok()) {
+            let Ok(png) = base64::engine::general_purpose::STANDARD.decode(l.png.trim()) else { continue };
+            let path = format!("browser:{}", l.browser);
+            if png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX && browsers.iter().any(|b| **b == l.browser) && !pages.iter().any(|p| p.path == path) {
+                pages.push(crate::ports::PageShot { path, png, errors: l.errors.min(10_000), report: Default::default() });
+            }
+        }
+        Ok(pages)
     }
 
     async fn seed_job(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {

@@ -477,6 +477,22 @@ function Form({
           </Field>
         )}
         {s.github.screenshot && (
+          <Field label="Other browsers" note="The first page in Firefox and WebKit too, each compared with main's in that browser and reviewed like a page.">
+            <div className="flex gap-4">
+              {(["firefox", "webkit"] as const).map((b) => (
+                <label key={b} className="flex items-center gap-1.5 text-[12px] text-soft">
+                  <input
+                    type="checkbox"
+                    checked={(s.github.browsers ?? []).includes(b)}
+                    onChange={(e) => set("github", { ...s.github, browsers: e.target.checked ? [...(s.github.browsers ?? []).filter((x) => x !== b), b] : (s.github.browsers ?? []).filter((x) => x !== b) })}
+                  />
+                  {b === "firefox" ? "Firefox" : "WebKit"}
+                </label>
+              ))}
+            </div>
+          </Field>
+        )}
+        {s.github.screenshot && (
           <Field label="Page states" note="Pages reached by a few steps (a cart open, a dialog), each screenshotted and reviewed like a page: a JSON list of {name, page, steps}, steps {click: selector}, {type: [selector, text]}, {press: key} or {wait: ms}. Up to 3.">
             <textarea value={states} onChange={(e) => setStates(e.target.value)} rows={3} placeholder='[{"name": "cart", "page": "/", "steps": [{"click": "#open-cart"}]}]' className={`${field} w-full py-1.5 font-mono text-[12px]`} spellCheck={false} />
           </Field>
