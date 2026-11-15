@@ -233,7 +233,16 @@ impl roll_secrets::aws::Sts for RollSts {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let conf = self.conf.get_or_init(|| aws_config::load_defaults(aws_config::BehaviorVersion::latest())).await;
-                let out = aws_sdk_sts::Client::new(conf)
+                // A server with no AWS settings at all still calls STS: the role's partition's
+                // global endpoint when no region is set.
+                let region = conf.region().cloned().unwrap_or_else(|| {
+                    aws_config::Region::from_static(match role_arn.split(':').nth(1) {
+                        Some("aws-cn") => "cn-north-1",
+                        Some("aws-us-gov") => "us-gov-west-1",
+                        _ => "us-east-1",
+                    })
+                });
+                let out = aws_sdk_sts::Client::from_conf(aws_sdk_sts::config::Builder::from(conf).region(region).build())
                     .assume_role_with_web_identity()
                     .role_arn(role_arn)
                     .web_identity_token(token)
@@ -241,7 +250,7 @@ impl roll_secrets::aws::Sts for RollSts {
                     .duration_seconds(seconds)
                     .send()
                     .await
-                    .map_err(|e| aws_sdk_sts::error::ProvideErrorMetadata::code(&e).unwrap_or("no answer").to_string())?;
+                    .map_err(|e| sts_failure(&e))?;
                 let c = out.credentials.ok_or("STS answered without credentials")?;
                 Ok(roll_secrets::aws::Session {
                     expires_at: c.expiration.to_millis().map_err(|_| "STS answered an expiry roll can't read")?,
@@ -299,6 +308,21 @@ impl RollSts {
 }
 
 /// AWS's error code, never the request (it may hold a key).
+/// Why an STS call failed: AWS's error code, else what kept it from answering (never the request).
+fn sts_failure<E: aws_sdk_sts::error::ProvideErrorMetadata, R>(e: &aws_sdk_sts::error::SdkError<E, R>) -> String {
+    use aws_sdk_sts::error::{ProvideErrorMetadata, SdkError};
+    if let Some(code) = e.code() {
+        return code.to_string();
+    }
+    match e {
+        SdkError::ConstructionFailure(_) => "the request couldn't be made (is a region set?)",
+        SdkError::TimeoutError(_) => "STS timed out",
+        SdkError::DispatchFailure(_) => "STS couldn't be reached",
+        _ => "no answer",
+    }
+    .to_string()
+}
+
 fn aws_code<E: aws_sdk_iam::error::ProvideErrorMetadata>(e: &E) -> String {
     e.code().unwrap_or("no answer").to_string()
 }
