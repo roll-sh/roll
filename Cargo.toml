@@ -185,7 +185,6 @@ curve25519-dalek = "4"
 hkdf = "0.12"
 # GitHub Actions secrets are libsodium sealed boxes (code-github `seal_secret`).
 crypto_box = { version = "0.9", features = ["seal"] }
-blake2 = "0.10"
 toml = "1"
 http-body-util = "0.1"
 ignore = "0.4"
