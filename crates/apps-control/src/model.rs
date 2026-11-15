@@ -483,6 +483,14 @@ pub struct Run {
     pub schedules: Vec<Scheduled>,
 }
 
+/// A volume's measured size ([`Environment::volume_used`]).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct VolumeUsed {
+    pub bytes: u64,
+    /// When it was measured (unix ms).
+    pub at: i64,
+}
+
 /// A command on a schedule ([`Run::schedules`]): a job (`crate::jobs`) at each due time, skipped
 /// while its last one still runs; a paused environment's move on without making up the runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -919,6 +927,9 @@ pub struct Environment {
     pub private: bool,
     /// A cron service's next scheduled run (unix ms), once it has a deployment.
     pub next_run_at: Option<i64>,
+    /// How full its volume was when last measured (hourly), when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume_used: Option<VolumeUsed>,
     /// Its instances keep crashing: three or more in the last ten minutes.
     pub crash_loop: Option<CrashLoop>,
     /// A gradual rollout under way: the new deployment and the percent of requests it takes.

@@ -50,7 +50,7 @@ type Range = (typeof RANGES)[number];
 /** At most this many points a chart: a week of minutes in 28-minute buckets. */
 const MAX_POINTS = 360;
 
-const COUNTS = ["requests", "errors", "cold_starts"] as const;
+const COUNTS = ["requests", "errors", "cold_starts", "egress_bytes"] as const;
 const PEAKS = ["p50_ms", "p95_ms", "p99_ms", "cpu", "memory_bytes", "instances", "cold_start_ms"] as const;
 
 /** `m` in buckets of `size` minutes (each named by its first): counts summed, the rest their peak. */
@@ -60,7 +60,7 @@ export function bucketed(m: MetricsData, size: number): MetricsData {
   for (const k of [...COUNTS, ...PEAKS]) (out as unknown as Record<string, number[]>)[k] = [];
   for (let i = 0; i < m.minutes.length; i += size) {
     out.minutes.push(m.minutes[i]);
-    for (const k of COUNTS) out[k].push(m[k].slice(i, i + size).reduce((a, v) => a + (v ?? 0), 0));
+    for (const k of COUNTS) out[k].push((m[k] ?? []).slice(i, i + size).reduce((a, v) => a + (v ?? 0), 0));
     for (const k of PEAKS) out[k].push(Math.max(0, ...m[k].slice(i, i + size).map((v) => v ?? 0)));
   }
   return out;
@@ -321,6 +321,7 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
       },
       { title: "CPU (cores)", agg: "peak" as Agg, series: [{ label: "cpu", values: m.cpu, color: ink }], format: cores, summary: `peak ${cores(peak(m.cpu))} cores` },
       { title: "Memory", agg: "peak" as Agg, series: [{ label: "memory", values: m.memory_bytes, color: ink }], format: (v: number) => formatBytes(v), summary: `peak ${formatBytes(peak(m.memory_bytes))}${memoryMb ? ` of ${formatBytes(memoryMb * 1024 * 1024)}` : ""}`, limit: memoryMb ? memoryMb * 1024 * 1024 : undefined },
+      { title: `Egress / ${per}`, agg: "total" as Agg, series: [{ label: "egress", values: m.egress_bytes ?? m.minutes.map(() => 0), color: ink }], format: (v: number) => formatBytes(v), summary: `${formatBytes(sum(m.egress_bytes ?? []))} answered in the ${range.label}` },
       { title: "Instances", agg: "peak" as Agg, series: [{ label: "instances", values: m.instances, color: ink }], format: count, summary: `peak ${peak(m.instances)}` },
       { title: `Cold starts / ${per}`, agg: "total" as Agg, series: [{ label: "cold starts", values: m.cold_starts, color: ink }], format: count, summary: `${sum(m.cold_starts)} in the ${range.label}` },
       { title: "Cold start time", agg: "peak" as Agg, series: [{ label: "cold start", values: m.cold_start_ms, color: ink }], format: formatMs, summary: `slowest ${formatMs(peak(m.cold_start_ms))}` },
@@ -360,7 +361,7 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
           <table className="w-full font-mono text-[11.5px] tabular-nums">
             <thead className="sticky top-0 bg-panel text-left text-subtle">
               <tr>
-                {["minute", "req", "5xx", "p50", "p95", "p99", "cpu", "memory", "inst", "cold", "cold ms", "deploy"].map((h) => (
+                {["minute", "req", "5xx", "p50", "p95", "p99", "cpu", "memory", "egress", "inst", "cold", "cold ms", "deploy"].map((h) => (
                   <th key={h} className="border-b border-line px-3 py-2 font-normal">
                     {h}
                   </th>
@@ -378,6 +379,7 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
                   <td className="px-3 py-1">{formatMs(m.p99_ms[i])}</td>
                   <td className="px-3 py-1">{cores(m.cpu[i] ?? 0)}</td>
                   <td className="px-3 py-1">{formatBytes(m.memory_bytes[i])}</td>
+                  <td className="px-3 py-1">{formatBytes(m.egress_bytes?.[i] ?? 0)}</td>
                   <td className="px-3 py-1">{m.instances[i]}</td>
                   <td className="px-3 py-1">{m.cold_starts[i]}</td>
                   <td className="px-3 py-1">{m.cold_starts[i] ? formatMs(m.cold_start_ms[i]) : "—"}</td>

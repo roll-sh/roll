@@ -144,6 +144,47 @@ impl Apps {
         .map_err(|e| Error::Internal(e.to_string()))?
     }
 
+    /// Once an hour, on the owner: how full each volume is (`du` in a helper container on Docker),
+    /// kept for the environment's answer, and `volume.full` once it passes 90% of its size (again
+    /// only after it went under 80%): a volume that fills up takes its database down.
+    pub async fn measure_volumes(self: &Arc<Self>) {
+        for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {
+            let Some(vol) = l.template().and_then(|t| t.run.volume.clone()) else { continue };
+            let Some(bytes) = self.deps.runtime.volume_used(&volume_name(&l.service, &l.env)).await else { continue };
+            let size = vol.size_gb as u64 * (1 << 30);
+            let pct = bytes.saturating_mul(100).checked_div(size).unwrap_or(0);
+            let (used, full) = (format!("volume_used:{}/{}", l.service, l.env), format!("volume_full:{}/{}", l.service, l.env));
+            let (sid, en, now) = (l.service.clone(), l.env.clone(), code_sql::now_ms());
+            let alert = self
+                .db(move |s| {
+                    s.set_state(&used, &format!("{bytes} {now}"))?;
+                    let was = s.get_state(&full)?.is_some_and(|v| !v.is_empty());
+                    if pct >= 90 && !was {
+                        s.set_state(&full, "1")?;
+                        s.add_event("volume.full", &sid, &en, None, &serde_json::json!({ "used_bytes": bytes, "size_gb": vol.size_gb, "pct": pct }))?;
+                        return Ok(true);
+                    }
+                    if pct < 80 && was {
+                        s.set_state(&full, "")?;
+                    }
+                    Ok(false)
+                })
+                .await
+                .unwrap_or(false);
+            if alert {
+                l.log.stream(crate::logs::Stream::System).line(format!("the volume is {pct}% full ({} of {} GB)", human_bytes(bytes), vol.size_gb));
+            }
+        }
+    }
+
+    /// What an environment's volume was last measured at: (bytes, when).
+    pub(crate) async fn volume_usage(self: &Arc<Self>, service: &str, env: &str) -> Option<(u64, i64)> {
+        let key = format!("volume_used:{service}/{env}");
+        let v = self.db(move |s| s.get_state(&key)).await.ok().flatten()?;
+        let (b, at) = v.split_once(' ')?;
+        Some((b.parse().ok()?, at.parse().ok()?))
+    }
+
     /// Once an hour, on the owner: a backup of each volume whose newest is a day old.
     pub(crate) async fn scheduled_backups(self: &Arc<Self>) {
         if self.deps.objects.is_none() {
@@ -186,5 +227,13 @@ impl Apps {
                 let _ = objects.delete(&key).await;
             }
         }
+    }
+}
+
+fn human_bytes(b: u64) -> String {
+    match b {
+        b if b >= 1 << 30 => format!("{:.1} GB", b as f64 / (1u64 << 30) as f64),
+        b if b >= 1 << 20 => format!("{:.0} MB", b as f64 / (1u64 << 20) as f64),
+        b => format!("{} KB", b / 1024),
     }
 }

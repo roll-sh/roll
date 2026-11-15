@@ -1829,7 +1829,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed"]), "the default events");
+    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");
@@ -3581,4 +3581,26 @@ async fn a_web_service_runs_a_command_on_its_schedule() {
     assert_eq!(list[0]["command"], "echo cleanup", "{list}");
     let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"schedules": [{"name": "Bad Name", "schedule": "@daily", "command": "x"}]}}))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+}
+
+/// How full a volume is, measured on the owner: the environment says it, and passing 90% is
+/// `volume.full` once (again only after it went under 80%).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_volume_filling_up_is_said_once() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "db", json!({"type": "worker", "volume": {"mount": "/data", "size_gb": 1}})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let volume = apps_control::volume_name(&id, "production");
+    let events = || async { call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().cloned().unwrap_or_default().into_iter().filter(|e| e["kind"] == "volume.full").count() };
+    w.fake.set_volume_used(&volume, 1_000_000_000);
+    w.apps.measure_volumes().await;
+    w.apps.measure_volumes().await;
+    assert_eq!(events().await, 1, "once while it stays full");
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
+    assert_eq!(env["volume_used"]["bytes"], 1_000_000_000u64, "{env}");
+    w.fake.set_volume_used(&volume, 1_000);
+    w.apps.measure_volumes().await;
+    w.fake.set_volume_used(&volume, 1_050_000_000);
+    w.apps.measure_volumes().await;
+    assert_eq!(events().await, 2, "again after it had room");
 }

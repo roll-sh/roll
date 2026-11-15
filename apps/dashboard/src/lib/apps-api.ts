@@ -419,6 +419,8 @@ export interface Environment extends EnvironmentSummary {
   private: boolean;
   /** A cron service's next scheduled run, once deployed. */
   next_run_at: number | null;
+  /** How full its volume was when last measured (hourly), when it has one. */
+  volume_used?: { bytes: number; at: number };
   /** Its instances keep crashing: three or more in the last ten minutes. */
   crash_loop: { crashes: number; last_at: number; last_error: string } | null;
   /** A gradual rollout under way: the new deployment and the percent of requests it takes. */
@@ -591,6 +593,8 @@ export interface Metrics {
   instances: number[];
   cold_starts: number[];
   cold_start_ms: number[];
+  /** Bytes answered a minute (what egress is billed by). */
+  egress_bytes: number[];
 }
 
 export interface Usage {
@@ -635,7 +639,8 @@ export type NotifyEvent =
   | "domain.expiring"
   | "domain.expired"
   | "domain.tls_failed"
-  | "volume.backup_failed";
+  | "volume.backup_failed"
+  | "volume.full";
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {

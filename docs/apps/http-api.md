@@ -340,6 +340,7 @@ type Environment = EnvironmentSummary & {
   needs_deploy: boolean;     // variables or settings changed since the active deployment
   private: boolean;          // its hostnames answer only visitors with its access token
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
+  volume_used?: { bytes: number; at: number }; // how full its volume was when last measured (hourly, on its owner), when it has one
   crash_loop: { crashes: number; last_at: number; last_error: string } | null; // 3+ crashes in 10 minutes
   canary: { deployment: string; share: number } | null; // a gradual rollout under way: the percent of requests the new deployment takes
   run: { [field: string]: number }; // its own run settings over the service's ({}: the service's)
@@ -464,6 +465,7 @@ type Metrics = {
   instances: number[];
   cold_starts: number[];
   cold_start_ms: number[];   // average of the minute's cold starts (0 when none)
+  egress_bytes: number[];    // bytes answered (what egress is billed by); format=prometheus: roll_apps_egress_bytes_per_minute
 };
 
 type Usage = {
@@ -473,7 +475,7 @@ type Usage = {
 
 /** In the event log, each written in the same transaction as the change it records. Sequence
  *  numbers commit in order with no gaps, so a reader moving past `next` never misses one. Kept 7 days. */
-type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" /* data.error: the daily backup failed (notified by default) */ | "alert.resolved" /* data.alert: which alert cleared; sent to targets that get that alert */ | `audit.${string}` /* changes people made: what /activity lists */; service: string; environment: string; deployment: string | null; data: object };
+type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" /* data.error: the daily backup failed (notified by default) */ | "volume.full" /* data.used_bytes, size_gb, pct: past 90% of its size, once until it's under 80% (notified by default) */ | "deploy.skipped" /* data.revision, tag: a push whose message said [skip ci] (the timeline only) */ | "alert.resolved" /* data.alert: which alert cleared; sent to targets that get that alert */ | `audit.${string}` /* changes people made: what /activity lists */; service: string; environment: string; deployment: string | null; data: object };
 /** A webhook's body: { type, at, seq, service, environment, deployment, data, title, text, url },
  *  signed as roll code's webhooks are: X-Roll-Signature-256: sha256=hex(HMAC-SHA256(secret,
  *  X-Roll-Timestamp + "." + body)), the timestamp the send time in Unix seconds (a retry is signed
@@ -511,7 +513,7 @@ type AccessLine = {
 };
 /** A volume's backup: a tar in object storage (`apps/volumes/<service>/<env>/<id>.tar`). */
 type Backup = { id: string; at: number; size: number };
-type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord" | "email"; host: string /* an email target's: "the project's owner" */; events: ("deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed")[];
+type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord" | "email"; host: string /* an email target's: "the project's owner" */; events: ("deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" | "volume.full")[];
   environments: string[];  // only these environments' events; empty: every one's
   services: string[];      // only these services' (ids); empty: every one's
   previews: boolean;       // preview (ephemeral) environments' events too (an environment named in `environments` always)

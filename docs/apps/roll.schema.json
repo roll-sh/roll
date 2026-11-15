@@ -344,6 +344,125 @@
         },
         "screenshots": {
           "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "pages": {
+              "type": "array",
+              "maxItems": 10,
+              "items": {
+                "type": "string",
+                "pattern": "^/[^\\s#\"'<>`\\\\]{1,199}$"
+              }
+            },
+            "hide": {
+              "type": "array",
+              "maxItems": 20,
+              "items": {
+                "type": "string",
+                "maxLength": 200
+              }
+            },
+            "states": {
+              "type": "array",
+              "maxItems": 3,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "page",
+                  "steps"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9-]{1,40}$"
+                  },
+                  "page": {
+                    "type": "string",
+                    "pattern": "^/[^\\s#\"'<>`\\\\]{0,199}$"
+                  },
+                  "steps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "items": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "click"
+                          ],
+                          "properties": {
+                            "click": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 200
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "type"
+                          ],
+                          "properties": {
+                            "type": {
+                              "type": "array",
+                              "minItems": 2,
+                              "maxItems": 2,
+                              "items": {
+                                "type": "string",
+                                "maxLength": 200
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "press"
+                          ],
+                          "properties": {
+                            "press": {
+                              "enum": [
+                                "Enter",
+                                "Escape",
+                                "Tab",
+                                "ArrowDown",
+                                "ArrowUp",
+                                "ArrowLeft",
+                                "ArrowRight",
+                                "Space",
+                                "Backspace"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "wait"
+                          ],
+                          "properties": {
+                            "wait": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 5000
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
           "description": "What roll previews' screenshots do, as roll.toml's [preview] takes them: pages, hide and [[states]] (name, page, steps). Checked by roll previews."
         }
       }

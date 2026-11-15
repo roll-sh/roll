@@ -679,6 +679,17 @@ impl Runtime for Docker {
         }
     }
 
+    async fn volume_used(&self, name: &str) -> Option<u64> {
+        if !name.starts_with(super::PREFIX) {
+            return None;
+        }
+        // Never `-v` a volume that isn't there (Docker would make an empty one).
+        docker(&["volume", "inspect", name]).await.ok()?;
+        let mount = format!("{name}:/data:ro");
+        let out = docker(&["run", "--rm", "--network", "none", "--label", &format!("{LABEL}=usage"), "-v", &mount, VOLUME_IMAGE, "du", "-skx", "/data"]).await.ok()?;
+        out.split_whitespace().next()?.parse::<u64>().ok().map(|kib| kib * 1024)
+    }
+
     async fn read_volume(&self, name: &str) -> anyhow::Result<super::VolumeStream> {
         anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps volume");
         let mount = format!("{name}:/data:ro");

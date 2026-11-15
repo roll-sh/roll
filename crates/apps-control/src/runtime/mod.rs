@@ -211,6 +211,11 @@ pub trait Runtime: Send + Sync {
     async fn export_files(&self, _image: &str, _dir: &str) -> anyhow::Result<VolumeStream> {
         anyhow::bail!("this runtime doesn't export files")
     }
+    /// The bytes a volume's files take (how full it is), measured; none when this runtime can't
+    /// say or the volume doesn't exist.
+    async fn volume_used(&self, _name: &str) -> Option<u64> {
+        None
+    }
     /// A volume's files as a tar stream, read-only (a backup).
     async fn read_volume(&self, _name: &str) -> anyhow::Result<VolumeStream> {
         anyhow::bail!("this runtime has no volume backups")

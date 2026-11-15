@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { appsApi, formatFirewall, formatHeaders, parseAllowList, parseFirewall, parseHeaders, PRODUCTION, shortSha, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
-import { clock, CPU, MEMORY, mb, StateBadge, SureButton, type Runner } from "./shared";
+import { clock, CPU, MEMORY, mb, since, StateBadge, SureButton, type Runner } from "./shared";
 
 /** A private environment's token: 32 of [a-z0-9], from the browser's CSPRNG. */
 export function newAccessToken(): string {
@@ -602,6 +602,21 @@ function OwnRun({ service, env, runner }: { service: Service; env: Environment; 
 const size = (n: number) => (n >= 1 << 30 ? `${(n / (1 << 30)).toFixed(1)} GB` : n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
 /** The volume's backups (daily, the newest seven kept): back up now, or restore one after typing the environment's name. */
+/** How full the volume was when last measured: a hairline meter, the danger colour from 90% (`volume.full`). */
+function VolumeMeter({ used, sizeGb }: { used: { bytes: number; at: number }; sizeGb: number }) {
+  const pct = Math.min(100, Math.round((used.bytes / (sizeGb * 2 ** 30)) * 100));
+  return (
+    <div className="mt-2 w-64 max-w-full">
+      <div className="h-1 overflow-hidden rounded-full bg-fg/[0.08]" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct} aria-label="Volume used">
+        <div className={`h-full rounded-full ${pct >= 90 ? "bg-danger" : "bg-fg/40"}`} style={{ width: `${pct}%` }} />
+      </div>
+      <p className={`mt-1 text-[11.5px] ${pct >= 90 ? "text-danger" : "text-subtle"}`}>
+        {size(used.bytes)} of {sizeGb} GB ({pct}%), measured {since(used.at, Date.now())}
+      </p>
+    </div>
+  );
+}
+
 function Backups({ service, env, runner }: { service: Service; env: Environment; runner: Runner }) {
   const [list, setList] = useState<Backup[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -623,6 +638,7 @@ function Backups({ service, env, runner }: { service: Service; env: Environment;
         <div>
           <p className="text-[13px] font-medium">Volume backups</p>
           <p className="mt-1 text-[12px] text-muted">{service.run.volume!.mount} is copied to object storage once a day; the newest seven are kept.</p>
+          {env.volume_used && <VolumeMeter used={env.volume_used} sizeGb={service.run.volume!.size_gb} />}
         </div>
         <button className={btn} disabled={busy} onClick={() => runner.run("backup", () => appsApi.backUp(service.id, env.name)).then(load)}>
           {runner.busy === "backup" ? <span className="shimmer">Backing up…</span> : "Back up now"}

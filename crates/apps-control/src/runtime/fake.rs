@@ -60,6 +60,8 @@ pub struct Fake {
     pub shared: std::sync::atomic::AtomicBool,
     instances: Mutex<HashMap<String, FakeInstance>>,
     networks: Mutex<Vec<String>>,
+    /// What a volume reports it takes, over its contents' length ([`Fake::set_volume_used`]).
+    volume_used: Mutex<HashMap<String, u64>>,
     pub counts: Counts,
     /// Who the last pull logged in as (a private registry).
     pub pulled_as: Mutex<Option<String>>,
@@ -132,6 +134,11 @@ impl Fake {
     /// What a volume holds, as the app wrote it.
     pub fn put_volume(&self, name: &str, data: &[u8]) {
         self.volumes.lock().insert(name.to_string(), data.to_vec());
+    }
+
+    /// `name` reports `bytes` used, whatever it holds (a full disk without writing one).
+    pub fn set_volume_used(&self, name: &str, bytes: u64) {
+        self.volume_used.lock().insert(name.to_string(), bytes);
     }
 
     pub fn volume(&self, name: &str) -> Option<Vec<u8>> {
@@ -447,6 +454,13 @@ impl Runtime for Fake {
         l.set_cksum();
         b.append_link(&mut l, "./passwd", "/etc/passwd")?;
         Ok(Box::new(std::io::Cursor::new(b.into_inner()?)))
+    }
+
+    async fn volume_used(&self, name: &str) -> Option<u64> {
+        if let Some(b) = self.volume_used.lock().get(name) {
+            return Some(*b);
+        }
+        self.volumes.lock().get(name).map(|v| v.len() as u64)
     }
 
     async fn read_volume(&self, name: &str) -> anyhow::Result<super::VolumeStream> {

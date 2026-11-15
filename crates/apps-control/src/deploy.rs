@@ -1636,6 +1636,7 @@ impl Apps {
                 // A volume's tar can take minutes: never on the reaper's own loop.
                 let this = self.clone();
                 tokio::spawn(async move {
+                    this.measure_volumes().await;
                     this.scheduled_backups().await;
                     this.backing_up.store(false, std::sync::atomic::Ordering::SeqCst);
                 });
