@@ -116,13 +116,12 @@ pub fn roll_target(url: &str) -> Option<(&'static str, &str)> {
     url.strip_prefix(STREAM).map(|s| ("stream", s.split('/').next().unwrap_or_default()))
 }
 
-/// An index name Elasticsearch takes: lowercase, not starting with `-`, `_` or `+`, no `\/*?"<>| ,#:`.
+/// An index name Elasticsearch takes, and not a hidden or system one: lowercase, not starting with
+/// `-`, `_`, `+` or `.`, no `\/*?"<>| ,#:`.
 fn index_ok(index: &str) -> bool {
     !index.is_empty()
         && index.len() <= 255
-        && index != "."
-        && index != ".."
-        && !index.starts_with(['-', '_', '+'])
+        && !index.starts_with(['-', '_', '+', '.'])
         && index.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
 }
 
