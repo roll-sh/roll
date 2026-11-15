@@ -867,6 +867,19 @@ pub fn btree_inner_pages(firsts: &[(usize, usize)]) -> usize {
     pages
 }
 
+/// The downlinks of `pivot` bytes a sorted build puts on an inner page (`btree_inner_pages`).
+pub fn inner_per_page(pivot: usize) -> usize {
+    let mut fill = LevelFill::new(BLCKSZ * 30 / 100);
+    let mut n = 0;
+    while !fill.push(pivot, pivot) || n == 0 {
+        n += 1;
+        if n > BT_USABLE {
+            break;
+        }
+    }
+    n
+}
+
 /// Pages of a btree built over index tuples of these sizes (in key order): leaves filled
 /// to 90%, inner pages to 70%, a metapage, and a root above more than one leaf.
 pub fn btree_pages(tuples: &[(usize, usize)]) -> i32 {

@@ -67,9 +67,9 @@ pub struct EstBuilder {
     fill: Option<LevelFill>,
     dedup: bool,
     leaves: Vec<(u128, Leaf)>,
-    base_sum: f64,
-    base_n: f64,
-    pivot_sum: f64,
+    base_sum: usize,
+    base_n: usize,
+    pivot_sum: usize,
 }
 
 impl EstBuilder {
@@ -81,30 +81,36 @@ impl EstBuilder {
     /// TIDs; `first`: the first tuple of its key.
     pub fn push(&mut self, size: usize, pivot: usize, key: u128, tids: usize, first: bool, base: usize) {
         let fill = self.fill.as_mut().expect("a fill");
+        let used = fill.used() as f64;
         if fill.push(size, pivot) {
-            self.pivot_sum += pivot as f64;
+            // (The leaf before it is full: its bytes as the fill left them.)
+            if let Some(l) = self.leaves.last_mut() {
+                l.1.used = used;
+            }
+            self.pivot_sum += pivot;
             self.leaves.push((key, Leaf { max: key, used: 0.0, tuples: 0.0, tids: 0.0, keys: 0.0 }));
         }
-        let used = fill.used() as f64;
         let l = &mut self.leaves.last_mut().expect("a leaf").1;
         l.max = key;
-        l.used = used;
         l.tuples += 1.0;
         l.tids += tids as f64;
         if first || l.keys == 0.0 {
             l.keys += 1.0;
         }
-        self.base_sum += base as f64;
-        self.base_n += 1.0;
+        self.base_sum += base;
+        self.base_n += 1;
     }
 
     /// The summary, with the build's pages (`relsize::btree_pages`'s count).
     pub fn finish(mut self) -> (i32, BtEst) {
         let fill = self.fill.take().expect("a fill");
+        if let Some(l) = self.leaves.last_mut() {
+            l.1.used = fill.used() as f64;
+        }
         let inner = if fill.firsts.is_empty() { 0 } else { relsize::btree_inner_pages(&fill.firsts) };
         let n = self.leaves.len();
-        let base = if self.base_n > 0.0 { self.base_sum / self.base_n } else { 16.0 };
-        let pivot = if n > 0 { self.pivot_sum / n as f64 } else { base };
+        let base = if self.base_n > 0 { self.base_sum as f64 / self.base_n as f64 } else { 16.0 };
+        let pivot = if n > 0 { self.pivot_sum as f64 / n as f64 } else { base };
         let (mut lows, mut store) = (Vec::with_capacity(n), Vec::with_capacity(n));
         for (i, (lo, l)) in self.leaves.into_iter().enumerate() {
             lows.push((lo, (i as u64) << 24));
@@ -171,7 +177,7 @@ impl BtEst {
 
     /// An empty index (a metapage).
     pub fn empty(dedup: bool, base: usize) -> BtEst {
-        EstBuilder { dedup, base_sum: base as f64, base_n: 1.0, ..EstBuilder::new(dedup) }.finish().1
+        EstBuilder { dedup, base_sum: base, base_n: 1, ..EstBuilder::new(dedup) }.finish().1
     }
 
     /// The file's blocks.
@@ -186,9 +192,14 @@ impl BtEst {
 
     /// Inner pages above `leaves` leaves filled as a build fills them.
     fn inner_for(&self, leaves: usize) -> usize {
-        let p = self.pivot.round() as usize;
-        let firsts = vec![(p, p); leaves];
-        if leaves == 0 { 0 } else { relsize::btree_inner_pages(&firsts) }
+        // (Downlinks of the pivots' size, as many to a page as a build puts there.)
+        let per = relsize::inner_per_page(self.pivot.round() as usize).max(2);
+        let (mut level, mut pages) = (leaves, 0);
+        while level > 1 {
+            level = level.div_ceil(per);
+            pages += level;
+        }
+        pages
     }
 
     fn note_blocks(&mut self) {

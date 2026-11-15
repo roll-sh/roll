@@ -267,7 +267,27 @@ struct EstHeap {
     runs: Vec<(Vec<u8>, u32, u16)>,
     /// The TIDs of versions put out of key order (an update's new version), by a hash of
     /// their rows' keys (`key_hash`), at most `moved_max`.
-    moved: FastMap<u64, Tid>,
+    moved: HashedMap<Tid>,
+}
+
+/// A map keyed by hashes already mixed (`key_hash`): used as they are.
+type HashedMap<V> = std::collections::HashMap<u64, V, std::hash::BuildHasherDefault<Hashed>>;
+
+#[derive(Default)]
+struct Hashed(u64);
+
+impl std::hash::Hasher for Hashed {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, b: &[u8]) {
+        for &x in b {
+            self.0 = self.0.rotate_left(8) ^ x as u64;
+        }
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
+    }
 }
 
 /// A row key's hash for `EstHeap::moved` (64 bits: a clash puts one row out of place).
@@ -290,6 +310,10 @@ struct Tail {
     items: u16,
     key: Vec<u8>,
 }
+
+/// The bulk loads in progress of a shard (`RelFiles::bulk`) and the writer's (table,
+/// transaction): its state, when it is one (`EstHeap::add_in`).
+type BulkOf<'a> = (&'a mut FastMap<(u32, u64), Bulk>, (u32, u64));
 
 /// What an `EstHeap` places: a new row (its key, when known) or an update's new version
 /// (the old one's key).
@@ -342,7 +366,7 @@ impl EstHeap {
             fill_key: None,
             tail: None,
             runs: Vec::new(),
-            moved: FastMap::default(),
+            moved: HashedMap::default(),
         }
     }
 
@@ -357,7 +381,7 @@ impl EstHeap {
     /// `add` for a bulk insert (`bi`: its state): a new page past the fresh ones extends
     /// the file as far as the bulk insert has extended it so far (RelationAddBlocks), the
     /// pages past the first fresh.
-    fn add_in(&mut self, len: usize, fillfactor: usize, bi: Option<&mut heapsim::Bistate>, put: Put) -> Option<Tid> {
+    fn add_in(&mut self, len: usize, fillfactor: usize, mut bulk: Option<BulkOf>, put: Put) -> Option<Tid> {
         let need = heapsim::maxalign(len) + heapsim::ITEM_ID;
         if self.reusable >= need {
             self.reusable -= need;
@@ -385,12 +409,17 @@ impl EstHeap {
             }
         }
         self.in_place = false;
-        let bulk = bi.is_some();
+        // (The bulk load's state, looked up only when it decides something.)
+        fn state<'a>(bulk: &'a mut Option<BulkOf>) -> Option<&'a mut heapsim::Bistate> {
+            let (m, k) = bulk.as_mut()?;
+            m.get_mut(k)?.mode.bistate.as_mut()
+        }
         let reserve = heapsim::BLCKSZ * (100 - fillfactor.min(100)) / 100;
         // (A writer other than the bulk load filling the page has no target page of its own:
         // the free space map gives it the bulk extension's fresh pages first.)
-        let leave = !bulk && self.fill_bulk && self.fresh > 0;
+        let leave = self.fill_bulk && self.fresh > 0 && state(&mut bulk).is_none();
         if leave || self.pages == 0 || need + reserve > self.room || full(self.items) {
+            let is_bulk = state(&mut bulk).is_some();
             if let Some(key) = self.fill_key.take() {
                 self.tail = Some(Tail { page: self.fill, room: self.room, items: self.items, key });
             }
@@ -399,14 +428,14 @@ impl EstHeap {
                 self.fill = self.pages - self.fresh;
                 self.fresh -= 1;
             } else {
-                let by = bi.map_or(1, |b| b.extend()) as u32;
+                let by = state(&mut bulk).map_or(1, |b| b.extend()) as u32;
                 self.fill = self.pages;
                 self.pages += by;
                 self.fresh = by - 1;
             }
             self.room = heapsim::BLCKSZ - heapsim::PAGE_HEADER;
             self.items = 0;
-            self.fill_bulk = bulk;
+            self.fill_bulk = is_bulk;
             self.fill_key = match put {
                 Put::Row(Some(k)) if self.order == EstOrder::InOrder => Some(k.to_vec()),
                 _ => None,
@@ -419,35 +448,42 @@ impl EstHeap {
 
     /// The version of the row under `key` went in at `tid` (None: not placed), with a key
     /// past every other's (`appended`) or not: kept for heap order (`runs`, `moved`).
-    fn placed(&mut self, key: Option<&[u8]>, tid: Option<Tid>, appended: bool) {
+    /// True: a run began with a key not given (`key` None), for the caller to give it.
+    fn placed(&mut self, key: Option<&[u8]>, tid: Option<Tid>, appended: bool) -> bool {
         self.writes += 1;
-        let (Some(tid), Some(key)) = (tid, key) else {
+        let Some(tid) = tid else {
             self.unplace();
-            return;
+            return false;
         };
         if self.order == EstOrder::Unplaced {
-            return;
+            return false;
         }
         // (A key past every other's at the end of the file: its page's run, counted on.)
         if appended {
             if self.runs.last().is_none_or(|r| r.1 != tid.0) {
-                self.runs.push((key.to_vec(), tid.0, tid.1));
+                self.runs.push((key.map_or_else(Vec::new, <[u8]>::to_vec), tid.0, tid.1));
+                return key.is_none();
             }
-            return;
+            return false;
         }
+        let Some(key) = key else {
+            self.unplace();
+            return false;
+        };
         self.order = EstOrder::Stamped;
         if self.moved.len() >= moved_max() {
             self.unplace();
-            return;
+            return false;
         }
         self.moved.insert(key_hash(key), tid);
+        false
     }
 
     /// A version whose place isn't known: the rows come as stored from now on.
     fn unplace(&mut self) {
         self.order = EstOrder::Unplaced;
         self.runs = Vec::new();
-        self.moved = FastMap::default();
+        self.moved = HashedMap::default();
     }
 
     /// The heap-order rank (`heaporder::tid_rank`) of the row under `key` without a stored
@@ -2218,21 +2254,32 @@ fn may_toast(v: &Value) -> bool {
 /// SELECT copying them, `dml::StoredInsert`): its heap estimate grows by the tuple's length
 /// `len` (its `row_len`, by `storage::row::stored_tuple_len`), as `inserted_with` grows it
 /// for a row short enough to keep its values in line. False: the table is modelled, or the
-/// row long (nothing done: the row goes in decoded). Some: the row's TID as the estimate
-/// places it (`EstHeap::add`), when it does.
-pub fn inserted_stored(t: &Table, len: usize, ctx: &ExecCtx) -> bool {
-    len <= TOAST_THRESHOLD && ctx.sess.db.relfiles.of(t.oid).read().untracked.contains(&t.oid)
-}
-
-/// The row `inserted_stored` took went in under `key`.
-pub fn stored_inserted(t: &Table, len: usize, key: &[u8], ctx: &ExecCtx) {
+/// row long (nothing done: the row goes in decoded). Some(true): the row begins a run of the
+/// heap order's places (`EstHeap::runs`), its key to be given (`stored_run_key`).
+pub fn inserted_stored(t: &Table, len: usize, ctx: &ExecCtx) -> Option<bool> {
+    if len > TOAST_THRESHOLD {
+        return None;
+    }
     let txn = ctx.txn.borrow().id;
     let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
+    if !rf.untracked.contains(&t.oid) {
+        return None;
+    }
     let RelFiles { estimated, bulk, .. } = &mut *rf;
-    let bi = bulk.get_mut(&(t.oid, txn)).and_then(|b| b.mode.bistate.as_mut());
-    if let Some(e) = estimated.get_mut(&t.oid) {
-        let tid = e.add_in(len, heap_fillfactor(t), bi, Put::Row(Some(key)));
-        e.placed(Some(key), tid, t.has_rowid());
+    let Some(e) = estimated.get_mut(&t.oid) else {
+        return Some(false);
+    };
+    let tid = e.add_in(len, heap_fillfactor(t), Some((bulk, (t.oid, txn))), Put::Row(None));
+    Some(e.placed(None, tid, t.has_rowid()))
+}
+
+/// The row `inserted_stored` took, which began a run of the heap order's places, went in
+/// under `key`.
+pub fn stored_run_key(t: &Table, key: &[u8], db: &Database) {
+    if let Some(r) = db.relfiles.of(t.oid).write().estimated.get_mut(&t.oid).and_then(|e| e.runs.last_mut())
+        && r.0.is_empty()
+    {
+        r.0 = key.to_vec();
     }
 }
 
@@ -2265,12 +2312,11 @@ fn untracked_write(
     let mut reused = false;
     if let Some(e) = estimated.get_mut(&t.oid) {
         // (A bulk load's, COPY's, extends the file as its model did: `add_in`.)
-        let bi = bulk.get_mut(&(t.oid, txn)).and_then(|b| b.mode.bistate.as_mut());
         let put = match old_key {
             Some(k) => Put::Update(k),
             None => Put::Row(Some(key)),
         };
-        tid = e.add_in(len, heap_fillfactor(t), bi, put);
+        tid = e.add_in(len, heap_fillfactor(t), Some((bulk, (t.oid, txn))), put);
         reused = tid.is_none() || e.in_place;
         // (A new row of a table keyed by row ids has a key past every other's.)
         e.placed(Some(key), tid, old.is_none() && t.has_rowid());
