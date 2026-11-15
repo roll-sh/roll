@@ -285,6 +285,70 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Storage format v2, re-confirmed (2026-11-15, agent 239)
+
+Agent 231's format 2 (round 1 below) re-gated after its rebase: **b239** is `5526bfef4` (the
+origin head it was rebased on), **h239** the format 2 commits on it (`e9fca0943`: the same code as
+the pushed ones, which sit on `7c1493375`; the commits between are agent 233's binder and type
+changes, none in storage). Plain dist builds (fat LTO, line tables) from two snapshots,
+equal-length binary paths (`~/.cache/a231/bin/<4 chars>`), agent 231's harnesses unchanged
+(lane C bulk and TPC-H, lane A point reads and short transactions, lane B range reads, each run
+under its lane's lock after its CPUs were quiet). Host load 35-55 throughout.
+
+### Bulk (1M rows, settled, bg_ steps counted; user instructions G, 5 alternating rounds)
+
+| step | b239 | h239 | % per round | median |
+|---|---|---|---|---|
+| COPY in | 10.227 | 10.169 | -0.6 x5 | -0.6 |
+| CREATE INDEX | 6.175 | 6.082 | -1.5 / -1.5 / -1.5 / -1.6 / -1.5 | -1.5 |
+| CREATE UNIQUE INDEX | 4.376 | 4.321 | -1.3 / -1.2 / -1.3 / -1.4 / -1.5 | -1.3 |
+| COPY out | 3.113 | 3.113 | 0 x5 | 0.0 |
+| INSERT … SELECT | 7.045 | 6.983 | -0.5 / -1.0 / -0.8 / -0.9 / -1.9 | -0.9 |
+| UPDATE half | 13.392 | 13.394 | +0.1 / 0 / -0.0 / -0.5 / 0 | 0.0 |
+| DELETE a quarter | 6.452 | 6.250 | -2.8 / -0.2 / -3.7 / -4.4 / -1.6 | -2.8 |
+| **bg after it (compaction)** | 6.535 | 6.070 | -8.2 / -13.0 / -5.1 / -9.4 / -8.2 | **-8.2** |
+| **VACUUM** | 2.051 | 1.834 | -10.6 x5 | **-10.6** |
+| ANALYZE, count(*), TRUNCATE, DROP | 1.030 | 1.032 | 0 | 0.0 |
+| **all steps** | 60.465 | 59.284 | -1.9 / -2.4 / -1.7 / -2.4 / -2.0 | **-2.0** |
+| cycles, all steps | 29.03 | 28.09 | -1.9 / -2.5 / -2.9 / -4.1 / -3.4 | -2.9 |
+| MB written | 189.3 | 181.6 | -4.1 x4 / -9.7 | **-4.1** |
+
+Rows equal in every run (count and sums of every column of both tables). Peak (cgroup) b239
+305-308 MB, h239 292-306; VmHWM 253-256 and 254-257. Every run had one or two steps over 1.0
+foreign core after three tries (kept: instructions are what the gate reads).
+
+### TPC-H SF1 (each arm on a data directory it loaded itself; alternating rounds; user instructions %)
+
+| cache | rounds | 22-query instructions, h239 against b239 | cycles | wall, sum of medians | VmHWM, MB |
+|---|---|---|---|---|---|
+| 2 GB | 3 | +0.11 / -0.02 / +0.03% (no query over +1% in two rounds) | -2.07 / -2.12 / -3.14% | 11.95 -> 11.47 s | b239 1,692-1,704, h239 1,694-1,704 |
+| 256 MB | 3 + 4 | **-14.48 / -14.29 / -14.43 / -14.76 / -14.53 / -14.48 / -14.41%**, every query lower every round (q07 -26, q08 -25, q04 / q05 / q22 -17..-18, q09 -17..-19, q03 -15, q21 -12..-13, q20 -11, q02 -7..-13, q11 -0.6..-16, q01 -4, q13 -2) | -14.2 / -14.7 / -5.9 / -11.6 / -13.5 / -17.4 / -13.9% | 44.44 -> 38.76 s, then 53.19 -> 46.93 (busier host) | b239 598-648 (median 616), h239 600-645 (median 631) |
+
+All 22 result hashes equal PostgreSQL's in every pass. Data directory after the load and a
+clean close: b239 638 MB (76 files of format 1, 668.1 MB of file bytes), h239 561 MB (76 of
+format 2, 587.8 MB): -12%. At 2 GB every block is read from its file once (the warm-up) and the
+queries run the same code on the same cached bytes; at 256 MB a miss decompresses and decodes a
+third fewer bytes. The 256 MB VmHWM is higher for h239 in five of seven rounds, by -34..+47 MB a
+round, with overlapping ranges; the cache holds the same blocks byte for byte, each in an
+allocation of its own size, in both builds, and the per-query peaks are already set by q01, the
+first query after the warm-up pass's evictions: allocator timing, not resident data, as far as
+measured. A lead, not resolved.
+
+### Point reads, short transactions, range reads (alternating pairs; medians h239 against b239)
+
+| cell | pairs | instr/op | cycles/op | CPU/op | ops/s |
+|---|---|---|---|---|---|
+| point select, 8 clients (lane A) | 8 | +0.5% (pairs -4.1..+1.5) | +0.0% | +0.1% | -0.9% |
+| point select, 1 client, in-process (lane B CPUs 10, 11; (I30 s - I10 s) / (ops30 - ops10)) | 6 | **-1.5%, every pair lower (-0.8..-4.1)** | (siblings loaded: +3.7%, pairs -7..+22) | | |
+LANEA_ROWS
+| range read (100 rows), 8 clients (lane B) | 5 | +0.9% (unflagged pairs +1.8, -2.0, +0.9, -1.6) | -0.9% | -0.4% | +0.4% |
+
+Point select at 8 clients, the cell agent 231 left at its limit (+1.0%), is level: its pairs
+spread by 4% in instructions (a session's spin waits count), and in-process, with the client in
+the engine's process, h239 reads fewer instructions in every pair. Footprint (fresh server,
+cgroup anon+shmem 25 s into 100 idle sessions, lane B, three each): b239 37.7 / 37.6 / 37.4 MB,
+h239 37.6 / 37.6 / 37.5; a fresh data directory 3.03 MB both.
+
 ## Storage format v2, round 1 (2026-11-14, agent 231)
 
 HANDOFF "Storage format v2: design" has the study behind it and "Storage format v2, round 1"

@@ -2871,6 +2871,9 @@ impl Ddl<'_, '_> {
             }
         };
         let mut b = self.binder();
+        // (CREATE / ALTER analyzes the constraint as written without planning it: its
+        // PL/pgSQL calls run only when a statement checks it.)
+        b.skip_procs = raw.is_some();
         let ta = Arc::new(t.clone());
         let e = b
             .bind_over_table(&ta, n, Clause::Check)

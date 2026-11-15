@@ -26,13 +26,15 @@ pub fn float_power(x: f64, y: f64) -> Result<Value> {
         return Err(err!(
             INVALID_ARGUMENT_FOR_POWER_FUNCTION,
             "zero raised to a negative power is undefined"
-        ));
+        )
+        .routine("dpow"));
     }
     if x < 0.0 && y.fract() != 0.0 && y.is_finite() {
         return Err(err!(
             INVALID_ARGUMENT_FOR_POWER_FUNCTION,
             "a negative number raised to a non-integer power yields a complex result"
-        ));
+        )
+        .routine("dpow"));
     }
     let r = x.powf(y);
     if r.is_infinite() && x.is_finite() && y.is_finite() {
@@ -60,7 +62,8 @@ pub fn sqrt_f(a: &[Value], _: &FnCtx) -> Result<Value> {
         return Err(err!(
             INVALID_ARGUMENT_FOR_POWER_FUNCTION,
             "cannot take square root of a negative number"
-        ));
+        )
+        .routine("dsqrt"));
     }
     f8(x.sqrt())
 }
@@ -123,13 +126,13 @@ fn abs_i(a: &[Value], c: &FnCtx) -> Result<Value> {
     match c.ret {
         T::Int2 => i16::try_from(r)
             .map(Value::Int2)
-            .map_err(|_| err!(NUMERIC_VALUE_OUT_OF_RANGE, "smallint out of range")),
+            .map_err(|_| err!(NUMERIC_VALUE_OUT_OF_RANGE, "smallint out of range").routine("int2abs")),
         T::Int4 => i32::try_from(r)
             .map(Value::Int4)
-            .map_err(|_| err!(NUMERIC_VALUE_OUT_OF_RANGE, "integer out of range")),
+            .map_err(|_| err!(NUMERIC_VALUE_OUT_OF_RANGE, "integer out of range").routine("int4abs")),
         _ => i64::try_from(r)
             .map(Value::Int8)
-            .map_err(|_| err!(NUMERIC_VALUE_OUT_OF_RANGE, "bigint out of range")),
+            .map_err(|_| err!(NUMERIC_VALUE_OUT_OF_RANGE, "bigint out of range").routine("int8abs")),
     }
 }
 fn round_num(a: &[Value], _: &FnCtx) -> Result<Value> {
@@ -221,12 +224,12 @@ fn ln_check(x: f64) -> Result<()> {
 }
 fn ln_f(a: &[Value], _: &FnCtx) -> Result<Value> {
     let x = float_arg(&a[0]);
-    ln_check(x)?;
+    ln_check(x).map_err(|e| e.routine("dlog1"))?;
     f8(x.ln())
 }
 fn log10_f(a: &[Value], _: &FnCtx) -> Result<Value> {
     let x = float_arg(&a[0]);
-    ln_check(x)?;
+    ln_check(x).map_err(|e| e.routine("dlog10"))?;
     f8(x.log10())
 }
 fn ln_num(a: &[Value], _: &FnCtx) -> Result<Value> {
@@ -263,7 +266,12 @@ fn power_num(a: &[Value], _: &FnCtx) -> Result<Value> {
 fn mod_i(a: &[Value], c: &FnCtx) -> Result<Value> {
     let (x, y) = (int_arg(&a[0]) as i128, int_arg(&a[1]) as i128);
     if y == 0 {
-        return Err(err!(DIVISION_BY_ZERO, "division by zero"));
+        let r = match c.ret {
+            T::Int2 => "int2mod",
+            T::Int4 => "int4mod",
+            _ => "int8mod",
+        };
+        return Err(err!(DIVISION_BY_ZERO, "division by zero").routine(r));
     }
     Ok(match c.ret {
         T::Int2 => Value::Int2((x % y) as i16),
@@ -720,7 +728,7 @@ macro_rules! trig {
             let x = float_arg(&a[0]);
             let r: f64 = $f(x);
             if r.is_nan() && !x.is_nan() {
-                return Err(err!(NUMERIC_VALUE_OUT_OF_RANGE, "input is out of range"));
+                return Err(err!(NUMERIC_VALUE_OUT_OF_RANGE, "input is out of range").routine(concat!("d", stringify!($name))));
             }
             f8(r)
         })*
@@ -757,11 +765,11 @@ fn gcd_i(a: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(match c.ret {
         T::Int4 => Value::Int4(
             i32::try_from(r)
-                .map_err(|_| err!(NUMERIC_VALUE_OUT_OF_RANGE, "integer out of range"))?,
+                .map_err(|_| err!(NUMERIC_VALUE_OUT_OF_RANGE, "integer out of range").routine("int4gcd_internal"))?,
         ),
         _ => Value::Int8(
             i64::try_from(r)
-                .map_err(|_| err!(NUMERIC_VALUE_OUT_OF_RANGE, "bigint out of range"))?,
+                .map_err(|_| err!(NUMERIC_VALUE_OUT_OF_RANGE, "bigint out of range").routine("int8gcd_internal"))?,
         ),
     })
 }
@@ -783,11 +791,11 @@ fn lcm_i(a: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(match c.ret {
         T::Int4 => Value::Int4(
             i32::try_from(r)
-                .map_err(|_| err!(NUMERIC_VALUE_OUT_OF_RANGE, "integer out of range"))?,
+                .map_err(|_| err!(NUMERIC_VALUE_OUT_OF_RANGE, "integer out of range").routine("int4lcm"))?,
         ),
         _ => Value::Int8(
             i64::try_from(r)
-                .map_err(|_| err!(NUMERIC_VALUE_OUT_OF_RANGE, "bigint out of range"))?,
+                .map_err(|_| err!(NUMERIC_VALUE_OUT_OF_RANGE, "bigint out of range").routine("int8lcm"))?,
         ),
     })
 }
@@ -892,7 +900,8 @@ fn width_bucket_f(a: &[Value], _: &FnCtx) -> Result<Value> {
         return Err(err!(
             INVALID_ARGUMENT_FOR_WIDTH_BUCKET,
             "lower bound cannot equal upper bound"
-        ));
+        )
+            .routine("width_bucket_float8"));
     };
     Ok(Value::Int4(b as i32))
 }

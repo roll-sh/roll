@@ -10210,6 +10210,70 @@ entries; the format can now change the restart interval per block, but the study
 misses, not the interval, are the cost); (4) the in-memory column cache (design item 4) against
 a cache sized to the data.
 
+## Storage format v2 landed: review and gates on the rebased head (agent 239)
+
+Agent 231 stopped before pushing; agent 239 took its three commits over (`wip/a231-takeover`),
+rebased them on `7c1493375`, reviewed them, re-ran the gates and the train, and pushed them.
+BENCH "Storage format v2, re-confirmed (agent 239)" has the numbers.
+
+**The upgrade is one-way for data directories.** The first manifest a format 2 build writes
+records `format: 2`, and from then on the store's flushes and compactions write format 2 files.
+A build from before format 2 (anything before this push) cannot read such a store: a client
+connecting to an upgraded database gets `ERROR: sst …/<id>.sst has a bad footer`. There is no
+downgrade tool. Format 1 files are read forever and rewritten lazily; a store stays readable by
+older builds only until a format 2 build writes a file in it (a flush, the flush of WAL replayed
+at open, a compaction): older builds ignore the manifest's `format` and fail on the first file.
+
+- **Train 4's `debug 101`** (agent 231's last train, `1d0dc6602`) was the two load-sensitive wire
+  tests, not the format work: `big_bytea_values_go_out_in_linear_time` (20.23 s against its
+  20 s bound) and `parallel_workers_seen_by_others` (`wait_event` NULL where it waits for
+  PgSleep). On the rebased tree every debug crate test passed, `wire` included.
+- **The 4 kB target fix** of `format_1_files_read_beside_format_2` (231's notes) is in
+  `1d021ce69` (`target_file_bytes: 4 << 10`).
+- **Review** (second pair of eyes on the on-disk change; nothing needed fixing):
+  - Crash safety: a format 2 file is fsynced before its rename, the directory before the
+    manifest's replace (as format 1). The manifest's format is raised in memory at open
+    (`max(manifest, StoreOptions::format)`), so every manifest written after it, the first one
+    naming a format 2 file included, says 2; a crash before that leaves the new files unnamed,
+    and the next open deletes them.
+  - Mixed stores: the reader decides per file, from its footer (format 1's six words or format
+    2's seven), and the bloom hash per file (`hash64` / `hash64_2`) on both the write and the
+    read side; no hash is computed once for several files. Linked runs (`txn::spill`,
+    `create_run`) stay format 1, and a format 2 file with a `commit_ts` is refused at open.
+  - Lazy migration under concurrent compaction: the writer's format comes from
+    `StoreOptions::format`, a constant, not from the inputs, so a compaction of mixed inputs
+    writes format 2 whatever it merges; `block_format.rs`'s `kill_during_upgrade_compactions`
+    (kill -9 during them, three rounds) and the train's crash and power-cut stages cover it.
+  - An old binary on a new store, checked by hand (`~/.cache/a239/scripts/oldbin.sh`): a
+    data directory written and cleanly closed by the head (`format: 2` in every manifest), then
+    `5526bfef4` started on it: it starts, a connection to the database fails with "bad footer",
+    every store file is byte for byte unchanged (only `databases.json`'s LSN counters advance,
+    as at every start), and the head then reads all 171,429 rows with the same checksum. The
+    refusal happens at `SstReader::open`, before WAL replay or any write: nothing is lost.
+  - Corruption: format 2 blocks keep format 1's crc32 over the stored bytes (checked at every
+    read, XX001 `checksum mismatch`). The index, the bloom filter and the footer have no
+    checksum, in either format. `Block::load` trusts a body whose crc holds but still checks the
+    trailer (restart log, restart count, offsets in range); the store code has no `unsafe`, so a
+    body that passed the crc yet is wrong would panic, not read out of bounds. No test covered a
+    corrupted block in either format: added `sst::tests::corrupted_format2_blocks_are_refused`
+    (a flipped byte, raw and zstd: XX001; a zeroed restart log with its crc redone: "bad sst
+    block").
+  - Backup and restore: nothing outside `storage/` parses store files (`pg_backup_start` /
+    `pg_backup_stop`, `CREATE DATABASE`'s template copy `engine::copy_dir` and pg-control's
+    reflink clone of a stopped branch take the files as they are), so they need no change; a
+    restored or cloned upgraded directory is format 2 like its source.
+- **Gates** on plain dist builds of `5526bfef4` (`b239`) and the head (`h239`): bulk -2.0%
+  instructions in every round (compaction after the DELETE -8.2%, VACUUM -10.6%, MB written
+  -4.1%, no step up); TPC-H SF1 at 2 GB level (+0.11 / -0.02 / +0.03%, cycles -2 to -3%), at
+  256 MB -14.3 to -14.8% in all seven rounds (wall 44.4 -> 38.8 s); the data directory after the
+  TPC-H load 638 -> 561 MB; point and range reads level (cached reads run the same code on the
+  same bytes). One figure to watch: the 256 MB pass's VmHWM, median 616 -> 631 MB over seven
+  rounds with overlapping ranges (598-648 against 600-645): no mechanism found (the cache holds
+  the same bytes in exact-size allocations in both); 2 GB, bulk and idle memory are equal.
+- **Dropped**: nothing.
+- **Left**: 231's "Next" list above, item 0 (the small cache) first; then the bulk DELETE and
+  its compaction (13.5 G user instructions against PostgreSQL's 1.7 G on the 1M-row script).
+
 ## Analytic path against pgrust (agent 220)
 
 TPC-H SF1 on lane C (servers on CPUs 14,15,32,33, i.e. two cores with their hyperthreads;
@@ -12810,3 +12874,165 @@ RUST_MIN_STACK=16 MiB. The first train (on `65b3617ee`) found transactions.sql's
 (AND CHAIN after an error in a chained transaction or a savepoint), fixed by `7fed6f2da`; its
 debug step's wire big_bytea_values_go_out_in_linear_time took 21 s against its 20 s limit
 under load (alone 14-15 s, as a debug build of the head without these commits: 15-16 s).
+
+## Behaviour gaps closed by agent 233 (2026-11-14)
+
+Recorded against a private PostgreSQL 18.6 (the reference image `postgres@sha256:77f58511...`,
+`select version()` 18.6). Every kept case is in the wire test `protocol_cases`
+(`tests/data/protocol_cases.out`, recorded with `PROTOCOL_RECORD`); its compact form now also
+carries an error's or notice's position (`P`) and CONTEXT (`W`), and the file was recorded again
+with them. The exploratory probes (raw protocol, Python: 774 cases, 461 differing on the base and 25 now) are in
+`~/.cache/a233/probe` (`run.py cases.py host port`, `cmp.py pg.out roll.out`).
+
+- **Immutable PL/pgSQL calls are evaluated while planning** (`Binder::user_call`,
+  `fold::proc_call`, `binder::Procs`). An immutable PL/pgSQL function returning neither a set
+  nor a record (nor a domain) over constants runs as the statement is planned, as
+  evaluate_function does: its value is a constant of the plan (EXPLAIN VERBOSE shows it), its
+  NOTICEs come before RowDescription, once (not once a row), and its error fails the statement
+  before any row: where no row reaches the call (an empty table, `WHERE false`, a CASE arm), at
+  plan time all the same (the error stays pending, `fold_failed`, and `fold::first_error`
+  raises it where planning reaches it, so a CASE arm whose condition folds false or an unread
+  output doesn't fail). In the extended protocol the planning is the Bind's: a Parse or
+  Describe binding only analyzes (`Session::defer_procs`, `Binder::defer_procs`), leaves the
+  calls and marks the binding (`Procs::deferred`); Bind plans such a statement then
+  (`bind_inner`), and the generic plan it makes is the statement's (one NOTICE for any number
+  of Binds of a named statement; PREPARE / EXECUTE the same). A call over parameters is
+  folded by each custom plan (`fold::param_folds` now sees PL/pgSQL calls: the Bind plans) and
+  not by the generic plan five custom plans later choose, whose call runs per row at Execute,
+  as PostgreSQL's. Not folded, as in PostgreSQL: stable or volatile functions, set-returning
+  ones, RECORD results (several OUT parameters), a strict call with a NULL argument (NULL).
+  Statements whose planning ran a call aren't kept as templates (`lit_learn`) nor have custom
+  plans made from their analysis (`litplan::procs_run`): each plan runs the calls again. The
+  body of a SQL function the planner evaluates is bound with its PL/pgSQL calls left
+  (`Binder::skip_procs`): they run once, when the function runs (its custom plan folds them),
+  as they do in PostgreSQL (two NOTICEs before). CREATE / ALTER TABLE's CHECK is analyzed
+  without running them (they ran at CREATE TABLE); an index's expressions and predicate keep
+  their calls (`Clause::IndexExpr`, `IndexPredicate`): the build runs them as the table's
+  owner in a security-restricted operation, row by row (the first train found CREATE INDEX
+  running them as the caller while binding: privileges.sql's `sro_ifun` units). A FROM function call that fails stays in the
+  plan for planning to raise (it was run twice at bind and again by the scan).
+  Still differs: a CTE nothing reads and an output of a view or sub-select nothing reads are
+  bound, so their calls run (a NOTICE PostgreSQL doesn't raise; no error, the pending error is
+  dropped with them); a catalog change unrelated to the statement replans a named statement,
+  running its calls again (PostgreSQL's invalidation is by dependency); an index expression's
+  calls run per row where PostgreSQL folds them once (the build at CREATE INDEX, as the owner,
+  and an INSERT's executor once a statement: two NOTICEs for a two-row INSERT, none at CREATE
+  INDEX, where PostgreSQL has two and one). DEFAULT and generated columns match (probe `t3`).
+- **Unknown parameter type oids, every statement shape** (`session/badparams.rs` rewritten):
+  the model now follows INSERT (VALUES rows, a source query, ON CONFLICT, RETURNING), UPDATE
+  (FROM, WHERE, RETURNING before SET), DELETE (USING, WHERE, RETURNING), MERGE (source, ON,
+  RETURNING, then each WHEN's condition and action), set operations (leaves left to right, a
+  column's sides' common type, then its grouping operators unless UNION ALL, then ORDER BY and
+  LIMIT), window functions (arguments with the target list, PARTITION BY / ORDER BY /
+  frame offsets after LIMIT, the WINDOW clause's before those written in OVER; lag, lead,
+  first_value, last_value, nth_value pass their first argument's type on, count takes any),
+  and column references through FROM sub-selects, CTEs, VALUES lists, aliases, joins (USING's
+  coercion) and LATERAL, a whole-row reference looking nothing up. Two parameters of one
+  missing oid are one type. Errors carry PostgreSQL's position where it reports one (sort,
+  group and set-operation keys, a function's argument coercion). 157 shapes in
+  `~/.cache/a233/probe/bp*.py` match PostgreSQL (80 differed on the base); the fallback rule remains only
+  for what the model marks unmodelled (grouping sets, recursive CTEs, locking clauses, ...).
+- **Error locations of arithmetic, casts and math** (`error_location.rs`): integer operators
+  name PostgreSQL's function for the operands' types (`ops::int_op_error`: int4pl, int24mi,
+  int84mul, int48div, int4mod, ...; unary minus and abs; division's overflow line apart from
+  its zero line), casts theirs (`cast::cast_routine`: i4toi2, int82, int84, dtoi2/4/8,
+  ftoi2/4/8, numeric_int2/4/8), float division by zero float_zero_divide_error, overflow and
+  underflow float_overflow_error / float_underflow_error, dsqrt, dlog1, dlog10, dpow, the trig
+  functions' "input is out of range", numeric's div_var, sqrt_var, numeric_sqrt, ln_var,
+  numeric_power, power_var, make_result_opt_error, exp_var, numeric_in, gcd / lcm, width_bucket,
+  folded or not. Messages several routines raise are matched only by the routine an error names
+  (`BY_ROUTINE`); an error can name the line too (`Error::routine_at`: COMMIT's warning outside
+  a block, 4073 in an implicit block, 4152 alone). Besides, by message: constraint and domain
+  errors (domain check / not null, exclusion, partition routing, generated and identity
+  columns, bpchar length, numeric typmod), operator / column / type lookups, the transaction,
+  cursor, sequence, prepared-statement, PL/pgSQL (no RETURN, STRICT INTO, ASSERT, unknown
+  variable), DDL (dependent objects, duplicate column / function, DROP of a missing table or
+  index and its NOTICE, CREATE ... IF NOT EXISTS's NOTICE, ALTER TYPE's cast), COPY (missing /
+  extra data, unterminated CSV, binary signature, bad format, ON_ERROR's NOTICEs and
+  REJECT_LIMIT), statement timeout, syntax error at end of input. 
+- **Messages and fields a probe found differing**: `chr(-1)` is 22023 "character number must be
+  positive" in every encoding (it was "requested character too large"); a jsonb number cast to
+  a type is "cannot cast jsonb numeric" (cannotCastJsonbValue's word); an enum's bad input
+  names the type as format_type_be does (qualified off the search path); "procedure e2.pr()
+  does not exist" and "e2.pr(integer) is a procedure" name the function as written; "each
+  UNION query must have the same number of columns", "UNION types ... cannot be matched" and
+  "VALUES lists must all be the same length" carry their positions.
+- **COPY FROM**: COPY FREEZE's refusals come after CopyInResponse (CopyFrom's checks), the
+  data that follows ignored, as PostgreSQL's; CopyFail's error has its CONTEXT "COPY t, line N"
+  (the line being read).
+
+Probed and matching already (no change): portal suspension with row limits (named, unnamed,
+across Sync, Describe in between, DML RETURNING, FETCH, errors mid-portal), NOTICE ordering
+in multi-statement queries and PL/pgSQL, client_min_messages, ParameterStatus for SET / RESET /
+SET LOCAL / function SET clauses / set_config / failed transactions, COPY TO formats and
+COPY FROM errors' CONTEXT lines, cancel requests (simple and extended), statement_timeout,
+lock_timeout, idle_in_transaction / transaction / idle_session timeouts' FATALs, a222's 221
+raw-protocol cases (only GSSENCRequest differs, by decision).
+
+Still differing (not done): an unterminated CSV quote at the end of the data reports the line
+it ends on (PostgreSQL: the line it starts on, `copy_in_csv_quote`); `select * from t0,
+fset(0)` with an empty t0 (PostgreSQL's plan runs the function scan, the engine's doesn't);
+the two "savepoint does not exist" and three "column ... of relation ... does not exist"
+routines aren't told apart (pg-engine location); date / timestamp / interval overflow
+routines (date_pli, timestamp_pl_interval, ... many sites).
+
+Verification (agent 233; the hashes before the rebase are the work branch's commits, kept on
+origin's `wip/a233`, squashed into this round's five): release wire (73; `protocol_cases` 207, recorded again from
+PostgreSQL with `P` and `W`: 36 of them differ on the base, none now) and golden (in-process,
+wire, shuffled) on the release build of `97d327795`. Lane A, plain dist builds, base
+`2947ce5a4` against these commits (`0f59c9ded`; `8b0eaf4db` only collapses an `if` and a
+`to_vec` clippy found), 8 clients, alternating pairs: point reads +0.26% user instructions per
+read at the median of the 6 pairs with at most 0.84 cores of foreign load (-0.73% to +1.30%;
+medians of the raw counts -0.21%), cycles -1.2%, CPU per read -1.5%; four more pairs had 1.2
+to 2.3 cores of foreign load and are left out. An earlier round on `97d327795` (before custom
+plans read the PL/pgSQL flag with the plan counters instead of locking the statement's binding)
+had +0.4% and +5.4% in its two clean pairs, which led to that change. Short transactions at 8
+clients didn't resolve (8 of 10 pairs over a core of foreign load; one binary's instructions
+per transaction moved by up to 15% between runs); at 1 client, 8 pairs, 5 under a core of
+foreign load: +1.0% at their median (-5.6% to +2.5%), cycles -2.0%, CPU -0.4%. An
+instructions:u profile of a run of each build (`~/.cache/a233/runs/gP`, `gP8`) explains the
+noise: 13% of a transaction's user instructions are the connection's idle-read polling and
+another 10% clock reads, which grow with the time spent waiting, not with the work; outside
+them the new build ran -11.6% (1 client) and -2.9% (8 clients) instructions per transaction,
+and of the functions this change touches only `Session::bound_as` shows (453 / 441 and 516 /
+488 instructions a transaction, base / new). Nothing on either path does
+more than a load and a test (Bind reads `proc_deferred` with the plan counters it already
+locks; `bound_as` one flag of the binding it already holds); the error paths' routine names are
+`#[cold]` functions on the error side of a `Result`.
+The machine's build-cleanup timer (emergency mode above 85% disk) twice removed `target/`
+mid-build although the train's processes were in the checkout; the train ran with
+`CARGO_TARGET_DIR=.test-build/target` (git-ignored, not a `target/` the timer sweeps).
+Verification train on `8b0eaf4db` (`TRAIN_NO_CHECKOUT=1`): release, clippy (20 warnings, the
+base's; the first run's two in these files fixed), crash, power-cut, crash-power (sync and
+async), debug all 0; regress 51,131 of 51,150, 17 newly differing units, all privileges.sql's
+`sro_ifun` index units (CREATE INDEX ran the index expressions' immutable PL/pgSQL call while
+binding them, as the caller; fixed by `6272ff37b`, index expressions keep their calls);
+isolation 1647/1648 (intra-grant-inplace as before); pg_dump 14609 passed. On `6272ff37b`, the
+steps that change can reach: regress 51,148 of 51,150, newly differing 0 (privileges 1477 of
+1477 alone); isolation 1647/1648; pg_dump 14609 passed (a first try's engine couldn't bind its
+port: run again); release wire (73), golden (3), kept_plans (11), twophase (4) all passing.
+Verification train after the rebase onto `5526bfef4`, on `76d9c94f4` (these commits): release,
+clippy (20 warnings), crash, power-cut, crash-power (sync and async) 0; regress 51,148 of
+51,150, newly differing 0; isolation 1647/1648 (intra-grant-inplace as before); pg_dump 14609
+passed; debug 101: protocol_cases' `plf_prepare` had a second NOTICE in the debug build (an
+earlier case's closing session dropped its temporary table between the two EXECUTEs, a catalog
+change the engine plans a prepared statement again for); the PL/pgSQL cases read tables of
+their own now (`bf895067c`), and protocol_cases passes three runs each of the release and
+debug builds.
+
+- **Scroll cursors after page splits**: not built; the design note is sharper. The model
+  already counts its page allocations: `Btree::sizes` (`SizeGen`) is bumped by every split
+  (`alloc`) and page deletion. A scroll cursor that records it at its first FETCH, and the
+  first FETCH that sees it change, knows at a turn whether any page the scan read can have
+  split since: unchanged (nearly always), today's placement is exact and nothing more is done.
+  Changed, it needs the pages as read; a bounded per-index split log (block split, new right
+  block, the first key moved right: one push per split, which already moves half a page of
+  items, so well under 1% of a split and nothing for an insert that doesn't split) lets the
+  turn map each row's current page back to the page it was on when its FETCH ran (rows on a
+  right half created after that FETCH were on its left page, recursively), falling back to
+  today's placement when the log has wrapped. Its cost to ordinary scans is zero (only scroll
+  cursors read the counter), to FETCH one load, to inserts one push per split. Not built
+  because the case (a scroll cursor turning after the same transaction split the pages it
+  read) is rare and the placement per load epoch needs the turn's page order rebuilt for
+  several epochs at once; measure a modelled-insert run (`bulk` lane C) before and after the
+  push if it is built.

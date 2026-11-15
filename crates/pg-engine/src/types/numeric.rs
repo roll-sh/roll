@@ -419,7 +419,7 @@ impl Numeric {
         match (self, other) {
             (Numeric::Finite { int: a, scale: sa }, Numeric::Finite { int: b, scale: sb }) => {
                 if b.is_zero() {
-                    bail!(DIVISION_BY_ZERO, "division by zero");
+                    return Err(err!(DIVISION_BY_ZERO, "division by zero").routine("div_var"));
                 }
                 // a/10^sa ÷ b/10^sb = (a * 10^(sb + rscale - sa)) / b, in units of 10^-rscale.
                 let shift = *sb as i64 + rscale as i64 - *sa as i64;
@@ -456,7 +456,7 @@ impl Numeric {
             (NaN, _) | (_, NaN) => NaN,
             (Finite { int: a, scale: sa }, Finite { int: b, scale: sb }) => {
                 if b.is_zero() {
-                    bail!(DIVISION_BY_ZERO, "division by zero");
+                    return Err(err!(DIVISION_BY_ZERO, "division by zero").routine("div_var"));
                 }
                 let rscale = Self::select_div_scale(a, *sa, b, *sb);
                 return self.div_scale(other, rscale);
@@ -464,7 +464,7 @@ impl Numeric {
             (Finite { .. }, _) => Numeric::zero(),
             (_, Finite { int, .. }) => {
                 if int.is_zero() {
-                    bail!(DIVISION_BY_ZERO, "division by zero");
+                    return Err(err!(DIVISION_BY_ZERO, "division by zero").routine("div_var"));
                 }
                 if self.is_negative() != int.is_negative() {
                     NegInf
@@ -481,7 +481,7 @@ impl Numeric {
         match (self, other) {
             (Numeric::Finite { int: a, scale: sa }, Numeric::Finite { int: b, scale: sb }) => {
                 if b.is_zero() {
-                    bail!(DIVISION_BY_ZERO, "division by zero");
+                    return Err(err!(DIVISION_BY_ZERO, "division by zero").routine("div_var"));
                 }
                 let (a, b, _) = Self::aligned(a, *sa, b, *sb);
                 Ok(Numeric::Finite {
@@ -499,7 +499,7 @@ impl Numeric {
             (NaN, _) | (_, NaN) => NaN,
             (Finite { int: a, scale: sa }, Finite { int: b, scale: sb }) => {
                 if b.is_zero() {
-                    bail!(DIVISION_BY_ZERO, "division by zero");
+                    return Err(err!(DIVISION_BY_ZERO, "division by zero").routine("div_var"));
                 }
                 let (a, b, s) = Self::aligned(a, *sa, b, *sb);
                 Finite {
@@ -508,7 +508,7 @@ impl Numeric {
                 }
             }
             (Finite { .. }, _) => self.clone(),
-            (_, Finite { int, .. }) if int.is_zero() => bail!(DIVISION_BY_ZERO, "division by zero"),
+            (_, Finite { int, .. }) if int.is_zero() => return Err(err!(DIVISION_BY_ZERO, "division by zero").routine("div_var")),
             _ => NaN,
         })
     }
@@ -520,13 +520,14 @@ impl Numeric {
             Numeric::NegInf => Err(err!(
                 INVALID_ARGUMENT_FOR_POWER_FUNCTION,
                 "cannot take square root of a negative number"
-            )),
+            )
+            .routine("numeric_sqrt")),
             Numeric::Finite { int, scale } => {
                 if int.is_negative() {
-                    bail!(
+                    return Err(err!(
                         INVALID_ARGUMENT_FOR_POWER_FUNCTION,
                         "cannot take square root of a negative number"
-                    );
+                    ).routine("sqrt_var"));
                 }
                 // Result scale as in numeric_sqrt: at least MIN_SIG_DIGITS significant digits.
                 let (w, _) = Self::weight_and_first(int, *scale);
@@ -558,10 +559,10 @@ impl Numeric {
         match self {
             Numeric::Finite { int, scale } => {
                 if int.is_negative() {
-                    bail!(
+                    return Err(err!(
                         INVALID_ARGUMENT_FOR_POWER_FUNCTION,
                         "cannot take square root of a negative number"
-                    );
+                    ).routine("sqrt_var"));
                 }
                 let target = rscale + 1;
                 let exp = 2 * target as i64 - *scale as i64;
@@ -689,11 +690,12 @@ impl Numeric {
     /// numeric_in (without typmod): syntax errors and "value overflows numeric format".
     pub fn parse_pg(s: &str) -> Result<Numeric> {
         match parse_numeric(s) {
-            Ok(n) => n.checked(),
+            Ok(n) => n.checked().map_err(|e| e.routine("numeric_in")),
             Err(true) => Err(err!(
                 NUMERIC_VALUE_OUT_OF_RANGE,
                 "value overflows numeric format"
-            )),
+            )
+            .routine("numeric_in")),
             Err(false) => Err(err!(
                 INVALID_TEXT_REPRESENTATION,
                 "invalid input syntax for type numeric: \"{s}\""
@@ -706,13 +708,13 @@ impl Numeric {
     pub fn checked(self) -> Result<Numeric> {
         if let Numeric::Finite { int, scale } = &self {
             if *scale as i64 > DSCALE_MAX {
-                bail!(NUMERIC_VALUE_OUT_OF_RANGE, "value overflows numeric format");
+                return Err(overflow());
             }
             // (Below 2^63 at a scale up to DSCALE_MAX the weight is within -4097..=4.)
             if !int.is_zero() && int.to_i64().is_none() {
                 let w = Var::from_parts(int.clone(), *scale as i64).weight();
                 if !(WEIGHT_MIN..=WEIGHT_MAX).contains(&w) {
-                    bail!(NUMERIC_VALUE_OUT_OF_RANGE, "value overflows numeric format");
+                    return Err(overflow());
                 }
             }
         }
@@ -776,7 +778,7 @@ impl Numeric {
                 let rscale = (MIN_SIG_DIGITS - val as i64)
                     .max(arg.scale)
                     .clamp(MIN_DISPLAY_SCALE, MAX_DISPLAY_SCALE);
-                exp_var(&arg, rscale)?.into_numeric().checked()
+                exp_var(&arg, rscale).map_err(|e| e.routine("exp_var"))?.into_numeric().checked()
             }
         }
     }
@@ -885,10 +887,11 @@ impl Numeric {
             });
         }
         if self.is_zero() && exp.is_negative() {
-            bail!(
+            return Err(err!(
                 INVALID_ARGUMENT_FOR_POWER_FUNCTION,
                 "zero raised to a negative power is undefined"
-            );
+            )
+            .routine("numeric_power"));
         }
         power_var(&self.var(), &exp.var())?.into_numeric().checked()
     }
@@ -946,6 +949,7 @@ fn log_negative() -> Error {
         INVALID_ARGUMENT_FOR_LOGARITHM,
         "cannot take logarithm of a negative number"
     )
+    .routine("ln_var")
 }
 
 fn log_zero() -> Error {
@@ -953,10 +957,11 @@ fn log_zero() -> Error {
         INVALID_ARGUMENT_FOR_LOGARITHM,
         "cannot take logarithm of zero"
     )
+    .routine("ln_var")
 }
 
 fn overflow() -> Error {
-    err!(NUMERIC_VALUE_OUT_OF_RANGE, "value overflows numeric format")
+    err!(NUMERIC_VALUE_OUT_OF_RANGE, "value overflows numeric format").routine("make_result_opt_error")
 }
 
 fn sign_of(n: &Numeric) -> i32 {
@@ -1131,7 +1136,7 @@ impl Var {
     /// div_var with rounding.
     fn div(&self, o: &Var, rscale: i64) -> Result<Var> {
         if o.is_zero() {
-            bail!(DIVISION_BY_ZERO, "division by zero");
+            return Err(err!(DIVISION_BY_ZERO, "division by zero").routine("div_var"));
         }
         // (a/10^sa) / (b/10^sb) in units of 10^-rscale = a * 10^(sb + rscale - sa) / b.
         let shift = o.scale + rscale - self.scale;
@@ -1333,10 +1338,11 @@ fn power_var(base: &Var, exp: &Var) -> Result<Var> {
     let mut base = base.clone();
     if base.int.is_negative() {
         if !exp.is_integral() {
-            bail!(
+            return Err(err!(
                 INVALID_ARGUMENT_FOR_POWER_FUNCTION,
                 "a negative number raised to a non-integer power yields a complex result"
-            );
+            )
+            .routine("power_var"));
         }
         res_neg = exp.integer_part().is_odd();
         base.int = -base.int;
@@ -1405,7 +1411,7 @@ fn power_var_int(base: &Var, exp: i64, exp_dscale: i64) -> Result<Var> {
     }
     if base.is_zero() {
         if exp < 0 {
-            bail!(DIVISION_BY_ZERO, "division by zero");
+            return Err(err!(DIVISION_BY_ZERO, "division by zero").routine("div_var"));
         }
         return Ok(Var::zero().round(rscale));
     }
