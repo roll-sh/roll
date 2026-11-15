@@ -11,5 +11,7 @@ describe("log filters by a line's fields", () => {
     expect(matchesTerms(splitFilter("user_id:4").terms, json)).toBe(false);
     expect(matchesTerms(splitFilter("req.method:post user_id:*").terms, json)).toBe(true);
     expect(matchesTerms(splitFilter("level:warn user_id:42").terms, "level=warn user_id=42 done")).toBe(true);
+    // An address or a time is a word, not a field.
+    expect(splitFilter("localhost 127.0.0.1:5432 12:30").where).toBe("");
   });
 });

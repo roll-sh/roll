@@ -306,7 +306,16 @@ impl Apps {
         let path = instance_path(path)?;
         let target = self.shell_target(service, env, instance).await?;
         let name = target.instance.clone();
-        let inner = self.deps.runtime.copy_from(&name, path).await.map_err(|e| Error::Conflict(e.to_string()))?;
+        let mut inner = self.deps.runtime.copy_from(&name, path).await.map_err(|e| Error::Conflict(e.to_string()))?;
+        // Its first bytes before the answer starts: a path that isn't there is a 404, not a
+        // broken body after a 200.
+        let mut first = vec![0u8; 8192];
+        let n = tokio::io::AsyncReadExt::read(&mut inner, &mut first).await.map_err(|e| Error::Internal(e.to_string()))?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("nothing at {path} in {name}")));
+        }
+        first.truncate(n);
+        let inner: crate::runtime::VolumeStream = Box::new(tokio::io::AsyncReadExt::chain(std::io::Cursor::new(first), inner));
         Ok((name, Box::new(Held { _target: target, inner })))
     }
 

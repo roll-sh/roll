@@ -12,6 +12,12 @@ export interface BundleFile {
   data: Uint8Array;
 }
 
+/** A file roll-fetch takes at most (its `max_file_bytes`). */
+export const MAX_FILE_BYTES = 100 << 20;
+
+/** A script (`#!` first) keeps its exec bit: a browser's File has no mode, a shebang says it. */
+const executable = (data: Uint8Array) => data[0] === 0x23 && data[1] === 0x21;
+
 const SKIP = new Set([".git", ".roll", "node_modules", "target", ".venv", "__pycache__", ".next", ".turbo", ".DS_Store"]);
 /** The most a dropped folder may hold (the API takes 512 MiB). */
 export const MAX_BYTES = 256 << 20;
@@ -63,7 +69,7 @@ function entry(name: string, data: Uint8Array, type: "0" | "5", mode: number): U
 }
 
 /** The bundle's tar (not yet gzipped): the files given, their directories made first. */
-export function tarBundle(files: BundleFile[]): Uint8Array {
+export function tarBundle(files: BundleFile[]): Blob {
   const parts: Uint8Array[] = [...entry("roll-bundle-1", new Uint8Array(0), "0", 0o644), ...entry("env", new Uint8Array(0), "0", 0o600)];
   const dirs = new Set<string>();
   for (const f of [...files].sort((a, b) => a.path.localeCompare(b.path))) {
@@ -75,22 +81,16 @@ export function tarBundle(files: BundleFile[]): Uint8Array {
         parts.push(...entry(`tree/${d}`, new Uint8Array(0), "5", 0o755));
       }
     }
-    parts.push(...entry(`tree/${f.path}`, f.data, "0", 0o644));
+    parts.push(...entry(`tree/${f.path}`, f.data, "0", executable(f.data) ? 0o755 : 0o644));
   }
   parts.push(new Uint8Array(1024));
-  const total = parts.reduce((n, p) => n + p.length, 0);
-  const out = new Uint8Array(total);
-  let at = 0;
-  for (const p of parts) {
-    out.set(p, at);
-    at += p.length;
-  }
-  return out;
+  // The parts as they are: no second copy of everything in one buffer.
+  return new Blob(parts as BlobPart[]);
 }
 
 /** gzip, with the browser's own `CompressionStream`. */
-export async function gzip(bytes: Uint8Array): Promise<Blob> {
-  const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new CompressionStream("gzip"));
+export async function gzip(tar: Blob): Promise<Blob> {
+  const stream = tar.stream().pipeThrough(new CompressionStream("gzip"));
   return new Response(stream).blob();
 }
 
@@ -129,6 +129,8 @@ export async function bundleOf(files: { path: string; file: File }[]): Promise<{
   const bytes = kept.reduce((n, f) => n + f.file.size, 0);
   if (!kept.length) throw new Error("there's nothing to deploy in it");
   if (bytes > MAX_BYTES) throw new Error(`it's ${Math.round(bytes / 2 ** 20)} MiB: drop at most ${MAX_BYTES >> 20} MiB, or deploy with roll up`);
+  const big = kept.find((f) => f.file.size > MAX_FILE_BYTES);
+  if (big) throw new Error(`${big.path} is more than ${MAX_FILE_BYTES >> 20} MiB: a file that big goes another way (an image, a bucket)`);
   const data = await Promise.all(kept.map(async (f) => ({ path: f.path, data: new Uint8Array(await f.file.arrayBuffer()) })));
   return { body: await gzip(tarBundle(data)), files: kept.length, left: files.length - kept.length };
 }

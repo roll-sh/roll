@@ -2226,6 +2226,11 @@ impl Store {
         Ok(self.db.query_row("SELECT value FROM state WHERE key = ?", [key], |r| r.get(0)).optional()?)
     }
 
+    /// Set `key` only when it isn't set: whether this call set it (one wins, on any node).
+    pub fn claim_state(&self, key: &str, value: &str) -> Result<bool> {
+        Ok(self.db.write(|c| c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", [key, value]))? == 1)
+    }
+
     pub fn set_state(&self, key: &str, value: &str) -> Result<()> {
         self.db.write(|c| {
             c.execute("DELETE FROM state WHERE key = ?", [key])?;

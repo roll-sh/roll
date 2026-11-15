@@ -209,9 +209,12 @@ impl Sources for CodeSources {
                 };
                 let row = names.entry(l.repo.clone()).or_insert_with(|| this.0.repo_by_id(&l.repo).ok()).clone();
                 let Some(r) = row else { continue };
-                // Who the deployment it makes names: the landed commit's author.
-                let author = this.0.store.changeset(&l.repo, &l.changeset).ok().flatten().map(|c| c.author.name()).filter(|n| !n.is_empty());
-                out.push(Landing { seq, repo: r.full_name(), branch: branch.to_string(), revision: Revision { sha: l.git_commit.to_string(), message: l.summary.clone() }, author });
+                // Who the deployment it makes names: the landed commit's author; and its whole
+                // message (a `[skip ci]` is often in the body, not the summary).
+                let cs = this.0.store.changeset(&l.repo, &l.changeset).ok().flatten();
+                let author = cs.as_ref().map(|c| c.author.name()).filter(|n| !n.is_empty());
+                let message = cs.map(|c| String::from_utf8_lossy(&c.message).into_owned()).filter(|m| !m.is_empty()).unwrap_or_else(|| l.summary.clone());
+                out.push(Landing { seq, repo: r.full_name(), branch: branch.to_string(), revision: Revision { sha: l.git_commit.to_string(), message }, author });
             }
             Ok(out)
         })

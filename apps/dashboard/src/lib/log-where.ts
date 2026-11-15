@@ -31,7 +31,12 @@ export function term(token: string): Term | null {
   if (i <= 0) return null;
   const key = t.slice(0, i);
   const value = unquote(t.slice(i + 1));
-  if (!KEY.test(key) || key.length > 64 || value.startsWith("/") || value === "") return null;
+  // A field's name starts with a letter or `_`, so `127.0.0.1:5432` and `12:30` stay words; a
+  // value that starts with `/` (a URL's `//`) or a digit after a colon-led word stays one too
+  // unless it's asked for with `@`.
+  const explicit = token.replace(/^-/, "").startsWith("@");
+  if (!KEY.test(key) || key.length > 64 || value === "" || value.startsWith("/")) return null;
+  if (!explicit && !/^[A-Za-z_]/.test(key)) return null;
   return { key: key.split("."), value: value === "*" ? null : value.toLowerCase(), not };
 }
 
@@ -41,7 +46,8 @@ export function splitFilter(text: string): { where: string; words: string; terms
   const words: string[] = [];
   const terms: Term[] = [];
   for (const tok of tokens(text.trim())) {
-    const t = term(tok);
+    // At most ten field terms (the API's limit): the rest are words.
+    const t = terms.length < 10 ? term(tok) : null;
     if (t) {
       fields.push(tok);
       terms.push(t);

@@ -105,16 +105,8 @@ impl Apps {
             return;
         }
         let key = format!("apps.email_offered.{project}");
-        let first = self
-            .db(move |s| {
-                if s.get_state(&key)?.is_some() {
-                    return Ok(false);
-                }
-                s.set_state(&key, "1")?;
-                Ok(true)
-            })
-            .await
-            .unwrap_or(false);
+        // Claimed in one statement: two services made at once add one target.
+        let first = self.db(move |s| s.claim_state(&key, "1")).await.unwrap_or(false);
         if first && let Err(e) = self.add_target(project, json!({ "kind": "email" })).await {
             tracing::warn!(project, error = %e, "apps: the owner's email target wasn't added");
         }

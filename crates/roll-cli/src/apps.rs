@@ -2504,13 +2504,27 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             };
             let (out, there) = match (src.strip_prefix(':'), dst.strip_prefix(':')) {
                 (Some(remote), None) => {
-                    let res = send(api.http.get(url(remote))).await?;
+                    let mut res = send(api.http.get(url(remote))).await?;
                     let from = res.headers().get("x-roll-instance").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-                    let bytes = res.bytes().await?;
+                    // Read as it comes, bounded: a whole filesystem asked for stops at 1 GiB.
+                    let mut bytes = Vec::new();
+                    while let Some(chunk) = res.chunk().await? {
+                        anyhow::ensure!(bytes.len() + chunk.len() <= 1 << 30, "{remote} is more than 1 GiB as a tar: copy something smaller");
+                        bytes.extend_from_slice(&chunk);
+                    }
                     let here = PathBuf::from(&dst);
-                    std::fs::create_dir_all(&here)?;
-                    // `unpack` keeps every entry inside `here` (no `..`, no absolute paths).
-                    tar::Archive::new(std::io::Cursor::new(bytes.to_vec())).unpack(&here).with_context(|| format!("unpacking into {}", here.display()))?;
+                    // One file to a path that isn't a directory: written there, as `cp` does.
+                    let files: Vec<_> = tar::Archive::new(std::io::Cursor::new(&bytes)).entries()?.filter_map(Result::ok).filter(|e| e.header().entry_type().is_file()).map(|_| ()).collect();
+                    if files.len() == 1 && !here.is_dir() && !dst.ends_with('/') {
+                        let mut a = tar::Archive::new(std::io::Cursor::new(&bytes));
+                        let mut e = a.entries()?.filter_map(Result::ok).find(|e| e.header().entry_type().is_file()).context("no file in it")?;
+                        let mut out = std::fs::File::create(&here).with_context(|| here.display().to_string())?;
+                        std::io::copy(&mut e, &mut out)?;
+                    } else {
+                        std::fs::create_dir_all(&here)?;
+                        // `unpack` keeps every entry inside `here` (no `..`, no absolute paths).
+                        tar::Archive::new(std::io::Cursor::new(&bytes)).unpack(&here).with_context(|| format!("unpacking into {}", here.display()))?;
+                    }
                     (format!("{from}:{remote} → {}", here.display()), json!({ "instance": from, "from": remote, "to": here }))
                 }
                 (None, Some(remote)) => {

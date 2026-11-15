@@ -1934,6 +1934,7 @@ impl Apps {
                 if due > now {
                     continue;
                 }
+                let due = latest_due(&schedule, due, now);
                 let (k, v) = (key.clone(), due.to_string());
                 let _ = self.db(move |s| s.set_state(&k, &v)).await;
                 let (this, sid, env) = (self.clone(), svc.id.clone(), e.name.clone());
@@ -1947,11 +1948,17 @@ impl Apps {
     /// Any owned service's `run.schedules` (the environment's own run first): each due one
     /// starts a job, unless the last it started still runs; a paused environment's move on.
     async fn schedules_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
+        // One read of every environment a pass, not one per service.
+        let Ok(all_envs) = self.db(|s| s.all_environments()).await else { return };
         for svc in services.iter().filter(|s| self.owns(&s.id) && !self.capped(&s.id)) {
-            let sid = svc.id.clone();
-            let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
-            for e in envs.iter().filter(|e| e.active.is_some()) {
-                let run = svc.for_env(e).map(|s| s.run).unwrap_or_else(|_| svc.run.clone());
+            // A preview environment never runs production's schedules (one per open pull request).
+            for e in all_envs.iter().filter(|e| e.service == svc.id && e.active.is_some() && !e.ephemeral) {
+                // What the live deployment runs with: roll.toml's `[[app.run.schedules]]` are in
+                // its template, not in the service's settings.
+                let run = match self.lives.lock().get(&crate::env_key(&svc.id, &e.name)).and_then(|l| l.template()) {
+                    Some(t) => t.run.clone(),
+                    None => svc.for_env(e).map(|s| s.run).unwrap_or_else(|_| svc.run.clone()),
+                };
                 for sc in &run.schedules {
                     let Ok(schedule) = crate::cron::Schedule::parse(&sc.schedule, sc.timezone.as_deref()) else { continue };
                     let key = format!("sched:{}/{}/{}", svc.id, e.name, sc.name);
@@ -1964,6 +1971,8 @@ impl Apps {
                         continue;
                     };
                     let Some(due) = schedule.next_after(last).filter(|d| *d <= now) else { continue };
+                    // The latest due time that has passed: after an outage one run, not every one missed.
+                    let due = latest_due(&schedule, due, now);
                     let (k, v) = (key.clone(), due.to_string());
                     let _ = self.db(move |s| s.set_state(&k, &v)).await;
                     let log = self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System);
@@ -2241,6 +2250,15 @@ ERROR: failed to solve: process \"/bin/sh -c npm ci\" did not complete successfu
 }
 
 
+/// The last due time at or before `now`, from one that is (`due`): what a pass records, so the
+/// runs an outage missed aren't made up one by one.
+fn latest_due(schedule: &crate::cron::Schedule, mut due: i64, now: i64) -> i64 {
+    while let Some(next) = schedule.next_after(due).filter(|n| *n <= now) {
+        due = next;
+    }
+    due
+}
+
 /// What in a commit's message skips its deploy: `[skip deploy]`, `[skip ci]`, `[skip roll]` and
 /// each the other way round (`[ci skip]`), in any case, anywhere in it.
 pub(crate) fn skip_tag(message: &str) -> Option<&'static str> {
@@ -2251,6 +2269,16 @@ pub(crate) fn skip_tag(message: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod skip_tests {
+    #[test]
+    fn an_outage_makes_up_one_run_not_every_one() {
+        let s = crate::cron::Schedule::parse("*/5 * * * *", None).unwrap();
+        let t0 = 1_767_225_600_000; // 2026-01-01 00:00 UTC
+        let first = s.next_after(t0).unwrap();
+        // A day down: the latest due time before now, not the first one missed.
+        let now = t0 + 86_400_000 + 60_000;
+        assert_eq!(super::latest_due(&s, first, now), t0 + 86_400_000);
+    }
+
     #[test]
     fn a_message_can_skip_its_deploy() {
         assert_eq!(super::skip_tag("docs: typo\n\n[Skip CI]"), Some("[skip ci]"));

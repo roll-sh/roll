@@ -166,7 +166,7 @@ async fn import(State(apps): S, b: Bytes) -> R {
             }
             .map_err(|e| Error::BadRequest(format!("{repo}: {e}")))?;
             let bytes = sources.read_file(repo, &rev.sha, "roll.toml").await.map_err(|e| Error::BadRequest(format!("{repo}: {e}")))?;
-            let bytes = bytes.ok_or_else(|| Error::BadRequest(format!("{repo} has no roll.toml at its root to deploy from")))?;
+            let bytes = bytes.ok_or_else(|| Error::BadRequest(format!("{repo} has no roll.toml at its root to deploy from (or one over 64 KiB)")))?;
             if bytes.len() > 1 << 20 {
                 return Err(Error::BadRequest("the file is at most 1 MiB".into()));
             }
