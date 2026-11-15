@@ -362,8 +362,10 @@ impl GraphBuilder {
 
     /// Inserts every node not seeded, on up to `threads` threads, then makes every node
     /// reachable from the entry point, and on level 0 also able to reach it back.
-    pub(crate) fn build<F: Fn(u32, u32) -> f32 + Sync>(&mut self, sim: &F, threads: usize) {
-        self.insert_all(sim, threads);
+    /// `prefetch(o)` hints that `o` is about to be scored against the node being inserted (each
+    /// step's unvisited neighbors are prefetched before any of them is scored).
+    pub(crate) fn build<F: Fn(u32, u32) -> f32 + Sync, P: Fn(u32) + Sync>(&mut self, sim: &F, prefetch: &P, threads: usize) {
+        self.insert_all(sim, prefetch, threads);
         // Each pass may evict a link the other relied on (only when a list is full): repeat
         // while they do, a few times at most.
         for _ in 0..4 {
@@ -374,7 +376,7 @@ impl GraphBuilder {
         }
     }
 
-    fn insert_all<F: Fn(u32, u32) -> f32 + Sync>(&mut self, sim: &F, threads: usize) {
+    fn insert_all<F: Fn(u32, u32) -> f32 + Sync, P: Fn(u32) + Sync>(&mut self, sim: &F, prefetch: &P, threads: usize) {
         let n = self.level0.len();
         let mut todo = Vec::with_capacity(n);
         for ord in 0..n {
@@ -407,7 +409,7 @@ impl GraphBuilder {
                     self.max_level = top;
                 }
                 Some(_) => {
-                    self.insert(&mut ctx, o, sim);
+                    self.insert(&mut ctx, o, sim, prefetch);
                     self.entry = Some(o);
                     self.max_level = top;
                 }
@@ -416,7 +418,7 @@ impl GraphBuilder {
         let threads = threads.clamp(1, 64).min(todo.len().div_ceil(256).max(1));
         if threads == 1 {
             for &o in &todo {
-                self.insert(&mut ctx, o, sim);
+                self.insert(&mut ctx, o, sim, prefetch);
             }
             return;
         }
@@ -432,7 +434,7 @@ impl GraphBuilder {
                             break;
                         }
                         for &o in &todo[start..(start + 64).min(todo.len())] {
-                            this.insert(&mut ctx, o, sim);
+                            this.insert(&mut ctx, o, sim, prefetch);
                         }
                     }
                 });
@@ -446,7 +448,7 @@ impl GraphBuilder {
     /// reverse links (Lucene's order): a concurrent search that reaches the node through a
     /// reverse link on some level then always finds its neighbors there and on every level
     /// below, instead of a dead end that would derail its beam.
-    fn insert<F: Fn(u32, u32) -> f32>(&self, ctx: &mut BuildCtx, ord: u32, sim: &F) {
+    fn insert<F: Fn(u32, u32) -> f32, P: Fn(u32)>(&self, ctx: &mut BuildCtx, ord: u32, sim: &F, prefetch: &P) {
         let Some(entry) = self.entry else { return };
         let level = self.levels[ord as usize] as usize;
         let n = self.level0.len();
@@ -457,7 +459,7 @@ impl GraphBuilder {
         let mut budget = usize::MAX;
         for l in ((level + 1)..=self.max_level).rev() {
             visited.reset();
-            search_layer(self, &mut score, &|_| {}, &ctx.ep, 1, l, visited, None, &mut budget, &mut ctx.scratch, &mut ctx.cands);
+            search_layer(self, &mut score, prefetch, &ctx.ep, 1, l, visited, None, &mut budget, &mut ctx.scratch, &mut ctx.cands);
             if !ctx.cands.is_empty() {
                 std::mem::swap(&mut ctx.ep, &mut ctx.cands);
             }
@@ -471,7 +473,7 @@ impl GraphBuilder {
             search_layer(
                 self,
                 &mut score,
-                &|_| {},
+                prefetch,
                 &ctx.ep,
                 self.ef_construction,
                 l,
