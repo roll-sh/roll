@@ -156,6 +156,7 @@ export function Deployments({
                       <span className="truncate">{d.id}</span>
                     </p>
                     {d.error && <p className="mt-1 line-clamp-2 text-[12px] text-danger">{d.error}</p>}
+                    {d.fix && <p className="mt-1 text-[12px] text-muted">How to fix it: {d.fix}</p>}
                     {d.error_detail && <p className="mt-1 line-clamp-3 break-words font-mono text-[11.5px] text-muted">{d.error_detail}</p>}
                   </div>
                   <div className="flex shrink-0 gap-1" onClick={(e) => e.stopPropagation()}>

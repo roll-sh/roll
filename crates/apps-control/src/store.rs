@@ -559,6 +559,8 @@ fn run_row(r: &code_sql::Row<'_>) -> code_sql::Result<CronRun> {
 fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
     let status: String = r.get(3)?;
     let plan: Option<String> = r.get(8)?;
+    let (error, error_detail): (Option<String>, Option<String>) = (r.get(10)?, r.get(19)?);
+    let fix = error.as_deref().and_then(|e| crate::model::fix_for(e, error_detail.as_deref()));
     Ok(Deployment {
         id: r.get(0)?,
         service: r.get(1)?,
@@ -570,7 +572,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         image: r.get(7)?,
         plan: plan.map(|p| json(&p)).transpose()?,
         rollback_of: r.get(9)?,
-        error: r.get(10)?,
+        error,
         created_at: r.get(11)?,
         started_at: r.get(12)?,
         finished_at: r.get(13)?,
@@ -579,7 +581,8 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         vars_hash: r.get(16)?,
         actor: r.get(17)?,
         pruned_at: r.get(18)?,
-        error_detail: r.get(19)?,
+        error_detail,
+        fix,
         steps: Vec::new(),
     })
 }

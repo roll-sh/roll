@@ -396,6 +396,7 @@ type Deployment = {
   plan: Plan | null;         // what the build detected
   rollback_of: string | null;
   error_detail?: string;     // what the app or the build printed when it failed (the step, its last line): the owner's, never in a commit status, an event or a notification
+  fix?: string;             // how to fix a failure roll knows (the setting and its command), read from the error
   pruned_at?: number;        // pruned (older than the environment keeps): history only, its image gone; a rollback to it is a 409
   steps?: { step: "build" | "pre_deploy" | "rollout" | "live" | "failed"; at: number }[]; // when each began: on GET …/deploys/{dep} only
   error: string | null;

@@ -1323,6 +1323,10 @@ pub struct Deployment {
     /// owner, never in a commit status or a notification.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_detail: Option<String>,
+    /// How to fix a known failure (a private image's login, more memory, a lockfile): read from
+    /// its error, never stored ([`fix_for`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
     /// When it was pruned (unix ms): out of what's kept, its image gone; history only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pruned_at: Option<i64>,
@@ -1765,3 +1769,43 @@ mod domain_diagnosis_tests {
     }
 }
 
+
+/// What to change for a failure roll knows (Heroku's error codes, Render's pointers): one line
+/// naming the setting and its command. None for anything else: the error and its detail say it.
+pub fn fix_for(error: &str, detail: Option<&str>) -> Option<String> {
+    let all = format!("{error}\n{}", detail.unwrap_or("")).to_lowercase();
+    let has = |w: &str| all.contains(w);
+    let fix = if has("docker pull") && (has("denied") || has("unauthorized") || has("not found") || has("manifest unknown") || has("failed")) {
+        "The registry wouldn't give the image: check its name and tag; a private image needs its registry login (Settings → Source, `roll apps registry`)."
+    } else if has("exit 137") || has("out of memory") || has("oomkilled") || has("javascript heap out of memory") {
+        "It ran out of memory: give it more (Settings → Size, `roll apps set --memory 1024`)."
+    } else if has("the build took longer than") {
+        "The build passed its time limit: make it lighter (a lockfile for cached installs, fewer steps), or build an image elsewhere and deploy that."
+    } else if has("npm ci") && (has("package-lock") || has("lockfile") || has("in sync")) {
+        "`npm ci` needs a package-lock.json that matches package.json: commit one (`npm install`), or set the install command to `npm install` (Settings → Build)."
+    } else if has("frozen-lockfile") || has("lockfile needs to be updated") {
+        "The lockfile doesn't match package.json: run the install locally and commit the lockfile, or drop `--frozen-lockfile` from the install command (Settings → Build)."
+    } else if has("health check didn't pass") || has("didn't answer in time") || has("health check") && has("failed") {
+        "It never answered its health check: it must listen on 0.0.0.0 at $PORT; if it boots slowly, raise the health timeout (Settings → Health, `roll apps set --health-timeout 120`)."
+    } else if has("no start command") || has("nothing says how to start") || has("doesn't know how to start") {
+        "Nothing says how to start it: set a start command (Settings → Run, `roll apps set --start \"…\"`) or a Procfile's `web:`."
+    } else if has("couldn't tell how to build this") {
+        "roll couldn't tell how to build it: add a Dockerfile, set the root directory to the app's, or set the build and start commands (Settings → Build)."
+    } else {
+        return None;
+    };
+    Some(fix.to_string())
+}
+
+#[cfg(test)]
+mod fix_tests {
+    #[test]
+    fn known_failures_say_what_to_change() {
+        let f = |e: &str, d: Option<&str>| super::fix_for(e, d).unwrap_or_default();
+        assert!(f("docker pull ghcr.io/acme/app:1 failed", Some("error from registry: denied")).contains("registry login"));
+        assert!(f("it was killed (exit 137: out of memory, or a SIGKILL)", None).contains("--memory"));
+        assert!(f("the health check didn't pass within 60 s", None).contains("$PORT"));
+        assert!(f("the build failed (docker build exited with 1)", Some("npm ci can only install packages when your package.json and package-lock.json are in sync")).contains("package-lock.json"));
+        assert_eq!(super::fix_for("a reason nobody wrote down", None), None);
+    }
+}

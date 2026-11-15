@@ -520,6 +520,8 @@ export interface Deployment {
   ready_ms: number | null;
   /** What the app or the build printed when it failed (the step, its last line): only shown here, never sent in a commit status or a notification. */
   error_detail?: string;
+  /** How to fix a failure roll knows (a private image's login, more memory, a lockfile): the setting and its command. */
+  fix?: string;
   /** Pruned (older than its environment keeps): history only, its image gone, so it can't be rolled back to. */
   pruned_at?: number;
   /** When each step began (`build`, `pre_deploy`, `rollout`, then `live` or `failed`): on a single deployment's GET. */

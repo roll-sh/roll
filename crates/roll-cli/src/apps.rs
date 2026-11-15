@@ -1522,7 +1522,10 @@ async fn watch(api: &Api, svc: &Value, env: &str, dep: &Value) -> anyhow::Result
             }
             Ok(())
         }
-        Some(st) => bail!("the deploy is {st}: {}", d["error"].as_str().unwrap_or("see the log above")),
+        Some(st) => match d["fix"].as_str() {
+            Some(f) => bail!("the deploy is {st}: {}\n  fix: {f}", d["error"].as_str().unwrap_or("see the log above")),
+            None => bail!("the deploy is {st}: {}", d["error"].as_str().unwrap_or("see the log above")),
+        },
         None => bail!("the deploy has no status"),
     }
 }
@@ -2580,6 +2583,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     // A pruned one is history only (its image is gone): nothing to roll back to.
                     let status = if d["pruned_at"].is_i64() { "pruned".to_string() } else { s(&d["status"]) };
                     println!("{}  {status:<10} {:<8} {rev:<8} {}{by}", s(&d["id"]), s(&d["trigger"]), s(&d["message"]));
+                    if let Some(f) = d["fix"].as_str() {
+                        println!("    fix: {f}");
+                    }
                 }
                 return Ok(());
             }
