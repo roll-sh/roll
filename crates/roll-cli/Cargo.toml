@@ -31,8 +31,6 @@ bytes.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 getrandom.workspace = true
-# `roll login`: PKCE.
-sha2.workspace = true
 clap.workspace = true
 nosql-engine = { workspace = true, optional = true }
 nosql-proto = { workspace = true, features = ["client"] }
