@@ -56,11 +56,21 @@ export interface AgentSees {
 export interface Grant {
   id: string;
   name: string;
-  kind: "token" | "oauth";
+  /** `workload`: a short-lived token a workload got by proving who it is (roll secrets' identity logins). */
+  kind: "token" | "oauth" | "workload";
   rules: Rule[];
   expires_at: number | null;
   /** It works only from then on (Cloudflare's TTL start); before, it's refused. */
   not_before?: number | null;
+  /** A person's token waiting for an admin's approval: it doesn't work until then. */
+  pending?: boolean;
+  /** When an admin approved it, and who decided (an admin's id, or "operator"). */
+  approved_at?: number | null;
+  decided_by?: string | null;
+  /** What its secret looks like (`rlt_…a1b2`), to match one found in a config to this row. */
+  hint?: string | null;
+  /** The person it's theirs (`usr_…`), when it isn't the operator's. */
+  user?: string | null;
   ip_allow: string[];
   /** "operator", or the grant that made it. */
   created_by: string;
@@ -95,11 +105,11 @@ export interface NewGrant {
 export interface Checkup {
   grant: { id: string; name: string; kind: Grant["kind"]; last_used_at: number | null; expires_at: number | null; created_at: number };
   /** Most serious first. */
-  findings: { kind: "everything" | "never_expires" | "unused" | "narrower" | "roams"; why: string; fix: "tighten" | "expire" | "revoke" | "limit_addresses" }[];
+  findings: { kind: "pending" | "unapproved" | "everything" | "never_expires" | "unused" | "narrower" | "roams"; why: string; fix: "approve" | "tighten" | "expire" | "revoke" | "limit_addresses" }[];
 }
 
 /** Checkup findings, most serious first. */
-const FINDING_ORDER: Checkup["findings"][number]["kind"][] = ["everything", "never_expires", "unused", "roams", "narrower"];
+const FINDING_ORDER: Checkup["findings"][number]["kind"][] = ["pending", "unapproved", "everything", "never_expires", "unused", "roams", "narrower"];
 
 /** The checkup's tokens, the most serious first (by each one's worst finding, then how many). */
 export function byConcern(list: Checkup[]): Checkup[] {
@@ -109,6 +119,7 @@ export function byConcern(list: Checkup[]): Checkup[] {
 
 /** What a checkup fix is called on its button. */
 export const FIX_LABEL: Record<Checkup["findings"][number]["fix"], string> = {
+  approve: "Approve or deny",
   tighten: "Tighten",
   expire: "Give it an expiry",
   revoke: "Revoke",
@@ -197,9 +208,11 @@ export function approvableTogether(shown: Approval[]): { grant_id: string; grant
 export interface AuditEvent {
   id: string;
   at: number;
+  /** A request's grant (`null`: the operator's); for a change (`source: "access"`), the token it's about. */
   grant_id: string | null;
   grant_name: string | null;
-  source: "api" | "mcp";
+  /** A request (`api`, `mcp`), a change to tokens and access (`access`: who in `args.by`), or roll's own act (`leak`, `workload`). */
+  source: "api" | "mcp" | "access" | "leak" | "workload";
   tool: string | null;
   method: string;
   /** The route pattern, never the path. */
@@ -207,7 +220,8 @@ export interface AuditEvent {
   product: string | null;
   action: Action | null;
   resource: string | null;
-  decision: "allow" | "deny" | "ask";
+  /** A request's `allow`, `deny` or `ask`; a change's name (`create`, `change`, `rotate`, `revoke`, `connect`, `approve`, `policy`, …). */
+  decision: string;
   approval: string | null;
   status: number;
   args: unknown;
@@ -234,7 +248,23 @@ export interface Catalog {
   api_url: string;
 }
 
-export type Me = { kind: "operator"; locked: boolean } | { kind: "token" | "oauth"; grant: Grant; locked: boolean };
+export type Me =
+  | { kind: "operator"; locked: boolean }
+  | { kind: "token" | "oauth"; grant: Grant; locked: boolean }
+  /** A signed-in user who isn't an admin: their tokens act as them and reach only `reach`. */
+  | { kind: "user"; user: { id: string; handle: string }; reach: string[]; approve_people?: Action[]; locked: boolean };
+
+/** Whether a token `me` makes with these rules waits for an admin (the server's `Policy::needs_approval`). */
+export function waitsForAdmin(me: Me | null, rules: Rule[], askOtherwise: boolean): boolean {
+  const approve = me?.kind === "user" ? (me.approve_people ?? []) : [];
+  return approve.length > 0 && (askOtherwise || rules.some((r) => (Object.keys(r.actions) as Action[]).some((a) => approve.includes(a))));
+}
+
+/** The catalogue as `me` may use it: a user's tokens reach only what their account does. */
+export function catalogFor(c: Catalog, me: Me | null): Catalog {
+  if (me?.kind !== "user") return c;
+  return { ...c, products: c.products.filter((p) => me.reach.includes(p)) };
+}
 
 /** How long a rotated token's old secret may keep working, in seconds (0: it stops at once). */
 export const KEEP_OLD: { label: string; s: number }[] = [
@@ -249,15 +279,15 @@ export interface Policy {
   require_expiry?: boolean;
   /** Tokens unused this many days stop working. */
   max_idle_days?: number | null;
+  /** A person's token reaching any of these waits for an admin's approval (GitHub's organizations' rule). */
+  approve_people?: Action[];
 }
 
-export interface Consent {
-  client_id: string;
-  redirect_uri: string;
-  code_challenge: string;
-  code_challenge_method?: string;
-  state?: string;
-  resource?: string;
+/** The actions an admin may require approval for in people's tokens, strongest first. */
+export const APPROVABLE: Action[] = ["admin", "reveal", "deploy", "delete"];
+
+/** What a person allows a client: on the consent screen, or for a device signing in. */
+export interface Allowed {
   name?: string;
   rules: Rule[];
   expires_at?: number | null;
@@ -266,8 +296,31 @@ export interface Consent {
   ask_otherwise?: boolean;
 }
 
+export interface Consent extends Allowed {
+  client_id: string;
+  redirect_uri: string;
+  code_challenge: string;
+  code_challenge_method?: string;
+  state?: string;
+  resource?: string;
+}
+
+/** A device signing in (RFC 8628), as the person who entered its code sees it. */
+export interface DeviceRequest {
+  user_code: string;
+  client: { id: string; name: string; uri?: string | null };
+  scope?: string | null;
+  /** The network it asked from (`203.0.113.0/24`), to tell it isn't yours. */
+  network?: string | null;
+  /** Whether it asked from this browser's network: when not, someone may have sent you the code. */
+  same_network?: boolean;
+  created_at: number;
+  expires_at: number;
+}
+
 const token = (id: string) => `/v1/access/tokens/${encodeURIComponent(id)}`;
 const approval = (id: string) => `/v1/access/approvals/${encodeURIComponent(id)}`;
+const device = (code: string) => `/v1/access/oauth/devices/${encodeURIComponent(code.trim())}`;
 
 export interface AuditFilter {
   grant?: string;
@@ -312,6 +365,8 @@ export const accessApi = {
   me: () => call<Me>("GET", "/v1/access"),
   catalog: () => call<Catalog>("GET", "/v1/access/catalog"),
   tokens: () => call<Grant[]>("GET", "/v1/access/tokens"),
+  /** The latest workload tokens (they're not in `tokens`). */
+  workloads: () => call<Grant[]>("GET", "/v1/access/tokens?kind=workload"),
   token: (id: string) => call<Grant>("GET", token(id)),
   /** The token is in the answer this once. */
   create: (g: NewGrant) => call<{ grant: Grant; token: string }>("POST", "/v1/access/tokens", g),
@@ -332,6 +387,9 @@ export const accessApi = {
   /** A new secret, the same rules; the old one stops at once. Shown this once. */
   /** A new secret; `keepOldS`: the old one keeps working that long (at most a week), as Stripe's roll key. */
   rotate: (id: string, keepOldS?: number) => call<{ grant: Grant; token: string }>("POST", `${token(id)}/rotate`, keepOldS ? { keep_old_for_s: keepOldS } : {}),
+  /** An admin decides a person's pending token: approved it works, denied it's revoked. */
+  approveToken: (id: string) => call<Grant>("POST", `${token(id)}/approve`),
+  denyToken: (id: string) => call<Grant>("POST", `${token(id)}/deny`),
   /** What the evaluator would decide for a request, without running it (`token`: the operator asks for one). */
   check: (method: string, path: string, opts: { body?: unknown; token?: string } = {}) =>
     call<{ decision: "allow" | "ask" | "deny"; product?: string; action?: Action; resource?: string | null; route?: string; why?: string }>(
@@ -364,6 +422,10 @@ export const accessApi = {
   client: (id: string) => call<OAuthClient>("GET", `/v1/access/oauth/clients/${encodeURIComponent(id)}`),
   /** The consent screen's answer: where to send the browser (the client's redirect, with a code). */
   authorize: (c: Consent) => call<{ redirect: string }>("POST", "/v1/access/oauth/authorize", c),
+  /** A device's request by the code its person typed (any case, with or without the dash). */
+  device: (code: string) => call<DeviceRequest>("GET", device(code)),
+  allowDevice: (code: string, a: Allowed) => call<{ grant_id: string; pending: boolean }>("POST", device(code), a),
+  denyDevice: (code: string) => call<null>("DELETE", device(code)),
   /** A search cluster's indices by name (search's own route; it wakes the cluster), for the builder. */
   /** Each product's tool count and context cost, for the connect panel (counts only). */
   toolsetCosts: () => call<{ products: ToolsetCost[] }>("GET", "/v1/mcp/toolsets").then((r) => r.products),
@@ -373,6 +435,33 @@ export const accessApi = {
 };
 
 // ── pure helpers (tested in access-api.test.ts) ──
+
+/**
+ * Whether a token matches what someone typed in the list's filter: every word in its name, id,
+ * hint, client, person or the products it reaches. A whole secret pasted in matches the token it
+ * is by its hint (prefix and last four), so a token found in a config finds its row; it's only
+ * compared here, never sent.
+ */
+export function grantMatches(g: Pick<Grant, "name" | "id" | "hint" | "client" | "user" | "created_by" | "rules">, typed: string): boolean {
+  const q = typed.trim().toLowerCase();
+  if (!q) return true;
+  if (/^rl[a-z]_[a-z2-7]{30,}$/.test(q)) return Boolean(g.hint) && g.hint === `${q.slice(0, q.indexOf("_") + 1)}…${q.slice(-4)}`;
+  const hay = [g.name, g.id, g.hint ?? "", g.client?.name ?? "", g.user ?? "", g.created_by, ...g.rules.map((r) => r.product)].join(" ").toLowerCase();
+  return q.split(/\s+/).every((w) => hay.includes(w));
+}
+
+/** Who an audit row is by: a change's person (`args.by`), else a request's grant, else the operator. */
+export function auditWho(e: AuditEvent): string {
+  const by = e.source === "access" && e.args && typeof e.args === "object" ? (e.args as { by?: unknown }).by : undefined;
+  if (typeof by === "string") return by;
+  return e.source === "access" ? "operator" : (e.grant_name ?? "operator");
+}
+
+/** What an audit row did: a tool, a request's route, or a change and the token it's about. */
+export function auditWhat(e: AuditEvent): string {
+  if (e.tool) return e.tool;
+  return e.source === "access" && e.grant_name ? `${e.method} ${e.route} · ${e.grant_name}` : `${e.method} ${e.route}`;
+}
 
 /** A preset's rules for a project (`project` → that project; none picked → every resource). */
 export function presetRules(p: Preset, project?: string): Rule[] {

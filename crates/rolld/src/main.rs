@@ -510,7 +510,8 @@ async fn run() -> anyhow::Result<()> {
     // Accounts and sign-in: always on; the gate resolves their session cookies. (Before the
     // evaluator joins the gate: setting sessions makes the gate anew.)
     let accounts = accounts::open(&args, &home, code.as_ref().map(|c| c.code.clone()), !auth.enforcing()).await?;
-    auth.sessions(accounts.sessions(), &accounts.config().api_url);
+    let sessions = accounts.sessions();
+    auth.sessions(sessions.clone(), &accounts.config().api_url);
     // roll apps emails a project's owner what needs them, through their account.
     if let Some(a) = &apps {
         a.apps.set_mailbox(std::sync::Arc::new(apps::AccountsMail(accounts.clone())));
@@ -548,6 +549,8 @@ async fn run() -> anyhow::Result<()> {
         workspace.clone(),
     )?;
     router = router.merge(roll_access::api::router(access.clone()));
+    // Users' own tokens act as them, as they are now (docs/permissions.md, "Users' own tokens").
+    let _ = access.people.set(sessions);
     // A grant's rate is shared among the nodes serving requests (each enforces its share).
     let nodes = cluster.clone();
     let _ = access.nodes.set(Box::new(move || nodes.nodes().len()));
