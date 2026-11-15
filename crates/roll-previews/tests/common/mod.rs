@@ -77,7 +77,7 @@ impl Source for FakeCode {
     }
     async fn services(&self, repo: &str, _revision: &str) -> anyhow::Result<Vec<ServiceSpec>> {
         let name = repo.rsplit('/').next().unwrap().to_string();
-        Ok(vec![ServiceSpec { name, image: "node:22".into(), run: "node app.js".into(), port: 3000, memory_mb: 512, cpus: 0.5, env: vec![], health: self.health.lock().clone(), states: self.repo_states.lock().clone() }])
+        Ok(vec![ServiceSpec { name, image: "node:22".into(), run: "node app.js".into(), port: 3000, memory_mb: 512, cpus: 0.5, env: vec![], health: self.health.lock().clone(), states: self.repo_states.lock().clone(), pages: vec![], hide: vec![] }])
     }
     async fn report(&self, p: &Preview, _s: &Settings) {
         self.reports.lock().push(p.clone());

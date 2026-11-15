@@ -72,7 +72,7 @@ RSS0=$(ps -o rss= -p "$PID")
 say "a repo with a service, and one of each data resource"
 api POST /v1/code/owners '{"name":"acme","kind":"org"}' >/dev/null
 api POST /v1/code/repos '{"owner":"acme","name":"web","source":"native"}' >/dev/null
-TOML='[preview]\nimage = \"'"$IMAGE"'\"\nrun = \"env > env.txt && python -m http.server $PORT\"\nport = 8000\nhealth = \"/\"\nmemory = 128\ncpus = 0.25\n[[preview.states]]\nname = \"repo-tab\"\npage = \"/\"\nsteps = [{ press = \"Tab\" }]\n'
+TOML='[preview]\nimage = \"'"$IMAGE"'\"\nrun = \"env > env.txt && python -m http.server $PORT\"\nport = 8000\nhealth = \"/\"\nmemory = 128\ncpus = 0.25\npages = [\"/index.html\"]\n[[preview.states]]\nname = \"repo-tab\"\npage = \"/\"\nsteps = [{ press = \"Tab\" }]\n'
 # The service's API, as an OpenAPI document (github.openapi): the change removes one operation and adds one.
 OPENAPI_MAIN='{\"paths\":{\"/users\":{\"get\":{\"parameters\":[{\"name\":\"limit\",\"in\":\"query\",\"schema\":{\"type\":\"integer\"}}]}},\"/users/{id}\":{\"delete\":{}}}}'
 OPENAPI_CHG='"openapi.json":{"content":"{\"paths\":{\"/users\":{\"get\":{\"parameters\":[{\"name\":\"limit\",\"in\":\"query\",\"required\":true,\"schema\":{\"type\":\"integer\"}}]}},\"/orders\":{\"post\":{}}}}"}'
@@ -599,13 +599,15 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 PAGES=$(api GET "/v1/previews/$PV" | jq_ "'; '.join('%s: %d error(s), %s%% against main' % (x['path'], x['errors'], x['base_percent']) for x in d.get('pages', []))")
-case "$PAGES" in "/pricing: "[1-9]*" error(s), "*"% against main") ;; *) echo "/pricing should be taken, with its 404, and compared with main's: $PAGES"; exit 1;; esac
+case "$PAGES" in *"/pricing: "[1-9]*" error(s), "*"% against main"*) ;; *) echo "/pricing should be taken, with its 404, and compared with main's: $PAGES"; exit 1;; esac
 # The first page's checks on /pricing too (the same 404 page as main's: nothing new against it).
 PRICING=$(api GET "/v1/previews/$PV" | jq_ "(lambda p: 'a11y %s, seo %s; new: a11y %s, seo %s, links %s' % (p.get('a11y') is not None, ((p.get('a11y') or {}).get('seo')) is not None, (p.get('against') or {}).get('a11y_added'), (p.get('against') or {}).get('seo_added'), (p.get('against') or {}).get('links_added')))([x for x in d['pages'] if x['path'] == '/pricing'][0])")
 [ "$PRICING" = "a11y True, seo True; new: a11y 0, seo 0, links 0" ] || { echo "/pricing should get the first page's checks, against main's /pricing: $PRICING"; exit 1; }
 case "$PAGES" in *"wiki:/: 0 error(s), "*"% against main"*) ;; *) echo "the wiki service's page should be taken in its own run and compared: $PAGES"; exit 1;; esac
 # A page state (github.states: Tab pressed on /), taken after its step and compared with main's.
 case "$PAGES" in *"state:tab: "*"% against main"*) ;; *) echo "the page state should be taken after its steps and compared: $PAGES"; exit 1;; esac
+# The repo's own page, from its roll.toml (pages = ["/index.html"]), taken with the project's.
+case "$PAGES" in *"/index.html: "*"% against main"*) ;; *) echo "the repo's own page should be taken and compared: $PAGES"; exit 1;; esac
 # And the repo's own, from its roll.toml ([[preview.states]], versioned with its selectors).
 case "$PAGES" in *"state:repo-tab: "*"% against main"*) ;; *) echo "the repo's own page state should be taken and compared: $PAGES"; exit 1;; esac
 # And in Firefox (github.browsers), compared with main's in Firefox.

@@ -221,6 +221,8 @@ pub fn service_of(repo: &str, p: &PreviewSpec) -> ServiceSpec {
         env: p.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         health: p.health.clone(),
         states: p.states.clone(),
+        pages: p.pages.clone(),
+        hide: p.hide.clone(),
     }
 }
 

@@ -79,6 +79,10 @@ pub struct PreviewSpec {
     pub env: BTreeMap<String, String>,
     /// Page states its screenshots reach (`[[preview.states]]`), as roll previews' `github.states`.
     pub states: Vec<StateRule>,
+    /// More of its own pages its screenshots take (`pages = ["/pricing"]`), and selectors blanked
+    /// in them (`hide = [".clock"]`), as roll previews' `github.pages` and `github.hide`.
+    pub pages: Vec<String>,
+    pub hide: Vec<String>,
 }
 
 /// Whether `p` is a page path the screenshot may visit: absolute, on the service's own origin.
@@ -178,6 +182,10 @@ struct RawPreview {
     /// whose selectors they name.
     #[serde(default)]
     states: Vec<StateRule>,
+    #[serde(default)]
+    pages: Vec<String>,
+    #[serde(default)]
+    hide: Vec<String>,
 }
 
 impl RollToml {
@@ -250,6 +258,13 @@ impl RollToml {
                 let bad_state = p.states.iter().enumerate().any(|(i, s)| {
                     !state_name_ok(&s.name) || p.states[..i].iter().any(|o| o.name == s.name) || !page_path_ok(&s.page) || s.steps.is_empty() || s.steps.len() > MAX_STEPS || !s.steps.iter().all(step_ok)
                 });
+                if p.pages.len() > 10 || p.pages.iter().any(|x| !page_path_ok(x) || x == "/") {
+                    return Err(format!("{FILE} {at}: pages are at most 10 paths besides / (each starting with /, no spaces, quotes or #)"));
+                }
+                let selector_ok = |s: &str| !s.trim().is_empty() && s.len() <= 200 && !s.contains(['{', '}', '<', ';', '\\']) && !s.contains("/*") && !s.chars().any(char::is_control);
+                if p.hide.len() > 20 || !p.hide.iter().all(|s| selector_ok(s)) {
+                    return Err(format!("{FILE} {at}: hide is at most 20 CSS selectors"));
+                }
                 if p.states.len() > MAX_STATES || bad_state {
                     return Err(format!(
                         "{FILE} {at}: states are at most {MAX_STATES}, each a name (a-z, 0-9, -), a page (a path) and 1 to {MAX_STEPS} steps: click or type on a selector, press one of {}, or wait up to 5000 ms",
@@ -273,6 +288,8 @@ impl RollToml {
                     cpus: cpus(at, p.cpus)?,
                     env: env(at, p.env)?,
                     states: p.states,
+                    pages: p.pages,
+                    hide: p.hide,
                 })
             }
         };
@@ -377,6 +394,9 @@ mod tests {
             postgres = "prj_abc123"
             redis = "rdb_def456"
 
+            pages = ["/pricing"]
+            hide = [".clock"]
+
             [[preview.states]]
             name = "cart"
             page = "/"
@@ -391,7 +411,7 @@ mod tests {
         assert_eq!((lint.timeout.as_secs(), lint.memory_mb, lint.env["RUST_LOG"].as_str()), (120, 512, "debug"));
         let p = t.preview.unwrap();
         assert_eq!((p.port, p.postgres.as_deref(), p.redis.as_deref(), p.auto), (3000, Some("prj_abc123"), Some("rdb_def456"), true));
-        assert_eq!(p.states.len(), 1);
+        assert_eq!((p.pages.as_slice(), p.hide.as_slice(), p.states.len()), (&["/pricing".to_string()][..], &[".clock".to_string()][..], 1));
         assert_eq!(p.states[0].steps, [Step::Click("#open-cart".into()), Step::Type("#coupon".into(), "SAVE10".into()), Step::Press("Enter".into()), Step::Wait(300)]);
     }
 
@@ -428,6 +448,8 @@ mod tests {
             ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\nhealth = \"healthz\"", "health"),
             ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\nredis = \"rdb_\"", "redis"),
             ("[preview]\nimage = \"a\"\nrun = \"x\"", "port"),
+            ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\nhide = [\"a{}\"]", "hide"),
+            ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\npages = [\"pricing\"]", "pages"),
             ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\n[[preview.states]]\nname = \"cart\"\npage = \"/\"\nsteps = [{ press = \"F12\" }]", "states"),
             ("[queue]\nbatch_size = 0", "batch_size"),
             ("[queue]\nbogus = 1", "bogus"),
