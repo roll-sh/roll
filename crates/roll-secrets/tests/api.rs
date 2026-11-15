@@ -201,7 +201,10 @@ impl roll_secrets::outside::OutsideDb for Outside {
 /// GitHub for App 1's installation 7: the live tokens, each with the repositories and
 /// permissions it was narrowed to.
 #[derive(Default)]
-struct FakeGitHub(std::sync::Mutex<BTreeMap<String, (Vec<String>, BTreeMap<String, String>)>>);
+struct FakeGitHub(std::sync::Mutex<BTreeMap<String, Narrowed>>);
+
+/// A token's repositories and permissions.
+type Narrowed = (Vec<String>, BTreeMap<String, String>);
 
 impl roll_secrets::github_app::GitHubApps for FakeGitHub {
     fn token(&self, _: &str, app_id: u64, key: &roll_secrets::Value, installation: u64, repositories: &[String], permissions: &BTreeMap<String, String>) -> Result<(roll_secrets::Value, i64), String> {
