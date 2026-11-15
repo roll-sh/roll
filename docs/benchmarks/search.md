@@ -224,7 +224,14 @@ ranges overlap):
    table's notes). Both fixed since: the walk by `6c2834a3e`, and the direct parser now takes
    noaa's documents (34% less server CPU per document; the noaa notes). Not rerun in Rally yet.
 7. nyc_taxis `distance_amount_agg`: 1.27x Elasticsearch (103.2 ms against 81.1; the ranges are
-   apart). One thread per shard against Elasticsearch's concurrent segments (above).
+   apart). One thread per shard against Elasticsearch's concurrent segments (above). Roll leads
+   since `0d1c0ece2`, still on one thread: the time was per-document overhead (a virtual `next`
+   per match of the range's doc set, doc values decoded through per-doc positions, a float key
+   and five array checks per value), not the lack of threads. Release build of `0d1c0ece2`
+   against `6e98b91bc`, the same 2M trips in Rally's two merged segments, lane b, one client,
+   5 alternating rounds, identical aggregations: 962M → 417M instructions per request, server
+   CPU 107.5 → 42.5 ms (41.3-45.0), p50 102.3 → 37.8 ms (36.3-46.7); Elasticsearch 9.5.5 on the
+   same CPUs 76.3-85.9 ms p50 at 213-243 ms of CPU. Rally rerun pending.
 8. nyc_taxis `autohisto_agg`: 1.19x OpenSearch (9.0 against 7.6, tie). The counted segments were
    still searched for the hit count (above); not since `7584df9f3` (server CPU at one segment
    -69%, `date_histogram_agg` -83%), Rally rerun pending.
