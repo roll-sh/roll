@@ -2777,6 +2777,13 @@ few reviewable ones and closes what they supersede:
 4. **#64** (the landed stack on roll-access) waits for roll MCP's #25 on main, then lands
    like the rest.
 
+**Merging main after a squash.** A squash leaves main without the branch's commits, so merging
+main into the next branch would conflict wherever it changed the squashed lines. Once main has
+squash S of tip T: check `git diff S T` is empty, merge `S^` normally, then `git merge -s ours S`,
+then anything after S normally. Every follow-up merges landing's final tip before #62 squashes,
+so `-s ours` is right for each of them too (and for #74 after #65). No base branch is deleted
+until the pull requests on it are retargeted (deleting one closes them).
+
 Before each lands: origin/main merged, the full gate (`cargo build/test/clippy`, roll-secrets on
 Postgres, `pnpm typecheck` and the dashboard's tests, the SDK suites, `pnpm test:code --docker`
 where AGENTS.md asks for it), CI green, a squash titled like #18–#27, main's CI green on the
