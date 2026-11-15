@@ -101,12 +101,29 @@ pub const BUCKET: &str = "bucket:";
 /// becomes one record there, keyed by its audit id.
 pub const STREAM: &str = "stream:";
 
+/// A sink URL naming an index of a roll search cluster: `search:<cluster id>/<index>`. Each audit
+/// event becomes a document there, its id the audit id (a retried batch writes the same ones).
+pub const SEARCH: &str = "search:";
+
 /// The roll resource (kind, ref) a sink URL names, if it names one.
 pub fn roll_target(url: &str) -> Option<(&'static str, &str)> {
     if let Some(b) = url.strip_prefix(BUCKET) {
         return Some(("bucket", b));
     }
+    if let Some(s) = url.strip_prefix(SEARCH) {
+        return Some(("search", s.split('/').next().unwrap_or_default()));
+    }
     url.strip_prefix(STREAM).map(|s| ("stream", s.split('/').next().unwrap_or_default()))
+}
+
+/// An index name Elasticsearch takes: lowercase, not starting with `-`, `_` or `+`, no `\/*?"<>| ,#:`.
+fn index_ok(index: &str) -> bool {
+    !index.is_empty()
+        && index.len() <= 255
+        && index != "."
+        && index != ".."
+        && !index.starts_with(['-', '_', '+'])
+        && index.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
 }
 
 impl Secrets {
@@ -132,6 +149,11 @@ impl Secrets {
                     if topic.is_empty() || topic.len() > 249 || !topic.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
                         return Err(Error::BadRequest("a stream sink is stream:<stream id>/<topic>".into()));
                     }
+                }
+                if let Some(rest) = n.url.strip_prefix(SEARCH)
+                    && !rest.split_once('/').is_some_and(|(_, index)| index_ok(index))
+                {
+                    return Err(Error::BadRequest("a search sink is search:<cluster id>/<index> (lowercase letters, digits, ., _ and -)".into()));
                 }
                 if !self.members(project)?.contains(&(kind.to_string(), name.to_string())) {
                     return Err(Error::BadRequest(self.not_linkable(project, kind, name)));

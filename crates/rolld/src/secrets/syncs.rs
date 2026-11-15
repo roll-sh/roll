@@ -291,6 +291,13 @@ impl Hooks {
     }
 }
 
+/// An audit event with its project named (an index holds many projects' events).
+fn with_project(e: &Json, project: &str) -> Json {
+    let mut e = e.clone();
+    e["project"] = Json::String(project.to_string());
+    e
+}
+
 /// Audit sinks' deliveries (roll_secrets::sinks): the same client, signature and guards.
 /// The products' routes too: a sink can be a roll bucket (`bucket:<name>`).
 pub struct AuditDeliver(Hooks, Api);
@@ -319,6 +326,30 @@ impl roll_secrets::Deliver for AuditDeliver {
             let (stream, topic) = rest.split_once('/').ok_or_else(|| Error::BadRequest(format!("{url}: stream:<id>/<topic>")))?;
             let records: Vec<Json> = body["events"].as_array().into_iter().flatten().map(|e| serde_json::json!({ "key": e["id"].to_string(), "value": e })).collect();
             return self.1.call(axum::http::Method::POST, &format!("/v1/streams/{}/topics/{}/records", urlencoding::encode(stream), urlencoding::encode(topic)), Some(serde_json::json!({ "records": records }))).map(|_| ());
+        }
+        // An index of a roll search cluster: one document per event, its id the audit id, so a
+        // retried batch writes the same documents again (bulk, in one request).
+        if let Some(rest) = url.strip_prefix(roll_secrets::sinks::SEARCH) {
+            let (cluster, index) = rest.split_once('/').ok_or_else(|| Error::BadRequest(format!("{url}: search:<cluster>/<index>")))?;
+            let project = body["project"].as_str().unwrap_or_default();
+            let mut ndjson = String::new();
+            for e in body["events"].as_array().into_iter().flatten() {
+                ndjson.push_str(&serde_json::json!({ "index": { "_id": e["id"].to_string() } }).to_string());
+                ndjson.push('\n');
+                ndjson.push_str(&with_project(e, project).to_string());
+                ndjson.push('\n');
+            }
+            let path = format!("/v1/search/clusters/{}/indices/{}/bulk", urlencoding::encode(cluster), urlencoding::encode(index));
+            let (status, v) = self.1.post_raw(&path, "application/x-ndjson", ndjson.into_bytes())?;
+            if !status.is_success() {
+                return Err(Error::Link(format!("search {cluster}/{index}: {} {}", status.as_u16(), v.get("error").map(|e| e.to_string()).unwrap_or_default())));
+            }
+            // Bulk answers 200 with per-document errors: any is a failed batch, sent again later.
+            if v["errors"].as_bool() == Some(true) {
+                let first = v["items"].as_array().into_iter().flatten().find_map(|i| i["index"]["error"]["reason"].as_str()).unwrap_or("a document was refused");
+                return Err(Error::Link(format!("search {cluster}/{index}: {first}")));
+            }
+            return Ok(());
         }
         let u = self.0.url(url)?;
         // A retried batch (or notice) is the same body: the same delivery.
@@ -441,5 +472,44 @@ impl SyncTarget for Notify {
             "changed_keys": p.changed, "removed_keys": p.removed, "at": p.at,
         });
         self.0.post(&url, p, &body)
+    }
+}
+
+#[cfg(test)]
+mod search_sink {
+    use roll_secrets::Deliver as _;
+    use serde_json::{Value as Json, json};
+    use std::sync::{Arc, Mutex};
+
+    /// An index of a roll search cluster gets each event as a document through its bulk route, its
+    /// id the audit id (a retried batch writes the same ones); per-document errors fail the batch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_search_sink_bulk_indexes_events_by_their_audit_id() {
+        let seen: Arc<Mutex<Vec<(String, String, String)>>> = Arc::default();
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (s, r) = (seen.clone(), refuse.clone());
+        let router = axum::Router::new().route(
+            "/v1/search/clusters/{id}/indices/{index}/bulk",
+            axum::routing::post(move |axum::extract::Path((id, index)): axum::extract::Path<(String, String)>, h: axum::http::HeaderMap, body: String| async move {
+                s.lock().unwrap().push((format!("{id}/{index}"), h["content-type"].to_str().unwrap().to_string(), body));
+                if r.load(std::sync::atomic::Ordering::SeqCst) {
+                    return axum::Json(json!({ "errors": true, "items": [{ "index": { "error": { "reason": "mapper_parsing_exception" } } }] }));
+                }
+                axum::Json(json!({ "errors": false, "items": [] }))
+            }),
+        );
+        let api = super::super::Api::default();
+        api.set(router);
+        let d = Arc::new(super::AuditDeliver::new(false, api));
+        let body = json!({ "sink": "snk_1", "project": "prj_a", "events": [{ "id": 7, "at": 1, "action": "secrets.write" }, { "id": 8, "at": 2, "action": "secrets.export" }] });
+        let send = |d: Arc<super::AuditDeliver>, body: Json| tokio::task::spawn_blocking(move || d.post("search:cl_1/roll-audit", "snk_1", &roll_secrets::Value::new("whsec_x"), &body));
+        send(d.clone(), body.clone()).await.unwrap().unwrap();
+        let (target, ct, ndjson) = seen.lock().unwrap()[0].clone();
+        let lines: Vec<Json> = ndjson.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!((target.as_str(), ct.as_str(), lines.len()), ("cl_1/roll-audit", "application/x-ndjson", 4));
+        assert_eq!((lines[0]["index"]["_id"].as_str(), lines[1]["action"].as_str(), lines[3]["project"].as_str()), (Some("7"), Some("secrets.write"), Some("prj_a")));
+        refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = send(d, body).await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("mapper_parsing_exception"), "{err}");
     }
 }

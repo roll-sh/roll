@@ -2220,6 +2220,12 @@ every delivery), writes each batch as an object `roll-secrets/audit/<sink>/<deli
   there, through roll storage in process: a compliance archive with the bucket's own lifecycle,
   versioning and Object Lock. A retried batch is the same delivery, so it writes the same object
   again, never a second one.
+- **Into roll search**: a sink whose URL is `search:<cluster id>/<index>`, a cluster on the
+  project's canvas (checked the same way), indexes each event as a document through the cluster's
+  bulk route in process, its id the audit id, so a retried batch writes the same documents again;
+  each names its project. Search and dashboards over the audit log with roll search's own
+  Kibana-compatible API. A per-document error (a mapping that refuses a field) fails the batch,
+  which is sent again later.
 - **Into a roll stream**: a sink `stream:<stream id>/<topic>` (a stream on the canvas, checked at
   every delivery like a bucket) produces each audit event to that topic as one record, keyed by its
   audit `id`, through roll streams in process: consumers react as it's written. A retried batch can
@@ -2317,7 +2323,7 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |
 | `POST /v1/secrets/shares/{id}/open` (public) | | `{ciphertext}` (one open used) |
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
-| `POST /audit/sinks` | `{url, from_start?}` (an HTTPS endpoint, `bucket:<name>` or `stream:<id>/<topic>` on the canvas) | 201 `Sink & {secret}` (shown once) |
+| `POST /audit/sinks` | `{url, from_start?}` (an HTTPS endpoint, or on the canvas `bucket:<name>`, `search:<cluster>/<index>` or `stream:<id>/<topic>`) | 201 `Sink & {secret}` (shown once) |
 | `DELETE /audit/sinks/{id}` | | 204 |
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
@@ -2733,7 +2739,7 @@ user's call).
    `spec.rolloutRestart`, as Infisical's reload annotation and Vault Secrets Operator's
    `rolloutRestartTargets`).
 7. **Audit sinks SIEMs take** (#70, on #62): Splunk HEC, Datadog and bearer formats with a sealed
-   token (Doppler, Infisical). Next: a sink into roll search.
+   token (Doppler, Infisical). A sink into roll search is #71.
 8. **A live rotation that keeps the old password a while** where the resource can (Redis ACL users
    hold two passwords), as managed rotation's grace already does.
 9. **More dynamic credentials**: GitHub App installation tokens (one repository, narrowed

@@ -170,7 +170,8 @@ function Streams() {
   const [copied, setCopied] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   // An HTTPS endpoint, or a roll bucket of this project's canvas (an archive).
-  const urlOk = /^https:\/\/[^\s/]+/.test(url.trim()) || /^bucket:[a-z0-9][a-z0-9.-]{1,62}$/.test(url.trim());
+  // Or an index of a search cluster, or a topic of a stream, on this canvas.
+  const urlOk = /^https:\/\/[^\s/]+/.test(url.trim()) || /^bucket:[a-z0-9][a-z0-9.-]{1,62}$/.test(url.trim()) || /^search:[^\s/]+\/[a-z0-9][a-z0-9._-]{0,254}$/.test(url.trim()) || /^stream:[^\s/]+\/[A-Za-z0-9._-]{1,249}$/.test(url.trim());
 
   const add = async () => {
     setBusy(true);
@@ -242,8 +243,8 @@ function Streams() {
           }}
         >
           <label className="min-w-64 flex-1">
-            <span className="mb-1 block text-[11px] font-medium text-subtle">HTTPS endpoint, or bucket:&lt;name&gt; for a roll bucket on this canvas</span>
-            <input autoFocus value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://siem.example.com/roll  or  bucket:audit-archive" spellCheck={false} className={`${field} font-mono text-[12px]`} />
+            <span className="mb-1 block text-[11px] font-medium text-subtle">HTTPS endpoint, or on this canvas: bucket:&lt;name&gt;, search:&lt;cluster&gt;/&lt;index&gt; or stream:&lt;stream&gt;/&lt;topic&gt;</span>
+            <input autoFocus value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://siem.example.com/roll  or  search:cl_…/roll-audit" spellCheck={false} className={`${field} font-mono text-[12px]`} />
           </label>
           <label className="flex h-8 items-center gap-1.5 text-[12px] text-muted" title="Otherwise it starts with the rows written from now on">
             <input type="checkbox" checked={fromStart} onChange={(e) => setFromStart(e.target.checked)} className="accent-[var(--accent)]" />
