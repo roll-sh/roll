@@ -484,7 +484,19 @@ impl Throttle {
     }
 
     /// Waits until a batch of `size` documents may start; `false` when the task was cancelled.
+    /// For documents already in hand (a remote source); a scroll waits before its next fetch.
     async fn before_batch(&mut self, size: usize) -> bool {
+        let go = self.wait().await;
+        if go {
+            self.start(size);
+        }
+        go
+    }
+
+    /// Waits out the delay the last batch earned before the next one is fetched
+    /// (`AbstractAsyncBulkByScrollAction.startNextScroll`): even the fetch that finds nothing waits,
+    /// so a throttled run stays running for its whole delay. `false` when the task was cancelled.
+    async fn wait(&mut self) -> bool {
         if self.live.is_cancelled() {
             return false;
         }
@@ -519,9 +531,13 @@ impl Throttle {
             }
             *self.live.throttled_until.lock() = None;
         }
+        !self.live.is_cancelled()
+    }
+
+    /// Marks a batch of `size` documents as started: the next [`wait`](Self::wait) counts from here.
+    fn start(&mut self, size: usize) {
         self.last_start = Some(std::time::Instant::now());
         self.last_size = size as u64;
-        !self.live.is_cancelled()
     }
 
     fn millis(&self) -> u64 {
@@ -760,6 +776,16 @@ fn touch(touched: &mut Vec<String>, uuid: &str) {
     }
 }
 
+/// The status of a run cancelled while its first search ran: a cancel that lands mid-search fails
+/// that search (`task_cancelled_exception`), and the run then ends as cancelled, not failed, as
+/// `AbstractAsyncBulkByScrollAction` checks its task before failing (the same holds for a later
+/// batch's search, handled in each loop).
+fn cancelled_before_start(live: &Arc<Live>) -> Status {
+    let s = Status { slice_id: live.slice_id, canceled: Some("by user request".into()), ..Default::default() };
+    publish(live, &s, &Throttle::new(live.clone()));
+    s
+}
+
 /// Publishes a run's counters to its task, after each batch.
 fn publish(live: &Live, s: &Status, throttle: &Throttle) {
     let mut g = live.status.lock();
@@ -930,22 +956,35 @@ pub async fn delete_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
         let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
             let (indices, query, routing) = (&indices, &query, &routing);
             async move {
-                let mut scanner = scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, false, false, live.task)?;
+                let mut scanner = match scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, false, false, live.task) {
+                    Ok(sc) => sc,
+                    Err(_) if live.is_cancelled() => return Ok((cancelled_before_start(&live), Vec::new())),
+                    Err(e) => return Err(e),
+                };
                 let mut s = Status { slice_id: live.slice_id, total: scanner.total, ..Default::default() };
                 let mut touched = Vec::new();
                 let mut throttle = Throttle::new(live.clone());
                 let mut stop = false;
                 loop {
-                    let batch = scanner.next_batch(opts.batch as usize)?;
-                    if batch.is_empty() {
-                        break;
-                    }
-                    if !throttle.before_batch(batch.len()).await {
+                    if !throttle.wait().await {
                         s.canceled = Some("by user request".into());
                         // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
                         publish(&live, &s, &throttle);
                         break;
                     }
+                    let batch = match scanner.next_batch(opts.batch as usize) {
+                        Ok(b) => b,
+                        Err(_) if live.is_cancelled() => {
+                            s.canceled = Some("by user request".into());
+                            publish(&live, &s, &throttle);
+                            break;
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    if batch.is_empty() {
+                        break;
+                    }
+                    throttle.start(batch.len());
                     s.batches += 1;
                     for d in &batch {
                         let args = WriteArgs { if_seq_no: Some(d.seq_no), if_primary_term: Some(d.primary_term), internal: true, ..Default::default() };
@@ -1008,22 +1047,35 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
         let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
             let (indices, query, routing, bound, pipeline) = (&indices, &query, &routing, &bound, &pipeline);
             async move {
-                let mut scanner = scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, true, false, live.task)?;
+                let mut scanner = match scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, true, false, live.task) {
+                    Ok(sc) => sc,
+                    Err(_) if live.is_cancelled() => return Ok((cancelled_before_start(&live), Vec::new())),
+                    Err(e) => return Err(e),
+                };
                 let mut s = Status { slice_id: live.slice_id, total: scanner.total, ..Default::default() };
                 let mut touched = Vec::new();
                 let mut throttle = Throttle::new(live.clone());
                 let mut stop = false;
                 loop {
-                    let batch = scanner.next_batch(opts.batch as usize)?;
-                    if batch.is_empty() {
-                        break;
-                    }
-                    if !throttle.before_batch(batch.len()).await {
+                    if !throttle.wait().await {
                         s.canceled = Some("by user request".into());
                         // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
                         publish(&live, &s, &throttle);
                         break;
                     }
+                    let batch = match scanner.next_batch(opts.batch as usize) {
+                        Ok(b) => b,
+                        Err(_) if live.is_cancelled() => {
+                            s.canceled = Some("by user request".into());
+                            publish(&live, &s, &throttle);
+                            break;
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    if batch.is_empty() {
+                        break;
+                    }
+                    throttle.start(batch.len());
                     s.batches += 1;
                     for d in &batch {
                         let source = match bound {
@@ -1355,22 +1407,35 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
                     let (src_indices, query, plan) = (&src_indices, &query, &plan);
                     async move {
-                        let mut scanner = scan(ctx, src_indices, query.as_ref(), None, max_docs, slice, true, true, live.task)?;
+                        let mut scanner = match scan(ctx, src_indices, query.as_ref(), None, max_docs, slice, true, true, live.task) {
+                    Ok(sc) => sc,
+                    Err(_) if live.is_cancelled() => return Ok((cancelled_before_start(&live), Vec::new())),
+                    Err(e) => return Err(e),
+                };
                         let mut s = Status { slice_id: live.slice_id, total: scanner.total, ..Default::default() };
                         let mut touched = Vec::new();
                         let mut throttle = Throttle::new(live.clone());
                         let mut stop = false;
                 loop {
-                            let docs = scanner.next_batch(batch as usize)?;
-                            if docs.is_empty() {
-                                break;
-                            }
-                            if !throttle.before_batch(docs.len()).await {
+                            if !throttle.wait().await {
                                 s.canceled = Some("by user request".into());
                                 // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
                                 publish(&live, &s, &throttle);
                                 break;
                             }
+                            let docs = match scanner.next_batch(batch as usize) {
+                                Ok(d) => d,
+                                Err(_) if live.is_cancelled() => {
+                                    s.canceled = Some("by user request".into());
+                                    publish(&live, &s, &throttle);
+                                    break;
+                                }
+                                Err(e) => return Err(e),
+                            };
+                            if docs.is_empty() {
+                                break;
+                            }
+                            throttle.start(docs.len());
                             s.batches += 1;
                             let sds: Vec<SourceDoc> = docs.into_iter().map(|d| SourceDoc { index: d.index.name.clone(), id: d.id, routing: d.routing, version: d.version, source: d.source }).collect();
                             reject_versioned_deletes(ctx, plan, sds.iter())?;
