@@ -7750,6 +7750,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "code-sql",
+ "flate2",
  "futures",
  "futures-util",
  "getrandom 0.4.3",

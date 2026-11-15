@@ -451,3 +451,12 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    loop limit with its error. Kölner/Haase doubled their spellings per match: a token now has at
    most 256 codes. Malformed kuromoji user dictionaries panicked: they are now errors. The caps
    are in compatibility.md, under "Extended suites".
+   `s3` repositories read a bucket the tenant writes, so they're bounded and checked like any
+   peer's input: repository data stops at 256 MiB inflated (streamed), 8M parsed values (charged
+   to the `request` breaker while parsed), 10,000 snapshots and 100,000 indices; a restored
+   document's source stops at `http.max_content_length` and is charged to `inflight_requests`
+   as its write was; listings stop at 10,000 pages, 1M objects or 64 MiB of keys. A restore
+   checks index, alias and data stream names as creating them does, and global state as
+   `PUT _cluster/settings` and the template, pipeline and stored script APIs do (templates among
+   the snapshot's own). Left, low: a cluster whose `max_body_mb` is over the node's 100mb can
+   write documents its restore from a bucket refuses.

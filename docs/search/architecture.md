@@ -257,7 +257,10 @@ are kept as hashes, never sealed.
   segment id and live count, so later snapshots reuse what didn't change. The cluster keeps a
   copy of the repository data, read again before each operation on the repository. A restore
   parses those records with bounds and indexes them again; it never opens segment files from a
-  bucket. Taking a snapshot reads the open shards' searchers (a closed index's last commit,
+  bucket. Everything read from a bucket is a peer's input: the repository data is bounded
+  inflated, in parsed values and in snapshots and indices, a document's source by
+  `http.max_content_length` (charged to the breakers as its write was), listings by pages and
+  objects, and a restore checks names and global state as the APIs that set them do. Taking a snapshot reads the open shards' searchers (a closed index's last commit,
   pinned only while it is read), so nothing stays in roll's storage.
 - **Credentials.** Elasticsearch takes an `s3` client's keys from its keystore; a roll tenant
   has none, so `access_key`, `secret_key` and `session_token` come with the repository's

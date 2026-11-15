@@ -1648,6 +1648,15 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
         Some(r) => Some(s3::refresh(ctx.cluster, &repo, &r).await?),
         None => None,
     };
+    // A snapshot's global state may come from a bucket someone else writes: it's checked as
+    // the APIs that set it check it.
+    if include_global_state {
+        let st = ctx.state();
+        let global = st.metadata.repositories.get(&repo).and_then(|r| st.metadata.repository_data.get(&r.location_key())).and_then(|d| d.find(&snap)).and_then(|s| s.global.clone());
+        if let Some(g) = global {
+            validate_global(ctx.cluster, st.dialect, &g)?;
+        }
+    }
     // Until the documents are copied, the snapshot can't be deleted.
     let _restoring = ctx.cluster.snapshot_data.restoring(&repo, &snap);
     let plan = move |st: &mut ClusterState| {
@@ -1695,6 +1704,7 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 Some((re, rep)) => re.replace_all(name, rep.as_str()).into_owned(),
                 None => name.clone(),
             };
+            crate::meta::names::validate_index_name(&target)?;
             let mut idx = IndexMeta::from_json_in(&target, stored, st.dialect)?;
             if let Some(existing) = st.metadata.indices.get(&target) {
                 if !existing.is_closed() {
@@ -1726,6 +1736,9 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
             if !include_aliases {
                 idx.aliases.clear();
             }
+            for a in idx.aliases.keys() {
+                crate::meta::names::validate_alias_name(a)?;
+            }
             idx.version += 1;
             let mut rs = Map::new();
             rs.insert("repository".into(), repo.clone().into());
@@ -1741,6 +1754,7 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
         }
         // Data streams whose backing indices all came back (under their own names).
         for (ds_name, stored) in &s.data_stream_meta {
+            crate::meta::data_streams::validate_name(ds_name)?;
             if rename.is_none()
                 && let Ok(ds) = crate::meta::data_streams::DataStream::from_stored(ds_name, stored)
                 && !ds.indices.is_empty()
@@ -1813,6 +1827,61 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
 fn shards_in_snapshot(ctx: &Ctx, uuid: &str, name: &str) -> Option<u32> {
     let st = ctx.state();
     st.metadata.repository_data.values().flat_map(|d| d.snapshots.iter()).find(|s| s.uuid == uuid).and_then(|s| s.index_meta.get(name)).map(|m| stored_shards(m) as u32)
+}
+
+/// Checks a snapshot's global state as `PUT _cluster/settings` and the template, pipeline and
+/// stored script APIs check what they're given. Templates are checked among the snapshot's
+/// own, as they stood together where the snapshot was taken.
+fn validate_global(cluster: &crate::Cluster, dialect: crate::Dialect, g: &Value) -> EsResult<()> {
+    use crate::meta::templates::{self, ComponentTemplate, ComposableTemplate, LegacyTemplate};
+    let entries = |key: &str| g.get(key).and_then(Value::as_object).into_iter().flat_map(|m| m.iter());
+    let mut md = Metadata { dialect, ..Metadata::default() };
+    for (k, v) in entries("component_templates") {
+        md.component_templates.insert(k.clone(), Arc::new(ComponentTemplate::from_stored(v)?));
+    }
+    for (k, v) in entries("index_templates") {
+        md.index_templates.insert(k.clone(), Arc::new(ComposableTemplate::from_stored(v)?));
+    }
+    for (k, v) in entries("templates") {
+        md.templates.insert(k.clone(), Arc::new(LegacyTemplate::from_stored(v)?));
+    }
+    for (k, t) in &md.component_templates {
+        templates::validate_component(&md, k, t, false)?;
+    }
+    for (k, t) in &md.index_templates {
+        templates::validate_composable(&md, k, t, false)?;
+    }
+    for (k, t) in &md.templates {
+        templates::validate_legacy(&md, k, t, false)?;
+    }
+    for (id, v) in entries("pipelines") {
+        let mut body = v.as_object().cloned().ok_or_else(|| EsError::new(400, "parse_exception", format!("pipeline [{id}] isn't an object")))?;
+        // Kept by the cluster, never given.
+        body.shift_remove("created_date_millis");
+        body.shift_remove("modified_date_millis");
+        crate::api::ingest::validate_pipeline(id, &body)?;
+        crate::xpack::enrich::validate_pipeline_refs(cluster, &body)?;
+        crate::ingest::pipeline::compile(cluster, id, &Value::Obj(body))?;
+    }
+    for (id, v) in entries("scripts") {
+        let lang = v.get("lang").and_then(Value::as_str).unwrap_or("painless");
+        if !crate::api::scripts::LANGS.contains(&lang) {
+            return Err(EsError::illegal_argument(format!("unable to put stored script with unsupported lang [{lang}]")));
+        }
+        if !v.get("source").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
+            return Err(EsError::illegal_argument(format!("stored script [{id}]: source cannot be empty")));
+        }
+        if let Some(o) = v.get("options") {
+            let Some(o) = o.as_object() else { return Err(EsError::illegal_argument(format!("stored script [{id}]: illegal compiler options"))) };
+            if lang != "mustache" && o.keys().any(|k| k != "content_type") {
+                return Err(EsError::illegal_argument(format!("illegal compiler options [{}] specified", crate::json::java_map_string(o))));
+            }
+        }
+    }
+    if let Some(p) = g.get("persistent") {
+        crate::meta::cluster_settings::validate_update_in(dialect, "persistent", &Settings::from_json(p)?)?;
+    }
+    Ok(())
 }
 
 /// Restores the global state of a snapshot over the cluster's.

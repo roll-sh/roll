@@ -19,6 +19,10 @@ use std::time::Duration;
 const ERROR_BODY_MAX: usize = 64 << 10;
 /// Attempts per request: S3 asks clients to retry 500 and 503.
 const ATTEMPTS: u32 = 3;
+/// Bounds on one listing ([`Client::list`]): S3 answers 1,000 keys a page.
+pub const LIST_PAGES_MAX: usize = 10_000;
+pub const LIST_ENTRIES_MAX: usize = 1_000_000;
+pub const LIST_KEY_BYTES_MAX: usize = 64 << 20;
 
 /// Keys a request is signed with.
 #[derive(Clone)]
@@ -235,12 +239,15 @@ impl Client {
         }
     }
 
-    /// Every object under `prefix`, as `(key, size)`.
+    /// Every object under `prefix`, as `(key, size)`. The endpoint decides how many pages there
+    /// are, so pages, objects and the bytes of their keys are bounded ([`LIST_PAGES_MAX`],
+    /// [`LIST_ENTRIES_MAX`], [`LIST_KEY_BYTES_MAX`]): past one, the listing fails.
     pub async fn list(&self, prefix: &str) -> Result<Vec<(String, u64)>, Error> {
-        const PAGE_MAX: usize = 16 << 20;
+        const PAGE_MAX: usize = 4 << 20;
         let mut out = Vec::new();
+        let mut key_bytes = 0usize;
         let mut token: Option<String> = None;
-        loop {
+        for _ in 0..LIST_PAGES_MAX {
             let mut q = vec![("list-type", "2"), ("prefix", prefix)];
             if let Some(t) = &token {
                 q.push(("continuation-token", t.as_str()));
@@ -254,6 +261,10 @@ impl Client {
             for item in elements(&page, "Contents") {
                 let key = elements(item, "Key").next().map(xml_unescape).unwrap_or_default();
                 let size = elements(item, "Size").next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+                key_bytes += key.len();
+                if out.len() >= LIST_ENTRIES_MAX || key_bytes > LIST_KEY_BYTES_MAX {
+                    return Err(err("TooLarge", format!("the listing of [{prefix}] holds more than [{LIST_ENTRIES_MAX}] objects or [{LIST_KEY_BYTES_MAX}] bytes of keys")));
+                }
                 out.push((key, size));
             }
             let truncated = elements(&page, "IsTruncated").next().is_some_and(|t| t.trim() == "true");
@@ -262,6 +273,7 @@ impl Client {
                 return Ok(out);
             }
         }
+        Err(err("TooLarge", format!("the listing of [{prefix}] is more than [{LIST_PAGES_MAX}] pages")))
     }
 }
 

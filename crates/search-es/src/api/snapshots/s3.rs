@@ -50,12 +50,16 @@ const SECRET_KIND: &str = "s3 repository credential";
 /// Settings that are credentials ([`Repository::secrets`]).
 pub const SECRET_SETTINGS: [&str; 3] = ["access_key", "secret_key", "session_token"];
 
-/// Bounds on what is read from a bucket.
+/// Bounds on what is read from a bucket. The repository data is bounded compressed and
+/// inflated, and in what parsing it would build: a gzipped `[0,0,…]` is two bytes a value.
 const DATA_MAX: usize = 256 << 20;
+const DATA_VALUES_MAX: usize = 8 << 20;
+const DATA_SNAPSHOTS_MAX: usize = 10_000;
+/// Indices over every snapshot of the repository data.
+const DATA_INDICES_MAX: usize = 100_000;
 const SHARD_FILE_MAX: usize = 64 << 20;
 const CHUNK_MAX: usize = 128 << 20;
 const HEAD_MAX: usize = 64 << 10;
-const SOURCE_MAX: usize = 512 << 20;
 /// A chunk is closed once it holds this much compressed.
 const CHUNK_TARGET: usize = 8 << 20;
 /// Generations past `index.latest` a reader looks for.
@@ -175,6 +179,8 @@ pub(super) struct Bucket {
     s3: client::Client,
     /// `<base_path>/roll/`.
     prefix: String,
+    /// The `request` breaker, charged while repository data is parsed.
+    budget: Arc<search_aggs::memory::MemoryBudget>,
 }
 
 impl Bucket {
@@ -191,7 +197,8 @@ impl Bucket {
         let s3 = client::Client::new(at, creds, allow_private(cluster)).map_err(|e| failed(name, e))?;
         let base = r.settings.get("base_path").unwrap_or_default().trim_matches('/');
         let prefix = if base.is_empty() { "roll/".to_string() } else { format!("{base}/roll/") };
-        Ok(Bucket { name: name.to_string(), s3, prefix })
+        let budget = cluster.breakers.request(cluster, &cluster.state());
+        Ok(Bucket { name: name.to_string(), s3, prefix, budget })
     }
 
     fn fail(&self, what: &str, e: client::Error) -> EsError {
@@ -213,10 +220,29 @@ impl Bucket {
     async fn data_at(&self, generation: i64) -> EsResult<Option<RepositoryData>> {
         let key = format!("{}index-{generation}", self.prefix);
         let Some(raw) = self.s3.get(&key, DATA_MAX).await.map_err(|e| self.fail("reading the repository data", e))? else { return Ok(None) };
-        let mut text = Vec::new();
-        flate2::read::GzDecoder::new(&raw[..]).take(DATA_MAX as u64 * 8).read_to_end(&mut text).map_err(|e| failed(&self.name, format!("the repository data [{key}] is damaged: {e}")))?;
+        let damaged = |why: String| {
+            let cause = EsError::new(500, "corrupt_state_exception", why);
+            failed(&self.name, format!("the repository data [{key}] is damaged")).caused_by(cause)
+        };
+        let text = inflate(&raw, DATA_MAX).map_err(damaged)?;
+        drop(raw);
+        let values = json_values(&text);
+        if values > DATA_VALUES_MAX {
+            return Err(damaged(format!("it holds more than [{DATA_VALUES_MAX}] values")));
+        }
+        // What the parsed tree takes, as a request holding it would be charged.
+        let mut held = crate::breaker::Reservation::new(self.budget.clone());
+        held.add((values * std::mem::size_of::<Value>() * 2 + text.len()) as u64, "<repository_data>")?;
         let v = crate::json::parse(&text).ok().flatten();
-        let data = v.as_ref().and_then(RepositoryData::from_stored).ok_or_else(|| failed(&self.name, format!("the repository data [{key}] is damaged")))?;
+        drop(text);
+        let data = v.as_ref().and_then(RepositoryData::from_stored).ok_or_else(|| damaged("it isn't repository data".into()))?;
+        drop(v);
+        if data.snapshots.len() > DATA_SNAPSHOTS_MAX {
+            return Err(damaged(format!("it holds more than [{DATA_SNAPSHOTS_MAX}] snapshots")));
+        }
+        if data.snapshots.iter().map(|s| s.indices.len().max(s.index_meta.len()) + s.data_stream_meta.len()).sum::<usize>() > DATA_INDICES_MAX {
+            return Err(damaged(format!("its snapshots hold more than [{DATA_INDICES_MAX}] indices")));
+        }
         if data.generation != generation {
             return Err(failed(&self.name, format!("the repository data [{key}] claims generation [{}]", data.generation)));
         }
@@ -386,7 +412,10 @@ impl Bucket {
                 let damaged = |why: &str| EsError::new(500, "snapshot_restore_exception", format!("[{}] the snapshot contents [{key}] are damaged: {why}", self.name));
                 let target = CopyTarget::new(cluster, idx)?;
                 let mut r = std::io::BufReader::new(flate2::read::GzDecoder::new(&raw[..]));
-                while let Some(copy) = read_record(&mut r).map_err(|e| damaged(&e))? {
+                let source_max = source_max(cluster);
+                while let Some(copy) = read_record(&mut r, source_max).map_err(|e| damaged(&e))? {
+                    // Charged as the body of the write that indexed it would be.
+                    let _in_flight = cluster.breakers.charge_in_flight(cluster, &cluster.state(), copy.source.len() as u64)?;
                     target.index(&copy)?;
                 }
             }
@@ -516,8 +545,44 @@ impl Chunk {
     }
 }
 
-/// The next record of a chunk ([`Chunk::push`]), `None` at its end.
-fn read_record(r: &mut impl BufRead) -> Result<Option<DocCopy>, String> {
+/// Inflates gzipped `raw`, reading no more than `max` bytes of it inflated.
+fn inflate(raw: &[u8], max: usize) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(raw).take(max as u64 + 1).read_to_end(&mut out).map_err(|e| e.to_string())?;
+    if out.len() > max {
+        return Err(format!("it inflates past [{max}] bytes"));
+    }
+    Ok(out)
+}
+
+/// At least as many values (keys included) as parsing JSON `text` would build: one more
+/// than its separators and opening brackets outside strings.
+fn json_values(text: &[u8]) -> usize {
+    let (mut n, mut in_str, mut escaped) = (1, false, false);
+    for &b in text {
+        match (in_str, b) {
+            (true, _) if escaped => escaped = false,
+            (true, b'\\') => escaped = true,
+            (true, b'"') => in_str = false,
+            (true, _) => {}
+            (false, b'"') => in_str = true,
+            (false, b',' | b':' | b'[' | b'{') => n += 1,
+            (false, _) => {}
+        }
+    }
+    n
+}
+
+/// The largest document source a restore indexes: the node's `http.max_content_length`, as
+/// no write could have sent a larger one.
+fn source_max(cluster: &crate::Cluster) -> usize {
+    let node = cluster.config.node_setting("http.max_content_length").and_then(|v| crate::units::ByteSize::parse(v, "http.max_content_length").ok());
+    node.map_or(crate::api::nodes::MAX_CONTENT_LENGTH, |b| b.0).clamp(0, i32::MAX as i64) as usize
+}
+
+/// The next record of a chunk ([`Chunk::push`]), `None` at its end. A source longer than
+/// `source_max` is refused.
+fn read_record(r: &mut impl BufRead, source_max: usize) -> Result<Option<DocCopy>, String> {
     let mut head = Vec::new();
     let n = r.by_ref().take(HEAD_MAX as u64 + 1).read_until(b'\n', &mut head).map_err(|e| e.to_string())?;
     if n == 0 {
@@ -529,7 +594,7 @@ fn read_record(r: &mut impl BufRead) -> Result<Option<DocCopy>, String> {
     let v = crate::json::parse(&head).ok().flatten().ok_or("a record's header isn't JSON")?;
     let int = |k: &str| v.get(k).and_then(Value::as_i64).ok_or_else(|| format!("a record has no [{k}]"));
     let len = int("len")?;
-    if !(0..=SOURCE_MAX as i64).contains(&len) {
+    if !(0..=source_max as i64).contains(&len) {
         return Err(format!("a record's source length [{len}] is out of bounds"));
     }
     let mut source = Vec::new();
@@ -839,13 +904,19 @@ mod tests {
         }
         let raw = c.finish();
         let mut r = std::io::BufReader::new(flate2::read::GzDecoder::new(&raw[..]));
-        let back: Vec<DocCopy> = std::iter::from_fn(|| read_record(&mut r).unwrap()).collect();
+        let back: Vec<DocCopy> = std::iter::from_fn(|| read_record(&mut r, 1 << 20).unwrap()).collect();
         assert_eq!(back, copies);
         // A length past the bound, or past what's there, is refused rather than allocated.
         let huge = format!("{{\"id\":\"1\",\"seq_no\":0,\"primary_term\":1,\"version\":1,\"len\":{}}}\n", u64::MAX / 2);
-        assert!(read_record(&mut std::io::Cursor::new(huge.into_bytes())).is_err());
+        assert!(read_record(&mut std::io::Cursor::new(huge.into_bytes()), 1 << 20).is_err());
         let short = b"{\"id\":\"1\",\"seq_no\":0,\"primary_term\":1,\"version\":1,\"len\":10}\n{}\n".to_vec();
-        assert!(read_record(&mut std::io::Cursor::new(short)).is_err());
+        assert!(read_record(&mut std::io::Cursor::new(short), 1 << 20).is_err());
         assert!(ShardBlobs::parse(br#"{"segments":[{"key":"../../x","docs":1,"chunks":[1]}]}"#).is_none());
+        // Repository data is bounded inflated, and by the values parsing it would build.
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&vec![b' '; 4 << 20]).unwrap();
+        let bomb = enc.finish().unwrap();
+        assert!(inflate(&bomb, 1 << 20).is_err() && inflate(&bomb, 4 << 20).is_ok());
+        assert_eq!(json_values(br#"{"a":[1,2,{"b":"x,[\"{:"}]}"#), 8);
     }
 }

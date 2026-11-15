@@ -1072,6 +1072,8 @@ async fn a_due_slm_run_wakes_its_sleeping_cluster() {
 struct MockBucket {
     objects: Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
     signed_by: Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+    /// Listings never end: every page is truncated, with 1,000 keys of 1 KiB.
+    endless: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MockBucket {
@@ -1097,6 +1099,10 @@ impl MockBucket {
         let key = uri.path().strip_prefix("/backups").unwrap_or_default().trim_start_matches('/').to_string();
         let mut objects = m.objects.lock().unwrap();
         match method.as_str() {
+            "GET" if key.is_empty() && m.endless.load(std::sync::atomic::Ordering::Relaxed) => {
+                let items: String = (0..1000).map(|i| format!("<Contents><Key>prod/roll/indices/{i}{}</Key><Size>1</Size></Contents>", "k".repeat(1024))).collect();
+                format!("<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>more</NextContinuationToken>{items}</ListBucketResult>").into_response()
+            }
             "GET" if key.is_empty() => {
                 let query = uri.query().unwrap_or_default();
                 let prefix = query.split('&').find_map(|p| p.strip_prefix("prefix=")).unwrap_or_default().replace("%2F", "/");
@@ -1193,6 +1199,93 @@ async fn an_s3_repository_moves_indices_between_clusters() {
     let (s, v) = e.es(&ua, &pa, reqwest::Method::POST, "/_snapshot/backup/_cleanup", None).await;
     assert_eq!((s, v["results"]["deleted_blobs"].as_i64()), (200, Some(1)), "{v}");
     assert!(bucket.keys("prod/roll/indices/stray/").is_empty());
+}
+
+fn gzip(raw: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    enc.write_all(raw).unwrap();
+    enc.finish().unwrap()
+}
+
+/// A tenant's bucket is someone else's input. Repository data that parses past its bounds, a
+/// document larger than any write could send and a listing that never ends fail
+/// without being held; index names and global state the APIs would refuse fail the restore.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_s3_repository_bounds_and_checks_what_a_bucket_holds() {
+    use std::io::Read;
+    let (endpoint, bucket) = MockBucket::start().await;
+    let e = env_with(|c| c.node_settings.push((search_control::S3_ALLOW_PRIVATE.into(), "true".into()))).await;
+    let (u, p) = creds(&e.post("/v1/search/clusters", json!({"name": "bounds"})).await);
+    let es = |method: reqwest::Method, path: &'static str, body: Option<Value>| e.es(&u, &p, method, path, body);
+    let repo = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "prod", "endpoint": endpoint, "path_style_access": true}});
+    assert_eq!(es(reqwest::Method::PUT, "/docs/_doc/1?refresh=true", Some(json!({"n": 1}))).await.0, 201);
+    assert_eq!(es(reqwest::Method::PUT, "/_snapshot/backup", Some(repo)).await.0, 200);
+    let (s, v) = es(reqwest::Method::PUT, "/_snapshot/backup/one?wait_for_completion=true", Some(json!({"indices": "docs", "include_global_state": true}))).await;
+    assert_eq!(s, 200, "{v}");
+    let object = |k: &str| bucket.objects.lock().unwrap().get(k).cloned().unwrap();
+    let put = |k: String, v: Vec<u8>| bucket.objects.lock().unwrap().insert(k, v);
+    let latest: i64 = String::from_utf8(object("prod/roll/index.latest")).unwrap().trim().parse().unwrap();
+    let mut text = Vec::new();
+    flate2::read::GzDecoder::new(&object(&format!("prod/roll/index-{latest}"))[..]).read_to_end(&mut text).unwrap();
+    let data: Value = serde_json::from_slice(&text).unwrap();
+    // Each change is committed as the next generation, as another writer would.
+    let mut generation = latest;
+    let mut commit = |edit: &dyn Fn(&mut Value)| {
+        generation += 1;
+        let mut d = data.clone();
+        d["generation"] = json!(generation);
+        edit(&mut d["snapshots"][0]);
+        put(format!("prod/roll/index-{generation}"), gzip(d.to_string().as_bytes()));
+        put("prod/roll/index.latest".into(), generation.to_string().into_bytes());
+    };
+    let restore = |body: Value| e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/one/_restore?wait_for_completion=true", Some(body));
+    let mut problems = Vec::new();
+    let mut expect = |what: &str, (s, v): (u16, Value), status: u16, text: &str| {
+        if s != status || !v.to_string().contains(text) {
+            let problem = format!("{what}: wanted {status} with [{text}], got {s} {v}");
+            eprintln!("{problem}");
+            problems.push(problem);
+        }
+    };
+
+    // A document longer than `http.max_content_length` (100mb), though the chunk is small.
+    let chunk = bucket.keys("prod/roll/indices/").into_iter().find(|k| k.ends_with(".0.gz")).unwrap();
+    let saved = object(&chunk);
+    put(chunk.clone(), gzip(format!("{{\"id\":\"1\",\"routing\":null,\"seq_no\":0,\"primary_term\":1,\"version\":1,\"len\":{}}}\n", 200 << 20).as_bytes()));
+    expect("oversized document", restore(json!({"rename_pattern": "docs", "rename_replacement": "big"})).await, 500, "out of bounds");
+    put(chunk, saved);
+
+    // Names and global state the APIs refuse.
+    commit(&|s| {
+        s["indices"] = json!(["_x"]);
+        let meta = s["index_meta"]["docs"].take();
+        s["index_meta"] = json!({"_x": meta});
+    });
+    expect("index name", restore(json!({})).await, 400, "invalid_index_name_exception");
+    commit(&|s| s["global"]["persistent"] = json!({"cluster.election.back_off_time": "1s"}));
+    expect("static setting", restore(json!({"include_global_state": true, "rename_pattern": "docs", "rename_replacement": "g1"})).await, 400, "not dynamically updateable");
+    commit(&|s| s["global"]["pipelines"] = json!({"p": {"processors": [{"no_such_processor": {}}]}}));
+    expect("pipeline", restore(json!({"include_global_state": true, "rename_pattern": "docs", "rename_replacement": "g2"})).await, 400, "no_such_processor");
+    let (_, v) = es(reqwest::Method::GET, "/_cat/indices?format=json&h=index", None).await;
+    let restored = v.as_array().into_iter().flatten().any(|i| ["_x", "g1", "g2"].contains(&i["index"].as_str().unwrap_or_default()));
+    expect("nothing restored", (200, json!(restored)), 200, "false");
+
+    // Repository data that would parse into more values than its bound (its inflated size is
+    // bounded too: `inflate`'s unit test). Unbounded, this one aborts the process.
+    generation += 1;
+    let mut dense = b"[".to_vec();
+    dense.extend(b"0,".repeat(9 << 20));
+    dense.extend(b"0]");
+    put(format!("prod/roll/index-{generation}"), gzip(&dense));
+    expect("value bomb", es(reqwest::Method::GET, "/_snapshot/backup/_all", None).await, 500, "values");
+    bucket.objects.lock().unwrap().remove(&format!("prod/roll/index-{generation}"));
+
+    // A listing that never ends.
+    bucket.endless.store(true, std::sync::atomic::Ordering::Relaxed);
+    let cleanup = tokio::time::timeout(Duration::from_secs(60), es(reqwest::Method::POST, "/_snapshot/backup/_cleanup", None)).await;
+    expect("endless listing", cleanup.unwrap_or((0, Value::Null)), 500, "listing");
+    assert!(problems.is_empty(), "{problems:#?}");
 }
 
 /// ES|QL and SQL read as their client: an API key limited to one index (what roll secrets hands
