@@ -946,6 +946,7 @@ impl Apps {
             needs_deploy,
             private,
             next_run_at,
+            schedules: self.schedule_states(&svc, &r).await,
             volume_used: match svc.run.volume {
                 Some(_) => self.volume_usage(&r.service, &r.name).await.map(|(bytes, at)| crate::model::VolumeUsed { bytes, at }),
                 None => None,

@@ -343,6 +343,7 @@ type Environment = EnvironmentSummary & {
   private: boolean;          // its hostnames answer only visitors with its access token
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
   volume_used?: { bytes: number; at: number }; // how full its volume was when last measured (hourly, on its owner), when it has one
+  schedules?: { name: string; next_run_at: number | null; last: { job: string; status: RunStatus; started_at: number } | null }[]; // run.schedules as they stand: next due (none paused, in a preview or undeployed) and the job each last started
   crash_loop: { crashes: number; last_at: number; last_error: string } | null; // 3+ crashes in 10 minutes
   canary: { deployment: string; share: number } | null; // a gradual rollout under way: the percent of requests the new deployment takes
   run: { [field: string]: number }; // its own run settings over the service's ({}: the service's)

@@ -2647,9 +2647,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             } else {
                 let v = api.get(&base).await?;
                 if !json_out {
+                    let states = if schedules.is_empty() { Value::Null } else { api.get(&env_path(&svc, &target.env)).await.map(|e| e["schedules"].clone()).unwrap_or(Value::Null) };
                     for x in &schedules {
                         let zone = x["timezone"].as_str().map(|z| format!(" ({z})")).unwrap_or_default();
-                        println!("on a schedule: {} at {}{zone}: {}", s(&x["name"]), s(&x["schedule"]), s(&x["command"]));
+                        let st = states.as_array().and_then(|a| a.iter().find(|st| st["name"] == x["name"]));
+                        let next = st.and_then(|st| st["next_run_at"].as_i64()).map(|t| format!(", next in {}", ago(t - chrono::Utc::now().timestamp_millis()).trim_end_matches(" ago"))).unwrap_or_default();
+                        let last = st.and_then(|st| st["last"]["status"].as_str()).map(|l| format!(", last {l}")).unwrap_or_default();
+                        println!("on a schedule: {} at {}{zone}{next}{last}: {}", s(&x["name"]), s(&x["schedule"]), s(&x["command"]));
                     }
                     for j in v.as_array().into_iter().flatten() {
                         let at = j["started_at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();

@@ -426,6 +426,8 @@ export interface Environment extends EnvironmentSummary {
   next_run_at: number | null;
   /** How full its volume was when last measured (hourly), when it has one. */
   volume_used?: { bytes: number; at: number };
+  /** Its schedules as they stand: when each is next due, and the job it last started. */
+  schedules?: { name: string; next_run_at: number | null; last: { job: string; status: Job["status"]; started_at: number } | null }[];
   /** Its instances keep crashing: three or more in the last ten minutes. */
   crash_loop: { crashes: number; last_at: number; last_error: string } | null;
   /** A gradual rollout under way: the new deployment and the percent of requests it takes. */

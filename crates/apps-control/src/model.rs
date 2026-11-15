@@ -483,6 +483,23 @@ pub struct Run {
     pub schedules: Vec<Scheduled>,
 }
 
+/// A schedule's state in an environment ([`Environment::schedules`]).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ScheduleState {
+    pub name: String,
+    /// The next due time (unix ms); none without a deployment or in a paused environment.
+    pub next_run_at: Option<i64>,
+    /// The job it last started, and how that went.
+    pub last: Option<ScheduleRun>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ScheduleRun {
+    pub job: String,
+    pub status: RunStatus,
+    pub started_at: i64,
+}
+
 /// A volume's measured size ([`Environment::volume_used`]).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct VolumeUsed {
@@ -927,6 +944,10 @@ pub struct Environment {
     pub private: bool,
     /// A cron service's next scheduled run (unix ms), once it has a deployment.
     pub next_run_at: Option<i64>,
+    /// Its schedules (`run.schedules`) as they stand: the next due time and the job each last
+    /// started (Heroku Scheduler's "Next due", Vercel's last run).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub schedules: Vec<ScheduleState>,
     /// How full its volume was when last measured (hourly), when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume_used: Option<VolumeUsed>,

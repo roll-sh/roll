@@ -3590,6 +3590,10 @@ async fn a_web_service_runs_a_command_on_its_schedule() {
     w.apps.cron_pass(now + 6 * 60_000).await;
     let list = get_until(&w.api, &jobs, |j| j.as_array().is_some_and(|a| !a.is_empty())).await;
     assert_eq!(list[0]["command"], "echo cleanup", "{list}");
+    // The environment says when it's next due and which job it last started (Heroku's "Next due").
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
+    let s = &env["schedules"][0];
+    assert!(s["next_run_at"].as_i64() > Some(now) && s["last"]["job"] == list[0]["id"], "{env}");
     let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"schedules": [{"name": "Bad Name", "schedule": "@daily", "command": "x"}]}}))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
 }

@@ -644,7 +644,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         ) : tab === "variables" ? (
           <VariablesTab service={service.id} project={service.project} env={env!} envs={service.environments.map((e) => e.name).filter((n) => n !== env!.name)} runner={runner} onRedeploy={redeploy} />
         ) : tab === "jobs" ? (
-          <JobsTab service={service.id} env={envName} runner={runner} cron={service.run.type === "cron"} schedules={service.run.schedules ?? []} />
+          <JobsTab service={service.id} env={envName} runner={runner} cron={service.run.type === "cron"} schedules={service.run.schedules ?? []} states={env?.schedules} />
         ) : tab === "shell" ? (
           <ShellTab service={service.id} env={envName} instances={env?.instances} />
         ) : tab === "domains" ? (
