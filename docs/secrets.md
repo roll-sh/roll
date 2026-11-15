@@ -2725,10 +2725,11 @@ App installation tokens (#73).
    value's keyed fingerprint (read at most every 10 s), and a product's own password, reset or
    restore route moves it at once, so watches, syncs, apps' redeploys and conditional reads see a
    credential however it changed (and #65's 304s come back for live links).
-2. **Rotating a registration's admin credential, and editing registrations in place** (building:
-   databases outside roll first), as Vault's `rotate-root`; Terraform then updates them instead
-   of replacing.
-3. **Syncs driven by changes**, not digest polling: a write marks its environment's syncs due, so
+2. **Rotating a registration's admin credential, and editing registrations in place** (built for
+   databases outside roll, #75: `rotate-admin`, `PATCH`, checked live on Postgres and MySQL),
+   as Vault's `rotate-root`; next the same for AWS users and rotators, and Terraform updating
+   registrations in place (#72).
+3. **Syncs driven by changes** (building), not digest polling: a write marks its environment's syncs due, so
    a change reaches Vercel or GitHub in seconds however many syncs there are (Doppler, Infisical).
 4. **Metrics**: resolves, 304s, KMS refusals, sync failures and lag, leases, sweeper lag and
    rotation failures, in rolld's metrics (Vault telemetry, CloudWatch).
