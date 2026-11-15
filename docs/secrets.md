@@ -2765,8 +2765,9 @@ App installation tokens (#73).
 `~/.local/share/roll-merge/lock`). About 50 pull requests sit on #20; the plan folds them into a
 few reviewable ones and closes what they supersede:
 
-1. **#20 → main** (the store, links, CLI, dashboard, integrations; green and mergeable), after
-   roll MCP's #24 if that's ready first; whichever lands second merges main and gates again.
+1. **#20 → main**: merged 2026-11-15 as 1ad248420 (through main's merge queue: add a pull
+   request with GraphQL's `enqueuePullRequest`, since auto-merge is off), after the full gate
+   including `pnpm test:code --docker`.
 2. **#62 → main**: retargeted once #20 is in. It is #31–#61 merged in order with every
    conflict resolved and seventeen independent reviews' fixes, so it lands as one squash
    (decided 2026-11-15: splitting it would redo conflict resolutions #62 already settled), and
