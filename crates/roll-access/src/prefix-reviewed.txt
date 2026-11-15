@@ -76,7 +76,6 @@ GET /v1/code/agents/{owner}/login/{user_code}
 GET /v1/code/agents/{owner}/lookup/{source}/{kind}
 POST /v1/code/agents/{owner}/lookup/{source}/{kind}
 GET /v1/code/agents/{owner}/machines
-POST /v1/code/agents/{owner}/machines
 DELETE /v1/code/agents/{owner}/machines/{machine}
 PATCH /v1/code/agents/{owner}/machines/{machine}
 POST /v1/code/agents/{owner}/machines/{machine}/projects
@@ -90,7 +89,6 @@ GET /v1/code/agents/{owner}/settings
 GET /v1/code/agents/{owner}/shares
 DELETE /v1/code/agents/{owner}/shares/{id}
 GET /v1/code/agents/{owner}/state
-POST /v1/code/agents/{owner}/threads/{thread}/shares
 DELETE /v1/code/agents/{owner}/threads/{thread}/work
 POST /v1/code/agents/{owner}/threads/{thread}/work
 GET /v1/code/changes/{id}/ai-jobs

@@ -192,6 +192,15 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   category (`ACL`, `CONFIG`, `MONITOR` and `SYNC`, which stream everyone's commands and data,
   `CLIENT`, `SLOWLOG`, `BGSAVE`, `CLUSTER`, `RESTORE` and the like), are `admin`; the rest `write`.
 - NoSQL CQL: `SELECT` is `read`, `DROP` and `TRUNCATE` are `delete`, the rest `write`.
+- roll code: creating a repo is `write`, but connecting a GitHub repository (`source: {github}`)
+  is `admin` (GitHub installations span tenants, so listing them is admin too). Landing is
+  `deploy`; `bypass: true` (over the required reviews, the merge queue and a secret-leak
+  blocker) is `admin`.
+- Streams: changing a stream's `retention_ms`, or a topic's `retention.*`, `cleanup.policy` or
+  `delete.retention.ms`, is `delete` (a shorter retention drops records at once); other settings
+  are `write`.
+- Agents: adding a machine mints its machine token (`admin`, as approving a login is); sharing a
+  thread makes an anonymous link to a copy of it (`reveal`, as other shares are).
 - NoSQL settings (`PATCH /v1/nosql/databases/{id}`): changing the masking policy (applied at read
   time for every role, so dropping it shows a reader raw values) or turning `read_only` off is
   `admin`, as roll previews' project settings are; its other settings are `write`.

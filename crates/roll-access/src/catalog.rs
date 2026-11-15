@@ -759,6 +759,31 @@ fn apps_patch_action(b: &Value) -> Action {
     if runs { Action::Deploy } else { Action::Write }
 }
 
+/// A new roll code repo: `admin` when it connects a GitHub repository (any installation's
+/// repositories could be imported that way: listing installations is admin too), else `write`.
+fn code_repo_action(b: &Value) -> Action {
+    if b.get("source").is_some_and(Value::is_object) { Action::Admin } else { Action::Write }
+}
+
+/// Landing: `deploy`, and `admin` with `bypass: true` (it lands over the repo's required reviews,
+/// the merge queue and a secret-leak blocker; roll code allows that to its admin only).
+fn code_land_action(b: &Value) -> Action {
+    if b.get("bypass") == Some(&Value::Bool(true)) { Action::Admin } else { Action::Deploy }
+}
+
+/// A stream's settings: `delete` when they change its retention (a shorter one drops records at
+/// once), else `write`.
+fn stream_settings_action(b: &Value) -> Action {
+    if b["settings"].get("retention_ms").is_some() { Action::Delete } else { Action::Write }
+}
+
+/// A topic's change: `delete` when its configs change what's kept (`retention.*`,
+/// `cleanup.policy`, `delete.retention.ms`: records go at once), else `write` (partitions only grow).
+fn topic_change_action(b: &Value) -> Action {
+    let drops = b["configs"].as_object().is_some_and(|c| c.keys().any(|k| k.starts_with("retention.") || k == "cleanup.policy" || k == "delete.retention.ms"));
+    if drops { Action::Delete } else { Action::Write }
+}
+
 fn agent_command_action(b: &Value) -> Action {
     let kind = b.get("type").and_then(Value::as_str).unwrap_or("");
     let raises = b.get("runtime_mode").is_some_and(|m| !m.is_null()) || b.get("interaction_mode").is_some_and(|m| !m.is_null());
@@ -883,7 +908,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/streams", "streams", R, list("id")),
     row("POST", "/v1/streams", "streams", W, create("stream", "id")).reveals(STREAM_SECRETS),
     row("GET", "/v1/streams/{s}", "streams", R, one(&["s"], "stream")),
-    row("PATCH", "/v1/streams/{s}", "streams", W, one(&["s"], "stream")),
+    row("PATCH", "/v1/streams/{s}", "streams", Act::Body(stream_settings_action), one(&["s"], "stream")),
     row("DELETE", "/v1/streams/{s}", "streams", D, one(&["s"], "stream")),
     // A copy-on-write branch of the stream (roll previews): its answer has the branch's own key.
     row("POST", "/v1/streams/{s}/branches", "streams", W, one(&["s"], "stream")).reveals(STREAM_SECRETS),
@@ -893,7 +918,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/streams/{s}/topics", "streams", R, one(&["s"], "stream")),
     row("POST", "/v1/streams/{s}/topics", "streams", W, one(&["s"], "stream")),
     row("GET", "/v1/streams/{s}/topics/{t}", "streams", R, one(&["s"], "stream")),
-    row("PATCH", "/v1/streams/{s}/topics/{t}", "streams", W, one(&["s"], "stream")),
+    row("PATCH", "/v1/streams/{s}/topics/{t}", "streams", Act::Body(topic_change_action), one(&["s"], "stream")),
     row("DELETE", "/v1/streams/{s}/topics/{t}", "streams", D, one(&["s"], "stream")),
     row("GET", "/v1/streams/{s}/groups", "streams", R, one(&["s"], "stream")),
     row("GET", "/v1/streams/{s}/groups/{g}", "streams", R, one(&["s"], "stream")),
@@ -1337,7 +1362,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/code/names/{name}", "code", R, Tgt::Product),
     row("GET", "/v1/code/names/{owner}/{repo}", "code", R, one(REPO, "repo")),
     row("GET", "/v1/code/repos", "code", R, list("full_name")),
-    row("POST", "/v1/code/repos", "code", W, create("repo", "full_name")),
+    row("POST", "/v1/code/repos", "code", Act::Body(code_repo_action), create("repo", "full_name")),
     row("GET", "/v1/code/repos/{owner}/{repo}", "code", R, one(REPO, "repo")),
     row("PATCH", "/v1/code/repos/{owner}/{repo}", "code", ADMIN, one(REPO, "repo")),
     row("DELETE", "/v1/code/repos/{owner}/{repo}", "code", D, one(REPO, "repo")),
@@ -1346,7 +1371,7 @@ static ROWS: &[Row] = &[
     // tells a reader which line holds production's key, so it's the repo's managers' (roll code
     // checks manage too): admin.
     row("*", "/v1/code/repos/{owner}/{repo}/leaks", "code", ADMIN, one(REPO, "repo")),
-    row("POST", "/v1/code/repos/{owner}/{repo}/land", "code", DEPLOY, one(REPO, "repo")),
+    row("POST", "/v1/code/repos/{owner}/{repo}/land", "code", Act::Body(code_land_action), one(REPO, "repo")),
     row("POST", "/v1/code/repos/{owner}/{repo}/queue/pause", "code", ADMIN, one(REPO, "repo")),
     row("POST", "/v1/code/repos/{owner}/{repo}/queue/resume", "code", ADMIN, one(REPO, "repo")),
     row("*", "/v1/code/repos/{owner}/{repo}/webhooks", "code", ADMIN, one(REPO, "repo")),
@@ -1355,7 +1380,7 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/code/repos/{owner}/{repo}/review-settings", "code", ADMIN, one(REPO, "repo")),
     row("*", "/v1/code/changes/{id}", "code", M, one(PG, "change")),
     row("*", "/v1/code/changes/{id}/", "code", M, one(PG, "change")),
-    row("POST", "/v1/code/changes/{id}/land", "code", DEPLOY, one(PG, "change")),
+    row("POST", "/v1/code/changes/{id}/land", "code", Act::Body(code_land_action), one(PG, "change")),
     row("POST", "/v1/code/changes/{id}/enqueue", "code", DEPLOY, one(PG, "change")),
     row("PATCH", "/v1/code/changes/{id}/enqueue", "code", DEPLOY, one(PG, "change")),
     // Running a fork's code with the repo's data is the repo's owner's call.
@@ -1382,6 +1407,11 @@ static ROWS: &[Row] = &[
     row("*", "/v1/code/agents/{owner}/", "agents", M, one(&["owner"], "owner")),
     row("POST", "/v1/code/agents/{owner}/machines/{machine}/commands", "agents", Act::Body(agent_command_action), one(&["owner"], "owner")),
     row("POST", "/v1/code/agents/{owner}/login/approve", "agents", ADMIN, one(&["owner"], "owner")),
+    // Adding a machine mints its long-lived machine token, as approving a login does.
+    row("POST", "/v1/code/agents/{owner}/machines", "agents", ADMIN, one(&["owner"], "owner")),
+    // A share is an anonymous link to a copy of the thread (prompts, code, tool output): how its
+    // content leaves the owner, as previews' and secrets' shares are.
+    row("POST", "/v1/code/agents/{owner}/threads/{thread}/shares", "agents", REVEAL, one(&["owner"], "owner")),
     row("POST", "/v1/code/agents/{owner}/login/deny", "agents", ADMIN, one(&["owner"], "owner")),
     row("*", "/v1/code/agents/{owner}/endpoints/{id}", "agents", ADMIN, one(&["owner"], "owner")),
     row("*", "/v1/code/agents/{owner}/gateway", "agents", ADMIN, one(&["owner"], "owner")),
@@ -1547,6 +1577,16 @@ mod tests {
         assert!(apps_repo(&serde_json::json!({ "source": { "kind": "image", "image": "nginx" } })).is_empty());
         assert_eq!(link_target("repo"), Some(("code", "repo")));
         // Loosening a NoSQL database's masking or read-only flag is admin; its other settings write.
+        // Connecting a GitHub repository, landing over the rules, and dropping a stream's
+        // records aren't the plain write or deploy their routes otherwise are.
+        assert_eq!(code_repo_action(&serde_json::json!({ "name": "web", "source": { "github": { "repo": "a/b" } } })), Action::Admin);
+        assert_eq!(code_repo_action(&serde_json::json!({ "name": "web", "source": "native" })), Action::Write);
+        assert_eq!(code_land_action(&serde_json::json!({ "bypass": true })), Action::Admin);
+        assert_eq!(code_land_action(&serde_json::json!({})), Action::Deploy);
+        assert_eq!(stream_settings_action(&serde_json::json!({ "settings": { "retention_ms": 1 } })), Action::Delete);
+        assert_eq!(stream_settings_action(&serde_json::json!({ "settings": { "max_partitions": 12 } })), Action::Write);
+        assert_eq!(topic_change_action(&serde_json::json!({ "configs": { "retention.ms": "1" } })), Action::Delete);
+        assert_eq!(topic_change_action(&serde_json::json!({ "partitions": 6, "configs": { "max.message.bytes": "2000000" } })), Action::Write);
         assert_eq!(nosql_patch_action(&serde_json::json!({ "masking": {} })), Action::Admin);
         assert_eq!(nosql_patch_action(&serde_json::json!({ "read_only": false })), Action::Admin);
         assert_eq!(nosql_patch_action(&serde_json::json!({ "read_only": true, "idle_timeout": 300 })), Action::Write);
