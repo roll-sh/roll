@@ -48,6 +48,8 @@ struct Mock {
     /// Bearer tokens seen per path.
     tokens: Mutex<Vec<(String, String)>>,
     revoked: Mutex<Vec<String>>,
+    /// Actions secrets by path: the PUT bodies.
+    secrets: Mutex<HashMap<String, Value>>,
 }
 
 type S = State<Arc<Mock>>;
@@ -390,6 +392,36 @@ async fn environments(State(m): S, h: HeaderMap) -> Response {
     Json(json!({"total_count": 100_000, "environments": many})).into_response()
 }
 
+/// The repo's Actions secrets key pair (X25519).
+const ACTIONS_SK: [u8; 32] = [7; 32];
+
+async fn actions_key(State(m): S, h: HeaderMap) -> Response {
+    use base64::Engine as _;
+    if let Some(res) = gate(&m, "/actions/secrets/public-key", &h) {
+        return res;
+    }
+    let pk = crypto_box::SecretKey::from(ACTIONS_SK).public_key();
+    Json(json!({"key_id": "568250167242549743", "key": base64::engine::general_purpose::STANDARD.encode(pk.as_bytes())})).into_response()
+}
+
+async fn put_secret(State(m): S, Path((o, r, name)): Path<(String, String, String)>, h: HeaderMap, Json(body): Json<Value>) -> Response {
+    if let Some(res) = gate(&m, "/actions/secrets", &h) {
+        return res;
+    }
+    m.secrets.lock().insert(format!("{o}/{r}/{name}"), body);
+    StatusCode::CREATED.into_response()
+}
+
+async fn delete_secret(State(m): S, Path((o, r, name)): Path<(String, String, String)>, h: HeaderMap) -> Response {
+    if let Some(res) = gate(&m, "/actions/secrets", &h) {
+        return res;
+    }
+    match m.secrets.lock().remove(&format!("{o}/{r}/{name}")) {
+        Some(_) => StatusCode::NO_CONTENT.into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({"message": "Not Found"}))).into_response(),
+    }
+}
+
 async fn serve() -> (Arc<Mock>, String) {
     let m = Arc::new(Mock::default());
     let app = Router::new()
@@ -411,6 +443,8 @@ async fn serve() -> (Arc<Mock>, String) {
         .route("/repos/{o}/{r}/labels", get(repo_labels).post(create_repo_label))
         .route("/repos/{o}/{r}/actions/workflows", get(workflows))
         .route("/repos/{o}/{r}/environments", get(environments))
+        .route("/repos/{o}/{r}/actions/secrets/public-key", get(actions_key))
+        .route("/repos/{o}/{r}/actions/secrets/{name}", axum::routing::put(put_secret).delete(delete_secret))
         .route("/orgs/{org}/teams", get(org_teams))
         .route("/graphql", post(graphql))
         .with_state(m.clone());
@@ -922,4 +956,31 @@ async fn review_threads_over_graphql() {
     assert!(e.to_string().contains("Could not resolve"), "{e}");
     // With the installation token, like REST.
     assert!(m.tokens.lock().iter().filter(|(p, _)| p == "/graphql").all(|(_, t)| t.starts_with("ghs_")));
+}
+
+/// GitHub takes Actions secrets as libsodium sealed boxes: opened here the way libsodium's
+/// `crypto_box_seal_open` does (nonce BLAKE2b-24(epk ‖ pk), then crypto_box), not through
+/// `crypto_box`'s own `unseal`.
+#[tokio::test]
+async fn actions_secrets_are_sealed_to_the_repos_key_and_deleted() {
+    use base64::Engine as _;
+    use blake2::Digest as _;
+    use crypto_box::aead::Aead as _;
+    let (m, base) = serve().await;
+    let gh = client(&base);
+    let key = gh.actions_public_key(INSTALLATION, "acme", "api", None).await.unwrap();
+    gh.put_actions_secret(INSTALLATION, "acme", "api", None, &key, "STRIPE_KEY", "sk_live_123").await.unwrap();
+    let body = m.secrets.lock()["acme/api/STRIPE_KEY"].clone();
+    assert_eq!(body["key_id"], "568250167242549743");
+    let sealed = base64::engine::general_purpose::STANDARD.decode(body["encrypted_value"].as_str().unwrap()).unwrap();
+    assert_eq!(sealed.len(), 32 + 16 + "sk_live_123".len(), "epk, tag, ciphertext");
+    let sk = crypto_box::SecretKey::from(ACTIONS_SK);
+    let epk = crypto_box::PublicKey::from(<[u8; 32]>::try_from(&sealed[..32]).unwrap());
+    let nonce = blake2::Blake2b::<blake2::digest::consts::U24>::new().chain_update(epk.as_bytes()).chain_update(sk.public_key().as_bytes()).finalize();
+    let plain = crypto_box::SalsaBox::new(&epk, &sk).decrypt(&nonce, &sealed[32..]).unwrap();
+    assert_eq!(plain, b"sk_live_123");
+
+    gh.delete_actions_secret(INSTALLATION, "acme", "api", None, "STRIPE_KEY").await.unwrap();
+    gh.delete_actions_secret(INSTALLATION, "acme", "api", None, "STRIPE_KEY").await.expect("a secret that's gone is deleted");
+    assert!(m.secrets.lock().is_empty());
 }

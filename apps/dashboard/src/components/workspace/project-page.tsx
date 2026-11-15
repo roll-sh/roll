@@ -1,4 +1,4 @@
-import { Bot, Eye, Lock, Moon, Plus, Search, Settings } from "lucide-react";
+import { Bot, Eye, KeyRound, Lock, Moon, Plus, Search, Settings } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import type { ResourceKind, WorkspaceProject } from "@/lib/workspace-api";
@@ -172,6 +172,10 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
               <span className="max-md:hidden">Previews</span>
             </button>
           )}
+          <Link href={`/dashboard/projects/${project.id}/secrets`} className={btn} title="This project's secrets and environment variables">
+            <KeyRound className="size-3.5" />
+            <span className="max-md:hidden">Secrets</span>
+          </Link>
           <button className={`${btn} ${agentsOpen ? "border-line-3 bg-white/[0.06]" : ""}`} onClick={() => setAgentsOpen((o) => !o)} aria-pressed={agentsOpen} title="This project's agents">
             <Bot className="size-3.5" />
             <span className="max-md:hidden">Agents</span>

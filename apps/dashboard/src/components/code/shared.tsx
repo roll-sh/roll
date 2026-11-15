@@ -143,7 +143,7 @@ const blockerIcon: Record<string, LucideIcon> = {
  * Why a change can't be queued or land yet, one row per blocker. `action` renders the button that
  * clears one (mark ready, approve the run) where the viewer is allowed to.
  */
-export function BlockerList({ blockers, action }: { blockers: Blocker[]; action?: (kind: BlockerAction) => ReactNode }) {
+export function BlockerList({ blockers, action, extra }: { blockers: Blocker[]; action?: (kind: BlockerAction) => ReactNode; extra?: (b: Blocker) => ReactNode }) {
   if (!blockers.length) return null;
   return (
     <ul className="space-y-2.5">
@@ -158,6 +158,7 @@ export function BlockerList({ blockers, action }: { blockers: Blocker[]; action?
               <p className="text-[13px]">{copy.title}</p>
               {copy.detail && <p className="text-[12px] text-subtle">{copy.detail}</p>}
               {button && <div className="mt-2">{button}</div>}
+              {extra?.(b)}
             </div>
           </li>
         );
