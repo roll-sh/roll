@@ -524,7 +524,12 @@ case "$HEALTH" in *boom*) ;; *) echo "the page's console.error should be caught:
 LINKS=$(api GET "/v1/previews/$PV" | jq_ "' '.join('%s %s' % (b['path'], b['status']) for b in (d.get('page_links') or {}).get('broken', []))")
 [ "$LINKS" = "/gone 404" ] || { echo "the page's broken link should be found: $LINKS"; exit 1; }
 # Against main's (which links nowhere): it's the change's.
-LINKS_NEW=$(api GET "/v1/previews/$PV" | jq_ "(d.get('base_change') or {}).get('links_added')")
+# (The comparison with main comes just after the page's own checks: waited for.)
+for _ in $(seq 1 240); do
+  LINKS_NEW=$(api GET "/v1/previews/$PV" | jq_ "(d.get('base_change') or {}).get('links_added')")
+  [ "$LINKS_NEW" = 1 ] && break
+  sleep 0.5
+done
 [ "$LINKS_NEW" = 1 ] || { echo "the broken link should be new against main: $LINKS_NEW"; exit 1; }
 case "$HEALTH" in *"; 0 failed") ;; *) echo "the link check's own requests aren't the page's: $HEALTH"; exit 1;; esac
 # The test page has no language and no title: the screenshot's browser says so.
