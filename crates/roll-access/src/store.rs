@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS grants (
     not_before INTEGER,
     pending INTEGER,
     approved_at INTEGER,
-    decided_by TEXT
+    decided_by TEXT,
+    hint TEXT
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS grant_secrets (
     hash TEXT PRIMARY KEY,
@@ -208,6 +209,11 @@ pub struct Grant {
     /// Who approved or denied it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decided_by: Option<String>,
+    /// What its secret looks like (`rlt_…a1b2`: its prefix and last four), to match a token found
+    /// in a config or a leak report to its row, as Stripe lists keys. A scoped token's only: an
+    /// OAuth connection's tokens change every hour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 /// Why a live token isn't honoured yet.
@@ -585,8 +591,16 @@ pub const MAX_KEEP_OLD_MS: i64 = 7 * 86_400_000;
 
 /// A grant's columns, as `grant_row` reads them (26 of them: a query may add its own after).
 const GRANT_COLUMNS: &str = "g.id, g.name, g.kind, g.rules, g.expires_at, g.ip_allow, g.created_by, g.created_at, g.last_used_at, g.last_used_ip, g.revoked_at, \
-     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.user_id, g.revoked_why, g.temp_rules, g.ask_otherwise, g.not_before, g.pending, g.approved_at, g.decided_by";
+     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.user_id, g.revoked_why, g.temp_rules, g.ask_otherwise, g.not_before, g.pending, g.approved_at, g.decided_by, g.hint";
 const GRANT_FROM: &str = "grants g LEFT JOIN oauth_clients c ON c.id = g.client_id";
+
+/// A secret as a list may show it: its prefix and its last four characters (`rlt_…a1b2`). The last
+/// six are a checksum of the rest (`checksum_ok`), so this tells nothing about the secret.
+pub fn hint(secret: &str) -> String {
+    let prefix = secret.find('_').map_or("", |i| &secret[..=i]);
+    let last: String = secret.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("{prefix}…{last}")
+}
 
 /// The position of the `n`th column a query selects after [`GRANT_COLUMNS`]: counted from the list,
 /// so adding a grant column never shifts what another query reads.
@@ -622,6 +636,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         pending: r.get::<_, Option<bool>>(23)?.unwrap_or(false),
         approved_at: r.get(24)?,
         decided_by: r.get(25)?,
+        hint: r.get(26)?,
         ip_allow: serde_json::from_str(&ip).unwrap_or_default(),
         created_by: r.get(6)?,
         created_at: r.get(7)?,
@@ -784,6 +799,10 @@ impl Store {
         if !db.has_column("grants", "decided_by")? {
             db.add_column("grants", "decided_by", "TEXT")?;
         }
+        // What a token's secret looks like, to tell it apart (`rlt_…a1b2`, as Stripe lists keys).
+        if !db.has_column("grants", "hint")? {
+            db.add_column("grants", "hint", "TEXT")?;
+        }
         let (audit_tx, rx) = std::sync::mpsc::sync_channel(AUDIT_QUEUE);
         let (writer, audit_pending) = (db.clone(), Arc::new(std::sync::atomic::AtomicUsize::new(0)));
         let pending = audit_pending.clone();
@@ -875,9 +894,10 @@ impl Store {
                     return Err(Error::Conflict(format!("a person has at most {USER_MAX_GRANTS} live tokens and connections: revoke some first")));
                 }
             }
+            let shown = (kind == GrantKind::Token).then(|| hint(&token));
             c.execute(
-                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise, not_before, pending) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, new.name.trim(), kind_s, rules, new.expires_at, ip, created_by, now, client_id, new.rate_per_minute.map(i64::from), user, new.ask_otherwise, new.not_before, new.pending],
+                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise, not_before, pending, hint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, new.name.trim(), kind_s, rules, new.expires_at, ip, created_by, now, client_id, new.rate_per_minute.map(i64::from), user, new.ask_otherwise, new.not_before, new.pending, shown],
             )?;
             c.execute(
                 "INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -1206,6 +1226,7 @@ impl Store {
                 }
             }
             c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'token', NULL, ?)", params![hash(&token), id, now])?;
+            c.execute("UPDATE grants SET hint = ? WHERE id = ?", params![hint(&token), id])?;
             Ok::<_, Error>(())
         })?;
         Ok((self.get(id)?, token))

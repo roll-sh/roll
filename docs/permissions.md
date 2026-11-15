@@ -693,7 +693,11 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   `max_idle_days` stops a grant nobody has used for that long (since its last use, or since it was
   made): an unused credential is risk with nothing to show for it. The evaluator reads the policy at
   most every 10 seconds, so a change reaches every node within that.
-- The secret is shown once, at creation. The store keeps its SHA-256.
+- The secret is shown once, at creation. The store keeps its SHA-256, and a scoped token's `hint`
+  (`rlt_…a1b2`: its prefix and last four characters, as Stripe lists keys) so a token found in a
+  config or a leak report can be matched to its row; rotating changes it. The last six characters
+  are a checksum of the rest, so the hint tells nothing about the secret. An OAuth connection has
+  none (its tokens change every hour).
 - A product that makes tokens of its own for its caller (roll secrets' project tokens) makes them
   with `Access::create_grant` and the caller's request: the function `POST /v1/access/tokens` is,
   with the same owner, coverage, policy and caps, never a second way in. Its page lists them with

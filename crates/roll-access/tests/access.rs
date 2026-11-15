@@ -921,6 +921,20 @@ async fn the_audit_log_streams_to_a_sink() {
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/audit/sinks/{id}"), None).await.0, StatusCode::NO_CONTENT);
 }
 
+/// A token's row says what its secret looks like (`rlt_…a1b2`, as Stripe lists keys), so one found
+/// in a config can be matched to it, and rotating it changes the hint with the secret.
+#[tokio::test]
+async fn a_token_shows_what_its_secret_looks_like() {
+    let d = Daemon::new(0);
+    let (token, id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let shown = |t: &str| format!("rlt_…{}", &t[t.len() - 4..]);
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert_eq!(g["hint"].as_str(), Some(shown(&token).as_str()), "{g}");
+    let (_, rotated) = d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{id}/rotate"), Some(json!({}))).await;
+    let fresh = rotated["token"].as_str().unwrap();
+    assert_eq!(rotated["grant"]["hint"].as_str(), Some(shown(fresh).as_str()), "{rotated}");
+}
+
 /// Changes are in the audit log as well as requests (GitHub's `personal_access_token.create`,
 /// Stripe's key history): a token's log tells who made, changed and revoked it, a person's own
 /// change names them, the policy's says who set it, and a grant's own request isn't written twice.

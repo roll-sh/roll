@@ -67,6 +67,8 @@ export interface Grant {
   /** When an admin approved it, and who decided (an admin's id, or "operator"). */
   approved_at?: number | null;
   decided_by?: string | null;
+  /** What its secret looks like (`rlt_…a1b2`), to match one found in a config to this row. */
+  hint?: string | null;
   ip_allow: string[];
   /** "operator", or the grant that made it. */
   created_by: string;
