@@ -676,7 +676,7 @@ static TOOLS: &[Tool] = &[
         b("name", Ty::Str, "New name"),
         b("source", Ty::Obj, "Where it's built from (repo or image), as apps_get_service shows it"),
         b("build", Ty::Obj, "Build settings to change"),
-        b("run", Ty::Obj, "Run settings to change (instances, memory, start command, h2c, alerts {memory_pct, error_pct, p95_ms}; schedules [{name, schedule (cron or @daily), command, timezone?, timeout_s?}] runs commands as jobs of the live deployment, replacing the list; changing start, pre_deploy, schedule, schedules, kind, port, volume or public needs deploy, as source and build do; a worker's scale {stream, group, per_instance} needs read on that stream)"),
+        b("run", Ty::Obj, "Run settings to change (instances, memory, start command, h2c, alerts {memory_pct, error_pct, p95_ms}; schedules [{name, schedule (cron or @daily), command, timezone?, timeout_s?}] runs commands as jobs of the live deployment, replacing the list; only size, scale, health checks, timers, alerts, rollout and restarts are write; any other run setting needs deploy, as source and build do; a worker's scale {stream, group, per_instance} needs read on that stream)"),
     ]),
     t(
         "apps_deploy",
