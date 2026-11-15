@@ -41,6 +41,8 @@ export interface Build {
   spa?: boolean;
   /** The Dockerfile's stage to build (a multi-stage one whose last stage isn't what runs). */
   target?: string;
+  /** System packages the generated Dockerfile installs (apt, or apk on Alpine): `ffmpeg`, `chromium`. */
+  packages?: string[];
 }
 
 export type ServiceType = "web" | "worker" | "cron";
@@ -92,6 +94,17 @@ export interface Run {
   rollback_on_crash?: boolean;
   /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
   scale?: { stream: string; group: string; per_instance?: number };
+  /** Commands on a schedule, each a job of the live deployment at its due times (Heroku Scheduler); at most 20. */
+  schedules?: Scheduled[];
+}
+
+/** A command on a schedule: `name` a-z, 0-9 and - (unique), `schedule` five fields or `@daily`, `timezone` IANA (default UTC). */
+export interface Scheduled {
+  name: string;
+  schedule: string;
+  command: string;
+  timezone?: string;
+  timeout_s?: number;
 }
 
 export type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
@@ -406,6 +419,8 @@ export interface Environment extends EnvironmentSummary {
   private: boolean;
   /** A cron service's next scheduled run, once deployed. */
   next_run_at: number | null;
+  /** How full its volume was when last measured (hourly), when it has one. */
+  volume_used?: { bytes: number; at: number };
   /** Its instances keep crashing: three or more in the last ten minutes. */
   crash_loop: { crashes: number; last_at: number; last_error: string } | null;
   /** A gradual rollout under way: the new deployment and the percent of requests it takes. */
@@ -578,6 +593,8 @@ export interface Metrics {
   instances: number[];
   cold_starts: number[];
   cold_start_ms: number[];
+  /** Bytes answered a minute (what egress is billed by). */
+  egress_bytes: number[];
 }
 
 export interface Usage {
@@ -622,7 +639,8 @@ export type NotifyEvent =
   | "domain.expiring"
   | "domain.expired"
   | "domain.tls_failed"
-  | "volume.backup_failed";
+  | "volume.backup_failed"
+  | "volume.full";
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {
@@ -833,7 +851,7 @@ export const appsApi = {
   readLogs: async (
     id: string,
     e: string,
-    q: { q?: string; since?: number; before?: number; instance?: string; deployment?: string; stream?: string; level?: LogLevel; http?: boolean; by?: string; status?: string; min_ms?: number; tail?: number },
+    q: { q?: string; where?: string; since?: number; before?: number; instance?: string; deployment?: string; stream?: string; level?: LogLevel; http?: boolean; by?: string; status?: string; min_ms?: number; tail?: number },
   ): Promise<{ lines: LogLine[]; truncated: boolean }> => {
     const res = await fetch(`${ROLL_API}${env(id, e)}/logs${qs({ ...q, http: q.http || undefined, tail: q.tail ?? 500 })}`, { headers: apiHeaders(), cache: "no-store" });
     onApiStatus(res.status);

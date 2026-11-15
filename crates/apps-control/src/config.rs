@@ -75,6 +75,9 @@ fn apply_one(c: &AppConfig, build: &Build, run: &Run) -> Result<(Build, Run)> {
     if c.spa.is_some() {
         b.spa = c.spa;
     }
+    if c.packages.is_some() {
+        b.packages.clone_from(&c.packages);
+    }
     if let Some(t) = &c.run {
         let patch = serde_json::to_value(t).map_err(|e| Error::BadRequest(format!("roll.toml: {e}")))?;
         r = r.merged(Some(&patch)).map_err(|e| Error::BadRequest(format!("roll.toml [app.run]: {e}")))?;
@@ -123,6 +126,7 @@ mod tests {
             affinity: true,
             tcp: true,
             rollback_on_crash: true,
+            schedules: vec![crate::model::Scheduled { name: "a".into(), schedule: "@daily".into(), command: "x".into(), timezone: None, timeout_s: None }],
         };
         let keys: std::collections::BTreeSet<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().filter(|k| *k != "volume").cloned().collect();
         let file: std::collections::BTreeSet<String> = apps_build::app::RUN_KEYS.iter().map(|k| k.to_string()).collect();
@@ -136,6 +140,7 @@ mod tests {
                 serde_json::Value::Number(_) => "integer",
                 serde_json::Value::String(_) => "string",
                 serde_json::Value::Object(_) => "object",
+                serde_json::Value::Array(_) => "array",
                 _ => "other",
             };
             assert_eq!(schema["definitions"]["run"]["properties"][k]["type"], kind, "{k}");

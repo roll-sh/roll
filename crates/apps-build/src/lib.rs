@@ -17,6 +17,7 @@ mod elixir;
 mod golang;
 mod java;
 mod node;
+pub mod packages;
 mod php;
 pub mod project;
 mod python;
@@ -63,6 +64,8 @@ pub struct Overrides {
     pub start: Option<String>,
     /// A single-page app, whatever the detection says (`None`: detected).
     pub spa: Option<bool>,
+    /// System packages a generated Dockerfile installs ([`packages`]).
+    pub packages: Vec<String>,
     /// Names of the variables the build sees (the service's, at deploy time): each install and
     /// build step mounts them as BuildKit secrets, so they're in its environment but never in a
     /// layer, the image's history or the cache's keys. `ROLL_BUILD_ENV` (a hash of the values)
@@ -148,6 +151,9 @@ pub enum Error {
     /// Several things could be built (binaries, `cmd/` programs): the build setting has to choose.
     #[error("{0}")]
     Ambiguous(String),
+    /// The packages asked for can't be installed (a name, or an image without a package manager).
+    #[error("{0}")]
+    Packages(String),
     #[error("{0}")]
     NoBinary(String),
 }
@@ -182,6 +188,16 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
     for (store, why) in uses(tree) {
         p.uses.push(store);
         p.notes.push(format!("{why}: it uses {}", store.label()));
+    }
+    if !overrides.packages.is_empty() {
+        if own_dockerfile {
+            p.notes.push("packages: not added to the tree's own Dockerfile (it installs what it needs)".into());
+        } else if p.provider == Provider::Static {
+            return Err(Error::Packages("packages: a static site runs no container to install them in".into()));
+        } else {
+            p.dockerfile = packages::add(&p.dockerfile, &overrides.packages).map_err(Error::Packages)?;
+            p.notes.push(format!("packages: {}", overrides.packages.join(", ")));
+        }
     }
     Ok(p)
 }
@@ -265,6 +281,7 @@ impl Overrides {
             build: clean(&self.build),
             start: clean(&self.start),
             spa: self.spa,
+            packages: self.packages.clone(),
             build_env: self.build_env.clone(),
             process: self.process.clone(),
         }

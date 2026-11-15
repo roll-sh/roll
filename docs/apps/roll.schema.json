@@ -154,6 +154,42 @@
         "rollback_on_crash": {
           "type": "boolean",
           "description": "Roll back when a new deployment crash-loops."
+        },
+        "schedules": {
+          "type": "array",
+          "maxItems": 20,
+          "description": "Commands on a schedule, each a job of the live deployment at its due times.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "schedule",
+              "command"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9-]{1,32}$"
+              },
+              "schedule": {
+                "type": "string",
+                "description": "Five fields, or @hourly, @daily \u2026"
+              },
+              "command": {
+                "type": "string"
+              },
+              "timezone": {
+                "type": "string",
+                "description": "IANA, e.g. Europe/Budapest; default UTC."
+              },
+              "timeout_s": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 86400
+              }
+            }
+          }
         }
       }
     },
@@ -206,6 +242,15 @@
         },
         "run": {
           "$ref": "#/definitions/run"
+        },
+        "packages": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9+\\-.:=~_]{0,99}$"
+          },
+          "description": "System packages the generated Dockerfile installs (apt, or apk on Alpine): ffmpeg, chromium, libvips42."
         }
       }
     },
@@ -240,6 +285,9 @@
         },
         "spa": {
           "$ref": "#/definitions/settings/properties/spa"
+        },
+        "packages": {
+          "$ref": "#/definitions/settings/properties/packages"
         },
         "run": {
           "$ref": "#/definitions/settings/properties/run"
@@ -288,11 +336,133 @@
         "spa": {
           "$ref": "#/definitions/settings/properties/spa"
         },
+        "packages": {
+          "$ref": "#/definitions/settings/properties/packages"
+        },
         "run": {
           "$ref": "#/definitions/settings/properties/run"
         },
         "screenshots": {
           "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "pages": {
+              "type": "array",
+              "maxItems": 10,
+              "items": {
+                "type": "string",
+                "pattern": "^/[^\\s#\"'<>`\\\\]{1,199}$"
+              }
+            },
+            "hide": {
+              "type": "array",
+              "maxItems": 20,
+              "items": {
+                "type": "string",
+                "maxLength": 200
+              }
+            },
+            "states": {
+              "type": "array",
+              "maxItems": 3,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "page",
+                  "steps"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9-]{1,40}$"
+                  },
+                  "page": {
+                    "type": "string",
+                    "pattern": "^/[^\\s#\"'<>`\\\\]{0,199}$"
+                  },
+                  "steps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "items": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "click"
+                          ],
+                          "properties": {
+                            "click": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 200
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "type"
+                          ],
+                          "properties": {
+                            "type": {
+                              "type": "array",
+                              "minItems": 2,
+                              "maxItems": 2,
+                              "items": {
+                                "type": "string",
+                                "maxLength": 200
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "press"
+                          ],
+                          "properties": {
+                            "press": {
+                              "enum": [
+                                "Enter",
+                                "Escape",
+                                "Tab",
+                                "ArrowDown",
+                                "ArrowUp",
+                                "ArrowLeft",
+                                "ArrowRight",
+                                "Space",
+                                "Backspace"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "wait"
+                          ],
+                          "properties": {
+                            "wait": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 5000
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
           "description": "What roll previews' screenshots do, as roll.toml's [preview] takes them: pages, hide and [[states]] (name, page, steps). Checked by roll previews."
         }
       }

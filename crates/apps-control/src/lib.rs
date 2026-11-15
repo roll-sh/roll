@@ -32,6 +32,7 @@ pub mod export;
 pub mod integrations;
 pub mod jobs;
 pub mod live;
+pub mod log_where;
 pub mod logs;
 pub mod metrics;
 pub mod model;
@@ -945,6 +946,10 @@ impl Apps {
             needs_deploy,
             private,
             next_run_at,
+            volume_used: match svc.run.volume {
+                Some(_) => self.volume_usage(&r.service, &r.name).await.map(|(bytes, at)| crate::model::VolumeUsed { bytes, at }),
+                None => None,
+            },
             crash_loop,
             canary,
             run: r.run.clone(),
@@ -2268,6 +2273,7 @@ impl Apps {
         gauge("roll_apps_instances", "Instances that were up.", r.instances as f64, "");
         gauge("roll_apps_cold_starts_per_minute", "Cold starts in the last finished minute.", r.cold_starts as f64, "");
         gauge("roll_apps_cold_start_ms", "Their mean time to answer.", r.cold_start_ms, "");
+        gauge("roll_apps_egress_bytes_per_minute", "Bytes answered in the last finished minute.", r.egress_bytes as f64, "");
         Ok(out)
     }
 
@@ -2297,6 +2303,7 @@ impl Apps {
             out.entry("instances").or_default().push(r.instances.into());
             out.entry("cold_starts").or_default().push(r.cold_starts.into());
             out.entry("cold_start_ms").or_default().push(r.cold_start_ms.into());
+            out.entry("egress_bytes").or_default().push(r.egress_bytes.into());
         }
         Ok(serde_json::to_value(out).expect("JSON"))
     }

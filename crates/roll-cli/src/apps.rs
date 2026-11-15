@@ -114,6 +114,10 @@ pub struct Logs {
     /// from JSON's `level`/`severity`, logfmt's `level=` or a leading `ERROR`.
     #[arg(long, value_parser = ["trace", "debug", "info", "warn", "error", "fatal"], conflicts_with_all = ["http", "build"])]
     pub level: Option<String>,
+    /// Only lines whose fields say so, JSON's or logfmt's (`level:error user_id:42`; `key:*`
+    /// there, `-key:value` not that, `req.method:POST` nested; Railway's `@attr:value`).
+    #[arg(long = "where", value_name = "FIELDS", conflicts_with = "build")]
+    pub fields: Option<String>,
     /// The requests instead (the proxy's access log): method, path, status, time.
     #[arg(long, conflicts_with = "build")]
     pub http: bool,
@@ -316,6 +320,10 @@ pub enum AppsCmd {
         /// `none`: every push.
         #[arg(long)]
         watch: Option<String>,
+        /// System packages the generated Dockerfile installs (comma-separated: `ffmpeg,chromium`;
+        /// apt, or apk on Alpine); `none`: no more.
+        #[arg(long)]
+        packages: Option<String>,
         /// A gradual rollout: the shares of requests a new deployment takes in turn (`10,50`);
         /// `none` switches at once.
         #[arg(long, value_name = "PERCENTS")]
@@ -471,6 +479,22 @@ pub enum AppsCmd {
         follow: bool,
         #[arg(long, value_name = "JOB")]
         cancel: Option<String>,
+        /// Run a command on a schedule (Heroku Scheduler): `--schedule NAME --at "0 3 * * *"
+        /// --command "node cleanup.js"` adds or replaces it; each due time is a job.
+        #[arg(long, value_name = "NAME", requires_all = ["at", "command"], conflicts_with_all = ["logs", "cancel", "unschedule"])]
+        schedule: Option<String>,
+        /// With `--schedule`: five cron fields, or `@hourly`, `@daily` …
+        #[arg(long, requires = "schedule")]
+        at: Option<String>,
+        /// With `--schedule`: the command.
+        #[arg(long, requires = "schedule")]
+        command: Option<String>,
+        /// With `--schedule`: its time zone (IANA; default UTC).
+        #[arg(long, requires = "schedule")]
+        tz: Option<String>,
+        /// Remove a schedule by its name.
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["logs", "cancel"])]
+        unschedule: Option<String>,
     },
     /// What a build would detect (no build): the provider, its commands, the port and why. A
     /// directory here is read on this machine (`roll up`'s tree, before it's uploaded); `--repo`
@@ -1397,7 +1421,7 @@ async fn project_logs(api: &Api, json_out: bool, l: &Logs) -> anyhow::Result<()>
     if let Some(d) = &l.before {
         q.push_str(&format!("&before={}", chrono::Utc::now().timestamp_millis() - ago_ms(d)?));
     }
-    for (k, v) in [("stream", &l.stream), ("level", &l.level), ("status", &l.status), ("by", &l.by)] {
+    for (k, v) in [("stream", &l.stream), ("level", &l.level), ("status", &l.status), ("by", &l.by), ("where", &l.fields)] {
         if let Some(v) = v {
             q.push_str(&format!("&{k}={}", enc(v)));
         }
@@ -1857,7 +1881,7 @@ pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
         };
         since.push_str(&format!("&instance={}", enc(&name)));
     }
-    for (k, v) in [("deployment", &l.deployment), ("stream", &l.stream), ("level", &l.level)] {
+    for (k, v) in [("deployment", &l.deployment), ("stream", &l.stream), ("level", &l.level), ("where", &l.fields)] {
         if let Some(v) = v {
             since.push_str(&format!("&{k}={}", enc(v)));
         }
@@ -2044,7 +2068,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() {
@@ -2103,6 +2127,16 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 Some(w) => {
                     let paths: Vec<&str> = w.split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
                     build.insert("watch".into(), json!(paths));
+                }
+            }
+            match packages.as_deref() {
+                None => {}
+                Some("none") => {
+                    build.insert("packages".into(), Value::Null);
+                }
+                Some(p) => {
+                    let names: Vec<&str> = p.split([',', ' ']).map(str::trim).filter(|n| !n.is_empty()).collect();
+                    build.insert("packages".into(), json!(names));
                 }
             }
             for (k, v) in [("builder", builder.map(Value::from)), ("dockerfile", text(dockerfile)), ("target", text(stage)), ("install", text(install)), ("build", text(build_command)), ("start", text(build_start))] {
@@ -2429,10 +2463,33 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Jobs { target, logs, follow, cancel } => {
+        AppsCmd::Jobs { target, logs, follow, cancel, schedule, at, command, tz, unschedule } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/jobs", env_path(&svc, &target.env));
-            if let Some(job) = cancel {
+            let mut schedules: Vec<Value> = svc["run"]["schedules"].as_array().cloned().unwrap_or_default();
+            if schedule.is_some() || unschedule.is_some() {
+                if let Some(name) = &unschedule {
+                    let before = schedules.len();
+                    schedules.retain(|x| x["name"] != name.as_str());
+                    anyhow::ensure!(schedules.len() < before, "{} has no schedule {name}", s(&svc["name"]));
+                }
+                if let Some(name) = schedule {
+                    schedules.retain(|x| x["name"] != name.as_str());
+                    let mut one = json!({ "name": name, "schedule": at, "command": command });
+                    if let Some(z) = tz {
+                        one["timezone"] = json!(z);
+                    }
+                    schedules.push(one);
+                }
+                let v = api.call(reqwest::Method::PATCH, &format!("/v1/apps/services/{}", enc(&s(&svc["id"]))), Some(json!({ "run": { "schedules": schedules } }))).await?;
+                if !json_out {
+                    for x in v["run"]["schedules"].as_array().into_iter().flatten() {
+                        println!("{:<16} {:<16} {}", s(&x["name"]), s(&x["schedule"]), s(&x["command"]));
+                    }
+                    return Ok(());
+                }
+                v["run"]["schedules"].clone()
+            } else if let Some(job) = cancel {
                 api.post(&format!("{base}/{}/cancel", enc(&job)), json!({})).await?
             } else if let Some(job) = logs {
                 let path = format!("{base}/{}/logs", enc(&job));
@@ -2450,6 +2507,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             } else {
                 let v = api.get(&base).await?;
                 if !json_out {
+                    for x in &schedules {
+                        let zone = x["timezone"].as_str().map(|z| format!(" ({z})")).unwrap_or_default();
+                        println!("on a schedule: {} at {}{zone}: {}", s(&x["name"]), s(&x["schedule"]), s(&x["command"]));
+                    }
                     for j in v.as_array().into_iter().flatten() {
                         let at = j["started_at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
                         let code = j["exit_code"].as_i64().map(|c| format!("exit {c}")).unwrap_or_default();

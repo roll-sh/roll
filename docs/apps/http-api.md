@@ -82,7 +82,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/pending` | | `{ variables: { added, removed, changed } \| null, run: string[], secrets: boolean \| null }` (secrets: the project's secrets changed since, by roll secrets' digest; null without one): what the next deploy changes (names, never values; variables against the snapshot kept at the live deployment's switch, null without one; run: fields the service sets that the live deployment doesn't run with). Links and project secrets move `needs_deploy` too, unnamed | read |
 | `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}`, never a sealed variable (nor a reference that reads one); 403 naming them when some come from roll secrets and roll secrets wouldn't show them to the caller (`SecretSource::may_reveal`) | reveal |
 | `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[], seal?: string[]}` (set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed) | `Variables` | deploy* |
-| `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&before=&instance=&deployment=&stream=&level=&q=&http=&status=&min_ms=&by=` | | `LogLine[]` or SSE; `before` (unix ms) reads back to a time (not followed), `instance`/`deployment`/`stream` narrow it (followed too), `level` keeps lines at that level or worse (a line that says none isn't; 400 for another word), `X-Roll-Search-Truncated: 1` when a read back stopped short; `http=1`: the proxy's access log (`stream: "http"`, text `AccessLine`), `status` (`500`, `5xx`, `400-499`), `min_ms` and `by` (one reason, or `any`: every answer roll gave itself) filtering it | read |
+| `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&before=&instance=&deployment=&stream=&level=&where=&q=&http=&status=&min_ms=&by=` | | `LogLine[]` or SSE; `before` (unix ms) reads back to a time (not followed), `instance`/`deployment`/`stream` narrow it (followed too), `level` keeps lines at that level or worse (a line that says none isn't; 400 for another word), `where` keeps lines whose JSON or logfmt fields say all its terms (`level:error user_id:42`, `key:*`, `-key:value`, `a.b:x`, quoted values; at most 10; 400 for one that isn't `key:value`), `X-Roll-Search-Truncated: 1` when a read back stopped short; `http=1`: the proxy's access log (`stream: "http"`, text `AccessLine`), `status` (`500`, `5xx`, `400-499`), `min_ms` and `by` (one reason, or `any`: every answer roll gave itself) filtering it | read |
 | `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=&format=` | | `Metrics`; `format=prometheus`: the last finished minute as Prometheus text (`roll_apps_requests_per_minute`, `…_errors_per_minute`, `…_latency_ms{quantile}`, `…_cpu_seconds_per_minute`, `…_memory_bytes`, `…_instances`, `…_cold_starts_per_minute`, `…_cold_start_ms`, labelled `service`, `service_id`, `environment`) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/routes?minutes=` | | `RouteStats` (the last 5–60 minutes, default 60): the access log grouped by method and route, id-like segments `:id` and no query; the busiest, the most 5xx and the slowest (5 requests or more), each at most 50 | read |
 | `GET /v1/apps/services/{id}/environments/{env}/usage?days=` | | `Usage` | read |
@@ -164,6 +164,10 @@ type Build = {
   watch?: string[];
   spa?: boolean;            // a single-page app (a page path with no file answers index.html); unset: detected
   target?: string;          // the tree's own Dockerfile's stage to build (--target): letters, digits, _ - . (64 at most)
+  /** System packages the generated Dockerfile installs, apt (or apk on Alpine) in every stage built on an image:
+   *  at most 50 names of lowercase letters, digits and + - . : = ~ _; refused for a static site and a
+   *  distroless runtime, left to the tree's own Dockerfile. roll.toml `[app] packages` wins over it. */
+  packages?: string[];
 };
 
 type Run = {
@@ -232,6 +236,9 @@ type Run = {
    *  one before it (a rollback: its image, no build, actor "crash loop"); a rollback's own
    *  deployment never is, so there are no two in a row. */
   rollback_on_crash?: boolean;
+  /** Commands on a schedule on any service: each a job of the live deployment at its due times, skipped while its
+   *  last job runs; at most 20; name a-z, 0-9 and - (unique, 32 at most), command 1–2000, timeout_s 1–86400. */
+  schedules?: { name: string; schedule: string; command: string; timezone?: string; timeout_s?: number }[];
 };
 
 type Service = {
@@ -333,6 +340,7 @@ type Environment = EnvironmentSummary & {
   needs_deploy: boolean;     // variables or settings changed since the active deployment
   private: boolean;          // its hostnames answer only visitors with its access token
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
+  volume_used?: { bytes: number; at: number }; // how full its volume was when last measured (hourly, on its owner), when it has one
   crash_loop: { crashes: number; last_at: number; last_error: string } | null; // 3+ crashes in 10 minutes
   canary: { deployment: string; share: number } | null; // a gradual rollout under way: the percent of requests the new deployment takes
   run: { [field: string]: number }; // its own run settings over the service's ({}: the service's)
@@ -457,6 +465,7 @@ type Metrics = {
   instances: number[];
   cold_starts: number[];
   cold_start_ms: number[];   // average of the minute's cold starts (0 when none)
+  egress_bytes: number[];    // bytes answered (what egress is billed by); format=prometheus: roll_apps_egress_bytes_per_minute
 };
 
 type Usage = {
@@ -466,7 +475,7 @@ type Usage = {
 
 /** In the event log, each written in the same transaction as the change it records. Sequence
  *  numbers commit in order with no gaps, so a reader moving past `next` never misses one. Kept 7 days. */
-type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" /* data.error: the daily backup failed (notified by default) */ | "alert.resolved" /* data.alert: which alert cleared; sent to targets that get that alert */ | `audit.${string}` /* changes people made: what /activity lists */; service: string; environment: string; deployment: string | null; data: object };
+type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" /* data.error: the daily backup failed (notified by default) */ | "volume.full" /* data.used_bytes, size_gb, pct: past 90% of its size, once until it's under 80% (notified by default) */ | "deploy.skipped" /* data.revision, tag: a push whose message said [skip ci] (the timeline only) */ | "alert.resolved" /* data.alert: which alert cleared; sent to targets that get that alert */ | `audit.${string}` /* changes people made: what /activity lists */; service: string; environment: string; deployment: string | null; data: object };
 /** A webhook's body: { type, at, seq, service, environment, deployment, data, title, text, url },
  *  signed as roll code's webhooks are: X-Roll-Signature-256: sha256=hex(HMAC-SHA256(secret,
  *  X-Roll-Timestamp + "." + body)), the timestamp the send time in Unix seconds (a retry is signed
@@ -504,7 +513,7 @@ type AccessLine = {
 };
 /** A volume's backup: a tar in object storage (`apps/volumes/<service>/<env>/<id>.tar`). */
 type Backup = { id: string; at: number; size: number };
-type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord" | "email"; host: string /* an email target's: "the project's owner" */; events: ("deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed")[];
+type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord" | "email"; host: string /* an email target's: "the project's owner" */; events: ("deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" | "volume.full")[];
   environments: string[];  // only these environments' events; empty: every one's
   services: string[];      // only these services' (ids); empty: every one's
   previews: boolean;       // preview (ephemeral) environments' events too (an environment named in `environments` always)

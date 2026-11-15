@@ -318,6 +318,10 @@ pub struct Build {
     /// stage isn't what runs (Fly's and Render's).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// System packages the generated Dockerfile installs (Railpack's `aptPkgs`, Heroku's
+    /// Aptfile): apt or apk names, in every stage built on an image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packages: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,6 +353,9 @@ impl Build {
         {
             return Err(Error::BadRequest("build.target is a Dockerfile stage's name: letters, digits, _, - and . (at most 64)".into()));
         }
+        if let Some(p) = &self.packages {
+            apps_build::packages::check(p).map_err(|why| Error::BadRequest(format!("build.{why}")))?;
+        }
         Ok(())
     }
 
@@ -363,6 +370,7 @@ impl Build {
             build: self.build.clone(),
             start: self.start.clone(),
             spa: self.spa,
+            packages: self.packages.clone().unwrap_or_default(),
             build_env: Vec::new(),
             process: None,
         }
@@ -469,6 +477,36 @@ pub struct Run {
     /// at-once deploy. Never a rollback's own: no two in a row.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rollback_on_crash: bool,
+    /// Commands on a schedule, each a job of the live deployment at its due times (Heroku
+    /// Scheduler, Vercel crons): any service's, without a cron service of its own.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub schedules: Vec<Scheduled>,
+}
+
+/// A volume's measured size ([`Environment::volume_used`]).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct VolumeUsed {
+    pub bytes: u64,
+    /// When it was measured (unix ms).
+    pub at: i64,
+}
+
+/// A command on a schedule ([`Run::schedules`]): a job (`crate::jobs`) at each due time, skipped
+/// while its last one still runs; a paused environment's move on without making up the runs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scheduled {
+    /// Unique in the service: a-z, 0-9 and -, at most 32.
+    pub name: String,
+    /// Five fields or `@hourly`, `@daily` … ([`crate::cron::Schedule`]).
+    pub schedule: String,
+    pub command: String,
+    /// The schedule's time zone (IANA; default UTC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    /// 1–86400 (default 3600).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -609,6 +647,7 @@ impl Default for Run {
             affinity: false,
             tcp: false,
             rollback_on_crash: false,
+            schedules: Vec::new(),
         }
     }
 }
@@ -624,6 +663,21 @@ impl Run {
             return Err(Error::BadRequest("alerts.log_match is 1–200 characters, alerts.log_count 1–10000".into()));
         }
         let bad = |m: &str| Err(Error::BadRequest(format!("run.{m}")));
+        if self.schedules.len() > 20 {
+            return bad("schedules is at most 20");
+        }
+        for (i, sc) in self.schedules.iter().enumerate() {
+            if sc.name.is_empty() || sc.name.len() > 32 || !sc.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') || self.schedules[..i].iter().any(|o| o.name == sc.name) {
+                return bad("schedules' names are unique: a-z, 0-9 and -, at most 32");
+            }
+            crate::cron::Schedule::parse(&sc.schedule, sc.timezone.as_deref()).map_err(|e| Error::BadRequest(format!("run.schedules.{}: {e}", sc.name)))?;
+            if sc.command.trim().is_empty() || sc.command.len() > 2000 || sc.command.contains('\0') {
+                return bad("schedules' commands are 1–2000 characters");
+            }
+            if sc.timeout_s.is_some_and(|t| !(1..=86_400).contains(&t)) {
+                return bad("schedules' timeout_s is 1–86400");
+            }
+        }
         let r = &self.rollout;
         if r.steps.len() > 5 || r.steps.iter().any(|s| !(1..=99).contains(s)) || r.steps.windows(2).any(|w| w[0] >= w[1]) {
             return bad("rollout.steps is up to five increasing percents, 1–99");
@@ -873,6 +927,9 @@ pub struct Environment {
     pub private: bool,
     /// A cron service's next scheduled run (unix ms), once it has a deployment.
     pub next_run_at: Option<i64>,
+    /// How full its volume was when last measured (hourly), when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume_used: Option<VolumeUsed>,
     /// Its instances keep crashing: three or more in the last ten minutes.
     pub crash_loop: Option<CrashLoop>,
     /// A gradual rollout under way: the new deployment and the percent of requests it takes.

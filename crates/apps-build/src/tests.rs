@@ -743,3 +743,13 @@ fn nothing_detected_says_what_it_did_find() {
     let err = plan(&tree(&[("Shop.sln", "")]), &Overrides::default()).unwrap_err();
     assert!(err.to_string().contains("Shop.sln: a .NET solution"), "{err}");
 }
+
+#[test]
+fn system_packages_go_in_a_generated_dockerfile_and_are_said() {
+    let o = Overrides { packages: vec!["ffmpeg".into()], ..Overrides::default() };
+    let p = plan(&tree(&[("package.json", r#"{"scripts":{"start":"node server.js"}}"#)]), &o).unwrap();
+    assert!(p.dockerfile.contains("apt-get install -y --no-install-recommends ffmpeg") && p.notes.contains(&"packages: ffmpeg".to_string()), "{}", p.dockerfile);
+    assert!(matches!(plan(&tree(&[("index.html", "<h1>hi</h1>")]), &o), Err(Error::Packages(_))), "a static site runs nothing to install them in");
+    let own = plan(&tree(&[("Dockerfile", "FROM alpine\n")]), &o).unwrap();
+    assert!(!own.dockerfile.contains("ffmpeg"), "the tree's own Dockerfile is its own");
+}

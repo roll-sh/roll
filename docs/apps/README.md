@@ -85,8 +85,17 @@ every deployment is immutable with instant rollback.
   command. A multi-stage Dockerfile whose last stage isn't what runs is built at its stage with
   `build.target` (`--target`, a stage's name and never a flag; the tree's own Dockerfile only;
   Fly's `build.target`, Render's Docker target; `docker.rs::a_dockerfiles_stage_is_built_by_its_target`).
+- **System packages** (Railpack's `aptPkgs`, Heroku's Aptfile): `build.packages` or roll.toml
+  `[app] packages = ["ffmpeg", "chromium"]` (Settings → Build, `roll apps set --packages`), so
+  an app that needs ffmpeg, Chromium or libvips doesn't need a Dockerfile. A generated
+  Dockerfile installs them after each `FROM` of an image (a stage built on an earlier one has
+  them), with apt (`--no-install-recommends`, the lists removed) or apk on an Alpine image; the
+  plan's notes name them. A name is lowercase letters, digits and `+ - . : = ~ _` (a pinned
+  `libvips42=8.14.1-3` too), at most 50, so nothing in one is a shell's. A static site (no
+  container) and a distroless runtime (Go's, no package manager) refuse them; the tree's own
+  Dockerfile is left alone (it says what it installs).
 - **Config as code** (`roll.toml` `[app]` in the service's root, like `railway.json`): `builder`,
-  `dockerfile`, `install`, `build`, `start`, `pre_deploy`, `health_path`, `watch`. Read at each build;
+  `dockerfile`, `install`, `build`, `start`, `pre_deploy`, `health_path`, `watch`, `packages`. Read at each build;
   what it sets wins over the service's settings and is named in the build log and the plan's
   notes (`POST /v1/apps/plan` shows it too). It's checked as the API checks settings, an unknown
   key is an error (a typo never silently does nothing), and it must be a regular file. The
@@ -440,6 +449,16 @@ every deployment is immutable with instant rollback.
   and, once it started again, run two where one was wanted).
   Crashed ones beyond what's wanted (a backlog fell while they waited) are removed, not started
   again to be scaled in; their crashes stay in the crash list.
+- **Commands on a schedule on any service** (Heroku Scheduler, Vercel crons): `run.schedules`,
+  at most 20 of `{name, schedule, command, timezone?, timeout_s?}` (the Jobs tab's "On a
+  schedule", `roll apps jobs --schedule NAME --at "0 3 * * *" --command …`, roll.toml
+  `[[app.run.schedules]]`), so a nightly cleanup doesn't need a cron service of its own. The
+  owner's reaper pass starts each due one as a job of the live deployment (`jobs`: its
+  variables, its network, its log `job:<id>`), skips it while the last job it started still
+  runs, and counts a schedule from when it's first seen, so nothing is made up for the time
+  before it existed or while the environment was paused. An environment's own run can set its
+  own list. A start that fails (spend limit, five jobs already running) is said in the
+  environment's log.
 - **Cron jobs** are a service type with a schedule (five-field cron, in `run.timezone` — IANA, its daylight saving kept, Cloud Scheduler's — or UTC). Each run is a fresh
   instance of the active deployment that runs to its exit, with a timeout (default 1 h) and its
   output as a log; a run that is still going when the next is due is skipped (Railway's rule).
@@ -462,6 +481,14 @@ every deployment is immutable with instant rollback.
 - **Resources**: `cpu` (0.25–8 vCPU) and `memory_mb` (256–16384) per instance, as Docker
   `--cpus`/`--memory` (no swap) and a pids limit, or the Fargate size rounded up (the default
   0.5 vCPU and 512 MB is a 0.5 vCPU, 1 GB task).
+- **How full a volume is** (Railway's and Render's disk charts): measured once an hour on the
+  service's owner (`Runtime::volume_used`: on Docker `du -skx` in a helper container that
+  mounts it read-only, after `docker volume inspect`, since `-v` would make a missing one), kept
+  in `state` and answered as the environment's `volume_used`; the volume's backups panel shows
+  it as a meter. Passing 90% of its size is `volume.full` (notified by default) once, again
+  only after it went under 80%: a host without disk quotas doesn't stop a volume growing past
+  its size, and a full disk takes its database down. **Egress per minute** is in Metrics (the
+  proxy's bytes answered, what egress is billed by) and the Prometheus text.
 - **Volumes**: a service may have one volume (a mount path and a size). Locally it's a named
   Docker volume `roll-apps-vol-<service>-<env>`; a service with a volume runs at most one
   instance (`max_instances` is forced to 1, as on Railway). On the fleet it's an EFS access
@@ -902,6 +929,15 @@ through the stored days, and the dashboard marks warn, error and fatal lines and
 its level when it says one (only error and fatal red: an nginx notice on stderr isn't an error),
 by its stream when it doesn't.
 `an_apps_log_filters_by_the_level_its_lines_say`.
+
+**By a line's fields** (Railway's `@attr:value`, Cloud Run's `jsonPayload`): `?where=level:error
+user_id:42` keeps the lines whose fields say all of it, a JSON object's (a dotted key reaches
+in: `req.method:POST`) or logfmt's pairs; `key:*` asks only that it's there, `-key:value` that it
+isn't that, a quoted value holds spaces, values compare as text in any case (so `user_id:4`
+isn't `42`, and `ok:false` matches JSON's boolean). Read back through the stored days and
+followed live (`roll apps logs --where …`); at most ten terms (`log_where.rs`). The dashboard's
+filter box takes both: its field terms go to `where`, its other words stay a text search, and
+the live view matches them the same way (`lib/log-where.ts`).
 
 ## A project's logs together
 
@@ -1900,55 +1936,46 @@ build; a drain naming a deleted service couldn't be edited; route groups filled 
 lines; the pre-deploy container had no `ROLL_INSTANCE`; another environment's routes stayed on
 the charts).
 
-1. **System packages for the automatic builder** (Railpack's `aptPkgs`, Heroku's Aptfile):
-   `[app] packages = ["ffmpeg"]` and `build.packages`, installed in the runtime stage, so an app
-   that needs `ffmpeg` or Chromium doesn't need a Dockerfile.
-2. **Schedules on any service** (Heroku Scheduler, Vercel crons): a schedule that runs a
-   command as a job of the live deployment, without a separate cron service.
-3. **Volume fullness and egress in Metrics**, and a `volume.full` alert (Railway's and Render's
-   disk charts): a volume that fills up silently takes its database down.
-4. **Log filters by a JSON line's fields** (`level:error user_id:42`; Railway's `@attr:value`,
-   Cloud Run's `jsonPayload`), on the Logs tab, the API and `roll apps logs --where`.
-5. **The CLI's rough edges**: `roll apps vars --deploy`; `roll up` saying when it reuses a
+1. **The CLI's rough edges**: `roll apps vars --deploy`; `roll up` saying when it reuses a
    project of the directory's name, and not taking a 401 for "no project"; `roll apps cp` (files
    to and from an instance, Fly's `sftp`); shell completions.
-6. **A "deploy to roll" link** with variables asked for or generated (Heroku's `app.json`
+2. **A "deploy to roll" link** with variables asked for or generated (Heroku's `app.json`
    `generator: secret`, Render's `generateValue`, Railway's templates).
-7. **Drag and drop a folder to deploy it** (Netlify Drop), for static sites first.
-8. *Waiting on accounts' owner (docs/accounts.md lists it).* **`roll login`**: a browser sign-in
+3. **Drag and drop a folder to deploy it** (Netlify Drop), for static sites first.
+4. *Waiting on accounts' owner (docs/accounts.md lists it).* **`roll login`**: a browser sign-in
    whose session the CLI keeps, as `railway login` and `fly auth login` do.
-9. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+5. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-10. **Region**: the region shown on the overview and each environment, defaulting to the project's
+6. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-11. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+7. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-12. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+8. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-13. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+9. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-14. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+10. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-15. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-16. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+11. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+12. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-17. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+13. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-18. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+14. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-19. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+15. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-20. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+16. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

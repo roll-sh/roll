@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { appsApi, atLeast, followLog, PRODUCTION, type LogLevel, type LogLine, type Service } from "@/lib/apps-api";
+import { matchesTerms, splitFilter } from "@/lib/log-where";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { btn, input, panel } from "../ui";
 import { clock, lineTone } from "./shared";
@@ -60,8 +61,11 @@ export function ProjectLogs({ project }: { project: WorkspaceProject }) {
     // Restarted when the set of services or the environment changes, not on every poll.
   }, [ids, envName]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const q = filter.trim().toLowerCase();
-  const shown = useMemo(() => lines.filter((l) => (!only || l.service === only) && (!q || l.text.toLowerCase().includes(q)) && atLeast(l, level)), [lines, only, q, level]);
+  const split = useMemo(() => splitFilter(filter), [filter]);
+  const shown = useMemo(() => {
+    const q = split.words.toLowerCase();
+    return lines.filter((l) => (!only || l.service === only) && (!q || l.text.toLowerCase().includes(q)) && matchesTerms(split.terms, l.text) && atLeast(l, level));
+  }, [lines, only, split, level]);
 
   const box = useRef<HTMLDivElement>(null);
   const [stuck, setStuck] = useState(true);
@@ -95,7 +99,7 @@ export function ProjectLogs({ project }: { project: WorkspaceProject }) {
           <option value="warn">warnings and worse</option>
           <option value="error">errors and worse</option>
         </select>
-        <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter" aria-label="Filter lines" spellCheck={false} className={`${input} w-56 font-mono text-[12px]`} />
+        <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter, or level:error user_id:42" aria-label="Filter lines" spellCheck={false} className={`${input} w-56 font-mono text-[12px]`} />
         <button type="button" className={btn} aria-pressed={paused} onClick={() => setPaused((p) => !p)}>
           {paused ? "Resume" : "Pause"}
         </button>

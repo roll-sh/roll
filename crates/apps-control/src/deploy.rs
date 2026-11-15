@@ -1636,6 +1636,7 @@ impl Apps {
                 // A volume's tar can take minutes: never on the reaper's own loop.
                 let this = self.clone();
                 tokio::spawn(async move {
+                    this.measure_volumes().await;
                     this.scheduled_backups().await;
                     this.backing_up.store(false, std::sync::atomic::Ordering::SeqCst);
                 });
@@ -1909,6 +1910,7 @@ impl Apps {
     /// when the next is due is skipped). The reaper's pass, every few seconds.
     pub async fn cron_pass(self: &Arc<Self>, now: i64) {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
+        self.schedules_pass(&services, now).await;
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s, svc.run.timezone.as_deref()).ok()) else { continue };
             let sid = svc.id.clone();
@@ -1938,6 +1940,52 @@ impl Apps {
                 tokio::spawn(async move {
                     let _ = this.run_cron(&sid, &env).await;
                 });
+            }
+        }
+    }
+
+    /// Any owned service's `run.schedules` (the environment's own run first): each due one
+    /// starts a job, unless the last it started still runs; a paused environment's move on.
+    async fn schedules_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
+        for svc in services.iter().filter(|s| self.owns(&s.id) && !self.capped(&s.id)) {
+            let sid = svc.id.clone();
+            let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
+            for e in envs.iter().filter(|e| e.active.is_some()) {
+                let run = svc.for_env(e).map(|s| s.run).unwrap_or_else(|_| svc.run.clone());
+                for sc in &run.schedules {
+                    let Ok(schedule) = crate::cron::Schedule::parse(&sc.schedule, sc.timezone.as_deref()) else { continue };
+                    let key = format!("sched:{}/{}/{}", svc.id, e.name, sc.name);
+                    let k = key.clone();
+                    let last: Option<i64> = self.db(move |s| s.get_state(&k)).await.ok().flatten().and_then(|v| v.parse().ok());
+                    // New (or paused): counted from now, so nothing is made up.
+                    let Some(last) = last.filter(|_| !e.paused) else {
+                        let (k, v) = (key.clone(), now.to_string());
+                        let _ = self.db(move |s| s.set_state(&k, &v)).await;
+                        continue;
+                    };
+                    let Some(due) = schedule.next_after(last).filter(|d| *d <= now) else { continue };
+                    let (k, v) = (key.clone(), due.to_string());
+                    let _ = self.db(move |s| s.set_state(&k, &v)).await;
+                    let log = self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System);
+                    // Skipped while the last one it started still runs.
+                    let jk = format!("sched-job:{}/{}/{}", svc.id, e.name, sc.name);
+                    let j = jk.clone();
+                    if let Ok(Some(prev)) = self.db(move |s| s.get_state(&j)).await {
+                        let (sid, en) = (svc.id.clone(), e.name.clone());
+                        if self.db(move |s| s.job(&sid, &en, &prev)).await.is_ok_and(|j| j.status == RunStatus::Running) {
+                            log.line(format!("scheduled {}: skipped, its last job still runs", sc.name));
+                            continue;
+                        }
+                    }
+                    match self.start_job(&svc.id, &e.name, serde_json::json!({ "command": sc.command, "timeout_s": sc.timeout_s })).await {
+                        Ok(job) => {
+                            log.line(format!("scheduled {}: job {} started", sc.name, job.id));
+                            let id = job.id.clone();
+                            let _ = self.db(move |s| s.set_state(&jk, &id)).await;
+                        }
+                        Err(err) => log.line(format!("scheduled {}: didn't start: {err}", sc.name)),
+                    }
+                }
             }
         }
     }
