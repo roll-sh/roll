@@ -204,8 +204,10 @@ pub struct GithubRule {
     pub browsers: Vec<String>,
 }
 
-/// The browsers `github.browsers` may name (Chromium always takes the screenshot).
-pub const BROWSERS: [&str; 2] = ["firefox", "webkit"];
+/// The browsers `github.browsers` may name (Chromium always takes the screenshot):
+/// `webkit-phone` is WebKit at a phone's size and density, as a touch device (mobile Safari's
+/// engine).
+pub const BROWSERS: [&str; 3] = ["firefox", "webkit", "webkit-phone"];
 
 /// A page state (`github.states`): `page` of the first service's, then its steps.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -614,7 +616,7 @@ mod tests {
         let four: Vec<serde_json::Value> = (0..4).map(|i| serde_json::json!({ "name": format!("s{i}"), "page": "/", "steps": [{ "wait": 1 }] })).collect();
         assert!(!ok(serde_json::json!(four)), "at most 3");
         let browsers = |b: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "browsers": b } })).is_ok();
-        assert!(browsers(serde_json::json!(["firefox", "webkit"])));
+        assert!(browsers(serde_json::json!(["firefox", "webkit", "webkit-phone"])));
         assert!(!browsers(serde_json::json!(["chrome"])) && !browsers(serde_json::json!(["webkit", "webkit"])), "the two other browsers, each once");
     }
 

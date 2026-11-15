@@ -148,7 +148,12 @@ pub struct Runtime {
     me: Weak<Runtime>,
     live: Mutex<HashMap<(String, String), Arc<Live>>>,
     client: Client<HttpConnector, Body>,
+    /// When building [`BROWSERS_IMAGE`] last failed (a node without npm's registry, say): not
+    /// tried again for [`BROWSERS_RETRY`], so screenshots don't each wait on a build that fails.
+    browsers_failed: Mutex<Option<std::time::Instant>>,
 }
+
+const BROWSERS_RETRY: Duration = Duration::from_secs(3600);
 
 /// A repo's cache volume.
 pub fn cache_name(repo: &str) -> String {
@@ -171,6 +176,7 @@ impl Runtime {
             cluster: OnceLock::new(),
             me: me.clone(),
             live: Mutex::new(HashMap::new()),
+            browsers_failed: Mutex::new(None),
             client: Client::builder(TokioExecutor::new()).build_http(),
         })
     }
@@ -1035,8 +1041,15 @@ impl Runtime {
     async fn other_browsers(&self, name: &str, port: u16, opts: &crate::ports::ShotOptions) -> anyhow::Result<Vec<crate::ports::PageShot>> {
         use base64::Engine as _;
         if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", BROWSERS_IMAGE]).await.is_err() {
+            if let Some(at) = *self.browsers_failed.lock() {
+                anyhow::ensure!(at.elapsed() >= BROWSERS_RETRY, "building {BROWSERS_IMAGE} failed {} min ago; tried again within the hour", at.elapsed().as_secs() / 60);
+            }
             let label = format!("{}=preview", code_preview::docker::LABEL);
-            docker_with_input(&["build", "--quiet", "--label", &label, "-t", BROWSERS_IMAGE, "-"], BROWSERS_DOCKERFILE.as_bytes(), 1 << 20).await?;
+            if let Err(e) = docker_with_input(&["build", "--quiet", "--label", &label, "-t", BROWSERS_IMAGE, "-"], BROWSERS_DOCKERFILE.as_bytes(), 1 << 20).await {
+                *self.browsers_failed.lock() = Some(std::time::Instant::now());
+                return Err(e);
+            }
+            *self.browsers_failed.lock() = None;
         }
         let browsers: Vec<&String> = opts.browsers.iter().filter(|b| crate::settings::BROWSERS.contains(&b.as_str())).collect();
         let hide: Vec<&String> = opts.hide.iter().filter(|s| crate::settings::selector_ok(s)).take(crate::settings::MAX_HIDE).collect();

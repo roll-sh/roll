@@ -477,16 +477,16 @@ function Form({
           </Field>
         )}
         {s.github.screenshot && (
-          <Field label="Other browsers" note="The first page in Firefox and WebKit too, each compared with main's in that browser and reviewed like a page.">
+          <Field label="Other browsers" note="The first page in Firefox and WebKit too (and WebKit at a phone's size, mobile Safari's engine), each compared with main's in that browser and reviewed like a page.">
             <div className="flex gap-4">
-              {(["firefox", "webkit"] as const).map((b) => (
+              {(["firefox", "webkit", "webkit-phone"] as const).map((b) => (
                 <label key={b} className="flex items-center gap-1.5 text-[12px] text-soft">
                   <input
                     type="checkbox"
                     checked={(s.github.browsers ?? []).includes(b)}
                     onChange={(e) => set("github", { ...s.github, browsers: e.target.checked ? [...(s.github.browsers ?? []).filter((x) => x !== b), b] : (s.github.browsers ?? []).filter((x) => x !== b) })}
                   />
-                  {b === "firefox" ? "Firefox" : "WebKit"}
+                  {b === "firefox" ? "Firefox" : b === "webkit" ? "WebKit" : "WebKit at a phone's size"}
                 </label>
               ))}
             </div>
