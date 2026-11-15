@@ -572,7 +572,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: ended OAuth connections and their kept clients are forgotten after the audit log's days
+Done lately: a token's "last day" counts only its own requests (its change history and roll's revocations were counted as asks: "1 asked" on a token that never made a request; seen in the review pack) (#25); ended OAuth connections and their kept clients are forgotten after the audit log's days
 (each `roll login` made one of each, kept forever) (#25); `roll login` checked live against a rolld
 set up as a deployment is (`ROLL_CODE_PUBLIC_URL`, over the tailnet; `users-live/login.sh`): over
 SSH it shows a code and link, the device page sees it with its network, allowing it signs the CLI in
