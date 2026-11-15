@@ -599,8 +599,13 @@ fn redis_action(b: &Value) -> Action {
     let first = cmd.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
     match first.as_str() {
         // A script can run anything, flushes included: the strongest a command can be.
-        "FLUSHDB" | "FLUSHALL" | "EVAL" | "EVALSHA" | "EVAL_RO" | "EVALSHA_RO" | "FCALL" | "FCALL_RO" | "FUNCTION" | "SCRIPT" => Action::Delete,
-        "ACL" | "CONFIG" | "AUTH" | "HELLO" | "MIGRATE" | "MODULE" | "DEBUG" | "SHUTDOWN" | "REPLICAOF" | "SLAVEOF" => Action::Admin,
+        "FLUSHDB" | "FLUSHALL" | "SWAPDB" | "EVAL" | "EVALSHA" | "EVAL_RO" | "EVALSHA_RO" | "FCALL" | "FCALL_RO" | "FUNCTION" | "SCRIPT" => Action::Delete,
+        // The server's, not the data's: Redis's own @dangerous category. MONITOR and SYNC stream
+        // everyone's commands and data, CLIENT sees and ends other connections, SLOWLOG shows other
+        // commands' arguments.
+        "ACL" | "CONFIG" | "AUTH" | "HELLO" | "MIGRATE" | "MODULE" | "DEBUG" | "SHUTDOWN" | "REPLICAOF" | "SLAVEOF" | "MONITOR" | "SYNC" | "PSYNC" | "REPLCONF"
+        | "CLIENT" | "SLOWLOG" | "LATENCY" | "CLUSTER" | "FAILOVER" | "ROLE" | "BGSAVE" | "SAVE" | "BGREWRITEAOF" | "LASTSAVE" | "RESTORE" | "RESTORE-ASKING"
+        | "PFDEBUG" | "PFSELFTEST" => Action::Admin,
         "GET" | "MGET" | "STRLEN" | "GETRANGE" | "EXISTS" | "TYPE" | "TTL" | "PTTL" | "EXPIRETIME" | "KEYS" | "SCAN" | "DBSIZE" | "HGET" | "HMGET" | "HGETALL"
         | "HKEYS" | "HVALS" | "HLEN" | "HEXISTS" | "HSCAN" | "HSTRLEN" | "LRANGE" | "LLEN" | "LINDEX" | "LPOS" | "SMEMBERS" | "SISMEMBER" | "SMISMEMBER"
         | "SCARD" | "SSCAN" | "SRANDMEMBER" | "SINTER" | "SUNION" | "SDIFF" | "ZRANGE" | "ZRANGEBYSCORE" | "ZREVRANGE" | "ZREVRANGEBYSCORE" | "ZSCORE"
@@ -689,9 +694,10 @@ fn apps_create_action(b: &Value) -> Action {
 /// A service's run settings that change only how much of it runs and how it's watched: its size,
 /// scale, health checks, timers, alerts, rollout and restarts. Every other run key decides what
 /// production runs, when, or who reaches it (start, pre-deploy, schedule, schedules and their
-/// timezone and retries, kind, port, volume, public, tcp), and so does any key apps adds later
-/// until it's listed here: a new setting is never a quiet way into production.
-const APPS_WRITE_RUN: [&str; 19] = [
+/// timezone and retries, kind, port, volume, public, tcp, and `rollback_on_crash`, which has roll
+/// put an older deployment live by itself), and so does any key apps adds later until it's listed
+/// here: a new setting is never a quiet way into production.
+const APPS_WRITE_RUN: [&str; 18] = [
     "min_instances",
     "max_instances",
     "concurrency",
@@ -709,7 +715,6 @@ const APPS_WRITE_RUN: [&str; 19] = [
     "restart",
     "restart_tries",
     "affinity",
-    "rollback_on_crash",
     "timeout_s",
 ];
 
@@ -1419,6 +1424,7 @@ mod tests {
         assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "schedules": [{ "name": "nightly", "schedule": "@daily", "command": "./export" }] } })), Action::Deploy);
         // A port on the internet is who reaches it, as public is; a key apps adds later is deploy until listed.
         assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "tcp": [5432] } })), Action::Deploy);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "rollback_on_crash": true } })), Action::Deploy);
         assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "a_setting_from_next_week": true } })), Action::Deploy);
         assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "memory_mb": 1024, "max_instances": 4, "alerts": { "memory_pct": 90 } } })), Action::Write);
         assert_eq!(apps_patch_action(&serde_json::json!({ "source": { "kind": "image", "image": "x" } })), Action::Deploy);
@@ -1435,6 +1441,10 @@ mod tests {
         assert_eq!(redis_action(&serde_json::json!({ "command": ["get", "k"] })), Action::Read);
         assert_eq!(redis_action(&serde_json::json!({ "command": ["FLUSHALL"] })), Action::Delete);
         assert_eq!(redis_action(&serde_json::json!({ "command": ["set", "k", "v"] })), Action::Write);
+        // Reading everyone's traffic or the whole dataset is the server's, not a write.
+        assert_eq!(redis_action(&serde_json::json!({ "command": ["MONITOR"] })), Action::Admin);
+        assert_eq!(redis_action(&serde_json::json!({ "command": "client kill 10.0.0.1:5000" })), Action::Admin);
+        assert_eq!(redis_action(&serde_json::json!({ "command": ["SWAPDB", "0", "1"] })), Action::Delete);
         assert_eq!(cql_action(&serde_json::json!({ "query": "SELECT * FROM t; DROP TABLE t" })), Action::Delete);
         assert_eq!(cql_action(&serde_json::json!({ "query": "" })), Action::Write);
         // Comments can't hide what runs; scripts and credentials are the strongest.

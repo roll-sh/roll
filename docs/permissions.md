@@ -131,9 +131,10 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 - Postgres SQL: `{"read_only": true}` is `read`, and the SQL runs as a role made for that one query
   that holds only `pg_read_all_data`, so Postgres refuses its writes whatever the SQL says (on a
   branch's primary; a read replica refuses read-only SQL). Anything else is `write`.
-- Redis commands: commands that only read are `read`; `FLUSHDB`, `FLUSHALL` and scripts (`EVAL`,
-  `FCALL`, `FUNCTION`, `SCRIPT`) are `delete`; `ACL`, `CONFIG` and the like are `admin`; the rest
-  `write`.
+- Redis commands: commands that only read are `read`; `FLUSHDB`, `FLUSHALL`, `SWAPDB` and scripts
+  (`EVAL`, `FCALL`, `FUNCTION`, `SCRIPT`) are `delete`; the server's own, Redis's `@dangerous`
+  category (`ACL`, `CONFIG`, `MONITOR` and `SYNC`, which stream everyone's commands and data,
+  `CLIENT`, `SLOWLOG`, `BGSAVE`, `CLUSTER`, `RESTORE` and the like), are `admin`; the rest `write`.
 - NoSQL CQL: `SELECT` is `read`, `DROP` and `TRUNCATE` are `delete`, the rest `write`.
 - Storage IAM: `Get…`, `List…`, `Simulate…` are `read`, the rest `admin`.
 - git pushes (`POST /git/{owner}/{repo}/git-receive-pack`): from the ref updates at the start
@@ -152,7 +153,8 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   agent's shell is. Waking a sleeping environment starts compute someone pays for: `write`.
 - A service's settings (`PATCH …/services/{id}`) are `write` only for how much of it runs and how
   it's watched: its size, scale, health checks, suspend and sleep timers, alerts, rollout,
-  restarts, affinity and a job's timeout (`APPS_WRITE_RUN`). Everything else is `deploy`: `source`
+  restarts, affinity and a job's timeout (`APPS_WRITE_RUN`); `run.rollback_on_crash` is deploy
+  (it has roll put an older deployment live by itself). Everything else is `deploy`: `source`
   and `build` (the next landing deploys them), `run.start`, `run.pre_deploy` (it runs with
   production's variables), `run.schedule` and `run.schedules` with their `timezone` and `retries`
   (commands run as jobs of the live deployment: a production job is deploy, so one on a timer
