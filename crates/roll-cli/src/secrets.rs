@@ -602,8 +602,14 @@ pub enum AwsRolesCmd {
     #[command(alias = "list")]
     Ls,
     /// Register a role: its trust policy lets roll's role assume it with
-    /// `sts:ExternalId = roll-secrets:<project>`.
-    Add { name: String, role_arn: String },
+    /// `sts:ExternalId = roll-secrets:<project>`, or (`--oidc`) trusts roll's issuer with
+    /// `aud = sts.amazonaws.com` and `sub = roll-secrets:<project>` (no AWS credential of roll's).
+    Add {
+        name: String,
+        role_arn: String,
+        #[arg(long)]
+        oidc: bool,
+    },
     Rm { id: String },
 }
 
@@ -1732,12 +1738,13 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     return print(&v);
                 }
                 for r in v.as_array().into_iter().flatten() {
-                    println!("{}  {:<16} {}", s(&r["id"]), s(&r["name"]), s(&r["role_arn"]));
+                    println!("{}  {:<16} {:<11} {}", s(&r["id"]), s(&r["name"]), s(&r["trust"]), s(&r["role_arn"]));
                 }
-                eprintln!("Trust policies need sts:ExternalId = roll-secrets:{}", c.project);
+                eprintln!("Trust policies pin roll-secrets:{} (sts:ExternalId, or sub for roll's issuer)", c.project);
             }
-            AwsRolesCmd::Add { name, role_arn } => {
-                let v = c.call(Method::POST, &format!("{}/aws-roles", c.base()), Some(json!({ "name": name, "role_arn": role_arn }))).await?;
+            AwsRolesCmd::Add { name, role_arn, oidc } => {
+                let trust = if oidc { "oidc" } else { "external_id" };
+                let v = c.call(Method::POST, &format!("{}/aws-roles", c.base()), Some(json!({ "name": name, "role_arn": role_arn, "trust": trust }))).await?;
                 if json_out {
                     return print(&v);
                 }

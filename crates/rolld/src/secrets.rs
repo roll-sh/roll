@@ -227,6 +227,32 @@ impl roll_secrets::aws::Sts for RollSts {
         })
     }
 
+    /// AssumeRoleWithWebIdentity isn't signed: AWS trusts roll's issuer's token, not a credential
+    /// of roll's (none is needed on the server).
+    fn assume_web_identity(&self, role_arn: &str, token: &str, session_name: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let conf = self.conf.get_or_init(|| aws_config::load_defaults(aws_config::BehaviorVersion::latest())).await;
+                let out = aws_sdk_sts::Client::new(conf)
+                    .assume_role_with_web_identity()
+                    .role_arn(role_arn)
+                    .web_identity_token(token)
+                    .role_session_name(session_name)
+                    .duration_seconds(seconds)
+                    .send()
+                    .await
+                    .map_err(|e| aws_sdk_sts::error::ProvideErrorMetadata::code(&e).unwrap_or("no answer").to_string())?;
+                let c = out.credentials.ok_or("STS answered without credentials")?;
+                Ok(roll_secrets::aws::Session {
+                    expires_at: c.expiration.to_millis().map_err(|_| "STS answered an expiry roll can't read")?,
+                    access_key_id: Value::new(c.access_key_id),
+                    secret_access_key: Value::new(c.secret_access_key),
+                    session_token: Value::new(c.session_token),
+                })
+            })
+        })
+    }
+
     fn iam_keys(&self, role_arn: &str, external_id: &str, user: &str) -> Result<Vec<String>, String> {
         let iam = self.iam(role_arn, external_id)?;
         Self::wait(async move {

@@ -152,8 +152,8 @@ impl Secrets {
         self.project(project)?;
         let arn: String = self
             .db
-            .read(|c| c.query_row("SELECT role_arn FROM aws_roles WHERE id = ? AND project_id = ?", [n.role.as_str(), project], |r| r.get(0)).optional())?
-            .ok_or_else(|| Error::BadRequest(format!("no AWS role {} in this project: register the role first", n.role)))?;
+            .read(|c| c.query_row("SELECT role_arn FROM aws_roles WHERE id = ? AND project_id = ? AND COALESCE(trust, 'external_id') = 'external_id'", [n.role.as_str(), project], |r| r.get(0)).optional())?
+            .ok_or_else(|| Error::BadRequest(format!("no AWS role {} in this project that trusts roll by ExternalId: register the role first (IAM users act through an ExternalId role)", n.role)))?;
         sts.iam_keys(&arn, &external_id(project), &n.user).map_err(|why| Error::BadRequest(format!("roll couldn't list {}'s access keys as {arn}: {why}", n.user)))?;
         let now = self.db.now_ms()?;
         let u = AwsUser { id: names::new_id("awu", 16), name: n.name, role: n.role, user: n.user, created_at: now, created_by: caller.principal.clone() };
