@@ -245,7 +245,8 @@ pub fn state_entry(e: &str) -> Option<&str> {
     e.strip_prefix("state:").filter(|n| state_name_ok(n))
 }
 
-fn step_ok(s: &Step) -> bool {
+/// Whether a step is one roll knows, bounded (checked when set, and again before a run).
+pub fn step_ok(s: &Step) -> bool {
     let text = |t: &str| t.len() <= 200 && !t.chars().any(char::is_control);
     let selector = |t: &str| !t.trim().is_empty() && text(t);
     match s {

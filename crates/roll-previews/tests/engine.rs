@@ -363,6 +363,20 @@ async fn page_states_and_other_browsers_are_taken_and_compared_like_pages() {
     // Another browser's first page the same way.
     let firefox = e.code.last_report("chg_st").pages.into_iter().find(|p| p.path == "browser:firefox").map(|p| p.base_percent);
     assert_eq!(firefox, Some(Some(0.0)), "Firefox's first page, compared with main's in Firefox");
+    // A push whose browsers run fails keeps no older Firefox picture to be reviewed as its own.
+    e.apps.no_browsers.store(true, std::sync::atomic::Ordering::SeqCst);
+    e.code.edit("chg_st", |c| c.head = "cs_6b".into());
+    let mut gone = false;
+    for _ in 0..500 {
+        e.engine.pass().await.unwrap();
+        let pages = e.code.last_report("chg_st").pages;
+        if pages.iter().any(|p| p.path == "state:cart") && !pages.iter().any(|p| p.path == "browser:firefox") {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(gone, "{:?}", e.code.last_report("chg_st").pages.iter().map(|p| &p.path).collect::<Vec<_>>());
 }
 
 #[tokio::test]

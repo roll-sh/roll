@@ -221,6 +221,8 @@ pub struct FakeApps {
     pub shots: Mutex<Vec<String>>,
     /// The page states each screenshot was asked to reach, by name.
     pub states: Mutex<Vec<String>>,
+    /// The other browsers' run fails (no `browser:` pages come back).
+    pub no_browsers: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -288,7 +290,7 @@ impl Apps for FakeApps {
             .pages
             .iter()
             .cloned()
-            .chain(opts.browsers.iter().map(|b| format!("browser:{b}")))
+            .chain(opts.browsers.iter().filter(|_| !self.no_browsers.load(Ordering::SeqCst)).map(|b| format!("browser:{b}")))
             .map(|path| roll_previews::ports::PageShot { path, png: png.clone(), errors: 0, report: Default::default() })
             .collect();
         Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None, api }))

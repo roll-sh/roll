@@ -54,7 +54,7 @@ impl roll_previews::ports::Secrets for Secrets {
             b
         };
         let answer = match self.0.post(&path, body(false)).await {
-            Err(e) if e.downcast_ref::<Refused>().is_some_and(|r| r.status == StatusCode::BAD_REQUEST && r.error.contains("dynamic")) => self.0.post(&path, body(true)).await,
+            Err(e) if e.downcast_ref::<Refused>().is_some_and(|r| r.status == StatusCode::BAD_REQUEST && r.error.contains("unknown field `dynamic`")) => self.0.post(&path, body(true)).await,
             other => other,
         };
         match answer {

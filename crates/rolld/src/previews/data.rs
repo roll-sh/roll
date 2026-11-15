@@ -795,10 +795,26 @@ impl Brancher for Search {
     /// A string mask (`redact`, `email`) on a field of the parent's that isn't text (a vector, a
     /// number) would fail the masking, and the preview: named when the rule is set.
     async fn mask_problems(&self, parent: &str, fields: &std::collections::BTreeMap<String, String>) -> anyhow::Result<Vec<String>> {
-        let v = self.0.post(&format!("/v1/search/clusters/{}/request", seg(parent)), json!({ "method": "GET", "path": "/_mapping" })).await?;
-        anyhow::ensure!(v["status"].as_u64() == Some(200), "reading {parent}'s mappings: {}", v["status"]);
-        let mapping: Value = serde_json::from_str(v["body"].as_str().unwrap_or("{}"))?;
-        Ok(roll_previews::mask::search_field_masks(&mapping, fields))
+        // Each index the rules name, read as itself (an alias or pattern answers with its real
+        // indices, and only those are checked); one the parent doesn't have yet is none.
+        let mut by_index: std::collections::BTreeMap<&str, std::collections::BTreeMap<String, String>> = Default::default();
+        for (spec, rule) in fields {
+            if let Some((index, _)) = spec.split_once('.') {
+                by_index.entry(index).or_default().insert(spec.clone(), rule.clone());
+            }
+        }
+        let mut out = Vec::new();
+        for (index, specs) in by_index {
+            let v = self.0.post(&format!("/v1/search/clusters/{}/request", seg(parent)), json!({ "method": "GET", "path": format!("/{}/_mapping", seg(index)) })).await?;
+            match v["status"].as_u64() {
+                Some(200) => {}
+                Some(404) => continue,
+                s => anyhow::bail!("reading {parent}'s {index} mapping: {s:?}"),
+            }
+            let mapping: Value = serde_json::from_str(v["body"].as_str().unwrap_or("{}"))?;
+            out.extend(roll_previews::mask::search_field_masks(&mapping, &specs));
+        }
+        Ok(out)
     }
 
     async fn find(&self, parent: &str, name: &str) -> anyhow::Result<Option<String>> {

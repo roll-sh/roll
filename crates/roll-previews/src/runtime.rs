@@ -86,14 +86,19 @@ const SHOT_JS: &str = include_str!("shot.js");
 /// but only Playwright drives them): built once per node from [`BROWSERS_DOCKERFILE`] when a
 /// project asks for other browsers (`github.browsers`).
 pub const BROWSERS_IMAGE: &str = "roll-previews-shot:1.64.1";
-const BROWSERS_DOCKERFILE: &str = "FROM mcr.microsoft.com/playwright:v1.64.1-noble\nRUN npm install -g --no-audit --no-fund playwright-core@1.64.1 && npm cache clean --force\nENV NODE_PATH=/usr/lib/node_modules\n";
+/// Built `FROM` the configured screenshot image (an operator's mirror of it too). `playwright-core`
+/// pinned to the image's Playwright, with no install scripts run.
+const BROWSERS_DOCKERFILE: &str = "FROM {image}\nRUN npm install -g --no-audit --no-fund --ignore-scripts playwright-core@1.64.1 && npm cache clean --force\nENV NODE_PATH=/usr/lib/node_modules\n";
+/// How long building [`BROWSERS_IMAGE`] may take (a registry that doesn't answer isn't waited on).
+const BROWSERS_BUILD: Duration = Duration::from_secs(180);
 const BROWSERS_JS: &str = include_str!("browsers.js");
 /// axe-core's WCAG rules for the screenshot's session (vendored, MPL-2.0): 640 KB, past what one
 /// environment variable may hold, so it goes in on the container's stdin.
 const AXE_JS: &str = include_str!("../vendor/axe-core/axe.min.js");
 
 /// `docker` with `input` on its stdin, written while its output is read.
-async fn docker_with_input(args: &[&str], input: &'static [u8], max: usize) -> anyhow::Result<String> {
+async fn docker_with_input(args: &[&str], input: impl Into<Vec<u8>>, max: usize) -> anyhow::Result<String> {
+    let input: Vec<u8> = input.into();
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut child = tokio::process::Command::new("docker")
         .args(args)
@@ -104,7 +109,7 @@ async fn docker_with_input(args: &[&str], input: &'static [u8], max: usize) -> a
         .spawn()?;
     let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("docker's stdin"))?;
     let feed = tokio::spawn(async move {
-        let _ = stdin.write_all(input).await;
+        let _ = stdin.write_all(&input).await;
     });
     // What the container writes is read up to `max` (its page's code runs in there): never more.
     let (mut stdout, mut stderr) = (child.stdout.take().ok_or_else(|| anyhow::anyhow!("docker's stdout"))?, child.stderr.take().ok_or_else(|| anyhow::anyhow!("docker's stderr"))?);
@@ -978,7 +983,11 @@ impl Runtime {
         }
         // Each state's page and steps, by name (`shot.js` reaches them before the capture).
         let states: std::collections::BTreeMap<&str, serde_json::Value> =
-            opts.states.iter().filter(|s| crate::settings::state_name_ok(&s.name)).map(|s| (s.name.as_str(), serde_json::json!({ "page": s.page, "steps": s.steps }))).collect();
+            opts.states
+                .iter()
+                .filter(|s| crate::settings::state_name_ok(&s.name) && crate::settings::page_path_ok(&s.page) && s.steps.len() <= crate::settings::MAX_STEPS && s.steps.iter().all(crate::settings::step_ok))
+                .map(|s| (s.name.as_str(), serde_json::json!({ "page": s.page, "steps": s.steps })))
+                .collect();
         if !states.is_empty() {
             args.extend(["--env".into(), format!("STATES={}", serde_json::to_string(&states)?)]);
         }
@@ -995,13 +1004,15 @@ impl Runtime {
             "-c".into(),
             format!(
                 "cat > /tmp/axe.js; {} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
-                 && echo && (cat /tmp/s.png.pages.json 2>/dev/null || true) && for n in 0 1 2 3 4; do echo; base64 -w0 /tmp/s.png.$n.png 2>/dev/null || true; done",
+                 && echo && (cat /tmp/s.png.pages.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.$n.png 2>/dev/null || true; done",
                 self.cfg.screenshot_command
             ),
         ]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         // Each other page is taken and checked too (accessibility, links up to 20 s, SEO, words).
-        let within = Duration::from_secs(90 + 30 * pages.len() as u64 + if endpoints.is_empty() { 0 } else { 25 });
+        // A page state's steps take up to about 25 s more.
+        let state_pages = pages.iter().filter(|p| crate::settings::state_entry(p).is_some()).count() as u64;
+        let within = Duration::from_secs(90 + 30 * pages.len() as u64 + 25 * state_pages + if endpoints.is_empty() { 0 } else { 25 });
         let out = match tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)).await {
             Ok(Ok(out)) => out,
             // Its container outlives a docker CLI that gave up on it (too much output).
@@ -1045,7 +1056,12 @@ impl Runtime {
                 anyhow::ensure!(at.elapsed() >= BROWSERS_RETRY, "building {BROWSERS_IMAGE} failed {} min ago; tried again within the hour", at.elapsed().as_secs() / 60);
             }
             let label = format!("{}=preview", code_preview::docker::LABEL);
-            if let Err(e) = docker_with_input(&["build", "--quiet", "--label", &label, "-t", BROWSERS_IMAGE, "-"], BROWSERS_DOCKERFILE.as_bytes(), 1 << 20).await {
+            let dockerfile = BROWSERS_DOCKERFILE.replace("{image}", &self.cfg.screenshot_image);
+            let built = match tokio::time::timeout(BROWSERS_BUILD, docker_with_input(&["build", "--quiet", "--label", &label, "-t", BROWSERS_IMAGE, "-"], dockerfile, 1 << 20)).await {
+                Ok(r) => r,
+                Err(_) => Err(anyhow::anyhow!("building {BROWSERS_IMAGE} took over {} s", BROWSERS_BUILD.as_secs())),
+            };
+            if let Err(e) = built {
                 *self.browsers_failed.lock() = Some(std::time::Instant::now());
                 return Err(e);
             }
@@ -1067,7 +1083,7 @@ impl Runtime {
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let within = Duration::from_secs(30 + 40 * browsers.len() as u64);
         let max = browsers.len() * (SCREENSHOT_MAX * 4 / 3 + 4096);
-        let out = match tokio::time::timeout(within, docker_with_input(&argv, b"", max)).await {
+        let out = match tokio::time::timeout(within, docker_with_input(&argv, Vec::new(), max)).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
                 code_preview::docker::remove(&run).await;
