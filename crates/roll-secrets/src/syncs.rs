@@ -492,15 +492,23 @@ impl Secrets {
         if due.is_none() {
             return Ok((0, 0));
         }
-        self.sweep_syncs()
+        // Only those a change marked: the rest wait for the sweep, so steady writes never turn
+        // this into a scan of every sync.
+        self.sweep_syncs_from(true)
     }
 
     /// One pass over the syncs (the sweeper): push those whose environment changed.
     /// Returns (pushed, failed).
     pub(crate) fn sweep_syncs(&self) -> Result<(usize, usize)> {
-        let now = self.db.now_ms()?;
         // Syncs of deleted environments and projects go with them.
         self.db.write(|c| c.execute("DELETE FROM syncs WHERE env_id NOT IN (SELECT id FROM environments)", ()))?;
+        self.sweep_syncs_from(false)
+    }
+
+    /// Check and push syncs, least recently checked first (`due_only`: only those a change marked).
+    fn sweep_syncs_from(&self, due_only: bool) -> Result<(usize, usize)> {
+        let now = self.db.now_ms()?;
+        let marked = if due_only { " AND s.checked_at IS NULL" } else { "" };
         let (mut pushed, mut failed) = (0, 0);
         // A digest of a large folder takes a tenth of a second: a sweep checks for so long, and
         // the next one goes on from the least recently checked. Every node sweeps: each claims a
@@ -516,7 +524,7 @@ impl Secrets {
             let batch: Vec<(Row, Option<i64>)> = self.db.write(|c| {
                 // Least recently checked first: every sync gets its turn, however many there are.
                 let rows = c.query(
-                    &format!("SELECT {COLUMNS}, s.checked_at FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.running_until <= ? AND s.retry_at <= ? AND COALESCE(s.checked_at, 0) < ? ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT {CLAIM}"),
+                    &format!("SELECT {COLUMNS}, s.checked_at FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.running_until <= ? AND s.retry_at <= ? AND COALESCE(s.checked_at, 0) < ?{marked} ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT {CLAIM}"),
                     params![now, now, now],
                     |r| Ok((row(r)?, r.get::<_, Option<i64>>(16)?)),
                 )?;

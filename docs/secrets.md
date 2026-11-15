@@ -1655,8 +1655,9 @@ last_synced_at, error}`:
   sync's environment `digest` (the hash `roll run --watch` polls) with the sync's
   `last_digest`. A sync whose digest moved is claimed with a compare-and-swap on its
   `running_until` (5 minutes), so two nodes never push one sync at once. A new sync first pushes
-  within seconds. `POST …/syncs/{id}/run` pushes now, every key, whatever the digest says (also after
-  a live link's resource rotated, which moves no digest).
+  within seconds. `POST …/syncs/{id}/run` pushes now, every key, whatever the digest says. The
+  2-second pass takes only the syncs a change marked; a credential changed where roll doesn't see
+  it (SQL, a product's own automation) reaches syncs at the next 30 s sweep, through the digest.
 - **Only what changed.** A sync remembers a stamp per name it pushed (the secret's id, version,
   fingerprint and link: no value). A push carries the values of every synced key and says which
   names `changed` since the last push, and which were `removed`: synced before, gone now (deleted,
