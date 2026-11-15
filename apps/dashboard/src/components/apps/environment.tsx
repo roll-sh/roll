@@ -1,6 +1,6 @@
 import { Lock, Rocket, Trash2, Unlock } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { appsApi, formatFirewall, formatHeaders, parseAllowList, parseFirewall, parseHeaders, PRODUCTION, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
+import { appsApi, formatFirewall, formatHeaders, parseAllowList, parseFirewall, parseHeaders, PRODUCTION, shortSha, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
 import { clock, CPU, MEMORY, mb, StateBadge, SureButton, type Runner } from "./shared";
@@ -59,6 +59,17 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   const [branch, setBranch] = useState(env.branch ?? "");
   const sources = service.environments.filter((e) => e.name !== env.name && e.active);
   const [from, setFrom] = useState(sources[0]?.name ?? "");
+  // What a promotion puts live, looked at before it does: the deployment (sent as `expect`) and
+  // the variables `from` has that this environment lacks (names only).
+  const [promoting, setPromoting] = useState<{ from: string; deployment: string; revision: string | null; missing: string[] } | null>(null);
+  const look = async () => {
+    const source = service.environments.find((e) => e.name === from)?.active;
+    if (!source) return;
+    const [theirs, ours] = await Promise.all([appsApi.variables(service.id, from), appsApi.variables(service.id, env.name)]);
+    const have = new Set(ours.vars.map((v) => v.name));
+    const missing = theirs.vars.filter((v) => (v.source === "service" || v.source === "reference" || v.source === "secret") && !have.has(v.name)).map((v) => v.name);
+    setPromoting({ from, deployment: source.id, revision: source.revision, missing });
+  };
   const [link, setLink] = useState<string | null>(null);
   const [hook, setHook] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -236,12 +247,41 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
                   </option>
                 ))}
               </select>
-              <button className={btn} disabled={!from || busy} onClick={() => runner.run("promote", () => appsApi.promote(service.id, env.name, from))}>
-                <Rocket className="size-3.5" /> {runner.busy === "promote" ? <span className="shimmer">Promoting…</span> : `Promote ${from}`}
+              <button className={btn} disabled={!from || busy || promoting !== null} onClick={() => void runner.run("promote-look", look)}>
+                <Rocket className="size-3.5" /> Promote {from}…
               </button>
             </>
           )}
         </div>
+        {promoting && (
+          <div className="rise mx-5 mb-4 space-y-2 rounded-lg border border-line bg-bg px-3 py-3 text-[13px]">
+            <p>
+              Put <span className="font-mono">{promoting.deployment}</span>
+              {promoting.revision ? <span className="font-mono text-muted"> ({shortSha(promoting.revision)})</span> : null} from {promoting.from} live in{" "}
+              <span className="font-mono">{env.name}</span>, with {env.name}'s variables and no build?
+            </p>
+            {promoting.missing.length > 0 && (
+              <p className="text-[12px] text-danger">
+                {env.name} lacks {promoting.missing.length === 1 ? "a variable" : "variables"} {promoting.from} has: <span className="font-mono">{promoting.missing.join(", ")}</span>.
+              </p>
+            )}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className={primary}
+                disabled={busy}
+                onClick={() =>
+                  void runner.run("promote", () => appsApi.promote(service.id, env.name, promoting.from, promoting.deployment)).then((d) => d && setPromoting(null))
+                }
+              >
+                {runner.busy === "promote" ? <span className="shimmer">Promoting…</span> : "Promote"}
+              </button>
+              <button type="button" className={btn} onClick={() => setPromoting(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
 
         <p className="px-5 pb-2 pt-5 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Who gets in</p>
 
