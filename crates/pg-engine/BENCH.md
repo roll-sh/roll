@@ -285,6 +285,201 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Short write transactions, round 6 (2026-11-14/15, agent 235)
+
+HANDOFF "Short write transactions, round 6" has what changed, what was dropped and the leads.
+Kept: `ff6ccea30` (an UPDATE's or DELETE's unique-key scan by the point probe) and `70e7b9906`
+(a group commit's fsync wakes the commits it covered and the next one to fsync), measured as
+`5dc14d2ec` / `1799da4ea` on `2947ce5a4` and rebased since.
+
+Harness: agent 218's (`~/.cache/a235/bench`, copied from `~/.cache/a218/bench`), lane A
+(servers on CPUs 6,7,24,25, 8 GiB; clients on 8,9,26,27), `short_txn` of 100,000 accounts,
+fsync and synchronous_commit on, `CHECKPOINT` and 5 s of quiet before each 10 s run. Changed
+this round, for all three servers alike: the servers' containers run with the default CPU
+weight (`--cpu-shares 2` was cgroup weight 1, below a nice-19 build's 15: the server lost
+its lane to other tenants' unpinned builds) and the client at nice 0; a pair waits for the
+machine's load average below 32 and is redone (4 tries) when either run saw more than 1.0
+core of other tenants' work on the server CPUs. **Instructions and cycles per transaction**
+in the gates are `perf record -e instructions:u,cycles:u -c 100003 -p <server>` over the
+whole run, inherited, samples counted by thread name: every thread but `roll-flush` (the
+flush and compaction threads a connection spawns), divided by the run's exact transaction
+count. The earlier counts (a per-thread window divided by tps × window, three perf sessions
+multiplexing the counters, a whole-process count) moved 5-13% between runs of one binary;
+this one about ±1.5% (instructions) and ±4% (cycles). The host was busy throughout (load
+averages 25-70); 1-client pairs could not be gated (every run had 1.5-3 cores of other work
+on the lane: the server leaves 3 of its 4 CPUs idle).
+
+**Gate, the round's stack against the origin head** (plain `--profile dist`, alternating;
+tps "a → b"; instructions and cycles sampled as above; CPU µs/txn the server's user+sys):
+
+| pair | tps | Δ tps | instr/txn | Δ instr | Δ cycles | Δ CPU | Δ p50 | other tenants (cores) |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| *8 clients* | | | | | | | | |
+| 1 | 7,431 → 8,277 | +11.4% | 243.6k → 240.3k | -1.36% | -7.2% | -11.3% | -14.9% | 0.83 |
+| 2 | 8,766 → 9,938 | +13.4% | 245.5k → 241.8k | -1.50% | -5.8% | -4.0% | -12.1% | 0.67 |
+| 3 | 10,167 → 9,585 | -5.7% | 244.9k → 243.0k | -0.80% | -1.6% | +5.1% | +4.8% | 0.22 |
+| 4 | 10,119 → 9,595 | -5.2% | 247.8k → 243.0k | -1.94% | -1.3% | +3.0% | +3.9% | 0.28 |
+| median | | +3.1% | | -1.43% | -3.7% | -0.5% | -4.1% | |
+| *32 clients* | | | | | | | | |
+| 1 | 9,595 → 9,887 | +3.0% | 245.0k → 239.2k | -2.37% | -5.5% | -2.6% | -3.4% | 0.30 |
+| 2 | 8,279 → 8,963 | +8.3% | 244.3k → 241.6k | -1.11% | -5.1% | -2.4% | -2.4% | 0.48 |
+| 3 | 7,431 → 7,021 | -5.5% | 239.5k → 234.8k | -1.96% | +0.2% | +5.1% | +6.0% | 0.69 |
+| 4 | 8,018 → 9,423 | +17.5% | 246.6k → 239.1k | -3.04% | -10.7% | -14.2% | -16.6% | 0.41 |
+| median | | +5.7% | | -2.16% | -5.3% | -2.5% | -2.9% | |
+| *point reads, 8 clients* | | | | | | | | |
+| 1-4 | 59,948-75,537 | -3.2% | 43.0k → 43.0k | -0.07%, +0.03%, +0.04%, -0.03% (median -0.00%) | +1.6% | +3.3% | | 0.30-0.74 |
+
+Instructions per transaction went down in every pair at 8 and at 32 clients, cycles in 7 of 8;
+tps on this host moved ±15% between pairs of one binary (the two quietest 8-client pairs went
+the other way). Point reads take neither changed path; their instructions are unchanged.
+
+Per step (each against the step before it): the UPDATE's point probe, 5 pairs each: 8
+clients -1.54% instructions, -2.8% cycles, 32 clients -0.39% and -4.8% (whole-process user
+cycles down in every pair, server CPU -5.9%). The directed wake, 4 pairs each, on a base that
+had the two dropped steps: 8 clients tps +6.0%, cycles -3.0% (every pair), CPU -6.7%, p50
+-12.0%, instructions +1.1% (the connections poll before they sleep: a shorter wait is polled
+for); 32 clients neutral (tps +1.5%, cycles +0.4%). Its first build lost wakeups (HANDOFF):
+8 clients -15% and -38% tps.
+
+**PGO confirmation** (`tools/dist-pgo.sh` of each side, its own profile and the same training:
+the origin head `2947ce5a4` against the stack `1799da4ea`; alternating, sampled as above):
+
+| pair | tps | Δ tps | instr/txn | Δ instr | Δ cycles | Δ CPU | Δ p50 | other tenants (cores) |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| *8 clients* | | | | | | | | |
+| 1 | 11,883 → 11,673 | -1.8% | 198.1k → 194.3k | -1.95% | -5.1% | -1.0% | -0.8% | 0.44 |
+| 2 | 11,608 → 11,816 | +1.8% | 197.5k → 200.8k | +1.68% | -5.6% | -3.3% | -2.3% | 0.43 |
+| 3 | 10,867 → 11,588 | +6.6% | 198.4k → 197.1k | -0.67% | -5.1% | -3.6% | -6.5% | 0.57 |
+| median | | +1.8% | | -0.67% | -5.1% | -3.3% | -2.3% | |
+| *32 clients* | | | | | | | | |
+| 1 | 7,135 → 7,981 | +11.9% | 196.1k → 191.7k | -2.26% | -12.9% | -14.7% | -23.4% | 0.94 |
+| 2 | 8,103 → 8,108 | +0.1% | 194.5k → 190.1k | -2.26% | -2.9% | -1.6% | -2.1% | 0.78 |
+| 3 | 10,548 → 10,821 | +2.6% | 197.9k → 194.5k | -1.72% | -6.8% | -2.5% | -1.3% | 0.35 |
+| median | | +2.6% | | -2.26% | -6.8% | -2.5% | -2.1% | |
+
+Cycles went down in every pair of both builds; under PGO the directed wake's change of a
+function boundary costs nothing measurable.
+
+**Agent 233's commits, `5526bfef4` against `7c1493375`** (asked by the coordinator: PL/pgSQL
+folding at planning, unknown parameter types, error routines; plain dist, alternating, sampled
+as above):
+
+| pair | tps | Δ tps | instr/txn | Δ instr | Δ cycles | Δ CPU | Δ p50 | other tenants (cores) |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| *8 clients* | | | | | | | | |
+| 1 | 7,527 → 9,327 | +23.9% | 234.2k → 238.2k | +1.69% | -3.6% | -10.8% | -14.7% | 0.93 |
+| 2 | 9,856 → 9,735 | -1.2% | 236.0k → 237.0k | +0.42% | -0.3% | +0.2% | +0.0% | 0.28 |
+| 3 | 9,305 → 8,387 | -9.9% | 237.0k → 232.5k | -1.92% | +1.9% | +4.3% | +10.2% | 0.73 |
+| 4 | 9,891 → 10,005 | +1.2% | 231.8k → 237.0k | +2.28% | +1.2% | -1.8% | +0.1% | 0.42 |
+| 5 | 8,858 → 9,834 | +11.0% | 231.2k → 233.4k | +0.95% | -2.0% | -5.4% | -7.2% | 0.70 |
+| median | | +1.2% | | +0.95% | -0.3% | -1.8% | +0.0% | |
+| *32 clients* | | | | | | | | |
+| 1 | 7,936 → 7,846 | -1.1% | 229.0k → 233.9k | +2.12% | +3.5% | +0.6% | +0.6% | 0.48 |
+| 2 | 9,228 → 9,232 | +0.0% | 227.1k → 230.4k | +1.44% | +0.0% | -0.6% | -1.2% | 0.38 |
+| 3 | 9,546 → 9,633 | +0.9% | 226.6k → 232.5k | +2.60% | +3.0% | +0.5% | +1.2% | 0.27 |
+| 4 | 9,364 → 9,318 | -0.5% | 230.1k → 229.6k | -0.19% | -1.5% | +1.1% | +1.4% | 0.29 |
+| 5 | 9,140 → 9,453 | +3.4% | 236.5k → 231.1k | -2.25% | -2.7% | -2.7% | -3.4% | 0.27 |
+| median | | +0.0% | | +1.44% | +0.0% | +0.5% | +0.6% | |
+
+About +1% instructions per transaction (7 of 10 pairs up), no cycles or tps cost. Bisected
+(the four builds in rotation, 32 clients, 4-5 rounds, against `5526bfef4`): `f0813f84d`
+(planning-time PL/pgSQL calls) +1.39% (+0.29, +0.75, +3.22, +2.04), `19c37ce81` +0.65%,
+`7c1493375` +1.53%: inside the ±2% a pair moves, the first commit carries what there is.
+Where: instructions sampled by symbol (LBR, two runs each of `5526bfef4` and `f0813f84d`) differ
+beyond their run-to-run spread only in the store's SST read path (`sst::Block::seek` +0.31% of
+all instructions, `Block::read`, `seek_on`, `SstReader::block_with`, `PointReader::first_raw`,
+`point::file_get`, `find_block`: together about +0.85%), code the commit doesn't touch; nothing
+the commit added (the `Procs` checks at Parse, Bind and Describe, the binder's sub-select
+check) shows on the path. Not the store's state: the data directory holds 4 SSTs (2.6 MiB) at
+the start of every run and 6 at its end for both builds. Not fixed: no change of the commit
+costs work on this path that could be taken back; the difference looks like where the fat
+LTO build's code and data land (`f0813f84d` grows `BoundQuery` and `Binder`), and should be
+checked again on a quiet host with longer runs before anyone acts on it.
+
+**The stack rebased on `7c1493375`** (`ff6ccea30`, `70e7b9906` as built: `pw2`), against it,
+3 pairs each: 8 clients instructions -3.53%, +0.12%, -3.94% (median -3.53%), cycles -2.6%,
+tps -5.8%, -15.5%, -1.2% (the stack's runs had the more foreign load in the first two); 32
+clients instructions -1.95%, -1.77%, +1.51% (median -1.77%), cycles -7.1%, -8.4%, -11.3%,
+tps -4.3%, +15.1%, +19.0%. A last step, waking the commit that fsyncs next before the ones an
+fsync covered (`wake-next-first.patch`), was neutral against it at 8 clients (4 pairs: tps
++0.1%, instructions -0.92%, cycles -1.4%, the quiet pairs +1.6% and -1.3% tps) and at 32
+(3 pairs: tps +2.6%, instructions +0.65%, cycles 0.0%): dropped.
+
+**On storage format v2** (`c25ffbd79` against the stack rebased on it, 3 pairs each):
+
+| pair | tps | Δ tps | instr/txn | Δ instr | Δ cycles | Δ CPU | Δ p50 | other tenants (cores) |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| *8 clients* | | | | | | | | |
+| 1 | 8,985 → 8,442 | -6.0% | 233.4k → 224.9k | -3.64% | -2.1% | +2.7% | +1.6% | 0.68 |
+| 2 | 9,726 → 9,500 | -2.3% | 234.1k → 229.8k | -1.84% | -2.8% | +2.0% | +1.5% | 0.42 |
+| 3 | 9,551 → 9,790 | +2.5% | 233.6k → 229.4k | -1.78% | -4.0% | -2.9% | -3.0% | 0.45 |
+| median | | -2.3% | | -1.84% | -2.8% | +2.0% | +1.5% | |
+| *32 clients* | | | | | | | | |
+| 1 | 8,711 → 7,758 | -10.9% | 232.3k → 225.6k | -2.89% | -4.0% | -0.5% | -1.4% | 0.51 |
+| 2 | 8,638 → 8,692 | +0.6% | 229.3k → 234.0k | +2.03% | -0.9% | +0.1% | -0.4% | 0.37 |
+| 3 | 10,073 → 9,559 | -5.1% | 238.0k → 222.7k | -6.42% | +1.3% | +4.0% | +4.6% | 0.35 |
+| median | | -5.1% | | -2.89% | -0.9% | +0.1% | -0.4% | |
+
+Instructions per transaction stay down; throughput on this quieter lane does not follow (HANDOFF:
+the directed wake's system time on a quiet host is the open question). p99 latency moved with
+the other tenants' load, both ways, in every series (2.2-4.7 ms at 8 clients, 12.5-18.6 ms at
+32): no 50 ms wakeup stalls.
+
+**Three servers, same day** (`tri3`, 2026-11-15 08:33-10:20, three rounds, each server's
+order rotated; medians, the three runs' tps in brackets; "this round" is `1799da4ea`, the
+origin head `2947ce5a4`; each PGO build its own profile from `tools/dist-pgo.sh`; user
+instructions and cycles counted on the server CPUs, every task on them, the same way for all
+three servers, so the 1-client cells take in the other tenants' work):
+
+| clients | server | tps | p50 / p99 ms | CPU µs/txn (user+sys) | user instr / cycles per txn (server CPUs) | peak MiB | foreign cores | runs |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | roll origin head, plain dist | 3,005 (3,016/2,713/3,005) | 0.325 / 0.761 | 315 (152+162) | 599k / 933k | 140 | 0.52 | 3 |
+| 1 | roll origin head, PGO | 3,210 (2,874/3,210/3,318) | 0.288 / 0.684 | 283 (120+163) | 1,153k / 1,347k | 192 | 1.01 | 3 |
+| 1 | roll this round, plain dist | 2,902 (2,372/3,036/2,902) | 0.329 / 0.806 | 314 (151+164) | 1,178k / 1,411k | 186 | 0.77 | 3 |
+| 1 | roll this round, PGO | 3,452 (3,116/3,503/3,452) | 0.263 / 0.675 | 270 (114+156) | 1,207k / 1,394k | 144 | 1.18 | 3 |
+| 1 | PostgreSQL 18.6 | 2,011 (2,225/1,903/2,011) | 0.464 / 1.049 | 316 (159+157) | 911k / 1,157k | 214 | 0.61 | 3 |
+| 1 | pgrust | 2,183 (2,300/2,124/2,183) | 0.438 / 0.899 | 281 (153+128) | 959k / 1,000k | 378 | 0.64 | 3 |
+| 8 | roll origin head, plain dist | 11,382 (10,619/11,382/11,741) | 0.609 / 2.195 | 284 (169+115) | 324k / 688k | 142 | 0.24 | 3 |
+| 8 | roll origin head, PGO | 14,506 (12,363/14,506/14,916) | 0.483 / 1.868 | 228 (120+108) | 267k / 493k | 193 | 0.29 | 3 |
+| 8 | roll this round, plain dist | 12,408 (8,640/12,424/12,408) | 0.585 / 2.067 | 273 (158+115) | 305k / 634k | 193 | 0.22 | 3 |
+| 8 | roll this round, PGO | 14,285 (13,047/14,285/15,776) | 0.488 / 1.995 | 221 (114+107) | 279k / 506k | 148 | 0.39 | 3 |
+| 8 | PostgreSQL 18.6 | 12,631 (12,631/12,533/12,643) | 0.573 / 1.617 | 264 (126+138) | 253k / 517k | 264 | 0.20 | 3 |
+| 8 | pgrust | 14,270 (14,270/14,120/15,302) | 0.497 / 1.553 | 228 (119+109) | 263k / 482k | 457 | 0.16 | 3 |
+| 32 | roll origin head, plain dist | 12,186 (11,959/12,788/12,186) | 2.194 / 10.190 | 301 (179+122) | 300k / 721k | 162 | 0.21 | 3 |
+| 32 | roll origin head, PGO | 14,614 (11,723/14,614/15,031) | 1.804 / 8.741 | 253 (139+113) | 254k / 540k | 196 | 0.26 | 3 |
+| 32 | roll this round, plain dist | 12,417 (10,872/12,417/12,897) | 2.121 / 10.564 | 297 (178+119) | 303k / 697k | 207 | 0.26 | 3 |
+| 32 | roll this round, PGO | 14,710 (12,954/14,710/15,888) | 1.774 / 8.927 | 247 (136+111) | 262k / 528k | 171 | 0.27 | 3 |
+| 32 | PostgreSQL 18.6 | 13,482 (12,332/13,482/14,055) | 2.222 / 6.506 | 286 (146+139) | 242k / 559k | 325 | 0.18 | 3 |
+| 32 | pgrust | 16,278 (15,987/16,278/17,931) | 1.834 / 5.174 | 236 (134+102) | 251k / 515k | 538 | 0.13 | 3 |
+
+1 clients: pw ÷ pg 1.44x, pw ÷ pgrust 1.33x, pw ÷ base 0.97x, pgo-pw ÷ pg 1.72x, pgo-pw ÷ pgrust 1.58x, pgo-pw ÷ pgo 1.08x
+8 clients: pw ÷ pg 0.98x, pw ÷ pgrust 0.87x, pw ÷ base 1.09x, pgo-pw ÷ pg 1.13x, pgo-pw ÷ pgrust 1.00x, pgo-pw ÷ pgo 0.98x
+32 clients: pw ÷ pg 0.92x, pw ÷ pgrust 0.76x, pw ÷ base 1.02x, pgo-pw ÷ pg 1.09x, pgo-pw ÷ pgrust 0.90x, pgo-pw ÷ pgo 1.01x
+
+fdatasync per commit (a counting run each, the same day): 8 clients roll 0.69-0.75 (every
+build), PostgreSQL 0.73, pgrust 0.71; 32 clients roll 0.52-0.57, PostgreSQL 0.26, pgrust
+0.25; context switches per transaction at 32 clients roll 9.3-10.6, PostgreSQL 6.9, pgrust
+6.8. All three fdatasync the WAL for every commit (synchronous_commit on, group commit
+where the server does it by default); at 32 clients PostgreSQL and pgrust group about four
+commits into a flush, roll two.
+
+What limits each number: at 8 and 32 clients all three servers are CPU-bound on the lane's 4
+CPUs (3.2-3.5 cores busy; the rest is the fsync wait); at 1 client the fsync of each commit
+(one commit per flush) and the client's round trips. Roll at 32 clients also pays for twice
+the fsyncs per commit (kernel time and context switches) and for 32 threads on 4 CPUs (the
+dropped nextval step below showed what an accidental throttle saves there).
+
+Dropped (patches in `~/.cache/a235/patches/`):
+
+| step | clients | Δ tps | Δ instr | Δ cycles | Δ CPU | pairs |
+|---|---:|---:|---:|---:|---:|---:|
+| nextval logged ahead without waiting for its fsync | 8 | +10.7% (every pair up) | +1.1% | -1.8% (every pair) | -3.9% | 4 |
+| | 32 | -6.1%, -8.8% | -2.6%, +2.3% | +1.3%, +4.2% | +5.4%, +6.0% | 2 (more flagged) |
+| the stack with it, against the origin head | 8 | +17.6% | -1.24% | -6.9% | -8.0% | 3 |
+| | 32 | -13.1%, -5.8% | -1.9%, -2.0% | +2.8%, -3.0% | +11.6%, +7.7% | 2 |
+| the memtable's skiplist under one epoch pin | 8 | +3.4% | -1.19% | -1.3% (every pair) | -4.7% | 3 |
+| | 32 | -1.9% | about 0 (-1.7, +2.6, -1.7, +1.3) | +0.6% | +2.3% | 4 |
+
 ## Build flags (2026-11-15, agent 236)
 
 HANDOFF "Build flags" has the decision and the recipe. The shipped builds now pad branches for
