@@ -32,8 +32,9 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   each one branches; search joins when it lands). A branch of a 100 GB project starts in
   seconds and stores only what the preview writes, except where the table below says
   otherwise.
-- **Put the whole preview to sleep, not just the app.** Services stop after `sleep_after`
-  without a request. Postgres computes, Redis, NoSQL, queues and search unload on their own
+- **Put the whole preview to sleep, not just the app.** Services freeze after `sleep_after`
+  without a request (paused, so the next visit is back in tens of milliseconds), and stop
+  for good half an hour later. Postgres computes, Redis, NoSQL, queues and search unload on their own
   after 5 minutes idle. A sleeping preview pays only for bytes. The first request to any of its
   URLs wakes it and waits for it.
 - **Use real data, safely.** Branches come from the resources in the project (production or
@@ -107,10 +108,19 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   doesn't wait for a cold start; they sleep again after `sleep_after` unused. Not a preview
   someone put to sleep, and only on the node that holds its lease. About $0.002 a push here;
   `warm: false` turns it off.
-- **Sleep**: a service with no requests for `sleep_after` (10 minutes by default) stops. A
-  request to any URL of the preview wakes it. The request is held for up to 60 s; after that the
-  visitor gets a "starting" page that refreshes. Data products sleep on their own and wake on
-  connect.
+- **Sleep**: a service with no requests for `sleep_after` (10 minutes by default) is frozen
+  first: its container is paused (`docker pause`), keeping its memory (12–22 MiB for the
+  measured service) and using no CPU, and it reads and costs as asleep. A visit in that window
+  thaws it: 48–72 ms to the first response on this machine, where a cold start is 3.3–3.9 s.
+  After `ROLL_PREVIEWS_WARM_MINUTES` (30; 0 stops at once, as before) it's stopped for good, and
+  a node keeps at most `ROLL_PREVIEWS_WARM_MAX` (32) frozen, stopping the oldest past it. A
+  request that lands just as a service freezes thaws it again at once. A frozen service keeps
+  its dynamic credentials renewed (its process comes back with them). Docker only: Fargate has
+  no pause, so services there stop. Sleep asked for (`roll preview sleep`, the sheet's Sleep)
+  stops at once. Otherwise a request to any URL of the preview wakes it. It's held for up to
+  60 s; after that the visitor gets a "starting" page that refreshes. Data products sleep on
+  their own and wake on connect. `scripts/preview-cost.sh` checks a frozen service thaws (the
+  same container, within 1.5 s).
 - **Reset**: `reset_every` (`0` off, or hours) re-branches every data resource from its parent's
   current state on a schedule. `POST /v1/previews/{id}/reset` does it now, for all resources or
   the ones named.
@@ -1295,6 +1305,8 @@ Ranked by what a person notices first. Done so far:
   button on its environment;
 - alarms on previews' failures in the cloud stack (`preview-converge-failures`,
   `preview-screenshot-failures`: most of a quarter-hour's runs failing, never rolling a deploy back);
+- idle services frozen before they stop, so a visit in the next half hour is back in tens of
+  milliseconds instead of a 3–4 s cold start;
 - search masks on an index whose name has dots (`logs.2024`): split off at the longest index name
   the cluster has, for masking and for the check when set;
 - a tenth review (states, browsers, search masks) and its fixes: a dialog a state's step opens
