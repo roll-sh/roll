@@ -14,7 +14,7 @@ use code_review::commands;
 const WRITERS: [&str; 3] = ["admin", "maintain", "write"];
 
 /// Can this GitHub user write to the linked repository?
-async fn can_write(hub: &Hub, link: &Link, login: &str) -> bool {
+pub(super) async fn can_write(hub: &Hub, link: &Link, login: &str) -> bool {
     match hub.client.collaborator_permission(link.installation_id, &link.owner, &link.repo, login).await {
         Ok(p) => WRITERS.contains(&p.as_str()),
         Err(e) => {
