@@ -70,7 +70,8 @@ impl roll_secrets::github_app::GitHubApps for RollGitHub {
     fn token(&self, api_base: &str, app_id: u64, private_key: &Value, installation: u64, repositories: &[String], permissions: &BTreeMap<String, String>) -> Result<(Value, i64), String> {
         let url = self.url(api_base, &format!("/app/installations/{installation}/access_tokens"))?;
         let config = code_github::AppConfig { app_id, private_key_pem: private_key.expose().to_string(), webhook_secret: String::new(), slug: String::new(), api_base: api_base.into(), web_base: String::new() };
-        let jwt = code_github::AppAuth::new(&config).and_then(|a| a.jwt()).map_err(|e| e.to_string())?;
+        let auth = code_github::AppAuth::new(&config).map_err(|_| "the private key isn't an RSA private key in PEM (the .pem GitHub gave)".to_string())?;
+        let jwt = auth.jwt().map_err(|e| e.to_string())?;
         let mut body = serde_json::Map::new();
         if !repositories.is_empty() {
             body.insert("repositories".into(), json!(repositories));

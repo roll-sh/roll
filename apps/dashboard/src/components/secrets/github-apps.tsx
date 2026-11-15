@@ -88,7 +88,7 @@ export function GitHubApps() {
           </div>
           <label className="sm:col-start-2">
             <span className="mb-1 block text-[11px] font-medium text-subtle">Private key (kept sealed, never shown again)</span>
-            <textarea value={key} onChange={(e) => setKey(e.target.value)} rows={4} placeholder="-----BEGIN RSA PRIVATE KEY-----" spellCheck={false} autoComplete="off" className={`${field} font-mono text-[11px]`} />
+            <textarea value={key} onChange={(e) => setKey(e.target.value)} rows={4} placeholder="-----BEGIN RSA PRIVATE KEY-----" spellCheck={false} autoComplete="off" className={`${field} h-auto resize-y py-1.5 font-mono text-[11px]`} />
           </label>
           <details className="sm:col-start-2">
             <summary className="cursor-pointer text-[11px] text-subtle select-none">GitHub Enterprise Server</summary>
