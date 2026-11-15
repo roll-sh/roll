@@ -3063,27 +3063,22 @@ impl Txn {
         Ok(out)
     }
 
-    /// `get_many_snap` (`resolve`) or `get_many_snap_raw` of strictly ascending `keys`, the
-    /// rows found pushed into `out` in their order: from the store by reference, a sorted
-    /// batch of reads (`Store::get_sorted_into`), when none of the keys is one of this
-    /// transaction's writes; else as `get_many_snap_with` reads them, owned.
-    pub fn get_sorted_snap_into(&self, keys: &[Vec<u8>], s: &Snap, resolve: bool, out: &mut crate::storage::batch::RowBatch) -> Result<()> {
+    /// `get_many_snap` (`resolve`) or `get_many_snap_raw` of strictly ascending `keys`, each
+    /// row in its key's place: from the store by its sorted multi-get (`Store::get_sorted`)
+    /// when none of the keys is one of this transaction's writes; else as
+    /// `get_many_snap_with` reads them.
+    pub fn get_sorted_snap(&self, keys: &[Vec<u8>], s: &Snap, resolve: bool) -> Result<Vec<Option<Bytes>>> {
         debug_assert!(keys.windows(2).all(|w| w[0] < w[1]), "keys strictly ascending");
         self.catch_up(s);
         let own = {
             let st = s.st.borrow();
             keys.iter().map(|k| self.snap_get(k, &st)).find_map(|r| r.transpose()).transpose()?.is_some()
         };
-        if !own {
-            let ts = s.st.borrow().ts;
-            return self.db.store.get_sorted_into(keys, ts, resolve, out);
+        if own {
+            return self.get_many_snap_with(keys, s, resolve);
         }
-        for (k, v) in keys.iter().zip(self.get_many_snap_with(keys, s, resolve)?) {
-            if let Some(v) = v {
-                out.push(k, v);
-            }
-        }
-        Ok(())
+        let ts = s.st.borrow().ts;
+        self.db.store.get_sorted(keys, ts, resolve)
     }
 
     /// Whether this transaction holds heavyweight lock `key` (in any mode).

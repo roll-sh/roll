@@ -2803,8 +2803,7 @@ pub(super) fn fetch_rows(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Vec<Option<b
 }
 
 /// `get_many_snap` (`resolve`) or `get_many_snap_raw` of `keys`: ascending ones as a sorted
-/// batch of reads (`Txn::get_sorted_snap_into`), the store sought forward from key to key
-/// instead of a lookup each.
+/// batch of reads (`Txn::get_sorted_snap`, the store's multi-get) instead of a lookup each.
 fn get_sorted(txn: &crate::txn::Txn, keys: &[Vec<u8>], s: &crate::txn::Snap, resolve: bool) -> Result<Vec<Option<bytes::Bytes>>> {
     if keys.len() < 2 || !keys.windows(2).all(|w| w[0] < w[1]) {
         return match resolve {
@@ -2812,15 +2811,7 @@ fn get_sorted(txn: &crate::txn::Txn, keys: &[Vec<u8>], s: &crate::txn::Snap, res
             false => txn.get_many_snap_raw(keys, s),
         };
     }
-    let mut b = crate::storage::batch::RowBatch::default();
-    txn.get_sorted_snap_into(keys, s, resolve, &mut b)?;
-    Ok(keys
-        .iter()
-        .map(|k| match b.peek() {
-            Some((bk, _)) if bk == k.as_slice() => b.take().map(|r| r.1),
-            _ => None,
-        })
-        .collect())
+    txn.get_sorted_snap(keys, s, resolve)
 }
 
 /// `ScanNode::erow` of an entry without a visible row.
