@@ -28,10 +28,10 @@ pub struct Used {
 const MAX_IDS: usize = 20;
 
 /// A resource as the audit log names it, as a rule selects it (search's `cl_1/logs-a` is cluster
-/// `cl_1`, index `logs-a`).
+/// `cl_1`, index `logs-a`; secrets' `prj_1/payments`, encryption key `payments`).
 fn selector(product: &str, resource: &str) -> Selector {
     match resource.split_once('/') {
-        Some((id, index)) if product == "search" => Selector::Id { id: id.into(), index: Some(index.into()) },
+        Some((id, index)) if roll_auth::scope::sub_resources(product).is_some() => Selector::Id { id: id.into(), index: Some(index.into()) },
         _ => Selector::id(resource),
     }
 }

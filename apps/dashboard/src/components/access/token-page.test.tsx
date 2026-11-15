@@ -31,6 +31,15 @@ vi.mock("@/lib/access-api", async (orig) => ({
     audit: async () => [event],
     approvals: async () => [],
     networks: async () => [{ network: "203.0.113.0/24", first_at: 0, last_at: Date.now() }],
+    agentSees: async () => ({
+      live: true,
+      context_tokens: 900,
+      prompts: [],
+      tools: [
+        { name: "postgres_query", title: "Query", product: "postgres", read_only: true, destructive: false },
+        { name: "postgres_execute", title: "Execute", product: "postgres", read_only: false, destructive: true },
+      ],
+    }),
     revoke: (id: string) => revoke(id),
     tighten: async () => ({ since: 0, days: 30, used: [{ product: "postgres", action: "read", resource: "prj_billing", count: 12, last_at: 0 }], rules: narrowed, from: grant.rules, narrower: true }),
     applyTighten: (id: string, from: unknown) => update(id, from),
@@ -52,6 +61,8 @@ describe("the token page", () => {
     expect(await screen.findByText(/Postgres · read · billing/)).toBeTruthy();
     expect(await screen.findByText(/Postgres · write · billing/)).toBeTruthy();
     expect(await screen.findByText(/DELETE \/v1\/projects\/\{id\} · prj_logs/)).toBeTruthy();
+    // What an agent with it is offered over MCP.
+    expect(await screen.findByText(/offered 2 tools \(1 that change things\)/)).toBeTruthy();
     expect(screen.getByRole("link", { name: "All of its requests" }).getAttribute("href")).toBe("/dashboard/access/audit?grant=tok_1");
     await userEvent.click(screen.getByRole("button", { name: "Take back" }));
     await waitFor(() => expect(forget).toHaveBeenCalledWith("tok_1", "apr_9"));
