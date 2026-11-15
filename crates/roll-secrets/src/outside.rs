@@ -180,6 +180,9 @@ fn aad(project: &str, id: &str) -> String {
 }
 
 /// A rotation's new admin URL, stored before the server's password changes.
+/// How long a rotation's claim on url_next keeps others off it: past its server call's timeouts.
+const ROTATING_MS: i64 = 5 * 60_000;
+
 fn next_aad(project: &str, id: &str) -> String {
     format!("roll-secrets:outside_database:{project}:{id}:url_next")
 }
@@ -525,26 +528,11 @@ impl Secrets {
         let url = match ch.url.as_deref().map(str::trim) {
             Some(u) => {
                 let host = check_url(u)?;
-                // Its roles' passwords and its leases' logins live on this server: moving to another
-                // would leave them behind, never dropped.
                 let scheme = |x: &str| x.split("://").next().unwrap_or_default().trim_end_matches("ql").to_string();
                 let current: Vec<u8> = self.db.read(|c| c.query_row("SELECT url FROM outside_dbs WHERE id = ?", [id], |r| r.get(0)))?;
                 let moved = host != d.host || scheme(u) != scheme(dek.open(&aad(project, id), &current)?.expose());
-                if moved {
-                    let like = (format!("%\"kind\":\"{KIND}\"%"), format!("%\"ref\":\"{id}\"%"));
-                    let used: i64 = self.db.read(|c| {
-                        c.query_row(
-                            "SELECT (SELECT COUNT(*) FROM secrets WHERE project_id = ? AND link LIKE ? AND link LIKE ?) + (SELECT COUNT(*) FROM leases WHERE project_id = ? AND revoked_at IS NULL AND link LIKE ? AND link LIKE ?)",
-                            params![project, like.0, like.1, project, like.0, like.1],
-                            |r| r.get(0),
-                        )
-                    })?;
-                    if used > 0 {
-                        return Err(Error::Conflict("in_use", format!("{} moves to another server only once no key links to it and no lease is live: its logins are on {}", d.name, d.host)));
-                    }
-                }
                 outside.check(u, ca.as_deref(), &d.roles, d.group.as_deref()).map_err(|why| Error::BadRequest(format!("roll couldn't use the database: {why}")))?;
-                Some((host, dek.seal(&aad(project, id), &Value::new(u.to_string()))))
+                Some((host, dek.seal(&aad(project, id), &Value::new(u.to_string())), moved))
             }
             None => None,
         };
@@ -563,9 +551,25 @@ impl Secrets {
                 c.execute("UPDATE outside_dbs SET ca = ? WHERE id = ?", params![ca, id])?;
                 changed.push("CA");
             }
-            if let Some((host, sealed)) = &url {
-                // A rotation left half done is superseded by the URL given.
-                c.execute("UPDATE outside_dbs SET url = ?, host = ?, url_next = NULL WHERE id = ?", params![sealed, host, id])?;
+            if let Some((host, sealed, moved)) = &url {
+                // A rotation in flight may still change the server's password: not under it.
+                if c.query_row("SELECT url_next IS NOT NULL FROM outside_dbs WHERE id = ?", [id], |r| r.get::<_, bool>(0))? {
+                    return Err(Error::Conflict("conflict", format!("{} is being rotated: set its URL once that's done", d.name)));
+                }
+                // Its roles' passwords and its leases' logins live on this server: moving to another
+                // would leave them behind, never dropped (checked here, in the write).
+                if *moved {
+                    let like = (format!("%\"kind\":\"{KIND}\"%"), format!("%\"ref\":\"{id}\"%"));
+                    let used: i64 = c.query_row(
+                        "SELECT (SELECT COUNT(*) FROM secrets WHERE project_id = ? AND link LIKE ? AND link LIKE ?) + (SELECT COUNT(*) FROM leases WHERE project_id = ? AND revoked_at IS NULL AND link LIKE ? AND link LIKE ?)",
+                        params![project, like.0, like.1, project, like.0, like.1],
+                        |r| r.get(0),
+                    )?;
+                    if used > 0 {
+                        return Err(Error::Conflict("in_use", format!("{} moves to another server only once no key links to it and no lease is live: its logins are on {}", d.name, d.host)));
+                    }
+                }
+                c.execute("UPDATE outside_dbs SET url = ?, host = ? WHERE id = ?", params![sealed, host, id])?;
                 changed.push("admin URL");
             }
             if !changed.is_empty() {
@@ -584,7 +588,11 @@ impl Secrets {
         let outside = self.outside.clone().ok_or_else(|| Error::BadRequest("databases outside roll aren't on this server".into()))?;
         let dek = self.project(project)?;
         let d = self.outside_database(project, id)?;
-        let (url, next): (Vec<u8>, Option<Vec<u8>>) = self.db.read(|c| c.query_row("SELECT url, url_next FROM outside_dbs WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))))?;
+        let (url, next, next_at): (Vec<u8>, Option<Vec<u8>>, Option<i64>) = self.db.read(|c| c.query_row("SELECT url, url_next, url_next_at FROM outside_dbs WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+        // Another rotation's in flight (its server call may still land): leave it alone.
+        if next.is_some() && next_at.is_some_and(|at| self.db.now_ms().is_ok_and(|now| now - at < ROTATING_MS)) {
+            return Err(Error::Conflict("conflict", format!("{} is being rotated: try again in a few minutes", d.name)));
+        }
         let current = dek.open(&aad(project, id), &url)?;
         let logs_in = |u: &Value| outside.check(u.expose(), d.ca.as_deref(), &d.roles, d.group.as_deref()).is_ok();
         // Every change below is a compare-and-swap on the url_next it read, so two nodes never
@@ -593,20 +601,31 @@ impl Secrets {
             let sealed = dek.seal(&aad(project, id), next);
             let now = self.db.now_ms()?;
             self.db.write(|c| {
-                if c.execute("UPDATE outside_dbs SET url = ?, url_next = NULL WHERE id = ? AND url_next = ?", params![sealed, id, sealed_next])? == 0 {
+                if c.execute("UPDATE outside_dbs SET url = ?, url_next = NULL, url_next_at = NULL WHERE id = ? AND url_next = ?", params![sealed, id, sealed_next])? == 0 {
                     return Ok(false);
                 }
                 audit::record(c, project, caller, "outside_db.rotate_admin", None, None, &[], &format!("{what} database {}'s admin password", d.name), now)?;
                 Ok(true)
             })
         };
-        let drop_next = |sealed_next: &[u8]| self.db.write(|c| c.execute("UPDATE outside_dbs SET url_next = NULL WHERE id = ? AND url_next = ?", params![id, sealed_next]));
+        let drop_next = |sealed_next: &[u8]| self.db.write(|c| c.execute("UPDATE outside_dbs SET url_next = NULL, url_next_at = NULL WHERE id = ? AND url_next = ?", params![id, sealed_next]));
+        // A promote that found url_next changed under it: keep whichever URL logs in.
+        let keep_working = |next: &Value| -> Result<()> {
+            let stored: Vec<u8> = self.db.read(|c| c.query_row("SELECT url FROM outside_dbs WHERE id = ?", [id], |r| r.get(0)))?;
+            if !logs_in(&dek.open(&aad(project, id), &stored)?) && logs_in(next) {
+                let sealed = dek.seal(&aad(project, id), next);
+                self.db.write(|c| c.execute("UPDATE outside_dbs SET url = ? WHERE id = ? AND url = ?", params![sealed, id, stored]))?;
+            }
+            Ok(())
+        };
         // An earlier rotation stopped between the server and the store: the URL that logs in wins,
         // and the interrupted one is dropped only once the stored one is shown to log in.
         if let Some(sealed_next) = next {
             let next = dek.open(&next_aad(project, id), &sealed_next)?;
             if logs_in(&next) {
-                promote(&next, &sealed_next, "finished rotating")?;
+                if !promote(&next, &sealed_next, "finished rotating")? {
+                    keep_working(&next)?;
+                }
                 return self.outside_database(project, id);
             }
             if !logs_in(&current) {
@@ -616,15 +635,23 @@ impl Secrets {
         }
         let pw = password();
         let next = Value::new(with_password(current.expose(), &pw)?);
+        // The rebuilt URL must be the same login at the same place (a query holding `@` could
+        // move it): otherwise the server would take a password roll then can't use.
+        if authority_host(next.expose())? != authority_host(current.expose())? || with_password(next.expose(), "x")? != with_password(current.expose(), "x")? {
+            return Err(Error::BadRequest(format!("{}'s admin URL can't be rotated as it's written: set it with PATCH, the password percent-encoded and no @ after the host", d.name)));
+        }
         let sealed = dek.seal(&next_aad(project, id), &next);
-        let claimed = self.db.write(|c| c.execute("UPDATE outside_dbs SET url_next = ? WHERE id = ? AND url_next IS NULL", params![sealed, id]))?;
+        let now = self.db.now_ms()?;
+        let claimed = self.db.write(|c| c.execute("UPDATE outside_dbs SET url_next = ?, url_next_at = ? WHERE id = ? AND url_next IS NULL", params![sealed, now, id]))?;
         if claimed == 0 {
             return Err(Error::Conflict("conflict", format!("{} is being rotated: try again in a moment", d.name)));
         }
         if let Err(why) = outside.set_own_password(current.expose(), d.ca.as_deref(), &pw) {
             // An error doesn't mean the server kept the old one (a reply lost after the change).
             if logs_in(&next) {
-                promote(&next, &sealed, "rotated")?;
+                if !promote(&next, &sealed, "rotated")? {
+                    keep_working(&next)?;
+                }
                 return self.outside_database(project, id);
             }
             if logs_in(&current) {
@@ -634,7 +661,9 @@ impl Secrets {
             return Err(Error::Link(format!("the server's answer to a new admin password was lost and neither password logs in now: roll keeps both and tries again on the next use ({why})")));
         }
         // The server has it now: keep it, whatever else happens.
-        promote(&next, &sealed, "rotated")?;
+        if !promote(&next, &sealed, "rotated")? {
+            keep_working(&next)?;
+        }
         outside
             .check(next.expose(), d.ca.as_deref(), &d.roles, d.group.as_deref())
             .map_err(|why| Error::Link(format!("the admin password was rotated and kept, but logging in with it failed: {why}")))?;

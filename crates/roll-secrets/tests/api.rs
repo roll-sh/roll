@@ -169,7 +169,7 @@ impl roll_secrets::clouds::CloudTokens for FakeClouds {
 /// A Postgres server outside roll: each role's current password and, for a dynamic login, its
 /// group and `VALID UNTIL`; the flag refuses every change.
 #[derive(Default)]
-struct Outside(std::sync::Mutex<BTreeMap<String, String>>, std::sync::atomic::AtomicBool, std::sync::Mutex<BTreeMap<String, (String, i64)>>, std::sync::atomic::AtomicBool);
+struct Outside(std::sync::Mutex<BTreeMap<String, String>>, std::sync::atomic::AtomicBool, std::sync::Mutex<BTreeMap<String, (String, i64)>>, std::sync::atomic::AtomicBool, std::sync::atomic::AtomicBool);
 
 impl Outside {
     /// The admin's password as the server has it.
@@ -180,6 +180,10 @@ impl Outside {
 
 impl roll_secrets::outside::OutsideDb for Outside {
     fn check(&self, url: &str, _: Option<&str>, roles: &[String], _: Option<&str>) -> Result<(), String> {
+        // With the flag set, the server can't be reached at all.
+        if self.4.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("connection timed out".into());
+        }
         if !url.contains(&format!("admin:{}@", self.admin())) {
             return Err("password authentication failed".into());
         }
@@ -1411,6 +1415,19 @@ async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
     api.outside.3.store(true, std::sync::atomic::Ordering::Relaxed);
     api.ok(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await;
     api.outside.3.store(false, std::sync::atomic::Ordering::Relaxed);
+    api.ok(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await;
+    // Lost reply and an unreachable server: roll keeps both URLs. Another rotation meanwhile is
+    // refused (the first may still land), and the next use that finds only the new one logging in
+    // finishes the rotation.
+    let set = |flag: &std::sync::atomic::AtomicBool, on: bool| flag.store(on, std::sync::atomic::Ordering::Relaxed);
+    set(&api.outside.3, true);
+    set(&api.outside.4, true);
+    assert!(!api.call(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await.0.is_success());
+    set(&api.outside.3, false);
+    set(&api.outside.4, false);
+    assert_eq!(api.call(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await.0, StatusCode::CONFLICT, "another rotation is in flight");
+    let lease = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;
+    assert!(password(lease["values"]["TMP_USER"].as_str().unwrap()).is_some(), "issuing finished the interrupted rotation");
     api.ok(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await;
     // Its logins live on this server: it moves to another only once nothing links to it.
     let (s, e) = api.call(Method::PATCH, &format!("/outside-databases/{id}"), Some(json!({ "url": "postgres://admin:x@other.example/app" }))).await;
