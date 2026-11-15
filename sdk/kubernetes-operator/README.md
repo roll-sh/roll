@@ -25,8 +25,11 @@ spec:
   Operator's `rolloutRestartTargets` do: `spec.rolloutRestart: [{kind: Deployment, name: web}]`
   (Deployments, StatefulSets and DaemonSets of the RollSecret's namespace) get a new
   `roll.sh/restartedAt` on their pod template, as `kubectl rollout restart` does: only when the
-  Secret's data changed, never when it's first made. Whoever may create a RollSecret in a namespace
-  can restart those workloads through it, as the operator patches them.
+  Secret's data changed, never when it's first made. A workload opts in, as Reloader's do: its
+  `roll.sh/restart-on` annotation names the RollSecrets (comma-separated) that may restart it, so
+  creating a RollSecret alone restarts nothing. Every target is tried; one that couldn't be
+  restarted (gone, not opted in) is named in `status.pendingRestarts` and `status.error`, and tried
+  again on each pass until it is.
 - **Each namespace logs in as itself.** Outside the operator's own namespaces
   (`roll.namespaces`, default the release's), a RollSecret names a service account of its own
   namespace and an identity for it:

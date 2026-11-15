@@ -31,10 +31,11 @@ rules:
   - apiGroups: [""]
     resources: [serviceaccounts/token]
     verbs: [create]
-  # spec.rolloutRestart: what reads a Secret restarts when it changes.
+  # spec.rolloutRestart: what reads a Secret restarts when it changes (a workload whose
+  # roll.sh/restart-on annotation names the RollSecret: the operator reads it first).
   - apiGroups: [apps]
     resources: [deployments, statefulsets, daemonsets]
-    verbs: [patch]
+    verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -22,6 +22,8 @@ type fakeKube struct {
 	status  map[string]rollStatus // ns/name
 	// Workloads restarted (spec.rolloutRestart): their paths.
 	restarted []string
+	// Workloads by path, with their annotations (roll.sh/restart-on).
+	workloads map[string]map[string]string
 }
 
 func (f *fakeKube) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +50,13 @@ func (f *fakeKube) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(p, "/") // /apis/roll.sh/v1/namespaces/{ns}/rollsecrets/{name}/status
 		f.status[parts[5]+"/"+parts[7]] = b.Status
 		write(200, nil)
+	case strings.HasPrefix(p, "/apis/apps/v1/namespaces/") && r.Method == http.MethodGet:
+		ann, ok := f.workloads[p]
+		if !ok {
+			write(404, map[string]string{"message": "not found"})
+			return
+		}
+		write(200, map[string]any{"metadata": map[string]any{"annotations": ann}})
 	case strings.HasPrefix(p, "/apis/apps/v1/namespaces/") && r.Method == http.MethodPatch:
 		var b map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&b)
@@ -137,14 +146,18 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestTheOperatorKeepsItsSecretsInStepAndTouchesNoOtherSecret(t *testing.T) {
-	kubeAPI := &fakeKube{secrets: map[string]*secretObj{}, status: map[string]rollStatus{}}
+	kubeAPI := &fakeKube{secrets: map[string]*secretObj{}, status: map[string]rollStatus{}, workloads: map[string]map[string]string{
+		"/apis/apps/v1/namespaces/apps/deployments/web":   {"roll.sh/restart-on": "other, web"},
+		"/apis/apps/v1/namespaces/apps/deployments/admin": {}, // not opted in
+	}}
 	kubeAPI.secrets["apps/taken"] = &secretObj{Metadata: meta{Name: "taken", Namespace: "apps"}, Data: map[string][]byte{"MINE": []byte("keep")}}
 	for _, n := range []struct{ name, secret string }{{"web", ""}, {"clash", "taken"}} {
 		var rs rollSecret
 		rs.Metadata = meta{Name: n.name, Namespace: "apps", UID: "uid-" + n.name, Generation: 1}
 		rs.Spec.Environment, rs.Spec.SecretName = "production", n.secret
 		if n.name == "web" {
-			rs.Spec.RolloutRestart = []restartTarget{{Kind: "Deployment", Name: "web"}}
+			// A workload that's gone, one that didn't opt in, and one that did.
+			rs.Spec.RolloutRestart = []restartTarget{{Kind: "Deployment", Name: "gone"}, {Kind: "Deployment", Name: "admin"}, {Kind: "Deployment", Name: "web"}}
 		}
 		kubeAPI.rs = append(kubeAPI.rs, rs)
 	}
@@ -189,15 +202,32 @@ func TestTheOperatorKeepsItsSecretsInStepAndTouchesNoOtherSecret(t *testing.T) {
 	if got := string(kubeAPI.secrets["apps/web"].Data["DB_URL"]); got != "postgres://db/two" || rolld.logins != 2 {
 		t.Fatalf("after the change: %q, %d logins", got, rolld.logins)
 	}
-	// What reads it restarted on the change, and not when the Secret was first made.
+	// What reads it and opted in restarted on the change (past one that's gone), and not when the
+	// Secret was first made; the rest wait in the status.
 	if len(kubeAPI.restarted) != 1 || kubeAPI.restarted[0] != "/apis/apps/v1/namespaces/apps/deployments/web" {
 		t.Fatalf("restarted: %v", kubeAPI.restarted)
+	}
+	if st := kubeAPI.status["apps/web"]; st.PendingRestarts != "Deployment/gone,Deployment/admin" || !strings.Contains(st.Error, "doesn't name RollSecret web") {
+		t.Fatalf("pending: %+v", st)
+	}
+	// One comes back: the next pass restarts it, though the data hasn't changed since.
+	kubeAPI.mu.Lock()
+	kubeAPI.workloads["/apis/apps/v1/namespaces/apps/deployments/gone"] = map[string]string{"roll.sh/restart-on": "web"}
+	kubeAPI.mu.Unlock()
+	if err := o.pass(ctx); err != nil || len(kubeAPI.restarted) != 2 || kubeAPI.status["apps/web"].PendingRestarts != "Deployment/admin" {
+		t.Fatalf("retried: %v %+v (%v)", kubeAPI.restarted, kubeAPI.status["apps/web"], err)
+	}
+	kubeAPI.mu.Lock()
+	kubeAPI.workloads["/apis/apps/v1/namespaces/apps/deployments/admin"] = map[string]string{"roll.sh/restart-on": "web"}
+	kubeAPI.mu.Unlock()
+	if err := o.pass(ctx); err != nil || len(kubeAPI.restarted) != 3 || kubeAPI.status["apps/web"].PendingRestarts != "" {
+		t.Fatalf("all done: %v %+v (%v)", kubeAPI.restarted, kubeAPI.status["apps/web"], err)
 	}
 	// The digest moving with the same values (a key rewritten as it was) restarts nothing.
 	rolld.mu.Lock()
 	rolld.digest = "d3"
 	rolld.mu.Unlock()
-	if err := o.pass(ctx); err != nil || len(kubeAPI.restarted) != 1 {
+	if err := o.pass(ctx); err != nil || len(kubeAPI.restarted) != 3 {
 		t.Fatalf("restarted on unchanged data: %v (%v)", kubeAPI.restarted, err)
 	}
 }

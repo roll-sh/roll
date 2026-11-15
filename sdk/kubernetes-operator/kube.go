@@ -151,6 +151,7 @@ type meta struct {
 	ResourceVersion string            `json:"resourceVersion,omitempty"`
 	Generation      int64             `json:"generation,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
+	Annotations     map[string]string `json:"annotations,omitempty"`
 	OwnerReferences []ownerRef        `json:"ownerReferences,omitempty"`
 }
 
@@ -198,6 +199,9 @@ type rollStatus struct {
 	Keys               int    `json:"keys"`
 	Error              string `json:"error,omitempty"`
 	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
+	// PendingRestarts are the rolloutRestart targets a change hasn't restarted yet
+	// ("Deployment/web,StatefulSet/db"): retried on every pass until they are.
+	PendingRestarts string `json:"pendingRestarts,omitempty"`
 }
 
 type secretObj struct {

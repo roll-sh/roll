@@ -38,7 +38,7 @@ spec:
                 serviceAccountName: { type: string, description: "A service account of this namespace to log in as (the identity's subject is system:serviceaccount:<namespace>:<name>). Required outside the operator's own namespaces." }
                 rolloutRestart:
                   type: array
-                  description: "Deployments, StatefulSets and DaemonSets of this namespace restarted when the Secret changes."
+                  description: "Deployments, StatefulSets and DaemonSets of this namespace restarted when the Secret changes; each opts in with the annotation roll.sh/restart-on naming this RollSecret."
                   items:
                     type: object
                     required: [kind, name]
@@ -53,3 +53,4 @@ spec:
                 keys: { type: integer }
                 error: { type: string }
                 observedGeneration: { type: integer }
+                pendingRestarts: { type: string }
