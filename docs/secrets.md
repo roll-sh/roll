@@ -2008,6 +2008,14 @@ code owner (`ada/…`).
   could hand a stranger's previews their variables (say, a `DATABASE_URL` pointing at their own
   server), or watch a stranger's landings for their values.
 
+### Read quotas
+
+A principal (a token, an identity's login, a person) reads values at most 600 times a minute on a
+node, as Vault's rate-limit quotas: past that, `…/values`, `…/resolve` and a key's reveal answer
+429 (`rate_limited`) for the rest of the minute, before anything is decrypted, issued or audited.
+roll's own runtimes (apps, previews, checks, syncs) and the operator aren't held to it. A service
+that reads in a loop should cache (the clients' `cacheTtl`) or follow the digest (`watch`).
+
 ### Reach
 
 `GET …/environments/{env}/reach?path=&key=` (`roll secrets reach [KEY]`, a key's menu "Who can

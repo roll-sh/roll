@@ -769,6 +769,12 @@ async fn scoped_tokens_reach_only_their_environments_paths_and_actions() {
     }
     let (_, who) = api.req(Method::GET, "/v1/secrets/whoami", None, Some(token)).await;
     assert_eq!(who["project"].as_str(), Some(api.project.as_str()));
+    // A token in a loop is told to slow down before it decrypts and audits without end.
+    let mut statuses = std::collections::BTreeSet::new();
+    for _ in 0..601 {
+        statuses.insert(api.req(Method::GET, "/environments/production/values?path=/api", None, Some(token)).await.0);
+    }
+    assert!(statuses.contains(&StatusCode::TOO_MANY_REQUESTS), "{statuses:?}");
     // Revocation takes effect on the next request.
     api.ok(Method::DELETE, &format!("/tokens/{}", t["id"].as_str().unwrap()), None).await;
     let (s, _) = api.req(Method::GET, "/environments/production/values?path=/api", None, Some(token)).await;
