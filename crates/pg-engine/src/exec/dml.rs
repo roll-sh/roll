@@ -3946,21 +3946,18 @@ impl StoredInsert {
         let Some(len) = crate::storage::row::stored_tuple_len(data, &self.types, &self.none) else {
             return Ok(false);
         };
-        let Some(tid) = super::sizing::inserted_stored(t, len, ctx) else {
+        if !super::sizing::inserted_stored(t, len, ctx) {
             return Ok(false);
-        };
+        }
         let rowid = ctx.sess.db.nextval_by_one(t.oid, || crate::session::ddl::rowid_sequence(t))?;
         let dkey = data_key(t, &[], Some(rowid));
+        super::sizing::stored_inserted(t, len, &dkey, ctx);
         plain_counts.set(plain_counts.get() + 1);
         let mut txn = ctx.txn.borrow_mut();
         let xid = txn.cur_xid();
-        let mut row = Vec::with_capacity(data.len() + 16);
-        row.push(if tid.is_some() { crate::storage::row::ROW_HEADER_TID } else { crate::storage::row::ROW_HEADER });
+        let mut row = Vec::with_capacity(data.len() + 10);
+        row.push(crate::storage::row::ROW_HEADER);
         crate::storage::sst::put_varint(&mut row, xid);
-        if let Some((block, off)) = tid {
-            crate::storage::sst::put_varint(&mut row, block as u64);
-            crate::storage::sst::put_varint(&mut row, off as u64);
-        }
         row.extend_from_slice(data);
         txn.put_fresh(dkey, row)?;
         STORED_INSERTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

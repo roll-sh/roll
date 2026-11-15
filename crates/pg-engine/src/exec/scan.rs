@@ -3306,7 +3306,13 @@ impl ScanNode {
             // update's new versions at the end): a plain scan then puts them in heap order
             // (`next_heap_ordered`).
             if !super::sizing::heap_modelled(&self.plan.table, ctx) {
-                let plain = self.keys.is_none() && self.only.is_none() && self.sample.is_none() && self.plan.index.is_none() && self.ranges.len() <= 1;
+                // (Not an UPDATE's or DELETE's scan: their rows' order isn't seen.)
+                let plain = self.keys.is_none()
+                    && self.only.is_none()
+                    && self.sample.is_none()
+                    && self.plan.index.is_none()
+                    && self.ranges.len() <= 1
+                    && !self.plan.with_key;
                 let stamped = matches!(super::sizing::estimated_order(&self.plan.table, ctx), Some((super::sizing::EstOrder::Stamped, _)));
                 if plain && stamped && ctx.snapshot().is_some() {
                     self.in_order = Some(false);
@@ -4015,14 +4021,22 @@ impl ScanNode {
             match self.hstream.as_deref_mut().expect("a stream") {
                 Stream::Tids(tids) => {
                     let mut tids = std::mem::take(tids);
-                    // (A table too big to model: what the pass finds is kept for its next
-                    // scans, unless it is written meanwhile.)
+                    // (A table too big to model: its rows ranked by the estimate's places,
+                    // kept for the merge; what the pass finds is kept for its next scans,
+                    // unless it is written meanwhile.)
                     let est = super::sizing::estimated_order(&self.plan.table, ctx).map(|e| e.1);
+                    let mut last = None;
                     // (The batch's rows read where they are.)
                     while self.next_plain(ctx)? {
                         ctx.check()?;
                         loop {
-                            let Some(t) = self.rb.peek().and_then(|(_, v)| tid(v)) else {
+                            let t = match est {
+                                Some(_) => self.rb.peek().and_then(|(k, v)| {
+                                    super::sizing::estimated_rank(&self.plan.table, k, v, &mut last, &ctx.sess.db)
+                                }),
+                                None => self.rb.peek().and_then(|(_, v)| tid(v)),
+                            };
+                            let Some(t) = t else {
                                 // (A row without its TID: all of them read and sorted; a
                                 // table too big to model's as stored, having no other place.)
                                 self.hstream = None;
@@ -4042,7 +4056,7 @@ impl ScanNode {
                         }
                     }
                     let (bits, early_bits) = displaced(&tids);
-                    drop(tids);
+                    let ranks = if est.is_some() { tids } else { Vec::new() };
                     self.restart();
                     if bits.iter().all(|w| *w == 0) {
                         // (In heap order after all.)
@@ -4063,7 +4077,8 @@ impl ScanNode {
                                 at += 1;
                                 if is_set(&early_bits, at - 1) {
                                     let (k, v) = self.rb.take().expect("a row");
-                                    early.push((tid(&v).unwrap_or(u64::MAX), k, v));
+                                    let t = ranks.get(at - 1).copied().or_else(|| tid(&v));
+                                    early.push((t.unwrap_or(u64::MAX), k, v));
                                     if self.rb.remaining() == 0 {
                                         self.held = false;
                                         break;
@@ -4089,9 +4104,10 @@ impl ScanNode {
                         ready: None,
                         early: early.into(),
                         late: Default::default(),
+                        ranks,
                     }));
                 }
-                Stream::Merge { bits, early_bits, pos, ready, early, late } => {
+                Stream::Merge { bits, early_bits, pos, ready, early, late, ranks } => {
                     // A held row of a lesser TID than the run's next row first, else that row;
                     // with the run done, the held rows left, then the end.
                     if ready.is_some() || *pos == usize::MAX {
@@ -4116,24 +4132,27 @@ impl ScanNode {
                     }
                     // The run's next row; the late displaced rows before it held.
                     let (bits, early_bits, mut at) = (std::mem::take(bits), std::mem::take(early_bits), *pos);
+                    let ranks = std::mem::take(ranks);
                     let (mut next, mut met) = (None, Vec::new());
                     while self.next_plain(ctx)? {
                         at += 1;
                         if !is_set(&bits, at - 1) {
-                            next = Some(self.rb.peek().and_then(|(_, v)| tid(v)).unwrap_or(u64::MAX));
+                            let t = ranks.get(at - 1).copied().or_else(|| self.rb.peek().and_then(|(_, v)| tid(v)));
+                            next = Some(t.unwrap_or(u64::MAX));
                             self.held = false;
                             break;
                         }
                         if !is_set(&early_bits, at - 1) {
                             let (k, v) = self.rb.peek().expect("a row");
-                            met.push((tid(v).unwrap_or(u64::MAX), k.to_vec(), bytes::Bytes::copy_from_slice(v)));
+                            let t = ranks.get(at - 1).copied().or_else(|| tid(v));
+                            met.push((t.unwrap_or(u64::MAX), k.to_vec(), bytes::Bytes::copy_from_slice(v)));
                         }
                     }
-                    let Stream::Merge { bits: b, early_bits: eb, pos, ready, late, .. } = self.hstream.as_deref_mut().expect("a stream") else {
+                    let Stream::Merge { bits: b, early_bits: eb, pos, ready, late, ranks: rk, .. } = self.hstream.as_deref_mut().expect("a stream") else {
                         unreachable!()
                     };
                     late.extend(met.into_iter().map(std::cmp::Reverse));
-                    (*b, *eb, *ready) = (bits, early_bits, next);
+                    (*b, *eb, *ready, *rk) = (bits, early_bits, next, ranks);
                     *pos = if next.is_some() { at } else { usize::MAX };
                 }
             }
