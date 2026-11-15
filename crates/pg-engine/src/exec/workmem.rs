@@ -101,6 +101,12 @@ fn data_len<'a>(vals: impl Iterator<Item = (&'a Value, &'a DataType)>, ctx: &sup
             (Value::Int2(_), _) => align(off, 2) - off + 2,
             (Value::Bool(_) | Value::Char(_), _) => 1,
             (Value::Text(s), DataType::Text | DataType::Varchar(_)) => varlena(off, s.len() as i64),
+            // (An ASCII char(n)'s characters are its bytes: padded to n, as `varlena_payload`
+            // counts it, without counting them again; a hash join sizes every inner row.)
+            (Value::Text(s), DataType::Bpchar(m)) if s.is_ascii() => {
+                let n = s.len() as i64;
+                varlena(off, if *m > 4 { n.max(*m as i64 - 4) } else { n })
+            }
             (Value::Bytea(b), _) => varlena(off, b.len() as i64),
             _ => crate::catalog::relsize::datum_bytes(off as usize, v, ty, &text) as i64,
         };
