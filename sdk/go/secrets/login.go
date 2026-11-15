@@ -48,7 +48,9 @@ func (l *relogin) token(ctx context.Context, c *Client, stale string) (string, e
 	if margin < time.Minute {
 		margin = time.Minute
 	}
-	if (stale != "" && stale == c.Token) || time.Now().After(l.expires.Add(-margin)) {
+	// An answer without an expiry is renewed only when the server refuses it.
+	ending := !l.expires.IsZero() && time.Now().After(l.expires.Add(-margin))
+	if (stale != "" && stale == c.Token) || ending {
 		if err := l.renewLocked(ctx, c); err != nil {
 			return "", err
 		}
@@ -79,7 +81,10 @@ func (l *relogin) renewLocked(ctx context.Context, c *Client) error {
 	if a.Token == "" {
 		return errors.New("the login answered no token")
 	}
-	c.Token, l.issued, l.expires = a.Token, time.Now(), time.UnixMilli(a.ExpiresAt)
+	c.Token, l.issued, l.expires = a.Token, time.Now(), time.Time{}
+	if a.ExpiresAt > 0 {
+		l.expires = time.UnixMilli(a.ExpiresAt)
+	}
 	if c.Project == "" {
 		c.Project = a.Project
 	}
