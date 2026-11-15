@@ -3200,7 +3200,7 @@ async fn reference_variables_are_filled_at_the_deploy() {
     assert!(log.to_string().contains("SELF: MISSING"), "{log}");
     // A token that may write apps but not reveal db's values can't reference them.
     let scope: roll_auth::scope::Scope = serde_json::from_value(json!([{"product": "apps", "resources": "*", "actions": {"write": "allow", "read": "allow"}}])).unwrap();
-    let grant = roll_auth::Grant { id: "tok_t".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(scope), ask_otherwise: false };
+    let grant = roll_auth::Grant { id: "tok_t".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(scope), user: None, ask_otherwise: false };
     let mut req = Request::builder()
         .method("PATCH")
         .uri(format!("/v1/apps/services/{id}/environments/production/variables"))

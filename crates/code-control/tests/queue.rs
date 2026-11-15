@@ -511,6 +511,56 @@ async fn blockers_keep_changes_out_of_the_queue() {
     a.ok("POST", &format!("/v1/code/changes/{}/checks", id(&c)), Some(json!({ "name": "ci", "status": "success" }))).await;
     let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
     assert_eq!(c["blockers"], json!([]));
+    // Its preview's project requires a visual review: pages that differ from main wait for
+    // someone to accept them, then it's free.
+    let preview = |state: &str, by: Option<&str>| code_control::model::Preview {
+        state: code_control::model::PreviewState::Running,
+        url: None,
+        postgres: None,
+        redis: None,
+        error: None,
+        created_at: 1,
+        environment: Some(code_control::model::PreviewEnvironment {
+            id: "pv_v".into(),
+            slug: "c1-shop".into(),
+            state: "ready".into(),
+            services: Vec::new(),
+            resources: Vec::new(),
+            sleeping_usd_month: 0.0,
+            active_usd_hour: 0.0,
+            dashboard_url: None,
+            github: Default::default(),
+            head: None,
+            schema_changes: None,
+            schema_risks: Vec::new(),
+            release_ms: None,
+            release_before_ms: None,
+            screenshot_url: None,
+            expires_at: None,
+            earlier: Vec::new(),
+            visual_change: None,
+            page_speed: None,
+            page_health: None,
+            page_a11y: None,
+            page_links: None,
+            base_change: None,
+            diff_url: None,
+            pages: Vec::new(),
+            speed_budget: None,
+            visual_review: Some(code_control::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.0, by: by.map(Into::into), required: true, head: None, pages: Vec::new() }),
+        }),
+    };
+    a.code.report_environment(&id(&c), Some(&preview("changed", None))).unwrap();
+    let v = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    assert_eq!(kinds(&v), ["visual"]);
+    // Its own author's acceptance doesn't count; someone else's does.
+    let author = v["author"].as_str().unwrap().to_string();
+    a.code.report_environment(&id(&c), Some(&preview("accepted", Some(&author)))).unwrap();
+    let v = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    assert_eq!(kinds(&v), ["visual"], "{v}");
+    a.code.report_environment(&id(&c), Some(&preview("accepted", Some("someone-else")))).unwrap();
+    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    assert_eq!(c["blockers"], json!([]));
     enqueue(&a, &c, "normal").await;
     // Marking a queued change draft takes it out.
     let c = a.ok("PATCH", &format!("/v1/code/changes/{}", id(&c)), Some(json!({ "draft": true }))).await;
