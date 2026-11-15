@@ -247,13 +247,14 @@ fn consented(a: &Arc<Access>, ext: &Extensions, client: &crate::store::Client, a
     Ok(Consented { new: NewGrant { pending: asker.is_some(), ..new }, by: crate::api::actor(ext), user, asker })
 }
 
-/// Mail the admins about a connection that waits for one of them.
-async fn tell_if_waiting(a: &Arc<Access>, asker: Option<String>, grant_id: String) {
+/// Mail a consent's news: its person hears what was added to their account, and admins hear of
+/// one that waits for them.
+async fn tell_consented(a: &Arc<Access>, ext: &Extensions, asker: Option<String>, grant_id: String, added: crate::api::Added<'_>) {
+    let a2 = a.clone();
+    let Ok(Ok(g)) = tokio::task::spawn_blocking(move || a2.store.get(&grant_id)).await else { return };
+    a.tell_added(&g, added, ext);
     if let Some(handle) = asker {
-        let a2 = a.clone();
-        if let Ok(Ok(g)) = tokio::task::spawn_blocking(move || a2.store.get(&grant_id)).await {
-            a.tell_admins_waiting(&g, &handle);
-        }
+        a.tell_admins_waiting(&g, &handle);
     }
 }
 
@@ -282,7 +283,7 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
     let (code, grant_id) = tokio::task::spawn_blocking(move || a2.store.issue_code(&cl, &new, crate::store::Issuer { created_by: &by, user: user.as_deref() }, &uri, &ch, res.as_deref()))
         .await
         .map_err(|e| Error::Internal(e.to_string()))??;
-    tell_if_waiting(&a, asker, grant_id.clone()).await;
+    tell_consented(&a, &ext, asker, grant_id.clone(), crate::api::Added::Client(&client.name)).await;
     let mut redirect = url::Url::parse(&c.redirect_uri).map_err(|_| Error::BadRequest("redirect_uri isn't a URL".into()))?;
     {
         let mut q = redirect.query_pairs_mut();
@@ -524,11 +525,12 @@ pub async fn device_approve(State(a): S, ext: Extensions, axum::extract::Path(co
     let client = known_client(&a, &r.client_id).await?.ok_or_else(|| Error::NotFound("the device's client is gone".into()))?;
     let Consented { new, by, user, asker } = consented(&a, &ext, &client, &allowed)?;
     let waits = asker.is_some();
+    let client_name = client.name.clone();
     let a2 = a.clone();
     let grant_id = tokio::task::spawn_blocking(move || a2.store.approve_device(&r.user_code, &client, &new, crate::store::Issuer { created_by: &by, user: user.as_deref() }))
         .await
         .map_err(|e| Error::Internal(e.to_string()))??;
-    tell_if_waiting(&a, asker, grant_id.clone()).await;
+    tell_consented(&a, &ext, asker, grant_id.clone(), crate::api::Added::Device(&client_name)).await;
     let mut res = Json(json!({ "grant_id": grant_id, "pending": waits })).into_response();
     res.extensions_mut().insert(crate::api::Changed(grant_id));
     Ok(res)
