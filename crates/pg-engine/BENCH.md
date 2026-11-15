@@ -340,12 +340,22 @@ measured. A lead, not resolved.
 |---|---|---|---|---|---|
 | point select, 8 clients (lane A) | 8 | +0.5% (pairs -4.1..+1.5) | +0.0% | +0.1% | -0.9% |
 | point select, 1 client, in-process (lane B CPUs 10, 11; (I30 s - I10 s) / (ops30 - ops10)) | 6 | **-1.5%, every pair lower (-0.8..-4.1)** | (siblings loaded: +3.7%, pairs -7..+22) | | |
-LANEA_ROWS
+| point select, 32 clients (lane A) | 5 | +0.6% (pairs +0.0..+1.4) | +0.6% | +0.5% | -1.4% |
+| point select, 1 client (lane A) | 5 | (four pairs over 1.0 foreign core, not counted; the clean one -2.5%, cycles +6.9% at 0.98) | | | |
+| short transactions, 8 clients (lane A) | 5 | -1.8% | -2.0% | -1.2% | +2.0% |
+| short transactions, 32 clients (lane A) | 5 | -0.8% | -0.1% | -0.9% | +1.6% |
 | range read (100 rows), 8 clients (lane B) | 5 | +0.9% (unflagged pairs +1.8, -2.0, +0.9, -1.6) | -0.9% | -0.4% | +0.4% |
 
 Point select at 8 clients, the cell agent 231 left at its limit (+1.0%), is level: its pairs
 spread by 4% in instructions (a session's spin waits count), and in-process, with the client in
-the engine's process, h239 reads fewer instructions in every pair. Footprint (fresh server,
+the engine's process, h239 reads fewer instructions in every pair. Point select at 32 clients
+leans the same +0.6%; an instructions:u profile of each server (lane B, sampled every 100,003)
+read -0.28% for h239 in total, no storage symbol among the larger differences (they were the
+session's and executor's, which the format doesn't touch), and both stores held the same files
+when the gate's measurement starts (no L0, four L1 files, 2.71 against 2.62 MB). The bloom
+filter's new hash passes as many absent keys as the old one (simulated on row keys of 12-17
+bytes: 0.79-0.83% both, k = 7 at 10 bits a key). Short transactions vary by +-5% a run of one
+binary: their cells show no change beyond that. Footprint (fresh server,
 cgroup anon+shmem 25 s into 100 idle sessions, lane B, three each): b239 37.7 / 37.6 / 37.4 MB,
 h239 37.6 / 37.6 / 37.5; a fresh data directory 3.03 MB both.
 

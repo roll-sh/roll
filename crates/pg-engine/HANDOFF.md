@@ -10266,13 +10266,27 @@ at open, a compaction): older builds ignore the manifest's `format` and fail on 
   instructions in every round (compaction after the DELETE -8.2%, VACUUM -10.6%, MB written
   -4.1%, no step up); TPC-H SF1 at 2 GB level (+0.11 / -0.02 / +0.03%, cycles -2 to -3%), at
   256 MB -14.3 to -14.8% in all seven rounds (wall 44.4 -> 38.8 s); the data directory after the
-  TPC-H load 638 -> 561 MB; point and range reads level (cached reads run the same code on the
-  same bytes). One figure to watch: the 256 MB pass's VmHWM, median 616 -> 631 MB over seven
+  TPC-H load 638 -> 561 MB; point and range reads and short transactions level (cached reads run
+  the same code on the same bytes; in-process point reads -1.5%, every pair lower; over the wire
+  point select +0.5 / +0.6% at 8 / 32 clients, inside its pairs' spread, and an instruction
+  profile of each server shows no storage symbol among the differences). One figure to watch: the 256 MB pass's VmHWM, median 616 -> 631 MB over seven
   rounds with overlapping ranges (598-648 against 600-645): no mechanism found (the cache holds
   the same bytes in exact-size allocations in both); 2 GB, bulk and idle memory are equal.
 - **Dropped**: nothing.
 - **Left**: 231's "Next" list above, item 0 (the small cache) first; then the bulk DELETE and
   its compaction (13.5 G user instructions against PostgreSQL's 1.7 G on the 1M-row script).
+  Item 0 measured on h239 (TPC-H SF1, 256 MB cache, lane C, `perf record -F 999` of the engine
+  over two runs each of q07 and q09): zstd is 58-60% of the samples of both. 45% is
+  `ZSTD_decompressSequences` (a whole 16 kB block decompressed for the entry or two a probe
+  wants), about 12% the entropy tables each block's header makes a fresh decoder build
+  (`ZSTD_buildFSETable` 5.3-5.4%, `HUF_readDTableX1` 2.4-2.9%, `FSE_readNCount` 1.4%,
+  `FSE_decompress_wksp` 1.4-1.6%, `HUF_readStats` 0.9-1.1%); creating the decompression
+  context per block (`zstd::bulk::decompress`) does not show (no symbol of it at 0.5%), so a
+  reused context alone is not the lever. The levers by that profile: a zstd dictionary per file
+  (its prebuilt tables replace the per-block builds, and 16 kB blocks compress better with one),
+  smaller blocks or none compressed for the files point probes read (the pread then copies what
+  the probe needs from the OS page cache, as PostgreSQL's 8 kB page), each a format change for
+  its own round.
 
 ## Analytic path against pgrust (agent 220)
 
