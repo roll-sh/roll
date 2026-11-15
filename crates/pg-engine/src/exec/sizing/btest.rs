@@ -203,16 +203,20 @@ impl BtEst {
         let per_key = (tids / keys).max(1.0);
         let base = self.base.round() as usize;
         let per = relsize::posting_per(base).max(1);
-        // (A key's TIDs in full posting lists, then the rest in one.)
+        // (A key's TIDs in full posting lists, then the rest in one: a key of `k` TIDs.)
+        let of = |k: usize| {
+            let (full, rest) = (k / per, k % per);
+            let mut one = full as f64 * (relsize::posting_size(base, per) as f64 + ITEM_ID);
+            if rest > 0 {
+                one += relsize::posting_size(base, rest) as f64 + ITEM_ID;
+            }
+            one
+        };
+        // (Between the sizes of the whole numbers of TIDs around the mean: a posting list
+        // grows by MAXALIGN steps, not 6 bytes a TID.)
         let k = per_key.floor() as usize;
-        let (full, rest) = (k / per, k % per);
-        let mut one = full as f64 * (relsize::posting_size(base, per) as f64 + ITEM_ID);
-        if rest > 0 {
-            one += relsize::posting_size(base, rest) as f64 + ITEM_ID;
-        }
-        // (The fraction of a TID past the whole ones: 6 bytes.)
-        one += (per_key - k as f64) * 6.0;
-        keys * one
+        let f = per_key - k as f64;
+        keys * (of(k) * (1.0 - f) + of(k + 1) * f)
     }
 
     /// An entry of `size` bytes (MAXALIGNed) under `key` goes in; `dup`: its key is in the
