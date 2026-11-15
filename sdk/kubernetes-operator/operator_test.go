@@ -20,6 +20,8 @@ type fakeKube struct {
 	secrets map[string]*secretObj // ns/name
 	writes  int
 	status  map[string]rollStatus // ns/name
+	// Workloads restarted (spec.rolloutRestart): their paths.
+	restarted []string
 }
 
 func (f *fakeKube) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -45,6 +47,16 @@ func (f *fakeKube) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		parts := strings.Split(p, "/") // /apis/roll.sh/v1/namespaces/{ns}/rollsecrets/{name}/status
 		f.status[parts[5]+"/"+parts[7]] = b.Status
+		write(200, nil)
+	case strings.HasPrefix(p, "/apis/apps/v1/namespaces/") && r.Method == http.MethodPatch:
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		ann := b["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)
+		if ann["roll.sh/restartedAt"] == nil {
+			write(400, map[string]string{"message": "no restart annotation"})
+			return
+		}
+		f.restarted = append(f.restarted, p)
 		write(200, nil)
 	case strings.HasSuffix(p, "/token") && strings.Contains(p, "/serviceaccounts/") && r.Method == http.MethodPost:
 		// A TokenRequest: the token names the service account it's for and its audience.
@@ -131,6 +143,9 @@ func TestTheOperatorKeepsItsSecretsInStepAndTouchesNoOtherSecret(t *testing.T) {
 		var rs rollSecret
 		rs.Metadata = meta{Name: n.name, Namespace: "apps", UID: "uid-" + n.name, Generation: 1}
 		rs.Spec.Environment, rs.Spec.SecretName = "production", n.secret
+		if n.name == "web" {
+			rs.Spec.RolloutRestart = []restartTarget{{Kind: "Deployment", Name: "web"}}
+		}
 		kubeAPI.rs = append(kubeAPI.rs, rs)
 	}
 	rolld := &fakeRolld{digest: "d1", value: "postgres://db/one"}
@@ -173,6 +188,10 @@ func TestTheOperatorKeepsItsSecretsInStepAndTouchesNoOtherSecret(t *testing.T) {
 	}
 	if got := string(kubeAPI.secrets["apps/web"].Data["DB_URL"]); got != "postgres://db/two" || rolld.logins != 2 {
 		t.Fatalf("after the change: %q, %d logins", got, rolld.logins)
+	}
+	// What reads it restarted on the change, and not when the Secret was first made.
+	if len(kubeAPI.restarted) != 1 || kubeAPI.restarted[0] != "/apis/apps/v1/namespaces/apps/deployments/web" {
+		t.Fatalf("restarted: %v", kubeAPI.restarted)
 	}
 }
 

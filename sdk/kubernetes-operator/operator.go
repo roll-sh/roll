@@ -209,7 +209,34 @@ func (o *operator) reconcile(ctx context.Context, rs *rollSecret) rollStatus {
 	if err != nil {
 		return fail(err)
 	}
+	// A changed Secret restarts what reads it (a new one has no readers yet that started before it).
+	if existing != nil {
+		if err := o.restart(ctx, ns, rs.Spec.RolloutRestart); err != nil {
+			return rollStatus{Digest: digest, SyncedAt: o.now().UTC().Format(time.RFC3339), Keys: len(data), ObservedGeneration: rs.Metadata.Generation, Error: err.Error()}
+		}
+	}
 	return rollStatus{Digest: digest, SyncedAt: o.now().UTC().Format(time.RFC3339), Keys: len(data), ObservedGeneration: rs.Metadata.Generation}
+}
+
+// restartKinds are the workloads a RollSecret may restart, by their API resource.
+var restartKinds = map[string]string{"Deployment": "deployments", "StatefulSet": "statefulsets", "DaemonSet": "daemonsets"}
+
+// restart rolls each target's pods, as `kubectl rollout restart` does: a new annotation on the
+// pod template. Only in the RollSecret's own namespace.
+func (o *operator) restart(ctx context.Context, ns string, targets []restartTarget) error {
+	at := o.now().UTC().Format(time.RFC3339)
+	for _, t := range targets {
+		resource, ok := restartKinds[t.Kind]
+		if !ok || t.Name == "" {
+			return fmt.Errorf("spec.rolloutRestart: %s/%s isn't a Deployment, StatefulSet or DaemonSet", t.Kind, t.Name)
+		}
+		patch := map[string]any{"spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"annotations": map[string]string{"roll.sh/restartedAt": at}}}}}
+		path := "/apis/apps/v1/namespaces/" + url.PathEscape(ns) + "/" + resource + "/" + url.PathEscape(t.Name)
+		if err := o.kube.call(ctx, http.MethodPatch, path, "application/merge-patch+json", patch, nil); err != nil {
+			return fmt.Errorf("restarting %s %s (the Secret is updated): %w", t.Kind, t.Name, err)
+		}
+	}
+	return nil
 }
 
 // pass reconciles every RollSecret in the cluster once.

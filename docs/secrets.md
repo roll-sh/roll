@@ -168,7 +168,9 @@ Two ways, as the best products offer:
   Secret as it was. Its status says what happened. Outside the operator's own namespaces a
   RollSecret logs in as a service account of its own namespace (`spec.serviceAccountName`, a
   10-minute token the operator requests), so creating a RollSecret never reaches what the
-  operator's identity, or another team's, reaches.
+  operator's identity, or another team's, reaches. `spec.rolloutRestart` names the Deployments,
+  StatefulSets and DaemonSets that read the Secret: a change restarts them (`kubectl rollout
+  restart`'s annotation).
 - **Push (the `kubernetes` sync)**: roll writes a Secret with credentials for the cluster it holds,
   sealed. For clusters roll can reach and the operator can't run in.
 ## Customer-managed keys
@@ -2729,8 +2731,9 @@ user's call).
 5. **AWS through roll's own issuer** (#68, on #62): `trust: "oidc"` roles, assumed with
    `AssumeRoleWithWebIdentity` and a token roll's issuer signs for the project (`sub` pinned, as GCP
    and Azure): no AWS credential of roll's at all.
-6. **The operator restarts what reads a Secret** when it changes (`spec.rolloutRestart`, as
-   Infisical's reload annotation and Vault Secrets Operator's `rolloutRestartTargets`).
+6. **The operator restarts what reads a Secret** when it changes (#69, on #62:
+   `spec.rolloutRestart`, as Infisical's reload annotation and Vault Secrets Operator's
+   `rolloutRestartTargets`).
 7. **Audit sinks SIEMs take**: headers, and Splunk HEC and Datadog presets (Doppler, Infisical),
    plus a sink into roll search.
 8. **A live rotation that keeps the old password a while** where the resource can (Redis ACL users

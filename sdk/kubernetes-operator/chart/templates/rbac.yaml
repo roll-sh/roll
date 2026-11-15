@@ -23,6 +23,10 @@ rules:
   - apiGroups: [""]
     resources: [serviceaccounts/token]
     verbs: [create]
+  # spec.rolloutRestart: what reads a Secret restarts when it changes.
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets]
+    verbs: [patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

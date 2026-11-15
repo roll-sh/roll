@@ -179,8 +179,17 @@ type rollSecret struct {
 		// requests for it), so the identity's subject pins the namespace. Without one, the
 		// operator's own login, only in the namespaces it's given (ROLL_OPERATOR_NAMESPACES).
 		ServiceAccountName string `json:"serviceAccountName"`
+		// Workloads in the RollSecret's namespace restarted when the Secret changes (not when it's
+		// first made), as `kubectl rollout restart` does.
+		RolloutRestart []restartTarget `json:"rolloutRestart"`
 	} `json:"spec"`
 	Status rollStatus `json:"status"`
+}
+
+// restartTarget is a Deployment, StatefulSet or DaemonSet to restart.
+type restartTarget struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
 }
 
 type rollStatus struct {

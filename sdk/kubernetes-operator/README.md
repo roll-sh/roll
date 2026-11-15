@@ -21,6 +21,11 @@ spec:
   RollSecret, so deleting the RollSecret deletes them. A Secret of the same name someone else made
   is left alone, and the RollSecret's status says so.
 - Values that don't resolve leave the Secret as it was, and the status names the key.
+- **What reads it restarts when it changes**, as Infisical's reload annotation and Vault Secrets
+  Operator's `rolloutRestartTargets` do: `spec.rolloutRestart: [{kind: Deployment, name: web}]`
+  (Deployments, StatefulSets and DaemonSets of the RollSecret's namespace) get a new
+  `roll.sh/restartedAt` on their pod template, as `kubectl rollout restart` does. Not when the
+  Secret is first made.
 - **Each namespace logs in as itself.** Outside the operator's own namespaces
   (`roll.namespaces`, default the release's), a RollSecret names a service account of its own
   namespace and an identity for it:
