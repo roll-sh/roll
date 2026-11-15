@@ -73,7 +73,8 @@ pub enum Token {
     /// Which tokens need attention and why (admin over everything, never expiring, unused,
     /// narrower than their rules, roaming), each with its fix.
     Checkup,
-    /// Who the token you're using is (`ROLL_TOKEN` or `ROLL_ADMIN_TOKEN`).
+    /// Which credential this CLI uses and where it came from (`ROLL_TOKEN`, `ROLL_ADMIN_TOKEN`,
+    /// `roll login`), what it may do, and any other credential set that loses to it.
     Whoami,
     /// The products, actions and presets the builder offers.
     Presets,
@@ -430,7 +431,15 @@ async fn decide(api: &Api, json_out: bool, id: &str, approve: bool) -> anyhow::R
     Ok(())
 }
 
-pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> {
+/// Which credential a run uses, and the ones set that lose to it (`gh auth status`'s answer).
+pub struct Credential {
+    /// What it is and where it came from: `ROLL_TOKEN`, `roll login (~/.config/roll/logins.json)`, …
+    pub source: Option<String>,
+    /// Credentials also set, which this run doesn't use.
+    pub unused: Vec<String>,
+}
+
+pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credential) -> anyhow::Result<()> {
     match cmd {
         Token::Create(c) => {
             let (not_before, expires_at) = window(c.starts.as_deref(), &c.expires)?;
@@ -617,13 +626,23 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
             }
         }
         Token::Whoami => {
-            let me = api.get("/v1/access").await?;
+            let Some(source) = &credential.source else {
+                bail!("no credential for {}: run `roll login`, or set ROLL_TOKEN", api.base);
+            };
+            let mut me = api.get("/v1/access").await?;
             if json_out {
+                me["credential"] = json!({ "source": source, "unused": credential.unused });
                 println!("{}", serde_json::to_string_pretty(&me)?);
-            } else if me["kind"] == "operator" {
+                return Ok(());
+            }
+            println!("Using {source} for {}.", api.base);
+            if me["kind"] == "operator" {
                 println!("the operator: everything");
             } else {
                 print_grant(&me["grant"]);
+            }
+            for u in &credential.unused {
+                println!("note: {u} is set too, and isn't used: {source} wins.");
             }
         }
         Token::Policy { max_days, require_expiry, no_limit, max_idle_days } => {

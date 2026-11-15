@@ -513,14 +513,11 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **`roll token whoami` says which credential it is and where it came from** (`gh auth status`:
-   `ROLL_TOKEN`, `roll login`'s file, the operator's token), with the login's end and whether it
-   waits for an admin, so a person who set two credentials can tell which one runs.
-2. **Keep `roll login`'s tokens in the OS keychain** when there is one (macOS Keychain, the Secret
+1. **Keep `roll login`'s tokens in the OS keychain** when there is one (macOS Keychain, the Secret
    Service on a Linux desktop), the 0600 file only where there isn't (gh and Doppler keep theirs in
    the keyring; a 30-day refresh token in a dotfile is what a laptop backup or a stray `cat`
    leaks).
-3. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25), and compare each product's routes with its tools
    (an everyday route with no tool is a gap: apps' were found this way); conflicts agreed with a
@@ -528,16 +525,16 @@ waits on a sibling PR reaching main is last.
    **`feature/mcp-on-landing`** (#25 with secrets' `feature/roll-secrets-landing-access`; it
    replaces `feature/mcp-on-secrets`) merged after either side moves: roll-access, roll-mcp and
    roll-secrets tests, rolld's route test and clippy before each push.
-4. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
+3. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
    `.index("name")` on the per-key routes and `Scope.key` in their own check (`GrantGrants` sets
    `id` since #30's fix). The tools and the builder's key picker are in; check both live once the
    rows land (a token on `prj_x/one-key` signs with it and is refused another key and the
    project's environments).
-5. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+4. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset, or search-then-call meta-tools (see Toolsets: clients handle long lists or have a picker, and meta-tools would hide each tool's hints); a connection narrowed to one project (Supabase's `project_ref`): their
@@ -545,7 +542,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: `/oauth/device` checked in a browser against a live rolld, wide and at phone width (`users-live/device-shot.mjs`: the code entry, a wrong code, a request with its network and age, allowing it and the poll taking tokens, refusing one and the poll hearing `access_denied`; the wrong-code page said "start connecting again from your MCP client", now its own words) (#25); `roll login` signs in with a code where there's no browser (RFC 8628's device flow, `gh auth login`'s: `/oauth/device` on any device, the consent screen's form, the asking network shown against device-code phishing, ten wrong codes a minute; over SSH by default) (#25); `apps_set_environment` takes `held` (apps #26's rollback hold) (#24); `apps_export_project` (apps #26: a project as a roll.toml, variables by name only; pairs with `apps_import`) (#24); `roll login` and `roll logout` (#25): the CLI signs in through the browser (`gh auth login`'s flow: RFC 7591 registration, a loopback redirect, PKCE, `state` and `iss` checked, `--no-browser` to paste the answer back), keeps the login 0600 per API URL, uses it only when no credential is set, refreshes it under a lock, and logout revokes it; revoking a refresh token now revokes its connection (RFC 7009 2.1: a client's sign-out left the grant listed as live with no secrets) (#25); the integration with secrets' landing branch built as `feature/mcp-on-landing` (#25 + 43cb35162) and every sibling head route-checked with #25; approving or denying a person's token is audited and keeps who decided (`decided_by`; GitHub's `personal_access_token.request_approved`), and the token row says "approved … by …" (#25); a waiting token answers 403 `pending_approval`, not 401 (a 401 sent an OAuth MCP client
+Done lately: `roll token whoami` names the credential that runs and where it came from, and each one set that loses to it (`gh auth status`; exits 1 with none) (#25); `/oauth/device` checked in a browser against a live rolld, wide and at phone width (`users-live/device-shot.mjs`: the code entry, a wrong code, a request with its network and age, allowing it and the poll taking tokens, refusing one and the poll hearing `access_denied`; the wrong-code page said "start connecting again from your MCP client", now its own words) (#25); `roll login` signs in with a code where there's no browser (RFC 8628's device flow, `gh auth login`'s: `/oauth/device` on any device, the consent screen's form, the asking network shown against device-code phishing, ten wrong codes a minute; over SSH by default) (#25); `apps_set_environment` takes `held` (apps #26's rollback hold) (#24); `apps_export_project` (apps #26: a project as a roll.toml, variables by name only; pairs with `apps_import`) (#24); `roll login` and `roll logout` (#25): the CLI signs in through the browser (`gh auth login`'s flow: RFC 7591 registration, a loopback redirect, PKCE, `state` and `iss` checked, `--no-browser` to paste the answer back), keeps the login 0600 per API URL, uses it only when no credential is set, refreshes it under a lock, and logout revokes it; revoking a refresh token now revokes its connection (RFC 7009 2.1: a client's sign-out left the grant listed as live with no secrets) (#25); the integration with secrets' landing branch built as `feature/mcp-on-landing` (#25 + 43cb35162) and every sibling head route-checked with #25; approving or denying a person's token is audited and keeps who decided (`decided_by`; GitHub's `personal_access_token.request_approved`), and the token row says "approved … by …" (#25); a waiting token answers 403 `pending_approval`, not 401 (a 401 sent an OAuth MCP client
 back through sign-in and consent for a connection that was only waiting) (#25); a person is told
 before making a token or connecting a client that it will wait for an admin (GitHub's "this token
 will require approval"; `approve_people` in `GET /v1/access`) (#25); the sixteenth review's #25
