@@ -42,10 +42,25 @@ impl roll_previews::ports::Secrets for Secrets {
 
     async fn resolve(&self, project: &str, env: &str, untrusted: bool, consumer: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
         let path = format!("/v1/secrets/projects/{}/environments/{}/resolve", seg(project), seg(env));
-        // Dynamic credentials included: each is a lease the engine renews while the service runs
-        // and revokes when it stops (a sleeping preview holds none).
-        let body = json!({ "path": "/", "consumer": consumer, "untrusted": untrusted });
-        match self.0.post(&path, body).await {
+        // Dynamic credentials only for code the project trusts with production's secrets: each is
+        // a lease the engine renews while the service runs and revokes when it stops. An untrusted
+        // preview (a fork's code, or a project that doesn't allow production) asks for none
+        // (`dynamic: false`, roll secrets' own rule for untrusted callers): a GitHub App token or a
+        // cloud session would outlive what the code was approved for. Those keys come back named
+        // in `dynamic`. A roll secrets from before the field (#20 without #62) refuses it (unknown
+        // fields are a 400) and has no dynamic links: asked again without it.
+        let body = |with_field: bool| {
+            let mut b = json!({ "path": "/", "consumer": consumer, "untrusted": untrusted });
+            if with_field && untrusted {
+                b["dynamic"] = json!(false);
+            }
+            b
+        };
+        let answer = match self.0.post(&path, body(true)).await {
+            Err(e) if e.downcast_ref::<Refused>().is_some_and(|r| r.status == StatusCode::BAD_REQUEST && r.error.contains("unknown field `dynamic`")) => self.0.post(&path, body(false)).await,
+            other => other,
+        };
+        match answer {
             Ok(v) => Ok(roll_previews::ports::Resolved {
                 values: v["values"].as_object().into_iter().flatten().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect(),
                 problems: v["problems"]
@@ -53,6 +68,9 @@ impl roll_previews::ports::Secrets for Secrets {
                     .into_iter()
                     .flatten()
                     .map(|p| format!("{}: {}", p["key"].as_str().unwrap_or("?"), p["problem"].as_str().unwrap_or("doesn't resolve")))
+                    .chain(v["dynamic"].as_array().into_iter().flatten().filter_map(|k| k.as_str()).filter(|_| untrusted).map(|k| {
+                        format!("{k}: a dynamic credential, which an untrusted preview doesn't get (a fork's code, or a project without secrets.allow_production)")
+                    }))
                     .collect(),
                 leases: v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str()).filter(|l| !l.is_empty() && l.len() <= 100).map(str::to_string).collect(),
             }),

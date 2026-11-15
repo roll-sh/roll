@@ -326,7 +326,12 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   (roll secrets' flag): nothing of a protected environment resolves, whether directly, by
   reference, by import or through the base. The preview gets its own overrides and links. Only
   a project with `secrets.allow_production` and a trusted change resolve without it.
-- **Dynamic credentials live as long as what started with them.** A dynamic link (a per-lease
+- **Dynamic credentials live as long as what started with them, and only trusted code gets
+  them.** A preview that resolves as untrusted (a fork's code, or a project without
+  `secrets.allow_production`) asks for none (`dynamic: false`, roll secrets' own rule for
+  untrusted callers, which it enforces too): a GitHub App installation token or a cloud session
+  would outlive what the code was approved for. Those keys are left out and named in the
+  activity. For a trusted preview, a dynamic link (a per-lease
   database login) is issued to each start of a service (consumer `preview:pv-<id>/<service>`)
   and each seed or release job (`…/seed`, `…/release`). previews keeps only the lease's id, never
   the credential (table `leases`). Each pass, the node that runs the preview renews a lease
