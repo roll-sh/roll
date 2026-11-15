@@ -953,6 +953,26 @@ impl apps_control::integrations::SecretSource for ForApps {
         .await?
     }
 
+    /// A new apps environment's own in roll secrets (`qa`), made as roll apps: a standard
+    /// environment, no keys. The defaults (`production`, `staging`, `development`) come with the
+    /// project whenever it's first used, so they're left to that.
+    async fn ensure(&self, project: &str, env: &str) -> anyhow::Result<()> {
+        let Some((secrets, _)) = self.0.get().cloned() else { return Ok(()) };
+        if roll_secrets::DEFAULT_ENVIRONMENTS.iter().any(|(slug, _)| *slug == env) {
+            return Ok(());
+        }
+        let (project, env) = (project.to_string(), env.to_string());
+        tokio::task::spawn_blocking(move || {
+            let caller = roll_secrets::Caller::consumer("roll:apps");
+            match secrets.environments(&project, &caller) {
+                Ok(_) => secrets.ensure_environment(&project, &env, roll_secrets::Ensure::default(), &caller).map(drop).map_err(anyhow::Error::from),
+                Err(roll_secrets::Error::NotFound(_)) => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        })
+        .await?
+    }
+
     async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str) -> bool {
         let Some((secrets, _)) = self.0.get().cloned() else { return false };
         match secrets.caller_of(who.operator, who.user, who.grant) {

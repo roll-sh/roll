@@ -2701,9 +2701,19 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
         async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, _: &str, _: &str) -> bool {
             who.operator
         }
+        async fn ensure(&self, _: &str, env: &str) -> anyhow::Result<()> {
+            ENSURED.lock().push(env.to_string());
+            Ok(())
+        }
     }
+    static ENSURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
     let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(FakeSecrets)).await;
     let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    // A new environment's secrets have somewhere to go; a preview's are roll previews' to make.
+    let envs = format!("/v1/apps/services/{}/environments", svc["id"].as_str().unwrap());
+    call(&w.api, "PUT", &format!("{envs}/qa"), Some(json!({}))).await;
+    call(&w.api, "PUT", &format!("{envs}/pr-1"), Some(json!({"ephemeral": true}))).await;
+    assert_eq!(*ENSURED.lock(), ["production", "qa"]);
     let values = format!("/v1/apps/services/{}/environments/production/variables/values", svc["id"].as_str().unwrap());
     let (st, e) = call(&w.api, "GET", &values, None).await;
     assert_eq!(st, StatusCode::FORBIDDEN, "{e}");

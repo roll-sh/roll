@@ -770,11 +770,12 @@ copy would read them, and that can take less than deploying where they are). A s
   it doesn't run with; the dashboard says them under "needs a deploy", `roll apps pending` as
   `+`/`-`/`~` lines. `roll apps open` opens the environment's address (`--print`: only prints
   it; Railway's and Vercel's `open`).
-- The wiring (`## Next`): creating an apps environment calls `Secrets::ensure_environment`
-  (idempotent; a preview's `pv-<id>` is previews' to make, with its base); apps never deletes a
-  secrets environment; a missing one means no secrets; `needs_deploy` compares
+- The wiring (rolld's `secrets::ForApps`, on main with #62): a new apps environment that isn't a
+  preview is ensured in roll secrets (`SecretSource::ensure`; `qa` is made, the defaults come
+  with the project, a preview's `pv-<id>` is previews' to make with its base); apps never
+  deletes a secrets environment; a missing one means no secrets; `needs_deploy` compares
   `Secrets::digest` instead of resolving values; `Values.linked` says which addresses to rewrite
-  for containers. Previews' environments are untrusted in roll secrets itself (an ephemeral
+  for containers, and `sensitive` keys are sealed in apps' listing. Previews' environments are untrusted in roll secrets itself (an ephemeral
   environment not made `trusted` never reads a protected one), so the port carries no trust flag.
 - What a deploy injects, lowest to highest precedence: roll's own (`PORT`,
   `ROLL_SERVICE`, `ROLL_ENVIRONMENT`, `ROLL_DEPLOYMENT`, `ROLL_PUBLIC_URL`,
@@ -2100,9 +2101,11 @@ put items 1–11 first.
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-5. *Unblocked: #62 landed (e689b0c76).* **roll secrets as the env store**, as in "Secrets and environments", plus
-   service variables at `/services/<name>`, values resolved only when a container is made,
-   `dynamic` links refused, and links as per-environment secrets links.
+5. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
+   digests mark "needs deploy", roll secrets' reveal rules, linked and sensitive keys, dynamic
+   credentials refused, new environments ensured); what's left is service variables kept in roll
+   secrets at `/services/<name>` (one store for both), and links as per-environment secrets
+   links.
 6. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and

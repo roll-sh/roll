@@ -581,7 +581,15 @@ impl Apps {
         }
         let (id, env_s, branch) = (svc.id.clone(), env.to_string(), branch.map(|b| b.map(str::to_string)));
         let ports = self.cfg.ports;
+        let (sid, e) = (svc.id.clone(), env.to_string());
+        let new = self.db(move |s| Ok(s.environment(&sid, &e).is_err())).await?;
         let row = self.db(move |s| s.put_environment(&id, &env_s, branch.as_ref().map(|b| b.as_deref()), ephemeral, &slugs, ports)).await?;
+        // A new environment's secrets have somewhere to go (best effort: none is no secrets).
+        if new && !row.ephemeral
+            && let Err(err) = self.deps.secrets.ensure(&svc.project, env).await
+        {
+            tracing::warn!(service = %svc.id, env, error = %err, "apps: roll secrets has no environment for it yet");
+        }
         Ok(row)
     }
 
