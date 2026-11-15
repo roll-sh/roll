@@ -834,7 +834,7 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
     assert_eq!(got, w);
     assert_eq!(
         keys(&got),
-        sorted(vec!["id", "repo_id", "repo", "number", "title", "body", "labels", "priority", "state", "source", "github_url", "claimed_by", "lease_until", "changes", "created_at", "updated_at"])
+        sorted(vec!["id", "repo_id", "repo", "number", "title", "body", "labels", "priority", "state", "source", "github_url", "outside", "claimed_by", "lease_until", "changes", "created_at", "updated_at"])
     );
 
     // change = Change
@@ -846,7 +846,7 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
     assert_eq!(got["id"], id);
     for k in [
         "id", "repo_id", "repo", "number", "title", "body", "author", "state", "base", "head", "revision", "work_item", "branch", "github_pr", "github_url", "trusted",
-        "run_approved", "draft", "checks", "preview", "landed_as", "conflict", "queue", "blockers", "review", "created_at", "updated_at",
+        "run_approved", "outside", "draft", "checks", "preview", "landed_as", "conflict", "queue", "blockers", "review", "created_at", "updated_at",
     ] {
         assert!(got.get(k).is_some(), "Change.{k}: {got}");
     }
