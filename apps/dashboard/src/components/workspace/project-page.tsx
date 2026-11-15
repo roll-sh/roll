@@ -1,4 +1,5 @@
 import { Bot, Eye, KeyRound, Lock, Moon, Plus, Search, Settings } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import type { ResourceKind, WorkspaceProject } from "@/lib/workspace-api";
@@ -18,6 +19,8 @@ import {
 } from "@/lib/workspace-resources";
 import { spendOf, useWorkspace, workspace, type WorkspaceState } from "@/lib/workspace-store";
 import { useProjectServices } from "../apps/live";
+import { appsApi } from "@/lib/apps-api";
+import { FolderDeploy } from "../apps/folder-deploy";
 import { NewServiceSheet } from "../apps/new-service";
 import { AppShell } from "../app-shell";
 import { Board, type Card } from "./board";
@@ -31,7 +34,7 @@ import { PreviewsOverlay } from "./previews-overlay";
 const btn =
   "flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-raised px-2.5 text-[12px] font-medium inset-shadow-highlight transition-colors hover:border-line-3";
 
-export type ProjectTab = "canvas" | "previews";
+export type ProjectTab = "canvas" | "previews" | "logs";
 
 /**
  * `/dashboard/projects/$id`: the project's resources on a canvas, or (`children`, the route's
@@ -56,6 +59,7 @@ export function ProjectPage({ id, tab = "canvas", children }: { id: string; tab?
 }
 
 function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: WorkspaceProject; tab: ProjectTab; children?: ReactNode }) {
+  const navigate = useNavigate();
   const [selected, setSelected] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -155,14 +159,14 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
             </span>
           )}
           <nav aria-label="Project views" className="flex h-7 items-center rounded-md border border-line-2 bg-canvas p-0.5">
-            {(["canvas", "previews"] as const).map((t) => (
+            {(["canvas", "previews", "logs"] as const).map((t) => (
               <Link
                 key={t}
-                href={`/dashboard/projects/${encodeURIComponent(project.id)}${t === "canvas" ? "" : "/previews"}`}
+                href={`/dashboard/projects/${encodeURIComponent(project.id)}${t === "canvas" ? "" : `/${t}`}`}
                 aria-current={tab === t ? "page" : undefined}
                 className={`flex h-full items-center rounded-[5px] px-2 text-[12px] font-medium transition-colors ${tab === t ? "bg-panel-3 text-fg" : "text-muted hover:text-fg"}`}
               >
-                {t === "canvas" ? "Canvas" : "Previews"}
+                {t === "canvas" ? "Canvas" : t === "previews" ? "Previews" : "Logs"}
               </Link>
             ))}
           </nav>
@@ -216,7 +220,28 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
         >
           {overlay && <PreviewsOverlay projectId={project.id} placed={project.resources} />}
         </Board>}
-        {canvas && cards.length === 0 && ws.status === "ready" && <Empty name={project.name} kinds={CREATABLE.filter((k) => ws.kinds.has(k))} onPick={stage} />}
+        {canvas && cards.length === 0 && ws.status === "ready" && (
+          <Empty
+            name={project.name}
+            kinds={CREATABLE.filter((k) => ws.kinds.has(k))}
+            onPick={stage}
+            drop={
+              ws.kinds.has("service") ? (
+                <FolderDeploy
+                  compact
+                  env="production"
+                  make={(name) => appsApi.create({ project: project.id, name, source: { kind: "upload" }, x: 48, y: 48 })}
+                  onDeployed={(_, s) => {
+                    if (!s) return;
+                    workspace.added(project.id, serviceView(s), 48, 48);
+                    live.refresh();
+                    void navigate({ to: "/dashboard/apps/$id", params: { id: s.id } });
+                  }}
+                />
+              ) : null
+            }
+          />
+        )}
         <ProjectAgents open={agentsOpen} repos={repos} onClose={() => setAgentsOpen(false)} />
         <AddMenu open={canvas && adding} ws={ws} onClose={() => setAdding(false)} onNew={stage} onAttach={attach} />
         {error && (
@@ -239,11 +264,17 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
               project={project}
               spot={newService}
               onClose={() => setNewService(null)}
+              onImported={() => {
+                setNewService(null);
+                live.refresh();
+              }}
               onCreated={(s) => {
                 workspace.added(project.id, serviceView(s), newService.x, newService.y);
                 setNewService(null);
-                setSelected(resourceKey({ kind: "service", ref: s.id }));
                 live.refresh();
+                // Its first build, as it happens: the service page's Deployments tab streams it,
+                // then says it's live (or why it isn't).
+                void navigate({ to: "/dashboard/apps/$id", params: { id: s.id } });
               }}
             />
           ) : current?.type === "placed" ? (
@@ -295,7 +326,7 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
   );
 }
 
-function Empty({ name, kinds, onPick }: { name: string; kinds: ResourceKind[]; onPick: (k: ResourceKind) => void }) {
+function Empty({ name, kinds, onPick, drop }: { name: string; kinds: ResourceKind[]; onPick: (k: ResourceKind) => void; drop?: ReactNode }) {
   return (
     <div className="pointer-events-none absolute inset-0 grid place-items-center p-4">
       <div className="rise pointer-events-auto w-full max-w-[460px] text-center">
@@ -314,6 +345,7 @@ function Empty({ name, kinds, onPick }: { name: string; kinds: ResourceKind[]; o
             </button>
           ))}
         </div>
+        {drop && <div className="mt-3 text-left">{drop}</div>}
       </div>
     </div>
   );
