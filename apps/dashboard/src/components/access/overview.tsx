@@ -132,8 +132,9 @@ export function ConnectPanel({ token }: { token?: string }) {
         {products.length > 0 && (
           <div className="space-y-1.5">
             <p className="text-[12px] text-subtle">
-              Tools for {picked.length ? "these products only" : "every product"}: each product's tools take part of the agent's context, so
-              pick the ones it needs.
+              {search
+                ? `Search finds ${picked.length ? "these products' tools only" : "every product's tools"}.`
+                : `Tools for ${picked.length ? "these products only" : "every product"}: each product's tools take part of the agent's context, so pick the ones it needs.`}
             </p>
             <div className="flex flex-wrap gap-1.5">
               {products.map((p) => {

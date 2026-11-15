@@ -560,31 +560,43 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **MCP tasks, as the 2026-07-28 extension** (`io.modelcontextprotocol/tasks`, SEP-2663: the
+1. **Everyday routes with no tool**, now that search mode keeps a long list cheap
+   (`tool-gaps.py origin/main <product>`: rows on main no tool calls). Tasks first: dead letters
+   (list, retry, delete), topics (fan-out: list, get, put, publish), events (send, list, get), a
+   run's wait, cancelling a function's run, changing a schedule, health and usage. Then streams
+   (read a partition's records and its tail, change a stream's or topic's config, a consumer
+   group's offsets), storage (change a bucket, its rules, usage) and queues (health, connections,
+   policies). Leave out what only an operator does by hand (keys, accounts, IAM, roles, CDN,
+   migrations, rotations): a tool for it is one more thing an agent can be talked into.
+2. **Lockdown for third-party text** (GitHub's MCP lockdown mode): `?lockdown=1` withholds the
+   text of results written by people outside the owner (a GitHub mirror's comments from
+   non-collaborators, a fork's pull request body, chat messages) and says it did, so an injected
+   instruction never reaches a model that can act. roll code knows each author's association;
+   the other products' payloads (queue messages, task bodies, objects) are the owner's own.
+3. **MCP tasks, as the 2026-07-28 extension** (`io.modelcontextprotocol/tasks`, SEP-2663: the
    server answers a task handle when a call will take long, `tasks/get` polls with the result in
    it, `tasks/update` carries input, no `tasks/result` or `tasks/list`; 2025-11-25's experimental
    tasks are retired, and no client in the extensions matrix supports either yet): for calls that
    wait for a person, `input_required` with the approval page. It needs a durable task store on
    the system database (a fleet's poll lands on another node), results sealed with
    `ROLL_SECRET_KEY` (a reveal's answer is a credential), each task bound to its grant and looked
-   up on every call, caps per caller, and audit rows; and a client people use that sends it.
-2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+   up on every call, caps per caller, and audit rows; and a client people use that sends it. Waits on clients.
+4. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25; agreed conflicts resolved by `known-conflicts.py`), and
    compare each product's routes with its tools (an everyday route with no tool is a gap: apps'
-   were found this way). Keep **`feature/mcp-on-landing`** (#25 with secrets'
-   `feature/roll-secrets-landing-access`) merged after either side moves: roll-access, roll-mcp,
-   roll-secrets and roll-cli's token tests and rolld's route test before each push.
-3. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
+   were found this way). #24 and #25 are on main, so `feature/mcp-on-landing` is retired:
+   secrets' #64 lands on main directly.
+5. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
    `.index("name")` on the per-key routes and `Scope.key` in their own check (`GrantGrants` sets
    `id` since #30's fix). The tools and the builder's key picker are in; check both live once the
    rows land (a token on `prj_x/one-key` signs with it and is refused another key and the
    project's environments).
-4. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+6. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+7. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset (see Toolsets: it would drop tools from connections that use them; search mode is opt-in); a connection narrowed to one project (Supabase's `project_ref`): their
