@@ -260,7 +260,7 @@ async fn tell_if_waiting(a: &Arc<Access>, asker: Option<String>, grant_id: Strin
 /// The consent screen's answer, from the operator or a signed-in user (whose connection is
 /// their own: it acts as them): a code for the client, in the redirect the dashboard sends the
 /// browser to.
-pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
+pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate::Result<Response> {
     let c: Consent = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
     if c.code_challenge_method.as_deref().unwrap_or("S256") != "S256" {
         return Err(Error::BadRequest("code_challenge_method must be S256".into()));
@@ -282,7 +282,7 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
     let (code, grant_id) = tokio::task::spawn_blocking(move || a2.store.issue_code(&cl, &new, crate::store::Issuer { created_by: &by, user: user.as_deref() }, &uri, &ch, res.as_deref()))
         .await
         .map_err(|e| Error::Internal(e.to_string()))??;
-    tell_if_waiting(&a, asker, grant_id).await;
+    tell_if_waiting(&a, asker, grant_id.clone()).await;
     let mut redirect = url::Url::parse(&c.redirect_uri).map_err(|_| Error::BadRequest("redirect_uri isn't a URL".into()))?;
     {
         let mut q = redirect.query_pairs_mut();
@@ -292,7 +292,9 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
         }
         q.append_pair("iss", &api(&a));
     }
-    Ok(Json(json!({ "redirect": redirect.to_string() })))
+    let mut res = Json(json!({ "redirect": redirect.to_string() })).into_response();
+    res.extensions_mut().insert(crate::api::Changed(grant_id));
+    Ok(res)
 }
 
 /// A metadata document is fetched at most this often (it's kept between).
@@ -516,7 +518,7 @@ pub async fn device_view(State(a): S, ext: Extensions, axum::extract::Path(code)
 
 /// `POST /v1/access/oauth/devices/{code}`: the person allows the device what the body says (as
 /// the consent screen's `Allowed`); its next poll takes the tokens.
-pub async fn device_approve(State(a): S, ext: Extensions, axum::extract::Path(code): axum::extract::Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
+pub async fn device_approve(State(a): S, ext: Extensions, axum::extract::Path(code): axum::extract::Path<String>, body: axum::body::Bytes) -> crate::Result<Response> {
     let allowed: Allowed = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
     let r = device_lookup(&a, &ext, &code).await?;
     let client = known_client(&a, &r.client_id).await?.ok_or_else(|| Error::NotFound("the device's client is gone".into()))?;
@@ -527,7 +529,9 @@ pub async fn device_approve(State(a): S, ext: Extensions, axum::extract::Path(co
         .await
         .map_err(|e| Error::Internal(e.to_string()))??;
     tell_if_waiting(&a, asker, grant_id.clone()).await;
-    Ok(Json(json!({ "grant_id": grant_id, "pending": waits })))
+    let mut res = Json(json!({ "grant_id": grant_id, "pending": waits })).into_response();
+    res.extensions_mut().insert(crate::api::Changed(grant_id));
+    Ok(res)
 }
 
 /// `DELETE /v1/access/oauth/devices/{code}`: the person refuses it.
