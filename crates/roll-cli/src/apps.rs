@@ -1534,10 +1534,10 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
     };
     let dir = std::fs::canonicalize(&dir).with_context(|| format!("{}", dir.display()))?;
     // A roll.toml the build would refuse is refused here, before anything is made or uploaded.
-    if !u.all {
-        if let Some(app) = apps_build::app::read(&dir).map_err(|e| anyhow::anyhow!("{e}"))? {
-            app.check_all().map_err(|e| anyhow::anyhow!("{e}"))?;
-        }
+    if !u.all
+        && let Some(app) = apps_build::app::read(&dir).map_err(|e| anyhow::anyhow!("{e}"))?
+    {
+        app.check_all().map_err(|e| anyhow::anyhow!("{e}"))?;
     }
     if u.all {
         return up_all(api, json_out, &dir, &u).await;
