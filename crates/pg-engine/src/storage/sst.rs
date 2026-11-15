@@ -2176,6 +2176,43 @@ mod tests {
         assert!(e.message.contains("bad footer"), "{}", e.message);
     }
 
+    /// A format 2 block whose bytes changed is refused by its checksum (XX001, as format 1's),
+    /// raw or compressed; one whose checksum holds but whose trailer doesn't add up is refused
+    /// by `Block::load`, not read.
+    #[test]
+    fn corrupted_format2_blocks_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for (id, codec) in [(1, Codec::None), (2, Codec::Zstd)] {
+            let mut w = SstWriter::create_with(dir.path(), id, codec, true).unwrap();
+            for i in 0..2000u32 {
+                w.add(&mvcc(&i.to_be_bytes(), 5), Some(format!("value {i}").as_bytes())).unwrap();
+            }
+            let meta = w.finish().unwrap();
+            let path = sst_path(dir.path(), id);
+            let good = std::fs::read(&path).unwrap();
+            let open = |b: &[u8]| {
+                std::fs::write(&path, b).unwrap();
+                SstReader::open(dir.path(), meta.clone(), BlockCache::new(1 << 20)).unwrap()
+            };
+            let (off, len) = open(&good).index.at[1];
+            let (off, len) = (off as usize, len as usize);
+            let mut b = good.clone();
+            b[off + len / 2] ^= 0x10;
+            let e = open(&b).block(1).err().unwrap();
+            assert_eq!((e.code, e.message.contains("checksum mismatch")), (crate::error::code::DATA_CORRUPTED, true), "{codec:?}: {}", e.message);
+            if codec == Codec::None {
+                // (The flags byte ends the body: a restart interval of 0, the checksum redone.)
+                let mut b = good.clone();
+                b[off + len - 5] &= 0x0F;
+                let crc = crc32fast::hash(&b[off..off + len - 4]);
+                b[off + len - 4..off + len].copy_from_slice(&crc.to_le_bytes());
+                let e = open(&b).block(1).err().unwrap();
+                assert!(e.message.contains("bad sst block"), "{}", e.message);
+            }
+            assert!(open(&good).block(1).is_ok());
+        }
+    }
+
     fn mvcc(k: &[u8], ts: u64) -> Vec<u8> {
         let mut v = k.to_vec();
         v.extend_from_slice(&(!ts).to_be_bytes());
