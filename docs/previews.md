@@ -862,7 +862,7 @@ type Settings = {
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
   teardown: Job | null;               // once when the preview goes, before its services and branches
-  masking: Record<string, Record<string, string>>; // "postgres:<ref>" → {"schema.table.column": "email"}, "nosql:<ref>" → {"ks.table.column": "mask_default()"}, "search:<ref>" → {"index.field": "redact" | "remove" | "email"} (redact and email only on a text-like field of the parent's: a number, a date or a vector is refused when set, use remove)
+  masking: Record<string, Record<string, string>>; // "postgres:<ref>" → {"schema.table.column": "email"}, "nosql:<ref>" → {"ks.table.column": "mask_default()"}, "search:<ref>" → {"index.field": "redact" | "remove" | "email"} (redact and email only on a text-like field of the parent's: a number, a date or a vector is refused when set, use remove; an index whose name has dots, `logs.2024.user.email`, is split off at the longest name the cluster has)
 };
 ```
 
@@ -1254,6 +1254,8 @@ Ranked by what a person notices first. Done so far:
 - a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
+- search masks on an index whose name has dots (`logs.2024`): split off at the longest index name
+  the cluster has, for masking and for the check when set;
 - a tenth review (states, browsers, search masks) and its fixes: a dialog a state's step opens
   dismissed (it held the whole screenshot), Enter submitting a form, an earlier push's browser
   page dropped when the browsers run fails, the image build bounded in time and built from the
@@ -1397,12 +1399,7 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Search masks on an index whose name has dots** (from the tenth review): a mask is
-   `index.field`, split at its first dot, so `logs.2024.email` means index `logs`, field
-   `2024.email`; an index named `logs.2024` can't be masked, and the masking skips the missing
-   `logs` without a word. Resolve the split against the parent's indices (the longest index
-   name that's a prefix), and refuse a mask whose index matches none when it's set.
-2. **Promote a preview's deployment to production on roll apps** (Vercel's promote): built on
+1. **Promote a preview's deployment to production on roll apps** (Vercel's promote): built on
    the stacked `feature/roll-previews-on-apps`. The sheet's "Promote <service> to production"
    (its name typed to confirm) calls roll apps' own `POST …/environments/production/promote`
    with `from: pv-<id>` as the signed-in person, so roll apps decides who may deploy production
@@ -1413,14 +1410,14 @@ Ranked by what a person notices first. Done so far:
    deployment as roll apps' `expect` (fc6fbf48c), so a newer push deployed since is a 409 from
    the same read the promotion is made of (live: a promote expecting another deployment refused).
    It merges into #28 with #26.
-3. **Dynamic credentials a preview renews** (roll secrets' leases): a preview resolves with
+2. **Dynamic credentials a preview renews** (roll secrets' leases): a preview resolves with
    `dynamic: false` today, so a dynamic link inherited from its base is named as a problem.
    Previews converges every few minutes, so it could hold such a lease itself: resolve the
    credential once per data generation, keep it (sealed, as a branch's `kept` credentials),
    renew it with `POST …/leases/{id}/renew` on each converge, and end it when the preview goes.
    Moderate value: a dynamic credential usually reaches something outside roll that previews
    doesn't branch, which a preview shouldn't write to anyway.
-4. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
+3. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
    (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
@@ -1436,19 +1433,19 @@ Ranked by what a person notices first. Done so far:
    host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
    every product port (an image of its own, and roll code's runner changed); on the cloud fleet
    it's security groups, with the cloud thread.
-5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-6. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-7. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-8. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1461,12 +1458,12 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-9. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+8. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-10. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+9. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

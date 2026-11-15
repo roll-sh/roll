@@ -797,9 +797,11 @@ impl Brancher for Search {
     async fn mask_problems(&self, parent: &str, fields: &std::collections::BTreeMap<String, String>) -> anyhow::Result<Vec<String>> {
         // Each index the rules name, read as itself (an alias or pattern answers with its real
         // indices, and only those are checked); one the parent doesn't have yet is none.
+        let listed = self.0.post(&format!("/v1/search/clusters/{}/request", seg(parent)), json!({ "method": "GET", "path": "/_cat/indices?h=index&format=json" })).await?;
+        let indices: Vec<String> = serde_json::from_str::<Vec<Value>>(listed["body"].as_str().unwrap_or("[]")).unwrap_or_default().iter().filter_map(|x| x["index"].as_str().map(str::to_string)).collect();
         let mut by_index: std::collections::BTreeMap<&str, std::collections::BTreeMap<String, String>> = Default::default();
         for (spec, rule) in fields {
-            if let Some((index, _)) = spec.split_once('.') {
+            if let Some((index, _)) = roll_previews::mask::split_mask(spec, &indices) {
                 by_index.entry(index).or_default().insert(spec.clone(), rule.clone());
             }
         }
@@ -812,7 +814,7 @@ impl Brancher for Search {
                 s => anyhow::bail!("reading {parent}'s {index} mapping: {s:?}"),
             }
             let mapping: Value = serde_json::from_str(v["body"].as_str().unwrap_or("{}"))?;
-            out.extend(roll_previews::mask::search_field_masks(&mapping, &specs));
+            out.extend(roll_previews::mask::search_field_masks(&mapping, &specs, &indices));
         }
         Ok(out)
     }
@@ -888,8 +890,11 @@ impl Brancher for Search {
         let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(300)).build()?;
         let send = |req: reqwest::RequestBuilder| if user.is_empty() { req } else { req.basic_auth(&user, pass.as_deref()) };
         let mut masked: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        // The branch's indices, so an index whose name has dots is split off whole.
+        let listed = send(http.get(u.join("_cat/indices?h=index&format=json")?)).send().await?;
+        let indices: Vec<String> = listed.json::<Vec<Value>>().await.unwrap_or_default().iter().filter_map(|x| x["index"].as_str().map(str::to_string)).collect();
         for (spec, rule) in fields {
-            let Some((index, path)) = spec.split_once('.') else { anyhow::bail!("{spec:?} isn't index.field") };
+            let Some((index, path)) = roll_previews::mask::split_mask(spec, &indices) else { anyhow::bail!("{spec:?} isn't index.field") };
             let target = u.join(&format!("{}/_update_by_query?conflicts=proceed&refresh=true", seg(index)))?;
             // Every document, not those `exists` finds: a field that isn't indexed (or has no doc
             // values) is in `_source` all the same.
