@@ -56,12 +56,16 @@ export function clientIdentity(id: string): string {
   return "Any app can register under any name: check the address it returns to below, and that you started this from that app.";
 }
 
-export function Problem({ text }: { text: string }) {
+/** Why a page can't go on: a connection request's problem by default, or the caller's own words. */
+export function Problem({ text, title = "This connection request can't be used", next = "Start connecting again from your MCP client." }: { text: string; title?: string; next?: string }) {
   return (
     <section className="rise rounded-xl border border-line bg-panel p-6">
       <HorizonMark state="error" size={28} />
-      <h1 className="mt-4 text-[15px] font-medium">This connection request can&apos;t be used</h1>
-      <p className="mt-1 text-[13px] text-muted">{text} Start connecting again from your MCP client.</p>
+      <h1 className="mt-4 text-[15px] font-medium">{title}</h1>
+      <p className="mt-1 text-[13px] text-muted">
+        {text.charAt(0).toUpperCase() + text.slice(1)}
+        {next ? ` ${next}` : ""}
+      </p>
     </section>
   );
 }

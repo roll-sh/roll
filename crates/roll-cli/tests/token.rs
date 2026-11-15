@@ -138,9 +138,14 @@ async fn roll_login_signs_the_cli_in_through_the_browser() {
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(std::fs::metadata(home.path().join("roll/logins.json")).unwrap().permissions().mode() & 0o777, 0o600);
 
-    // No token set: commands use the login, within its rules.
+    // No token set: commands use the login, within its rules, and whoami says it's the login's
+    // (or, with the operator's token set too, that the login loses to it: gh auth status).
     let me = json_of(&bare(&["--json", "token", "whoami"]).output().unwrap());
     let id = me["grant"]["id"].as_str().unwrap().to_string();
+    assert!(me["credential"]["source"].as_str().is_some_and(|s| s.starts_with("roll login")), "{me}");
+    let both = json_of(&bare(&["--json", "token", "whoami"]).env("ROLL_ADMIN_TOKEN", OPERATOR).output().unwrap());
+    assert_eq!(both["credential"]["source"], "ROLL_ADMIN_TOKEN");
+    assert!(both["credential"]["unused"][0].as_str().is_some_and(|s| s.starts_with("roll login")), "{both}");
     assert!(bare(&["db", "list"]).output().unwrap().status.success());
     assert!(!bare(&["token", "list"]).output().unwrap().status.success());
     // An access token at its end is refreshed, and the new pair kept.

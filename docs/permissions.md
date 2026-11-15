@@ -85,6 +85,10 @@ Infisical's and 1Password's CLIs do, rather than a token pasted into a shell pro
   looked up by a token, and ten wrong codes in a minute answer 429 to that caller. On a roll
   without the device endpoint, the address the browser ends on is pasted back instead.
 - `$BROWSER` names the browser to open, as `gh` reads it.
+- `roll token whoami` says which credential runs and where it came from (`ROLL_TOKEN`,
+  `ROLL_ADMIN_TOKEN`, `ROLL_API_KEY`, or `roll login` and its file), what it may do, and each other
+  credential set that loses to it (`gh auth status`); with none, it says to `roll login` and exits 1.
+  `--json` adds `credential: {source, unused}`.
 - The login is kept in `$XDG_CONFIG_HOME/roll/logins.json` (else `~/.config`), 0600 in a 0700
   directory, one entry per API URL. Commands use it only when no credential is set for the run
   (`ROLL_TOKEN`, `ROLL_IDENTITY`, `ROLL_ADMIN_TOKEN`, `ROLL_API_KEY`, `roll code`'s and `roll

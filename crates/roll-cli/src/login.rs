@@ -48,6 +48,11 @@ fn logins_path() -> anyhow::Result<PathBuf> {
     Ok(base.join("roll").join("logins.json"))
 }
 
+/// Where this API's login is kept, when there is one (for `roll token whoami`).
+pub fn kept(api: &str) -> Option<PathBuf> {
+    load().ok()?.contains_key(api).then(|| logins_path().ok()).flatten()
+}
+
 fn load() -> anyhow::Result<BTreeMap<String, Saved>> {
     let path = logins_path()?;
     match std::fs::read_to_string(&path) {

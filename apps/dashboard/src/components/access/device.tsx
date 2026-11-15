@@ -68,7 +68,7 @@ function Ask({ code, again }: { code: string; again: () => void }) {
   if (loaded.state === "error") {
     return (
       <div className="space-y-3">
-        <Problem text={loaded.error} />
+        <Problem title="That code didn't work" text={loaded.error.replace(/[.:]?\s*$/, ".")} next="" />
         <button onClick={again} className="text-[13px] text-accent">
           Enter another code
         </button>
