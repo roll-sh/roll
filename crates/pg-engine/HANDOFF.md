@@ -12712,7 +12712,8 @@ the two "savepoint does not exist" and three "column ... of relation ... does no
 routines aren't told apart (pg-engine location); date / timestamp / interval overflow
 routines (date_pli, timestamp_pl_interval, ... many sites).
 
-Verification (agent 233): release wire (73; `protocol_cases` 207, recorded again from
+Verification (agent 233; the hashes before the rebase are the work branch's commits, kept on
+origin's `wip/a233`, squashed into this round's five): release wire (73; `protocol_cases` 207, recorded again from
 PostgreSQL with `P` and `W`: 36 of them differ on the base, none now) and golden (in-process,
 wire, shuffled) on the release build of `97d327795`. Lane A, plain dist builds, base
 `2947ce5a4` against these commits (`0f59c9ded`; `8b0eaf4db` only collapses an `if` and a
@@ -12746,6 +12747,14 @@ isolation 1647/1648 (intra-grant-inplace as before); pg_dump 14609 passed. On `6
 steps that change can reach: regress 51,148 of 51,150, newly differing 0 (privileges 1477 of
 1477 alone); isolation 1647/1648; pg_dump 14609 passed (a first try's engine couldn't bind its
 port: run again); release wire (73), golden (3), kept_plans (11), twophase (4) all passing.
+Verification train after the rebase onto `5526bfef4`, on `76d9c94f4` (these commits): release,
+clippy (20 warnings), crash, power-cut, crash-power (sync and async) 0; regress 51,148 of
+51,150, newly differing 0; isolation 1647/1648 (intra-grant-inplace as before); pg_dump 14609
+passed; debug 101: protocol_cases' `plf_prepare` had a second NOTICE in the debug build (an
+earlier case's closing session dropped its temporary table between the two EXECUTEs, a catalog
+change the engine plans a prepared statement again for); the PL/pgSQL cases read tables of
+their own now (`bf895067c`), and protocol_cases passes three runs each of the release and
+debug builds.
 
 - **Scroll cursors after page splits**: not built; the design note is sharper. The model
   already counts its page allocations: `Btree::sizes` (`SizeGen`) is bumped by every split
