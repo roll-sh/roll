@@ -127,6 +127,10 @@ enum Cmd {
     Login(login::Login),
     /// Revoke this CLI's login and forget it.
     Logout,
+    /// Shell completions for every command and flag: `roll completions zsh > ~/.zfunc/_roll`
+    /// (bash, zsh, fish, powershell, elvish), as `fly completion` and `railway completion`.
+    #[command(visible_alias = "completion")]
+    Completions { shell: clap_complete::Shell },
 }
 
 #[derive(Subcommand)]
@@ -501,6 +505,10 @@ async fn main() -> anyhow::Result<()> {
     let admin = admin.or(signed_in);
     let api = Api { base, http, key: admin.clone().or(cli.api_key), headers: Vec::new() };
     let cmd = match cli.cmd {
+        Cmd::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "roll", &mut std::io::stdout());
+            return Ok(());
+        }
         Cmd::Db(cmd) => cmd,
         Cmd::Agent(cmd) => return agent::run(&api.base, cli.json, cmd).await,
         Cmd::Gateway(cmd) => return gateway::run(cli.json, cmd).await,
