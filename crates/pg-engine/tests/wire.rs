@@ -4703,6 +4703,93 @@ fn protocol_cases() {
         // COPY: FREEZE refused once the COPY started; CopyFail's line.
         c("copy_freeze_refused", |a| session(a, &["create temp table cpf(a int)"], &[query("copy cpf from stdin with (freeze)"), [msg(b'd', b"1\n"), msg(b'c', b"")].concat()])),
         c("copy_fail_line", |a| session(a, &["create temp table cpf(a int)"], &[query("copy cpf from stdin"), [msg(b'd', b"1\n2\n3"), msg(b'f', &cstr("bye"))].concat()])),
+        // An unterminated CSV quote's line: CopyReadLineText counts the quoted ends of
+        // lines once it knows the end of line, after the first record.
+        c("copy_csv_quote_lines", |a| session(a, &["create temp table cpq(a int, b text)"], &[
+            [query("copy cpq from stdin with (format csv)"), msg(b'd', b"1,\"un\nterminated\n"), msg(b'c', b"")].concat(),
+            [query("copy cpq from stdin with (format csv)"), msg(b'd', b"1,a\n2,\"x\ny\n"), msg(b'c', b"")].concat(),
+            [query("copy cpq from stdin with (format csv)"), msg(b'd', b"1,\"a\nb\"\n2,\"x\n"), msg(b'c', b"")].concat(),
+        ])),
+        // Locations of errors two PostgreSQL routines share, and date/time overflows.
+        c("loc_routines", |a| session(a, &["create schema if not exists lr", "create table if not exists lr.t(id int primary key, v int)"], &[
+            query("begin"),
+            query("rollback to savepoint nope"),
+            query("rollback"),
+            query("begin"),
+            query("release savepoint nope"),
+            query("rollback"),
+            query("close nope"),
+            query("show nope"),
+            query("set work_mem = 1"),
+            query("insert into lr.t(id, x) values (1, 2)"),
+            query("update lr.t set nope = 1"),
+            query("alter table lr.t drop column nope"),
+            query("create index on lr.t(nope)"),
+            query("drop function lr.nope()"),
+            query("grant select on lr.nope to public"),
+            query("drop index lr.t_pkey"),
+            query("select '{1,{2}}'::int[]"),
+            query("select true::int2"),
+            query("select date '5874897-12-31' + 1"),
+            query("select interval '2147483647 days' + interval '1 day'"),
+            query("select timestamp '294276-12-31' + interval '1 year'"),
+        ])),
+        // An unread CTE isn't planned: its PL/pgSQL calls don't run.
+        c("plf_cte_unread", |a| session(a, &[], &[query("with x as (select pc_fi(0)) select 1"), query("with x as materialized (select pc_fi(0)) select 1")])),
+        // EXPLAIN's widths and shapes: a CTE's columns by type, a window's resjunk keys, a
+        // pulled-up constant coerced, WITH ORDINALITY, a bitmap scan
+        // nothing is read of, an inheritance Append's average, MERGE's join.
+        c("explain_widths", |a| session(a, &[
+            "drop table if exists xw_a, xw_b, xw_p",
+            "create table xw_a(id int primary key, g int, t text)",
+            "create table xw_b(id int primary key, aid int, v numeric)",
+            "insert into xw_a select i, i % 10, 'r' || i from generate_series(1, 2000) i",
+            "insert into xw_b select i, i % 2000 + 1, i * 1.5 from generate_series(1, 5000) i",
+            "create index xw_b_aid on xw_b(aid)", "create index xw_a_g on xw_a(g)",
+            "create table xw_p(k int, v text) partition by range (k)",
+            "create table xw_p1 partition of xw_p for values from (0) to (1000)",
+            "create table xw_p2 partition of xw_p for values from (1000) to (3000)",
+            "insert into xw_p select i, 'v' || i from generate_series(1, 2500) i",
+            "analyze xw_a", "analyze xw_b", "analyze xw_p",
+        ], &[
+            query("explain with c as materialized (select * from xw_a where g = 2) select * from c"),
+            query("explain select id, row_number() over (partition by g order by id) from xw_a"),
+            query("explain verbose insert into xw_b select id + 10000, id, 0 from xw_a where g = 9"),
+            query("explain select * from generate_series(1, 3) with ordinality"),
+            query("explain (verbose, costs off) select count(*) from xw_b where aid = 5"),
+            query("explain select * from xw_p"),
+            query("explain (costs off) merge into xw_a t using xw_b s on t.id = s.id when matched then update set g = 1 when not matched then do nothing"),
+            query("explain (verbose, costs off) delete from xw_b using xw_a where xw_a.id = xw_b.aid and xw_a.g = 3"),
+            query("drop table xw_a, xw_b, xw_p"),
+        ])),
+        // information_schema.columns has no materialized view; nulls_distinct is a UNIQUE
+        // constraint's. pg_settings' sources.
+        c("info_schema_rows", |a| session(a, &[
+            "drop schema if exists isr cascade", "create schema isr",
+            "create table isr.t(id int primary key, u int unique)",
+            "create materialized view isr.mv as select id from isr.t",
+        ], &[
+            query("select table_name, column_name from information_schema.columns where table_schema = 'isr' order by 1, 2"),
+            query("select constraint_name, nulls_distinct from information_schema.table_constraints where table_schema = 'isr' order by 1"),
+            query("select name, source from pg_settings where name in ('zero_damaged_pages', 'xmloption')"),
+            query("drop schema isr cascade"),
+        ])),
+        // Index builds count as sequential scans of the table; ON CONFLICT's arbiter checks
+        // as index scans; a new relation's creator holds its AccessExclusiveLock.
+        c("stat_counts", |a| session(a, &[], &[
+            query("begin"),
+            query("create table stc(id int primary key, v int)"),
+            query("create index stc_v on stc(v)"),
+            query("insert into stc values (1, 1)"),
+            query("insert into stc values (1, 2) on conflict (id) do update set v = excluded.v"),
+            query("insert into stc values (2, 2) on conflict do nothing"),
+            query("select seq_scan, idx_scan, idx_tup_fetch from pg_stat_xact_user_tables where relname = 'stc'"),
+            query("select relname, pg_stat_get_xact_numscans(oid), pg_stat_get_xact_tuples_returned(oid), pg_stat_get_xact_tuples_fetched(oid) from pg_class where relname in ('stc_pkey', 'stc_v') order by 1"),
+            query("truncate stc"),
+            query("select seq_scan from pg_stat_xact_user_tables where relname = 'stc'"),
+            query("select relation::regclass, mode from pg_locks where pid = pg_backend_pid() and locktype = 'relation' and relation::regclass::text like 'stc%' order by 1::text, 2"),
+            query("rollback"),
+        ])),
     ];
     let file = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/protocol_cases.out");
     if let Ok(addr) = std::env::var("PROTOCOL_RECORD") {
