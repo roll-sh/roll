@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { formatBytes } from "@/lib/roll-api";
 import { esJson, formatCount, type SearchCluster, type SearchIndex } from "@/lib/search-api";
-import { RETENTION_POLICY_PREFIX, retentionOf, retentionPolicy, retentionPolicyId, streamPolicy } from "@/lib/search-ism";
+import { retentionOf, retentionPolicy, retentionPolicyId, streamPolicy } from "@/lib/search-ism";
 import { ErrorNote, input, Panel } from "../ui";
 
 /** A data stream as `GET _data_stream` lists it (the fields the panel reads). */
@@ -135,8 +135,9 @@ export function DataStreams({ cluster, indices, onSelect }: { cluster: SearchClu
               const write = d.indices[d.indices.length - 1]?.index_name;
               const ilm = d.next_generation_managed_by === "Index Lifecycle Management" && d.ilm_policy;
               const own = ism[d.name];
-              // A policy of the user's on an OpenSearch stream is theirs to manage.
-              const userIsm = opensearch && own?.policy && !own.policy.startsWith(RETENTION_POLICY_PREFIX) ? own.policy : null;
+              // A policy other than this stream's own retention (the user's, or another stream's
+              // roll retention its indices picked up) is shown as that policy, not managed here.
+              const userIsm = opensearch && own?.policy && own.policy !== retentionPolicyId(d.name) ? own.policy : null;
               const retention = (opensearch ? own?.retention : d.lifecycle?.data_retention) ?? "";
               const options = RETENTION.some((o) => o.value === retention) ? RETENTION : [...RETENTION, { label: retention, value: retention }];
               return (

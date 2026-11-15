@@ -10,7 +10,8 @@ test("a stream's retention is an ISM policy that never deletes the write index",
   assert.deepEqual(hot.actions, [{ rollover: { min_index_age: "1d", min_primary_shard_size: "50gb" } }]);
   assert.deepEqual(hot.transitions, [{ state_name: "delete", conditions: { min_rollover_age: "7d" } }]);
   assert.deepEqual(del.actions, [{ delete: {} }]);
-  assert.deepEqual(p.policy.ism_template, [{ index_patterns: [".ds-app-logs-*"], priority: 100 }]);
+  // Only the stream's own generations: `app-logs-eu` has backing indices `.ds-app-logs-eu-000001`.
+  assert.deepEqual(p.policy.ism_template, [{ index_patterns: [".ds-app-logs-00*"], priority: 100 }]);
   // Read back as OpenSearch prints it (`GET _plugins/_ism/policies/<id>`).
   assert.equal(retentionOf({ _id: "roll-retention-app-logs", policy: p.policy }), "7d");
   assert.equal(retentionOf({ policy: { states: [{ name: "hot", transitions: [] }] } }), null);

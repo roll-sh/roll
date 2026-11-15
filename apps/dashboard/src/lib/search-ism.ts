@@ -3,7 +3,10 @@
  * an Index State Management policy roll makes for the stream (`roll-retention-<stream>`). It
  * rolls the stream over, then deletes each backing index once it has been rolled over for the
  * retention (`min_rollover_age`, as Elasticsearch's lifecycle counts from a generation's rollover),
- * so the write index is never deleted; its `ism_template` puts new backing indices under it.
+ * so the write index is never deleted; its `ism_template` puts new backing indices under it. The
+ * template matches the stream's own generations only (`.ds-<stream>-00*`: ISM patterns have no
+ * wildcard but `*`, and generations are zero-padded), never another stream that starts with the
+ * same name (`logs` against `logs-app`).
  */
 
 export const RETENTION_POLICY_PREFIX = "roll-retention-";
@@ -44,9 +47,15 @@ export function retentionPolicy(stream: string, retention: string) {
         },
         { name: "delete", actions: [{ delete: {} }], transitions: [] },
       ],
-      ism_template: [{ index_patterns: [`.ds-${stream}-*`], priority: 100 }],
+      ism_template: [{ index_patterns: [backingPattern(stream)], priority: 100 }],
     },
   };
+}
+
+/** The backing indices of `stream` an ISM template may match: its generations
+ * (`.ds-<stream>-000001`), not `.ds-<stream>-<other>-000001` of a stream named `<stream>-<other>`. */
+export function backingPattern(stream: string) {
+  return `.ds-${stream}-00*`;
 }
 
 /** The retention a roll-made policy (`GET _plugins/_ism/policies/<id>`) keeps, or `null`. */
