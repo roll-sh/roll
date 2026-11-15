@@ -66,6 +66,7 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
         people: None,
         clouds: None,
         outside: None,
+        github: None,
         kms: None,
         sts: None,
     };

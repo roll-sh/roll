@@ -126,6 +126,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/cloud-accounts/{{id}}"), axum::routing::delete(delete_cloud_account))
         .route(&format!("{P}/outside-databases"), get(outside_databases).post(add_outside_database))
         .route(&format!("{P}/outside-databases/{{id}}"), axum::routing::delete(delete_outside_database))
+        .route(&format!("{P}/github-apps"), get(github_apps).post(add_github_app))
+        .route(&format!("{P}/github-apps/{{id}}"), axum::routing::delete(delete_github_app))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -1049,6 +1051,20 @@ async fn outside_databases(State(s): S, Who(c): Who, Path(project): Path<String>
 async fn add_outside_database(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let n: crate::outside::NewOutsideDatabase = body(&b)?;
     Ok(created(blocking(s, move |s| s.add_outside_database(&project, n, &c)).await?))
+}
+
+async fn github_apps(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.github_apps(&project, &c)).await?))
+}
+
+async fn add_github_app(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::github_app::NewGitHubApp = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_github_app(&project, n, &c)).await?))
+}
+
+async fn delete_github_app(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_github_app(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn delete_outside_database(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {

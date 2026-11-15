@@ -871,6 +871,30 @@ rotation (the rotated login signs in), a dynamic login that signs in with the gr
 can't once dropped, and an untrusted certificate refused. With TLS 1.3 enabled on the server as
 well (`tlsprotocols = 1.2,1.3`), SQL Server 2022 on Linux refused TDS 7.4 logins, Microsoft's own
 `sqlcmd` included: such a server needs TLS 1.2 allowed.
+### GitHub App tokens
+A short-lived GitHub token per lease, from the project's own GitHub App, as Akeyless and Vault's
+GitHub plugin give: a release job gets `GITHUB_TOKEN` that reads one repository and opens pull
+requests in it, and nothing else, for as long as the job runs. Nobody keeps a personal access token
+in a secret.
+
+An admin registers the App's installation (`POST …/github-apps {name, app_id, installation_id,
+private_key, api_base?}`, `roll secrets github-apps add deploy --app-id 123 --installation 456 <
+key.pem`, or the Links tab): the App's private key, as GitHub gave it, is sealed with the project's
+key and bound to its row, and never shown again. roll gets one token with it first, and revokes it
+at once, so a wrong id or key is refused with GitHub's own reason. `api_base` names a GitHub
+Enterprise Server's API (`https://github.example.com/api/v3`); rolld reaches it as it does every
+URL a tenant chose (public addresses only, no redirects, at most 64 KiB read).
+
+A key links to it `dynamic`, with field `token`. `options.repositories` names repositories of the
+installation's owner (`["web", "api"]`; none: every one the installation reaches), and
+`options.permissions` maps GitHub's permission names to `read`, `write` or `admin` (`{"contents":
+"read", "pull_requests": "write"}`; none: the App's own). GitHub refuses to widen what the App was
+granted. Each resolve signs a JWT as the App and gets an installation token narrowed that way
+(`POST /app/installations/{id}/access_tokens`); the token is sealed in its lease, and the lease
+ending (revoked, expired or swept) ends the token (`DELETE /installation/token`). GitHub ends one
+after an hour on its own, so a link's `ttl_minutes` is 60 at most, and a lease can't be renewed:
+resolve again for a new token. An App is deleted only once no key links to it and no lease holds a
+token of it.
 ### GCP and Azure
 Short-lived GCP and Azure access tokens for each lease, as Vault's GCP and Azure engines give, with
 no key of the customer's stored anywhere: **roll is an OpenID Connect issuer**, and the customer's
@@ -2338,6 +2362,9 @@ isn't in the workspace is 404.
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
+| `GET /github-apps` | | `GitHubApp[]` (`read` on the project; never the key) |
+| `POST /github-apps` | `{name, app_id, installation_id, private_key, api_base?}` | 201 `GitHubApp` (`admin`; gets and revokes a token first: 400 with GitHub's reason) |
+| `DELETE /github-apps/{id}` | | 204; 409 while a key links to it or a lease holds a token (`admin`) |
 | `GET /cloud-accounts` | | `CloudAccount[]` (`read` on the project) |
 | `POST /cloud-accounts` | `{name, cloud: "gcp", audience, service_account}` or `{name, cloud: "azure", tenant, client_id, scope?}` | 201 `CloudAccount` (`admin`; 400 when a made-up project's token is taken, or this project's isn't) |
 | `DELETE /cloud-accounts/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -2716,10 +2743,10 @@ Built, in pull requests on #62 (each reviewed, its fixes in): the Secrets Store 
 Go and Python clients and Terraform resources for registrations (#66, #67, #72), AWS through roll's
 issuer (#68), the operator's restarts (#69), SIEM and roll search audit sinks (#70, #71).
 
-1. **GitHub App installation tokens** (building): a dynamic link to the project's own GitHub App
-   issues an installation token per lease, narrowed to chosen repositories and permissions and
-   ended with the lease (GitHub revokes it), as Akeyless and Vault's GitHub plugin do; the App's
-   private key sealed with the project's key, registered as `github_app`.
+1. **GitHub App installation tokens** (built, in review: `feature/roll-secrets-github-app`): a
+   dynamic link to the project's own GitHub App issues an installation token per lease, narrowed
+   to chosen repositories and permissions and ended with the lease, as Akeyless and Vault's GitHub
+   plugin do ("GitHub App tokens").
 2. **Kubernetes service account tokens** per lease (TokenRequest against a cluster the project
    registers), as Vault's Kubernetes engine, Akeyless and Infisical do.
 3. **Snowflake** logins outside roll (key-pair users per lease or two that take turns), as Vault,

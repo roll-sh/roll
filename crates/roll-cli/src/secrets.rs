@@ -335,6 +335,10 @@ pub enum Secrets {
     /// list, add, remove.
     #[command(subcommand)]
     Databases(DatabasesCmd),
+    /// The project's GitHub Apps, for an installation token per lease (narrowed by the link's
+    /// options.repositories and options.permissions): list, add, remove.
+    #[command(subcommand, name = "github-apps")]
+    GithubApps(GithubAppsCmd),
     /// AWS roles for dynamic AWS credentials: list, add (roll assumes it to check), remove.
     #[command(subcommand, name = "aws-roles")]
     AwsRoles(AwsRolesCmd),
@@ -623,6 +627,25 @@ pub enum DatabasesCmd {
         /// The server's CA certificates (PEM file), when the system's don't cover it (Amazon RDS).
         #[arg(long)]
         ca: Option<std::path::PathBuf>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum GithubAppsCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register an App's installation: the App's private key (the PEM GitHub gave) on stdin.
+    /// roll gets a token once (and revokes it) to check.
+    Add {
+        name: String,
+        #[arg(long)]
+        app_id: u64,
+        #[arg(long)]
+        installation: u64,
+        /// GitHub Enterprise Server's API (https://github.example.com/api/v3).
+        #[arg(long)]
+        api_base: Option<String>,
     },
     Rm { id: String },
 }
@@ -1708,6 +1731,34 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             DatabasesCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/outside-databases/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::GithubApps(g) => match g {
+            GithubAppsCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/github-apps", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for a in v.as_array().into_iter().flatten() {
+                    println!("{}  {:<16} app {}  installation {}  {}", s(&a["id"]), s(&a["name"]), a["app_id"], a["installation_id"], s(&a["api_base"]));
+                }
+            }
+            GithubAppsCmd::Add { name, app_id, installation, api_base } => {
+                // The private key: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("The App's private key (PEM), then Enter and Ctrl-D: ");
+                }
+                let mut key = String::new();
+                std::io::stdin().read_to_string(&mut key).context("reading the private key from stdin")?;
+                let v = c.call(Method::POST, &format!("{}/github-apps", c.base()), Some(json!({ "name": name, "app_id": app_id, "installation_id": installation, "private_key": key.trim(), "api_base": api_base }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link GITHUB_TOKEN to it, dynamic, for a token per lease.", s(&v["name"]), s(&v["id"]));
+            }
+            GithubAppsCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/github-apps/{}", c.base(), enc(&id)), None).await?;
                 println!("Removed {id}");
             }
         },

@@ -289,6 +289,7 @@ export type CloudAccount =
 export type NewCloudAccount = { name: string } & ({ cloud: "gcp"; audience: string; service_account: string } | { cloud: "azure"; tenant: string; client_id: string; scope?: string });
 /** A Postgres, MySQL, Redis or MongoDB server outside roll: two login roles that take turns (managed), a group dynamic logins join, or both; the admin URL stays sealed. */
 export type OutsideDatabase = { id: string; name: string; host: string; roles: string[]; group?: string; ca?: string; created_at: number; created_by: string };
+export type GitHubApp = { id: string; name: string; app_id: number; installation_id: number; api_base: string; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 
