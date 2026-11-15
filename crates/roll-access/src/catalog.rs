@@ -110,10 +110,26 @@ fn apps_scale(b: &Value) -> Vec<Lent> {
     b.pointer("/run/scale/stream").and_then(Value::as_str).map(|s| Lent { kind: "stream".into(), r#ref: s.into(), action: Action::Read }).into_iter().collect()
 }
 
-/// A new service: its links and its scaling stream.
+/// A roll code repo the body names, which apps reads for the caller (`repo` for a plan or an import,
+/// `source.repo` for a service built from one): read on it, so a token can't learn a repo's stack,
+/// head or roll.toml, or build and run its code, without being allowed to read it.
+fn apps_repo(b: &Value) -> Vec<Lent> {
+    let from_source = (b.pointer("/source/kind").and_then(Value::as_str) == Some("repo")).then(|| b.pointer("/source/repo").and_then(Value::as_str)).flatten();
+    b.get("repo").and_then(Value::as_str).or(from_source).map(|r| Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }).into_iter().collect()
+}
+
+/// A new service: its links, its scaling stream and the repo it's built from.
 fn apps_create_lends(b: &Value) -> Vec<Lent> {
     let mut out = apps_links(b);
     out.extend(apps_scale(b));
+    out.extend(apps_repo(b));
+    out
+}
+
+/// A service's settings: its scaling stream and, when its source changes, the repo.
+fn apps_patch_lends(b: &Value) -> Vec<Lent> {
+    let mut out = apps_scale(b);
+    out.extend(apps_repo(b));
     out
 }
 
@@ -128,6 +144,8 @@ pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
         "nosql" => ("nosql", "nosql-database"),
         // Another service's URLs: no credential, but held to the same `reveal` as the rest.
         "service" => ("apps", "service"),
+        // Not a link: a repo apps reads (`apps_repo`).
+        "repo" => ("code", "repo"),
         _ => return None,
     })
 }
@@ -1203,7 +1221,7 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
     // A worker scaled on a stream group's lag has apps read that stream for it: read there too.
-    row("PATCH", "/v1/apps/services/{id}", "apps", Act::Body(apps_patch_action), one(PG, "service")).lends(Lend::Each(apps_scale)),
+    row("PATCH", "/v1/apps/services/{id}", "apps", Act::Body(apps_patch_action), one(PG, "service")).lends(Lend::Each(apps_patch_lends)),
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
     // `variables_from` copies another environment's values into this one: reveal there too.
     row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("variables_from")),
@@ -1242,8 +1260,9 @@ static ROWS: &[Row] = &[
     // Checking a domain changes nothing a person sees.
     row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/verify", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps", "apps", R, Tgt::Product),
-    row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant),
-    row("POST", "/v1/apps/import", "apps", R, Tgt::AnyGrant),
+    // A plan or an import of a roll code repo reads it: read there too.
+    row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
+    row("POST", "/v1/apps/import", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
     // A project as a roll.toml: variables by name, never a value.
     row("POST", "/v1/apps/projects/{project}/export", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/services", "apps", R, one(&["project"], "project")),
@@ -1496,6 +1515,12 @@ mod tests {
         assert_eq!(dep.row.action("POST", &[("env".into(), "staging".into())], None), Action::Write);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1", "read_only": true })), Action::Read);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1" })), Action::Write);
+        // A repo apps reads for the caller needs read on it: a plan's, an import's, a source's.
+        let repo = |r: &str| vec![Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }];
+        assert_eq!(apps_repo(&serde_json::json!({ "repo": "acme/web", "revision": "main" })), repo("acme/web"));
+        assert_eq!(apps_repo(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/api" } })), repo("acme/api"));
+        assert!(apps_repo(&serde_json::json!({ "source": { "kind": "image", "image": "nginx" } })).is_empty());
+        assert_eq!(link_target("repo"), Some(("code", "repo")));
         assert_eq!(redis_action(&serde_json::json!({ "command": ["get", "k"] })), Action::Read);
         assert_eq!(redis_action(&serde_json::json!({ "command": ["FLUSHALL"] })), Action::Delete);
         assert_eq!(redis_action(&serde_json::json!({ "command": ["set", "k", "v"] })), Action::Write);
