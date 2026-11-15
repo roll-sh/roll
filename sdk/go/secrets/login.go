@@ -9,24 +9,81 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Login exchanges a workload's own OIDC token for a short-lived roll token through workload
 // identity (docs/secrets.md, "Workload identities"): nothing long-lived sits in the workload's
-// settings. The answer's client is limited to the identity's project, environments and folders.
+// settings. The answer's client is limited to the identity's project, environments and folders,
+// and logs in again with the same OIDC token before its roll token ends (FromEnv reads a fresh
+// OIDC token each time).
 func Login(ctx context.Context, api, identity, oidcToken string) (*Client, error) {
-	c := &Client{API: api}
-	var l struct {
-		Token   string `json:"token"`
-		Project string `json:"project"`
-	}
-	if err := c.call(ctx, http.MethodPost, "/v1/secrets/login", map[string]string{"identity": identity, "token": strings.TrimSpace(oidcToken)}, &l); err != nil {
+	return login(ctx, api, identity, func(context.Context) (string, error) { return oidcToken, nil })
+}
+
+func login(ctx context.Context, api, identity string, source func(context.Context) (string, error)) (*Client, error) {
+	c := &Client{API: api, login: &relogin{identity: identity, source: source}}
+	if err := c.login.renew(ctx, c); err != nil {
 		return nil, err
 	}
-	if l.Token == "" {
-		return nil, errors.New("the login answered no token")
+	return c, nil
+}
+
+// relogin keeps a logged-in client's token fresh: a new login once less than a fifth of its life
+// (at least a minute) is left, or when the server refuses it.
+type relogin struct {
+	identity string
+	source   func(context.Context) (string, error)
+	mu       sync.Mutex
+	issued   time.Time
+	expires  time.Time
+}
+
+// token is the client's token, renewed first when it's about to end (or `stale`: refused).
+func (l *relogin) token(ctx context.Context, c *Client, stale string) (string, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	margin := l.expires.Sub(l.issued) / 5
+	if margin < time.Minute {
+		margin = time.Minute
 	}
-	return &Client{API: api, Token: l.Token, Project: l.Project}, nil
+	if (stale != "" && stale == c.Token) || time.Now().After(l.expires.Add(-margin)) {
+		if err := l.renewLocked(ctx, c); err != nil {
+			return "", err
+		}
+	}
+	return c.Token, nil
+}
+
+func (l *relogin) renew(ctx context.Context, c *Client) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.renewLocked(ctx, c)
+}
+
+func (l *relogin) renewLocked(ctx context.Context, c *Client) error {
+	oidc, err := l.source(ctx)
+	if err != nil {
+		return err
+	}
+	var a struct {
+		Token     string `json:"token"`
+		Project   string `json:"project"`
+		ExpiresAt int64  `json:"expires_at"`
+	}
+	anon := &Client{API: c.API, HTTP: c.HTTP}
+	if err := anon.call(ctx, http.MethodPost, "/v1/secrets/login", map[string]string{"identity": l.identity, "token": strings.TrimSpace(oidc)}, &a); err != nil {
+		return err
+	}
+	if a.Token == "" {
+		return errors.New("the login answered no token")
+	}
+	c.Token, l.issued, l.expires = a.Token, time.Now(), time.UnixMilli(a.ExpiresAt)
+	if c.Project == "" {
+		c.Project = a.Project
+	}
+	return nil
 }
 
 // FromEnv is a client as `roll run` makes one: ROLL_API_URL, then ROLL_TOKEN, or ROLL_IDENTITY
@@ -44,11 +101,10 @@ func FromEnv(ctx context.Context) (*Client, error) {
 	case env("ROLL_TOKEN") != "":
 		c = New(api, env("ROLL_TOKEN"))
 	case env("ROLL_IDENTITY") != "":
-		oidc, err := oidcToken(ctx, api, env)
-		if err != nil {
-			return nil, err
-		}
-		if c, err = Login(ctx, api, env("ROLL_IDENTITY"), oidc); err != nil {
+		// The OIDC token is read again for each login (a projected token is replaced on disk).
+		source := func(ctx context.Context) (string, error) { return oidcToken(ctx, api, env) }
+		var err error
+		if c, err = login(ctx, api, env("ROLL_IDENTITY"), source); err != nil {
 			return nil, err
 		}
 	default:
