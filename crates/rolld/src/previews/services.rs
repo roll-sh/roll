@@ -108,6 +108,7 @@ impl roll_previews::ports::Apps for RollApps {
                 .map(|x| roll_previews::ports::CatalogService {
                     name: s(&x["name"]).unwrap_or_default(),
                     repo: (x["source"]["kind"] == "repo").then(|| s(&x["source"]["repo"])).flatten(),
+                    root: s(&x["source"]["root"]).unwrap_or_default(),
                     memory_mb: x["run"]["memory_mb"].as_u64().unwrap_or(512) as u32,
                 })
                 .collect(),

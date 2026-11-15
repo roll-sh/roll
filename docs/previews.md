@@ -264,7 +264,11 @@ behind the `Apps` trait:
     more of its own pages and what to blank in them, versioned with the code they name: read from
     its `roll.toml` at the revision the first service runs, with the project's (a state name the
     project has wins), and refused with the rest of the file when they break the same rules
-    (live: a repo page and a repo state compared with main's).
+    (live: a repo page and a repo state compared with main's). A service on roll apps takes them
+    from its `[app.previews.screenshots]` instead (roll apps describes it, and leaves that table
+    to previews: agreed with the apps thread, its 60dd4071a), read from `roll.toml` under the
+    service's root at the revision it runs, never the catalog's copy of the default branch; a
+    table that breaks the rules is said in the activity.
   - With `health = "/healthz"` in `[preview]`, a service counts once it answers 2xx/3xx there
     (Render's and Railway's health checks), asked once per deploy (it wakes the service once). A
     service that answers 500 fails the preview with the status and the first line it said, so
@@ -1261,7 +1265,8 @@ Ranked by what a person notices first. Done so far:
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
 - page states, pages and hidden selectors in the repo's own `roll.toml` (`[[preview.states]]`,
-  `pages`, `hide`), versioned with the code they name, with the project's;
+  `pages`, `hide`; a roll apps service's `[app.previews.screenshots]`), versioned with the code
+  they name, with the project's;
 - search masks on an index whose name has dots (`logs.2024`): split off at the longest index name
   the cluster has, for masking and for the check when set;
 - a tenth review (states, browsers, search masks) and its fixes: a dialog a state's step opens
@@ -1407,7 +1412,13 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Promote a preview's deployment to production on roll apps** (Vercel's promote): built on
+1. **Screenshot runs got long: measure them, then overlap them**: a node takes one screenshot at
+   a time (`shooting`, one slot), and a full run now holds pages, states (up to 25 s each), the
+   other browsers' run and the second capture of each page; in the live script main's and the
+   change's back to back went past a minute. Measure a run's parts (EMF: the first page, each
+   other page, the browsers run), then let the other browsers' run go in a slot of its own after
+   Chromium's, or give a node two slots when it has the cores.
+2. **Promote a preview's deployment to production on roll apps** (Vercel's promote): built on
    the stacked `feature/roll-previews-on-apps`. The sheet's "Promote <service> to production"
    (its name typed to confirm) calls roll apps' own `POST …/environments/production/promote`
    with `from: pv-<id>` as the signed-in person, so roll apps decides who may deploy production
@@ -1418,14 +1429,6 @@ Ranked by what a person notices first. Done so far:
    deployment as roll apps' `expect` (fc6fbf48c), so a newer push deployed since is a 409 from
    the same read the promotion is made of (live: a promote expecting another deployment refused).
    It merges into #28 with #26.
-2. **States, pages and hide from a roll apps service's own config**: a repo's `[preview]` carries
-   them for roll's runtime; a service on roll apps is described by `[app]`, so its repo can't yet.
-   Agreed with the apps thread (2026-11-15): `[app.previews.screenshots]` (pages, hide,
-   `[[…states]]`), which roll apps allows and leaves opaque (`apps_build::app::screenshots`);
-   previews reads it from the tree at the preview's own revision (`<tree>/<source.root>/roll.toml`,
-   never the catalog's default-branch copy), checks it with code_preview's rules, and joins it
-   with the project's. Parsed and checked on #28 (`code_preview::config::Screenshots`,
-   `Source::screenshots`); read for a roll apps service on the stacked branch (apps' 60dd4071a).
 3. **Dynamic credentials a preview renews** (roll secrets' leases): a preview resolves with
    `dynamic: false` today, so a dynamic link inherited from its base is named as a problem.
    Previews converges every few minutes, so it could hold such a lease itself: resolve the

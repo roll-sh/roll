@@ -557,24 +557,43 @@ impl Engine {
             .settings(&r.project_id)
             .map(|s| (s.github.pages, s.github.hide, s.github.widths, s.github.openapi, s.github.endpoints, s.github.states, s.github.browsers))
             .unwrap_or_default();
-        // The first service's own states, from its `roll.toml` at the revision it runs (versioned
-        // with the selectors they name): after the project's, a name the project has kept.
-        if let Some(rev) = first.revision.as_deref()
-            && let Ok(specs) = self.source.services(&first.repo, rev).await
-            && let Some(spec) = specs.into_iter().find(|s| s.name == first.name)
-        {
-            for st in spec.states {
+        // What the first service's own repo says its screenshots take, at the revision it runs
+        // (versioned with the code it names), joined with the project's (a state name the
+        // project has wins): a service on roll apps from its `[app.previews.screenshots]` (roll
+        // apps describes it), else its `[preview]`.
+        let on_apps = self.apps.catalog(&r.project_id).await.ok().flatten().and_then(|c| c.into_iter().find(|s| s.name == first.name));
+        let from_repo = match (first.revision.as_deref(), on_apps) {
+            (Some(rev), Some(svc)) => match svc.repo.as_deref() {
+                Some(repo) => match self.source.screenshots(repo, rev, &svc.root).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = self.store.log(&r.id, &format!("its roll.toml's [app.previews.screenshots] wasn't read: {e:#}"));
+                        None
+                    }
+                },
+                None => None,
+            },
+            (Some(rev), None) => self
+                .source
+                .services(&first.repo, rev)
+                .await
+                .ok()
+                .and_then(|specs| specs.into_iter().find(|s| s.name == first.name))
+                .map(|s| code_preview::config::Screenshots { pages: s.pages, hide: s.hide, states: s.states }),
+            (None, _) => None,
+        };
+        if let Some(more) = from_repo {
+            for st in more.states {
                 if !states.iter().any(|s| s.name == st.name) {
                     states.push(st);
                 }
             }
-            // Its own pages and what to blank in them, the same way.
-            for p in spec.pages {
+            for p in more.pages {
                 if !entries.contains(&p) {
                     entries.push(p);
                 }
             }
-            for h in spec.hide {
+            for h in more.hide {
                 if !hide.contains(&h) {
                     hide.push(h);
                 }

@@ -340,6 +340,8 @@ pub struct CatalogService {
     pub name: String,
     /// `owner/name` for a repo source.
     pub repo: Option<String>,
+    /// Where in the repo it builds from (`apps/web`; empty: the repo's root).
+    pub root: String,
     pub memory_mb: u32,
 }
 

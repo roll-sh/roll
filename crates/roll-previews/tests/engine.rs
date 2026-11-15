@@ -187,7 +187,7 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     e.engine.pass().await.unwrap();
     let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.is_baseline() && r.desired == Desired::Active).expect("back with the repo");
     // On roll apps (whose pages can't be screenshotted yet) it goes too, rather than cost for nothing.
-    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "web".into(), repo: Some("acme/web".into()), memory_mb: 512 }]);
+    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "web".into(), repo: Some("acme/web".into()), root: String::new(), memory_mb: 512 }]);
     e.engine.pass().await.unwrap();
     assert!(e.engine.store.row(&base.id).map_or(true, |r| r.desired == Desired::Deleted));
     *e.apps.catalog.lock() = None;
@@ -380,6 +380,29 @@ async fn page_states_and_other_browsers_are_taken_and_compared_like_pages() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert!(gone, "{:?}", e.code.last_report("chg_st").pages.iter().map(|p| &p.path).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn a_roll_apps_service_s_screenshots_come_from_its_own_config() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true } }));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "web".into(), repo: Some("acme/web".into()), root: "apps/web".into(), memory_mb: 512 }]);
+    // Its [app.previews.screenshots] (roll apps describes it), not a [preview] the repo also has.
+    *e.code.app_screenshots.lock() = Some(code_preview::config::Screenshots { pages: vec![], hide: vec![], states: vec![roll_previews::settings::StateRule { name: "apps-cart".into(), page: "/".into(), steps: vec![roll_previews::settings::Step::Press("Tab".into())] }] });
+    *e.code.repo_states.lock() = vec![roll_previews::settings::StateRule { name: "preview-only".into(), page: "/".into(), steps: vec![roll_previews::settings::Step::Wait(1)] }];
+    e.code.open(change("chg_ap", 7));
+    for _ in 0..500 {
+        e.engine.pass().await.unwrap();
+        if e.apps.states.lock().iter().any(|n| n == "apps-cart") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let states = e.apps.states.lock().clone();
+    assert!(states.iter().any(|n| n == "apps-cart") && !states.iter().any(|n| n == "preview-only"), "{states:?}");
+    assert!(e.code.app_roots.lock().iter().all(|r| r == "apps/web"), "read at the service's root");
 }
 
 #[tokio::test]
@@ -881,7 +904,7 @@ async fn a_family_of_branches_gets_its_own_variables() {
 #[tokio::test]
 async fn a_roll_apps_preview_costs_what_it_runs_with() {
     let e = env(json!({ "enabled": true }));
-    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "web".into(), repo: Some("acme/web".into()), memory_mb: 2048 }]);
+    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "web".into(), repo: Some("acme/web".into()), root: String::new(), memory_mb: 2048 }]);
     *e.apps.memory.lock() = Some(256);
     e.code.open(change("chg_m", 9));
     e.engine.pass().await.unwrap();

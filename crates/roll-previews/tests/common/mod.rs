@@ -26,6 +26,9 @@ pub struct FakeCode {
     pub health: Mutex<Option<String>>,
     /// The page states every service's `roll.toml` names (`[[preview.states]]`).
     pub repo_states: Mutex<Vec<roll_previews::settings::StateRule>>,
+    /// What every roll apps service's `[app.previews.screenshots]` says, and the roots it was read at.
+    pub app_screenshots: Mutex<Option<code_preview::config::Screenshots>>,
+    pub app_roots: Mutex<Vec<String>>,
     pub reports: Mutex<Vec<Preview>>,
     pub forgotten: Mutex<Vec<String>>,
     /// Previews that went with their teardown failing: (preview, what it said).
@@ -52,6 +55,10 @@ impl FakeCode {
 impl Source for FakeCode {
     async fn open_changes(&self, repo: &str) -> anyhow::Result<Vec<ChangeInfo>> {
         Ok(self.changes.lock().values().filter(|c| c.repo == repo && c.open).cloned().collect())
+    }
+    async fn screenshots(&self, _repo: &str, _revision: &str, root: &str) -> anyhow::Result<Option<code_preview::config::Screenshots>> {
+        self.app_roots.lock().push(root.to_string());
+        Ok(self.app_screenshots.lock().clone())
     }
     async fn change(&self, id: &str) -> anyhow::Result<Option<ChangeInfo>> {
         Ok(self.changes.lock().get(id).cloned())
