@@ -138,9 +138,14 @@ class Client:
         opened = json.loads(open_sealed(r["sealed"], key, r["context"]))
         return Values._of(r, values=opened)
 
-    def digest(self, env: str, path: str = "") -> str:
-        """Moves whenever ``env``'s values under ``path`` would; reads no value."""
-        return self._call("GET", self._env(env) + "/digest" + _q(path))["digest"]
+    def digest(self, env: str, path: str = "", since: Optional[str] = None, wait: float = 0) -> str:
+        """Moves whenever ``env``'s values under ``path`` would; reads no value. With ``since`` and
+        ``wait`` (seconds, at most 60), a long poll: it answers as soon as the digest differs from
+        ``since``, or with the same one when ``wait`` runs out."""
+        q = _q(path)
+        if since and wait >= 1:
+            q += ("&" if q else "?") + "since=" + urllib.parse.quote(since, safe="") + "&wait=" + str(int(min(wait, 60)))
+        return self._call("GET", self._env(env) + "/digest" + q)["digest"]
 
     def renew(self, lease: str, ttl_minutes: Optional[int] = None) -> Dict[str, Any]:
         """Pushes a dynamic lease's expiry out by ``ttl_minutes`` (its link's TTL by default)."""
@@ -166,11 +171,16 @@ class Client:
         fail = on_error or (lambda _e: None)
         last: Optional[str] = None
         leases: List[str] = []
-        renewed = 0.0
-        waited = 0.0
+        renewed = time.monotonic()
         while not stop.is_set():
+            # A long poll: a change arrives within a second or two; ``every`` paces a server
+            # without them. It never outlasts the next renewal.
+            held = False
+            asked = time.monotonic()
             try:
-                now = self.digest(env, path)
+                until_renew = max(1.0, renew_every - (asked - renewed))
+                now = self.digest(env, path, since=last, wait=min(25.0, until_renew)) if last else self.digest(env, path)
+                held = last is not None and (now != last or time.monotonic() - asked >= 1)
                 if now != last:
                     v = self.resolve(env, consumer, path) if consumer else self.values(env, path)
                     before, last = last, now
@@ -183,11 +193,10 @@ class Client:
                     on_change(v)
             except Exception as e:  # noqa: BLE001 - the watch goes on, as documented
                 fail(e)
-            if stop.wait(every):
+            if not held and stop.wait(every):
                 break
-            waited += every
-            if waited - renewed >= renew_every:
-                renewed = waited
+            if time.monotonic() - renewed >= renew_every:
+                renewed = time.monotonic()
                 for lease in leases:
                     try:
                         self.renew(lease)

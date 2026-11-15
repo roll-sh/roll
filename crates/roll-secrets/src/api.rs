@@ -567,8 +567,42 @@ async fn insights(State(s): S, Who(c): Who, Path((project, env)): Path<(String, 
     Ok(ok(blocking(s, move |s| s.insights(&project, &env, &path_of(&q), &c)).await?))
 }
 
+/// The folder's digest. With `since` (the digest a watcher has) and `wait` (seconds, at most 60), a
+/// long poll: it answers as soon as the digest differs from `since`, or with the same digest when
+/// `wait` runs out. Meanwhile it reads the project's change counter each second (cheap) and works
+/// the digest out again only when that moved, or every 10 s (what the counter can't see: a live
+/// link's value, a folder another project shares).
 async fn digest(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
-    let d = blocking(s, move |s| s.digest(&project, &env, &path_of(&q), &c)).await?;
+    let path = path_of(&q);
+    let wait = q.get("wait").and_then(|w| w.parse::<u64>().ok()).unwrap_or(0).min(60);
+    let since = q.get("since").cloned();
+    let read = |s: Arc<Secrets>| {
+        let (project, env, path, c) = (project.clone(), env.clone(), path.clone(), c.clone());
+        blocking(s, move |s| s.digest(&project, &env, &path, &c))
+    };
+    let mut d = read(s.clone()).await?;
+    if wait == 0 || since.as_deref() != Some(d.as_str()) {
+        return Ok(ok(json!({ "digest": d })));
+    }
+    let marker = |s: Arc<Secrets>| {
+        let project = project.clone();
+        blocking(s, move |s| s.change_marker(&project))
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
+    let mut seen = marker(s.clone()).await?;
+    let mut worked_out = tokio::time::Instant::now();
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(1))).await;
+        let now = marker(s.clone()).await?;
+        if now != seen || worked_out.elapsed() >= std::time::Duration::from_secs(10) {
+            seen = now;
+            worked_out = tokio::time::Instant::now();
+            d = read(s.clone()).await?;
+            if since.as_deref() != Some(d.as_str()) {
+                break;
+            }
+        }
+    }
     Ok(ok(json!({ "digest": d })))
 }
 
