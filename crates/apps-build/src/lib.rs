@@ -6,14 +6,20 @@
 //! a slim runtime image with BuildKit. It only reads files: no network, no processes. The design
 //! is "Builds" in docs/apps/README.md.
 
+pub mod app;
 mod caches;
 mod cargo;
+mod deno;
 mod df;
 mod docker;
+mod dotnet;
+mod elixir;
 mod golang;
 mod java;
 mod node;
+pub mod packages;
 mod php;
+pub mod project;
 mod python;
 mod ruby;
 mod static_site;
@@ -58,6 +64,8 @@ pub struct Overrides {
     pub start: Option<String>,
     /// A single-page app, whatever the detection says (`None`: detected).
     pub spa: Option<bool>,
+    /// System packages a generated Dockerfile installs ([`packages`]).
+    pub packages: Vec<String>,
     /// Names of the variables the build sees (the service's, at deploy time): each install and
     /// build step mounts them as BuildKit secrets, so they're in its environment but never in a
     /// layer, the image's history or the cache's keys. `ROLL_BUILD_ENV` (a hash of the values)
@@ -112,6 +120,7 @@ pub struct Plan {
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Dockerfile,
+    Deno,
     Node,
     Python,
     Go,
@@ -119,17 +128,20 @@ pub enum Provider {
     Ruby,
     Php,
     Java,
+    Dotnet,
+    Elixir,
     Static,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(
-        "couldn't tell how to build this: found no Dockerfile, package.json, requirements.txt, \
-         pyproject.toml, go.mod, Cargo.toml, Gemfile, composer.json, index.php, pom.xml, \
-         build.gradle or index.html at the root; add a Dockerfile or set the root directory"
+        "couldn't tell how to build this: found no Dockerfile, package.json, deno.json, \
+         requirements.txt, pyproject.toml, go.mod, Cargo.toml, Gemfile, composer.json, index.php, \
+         pom.xml, build.gradle, a .csproj, mix.exs or index.html at the root{0}; add a Dockerfile or set the \
+         root directory"
     )]
-    NothingDetected,
+    NothingDetected(String),
     #[error("the Dockerfile path {0:?} must be a relative path inside the source, without `..`")]
     BadDockerfilePath(String),
     #[error("there's no {0} in the source (the builder is set to dockerfile)")]
@@ -139,6 +151,9 @@ pub enum Error {
     /// Several things could be built (binaries, `cmd/` programs): the build setting has to choose.
     #[error("{0}")]
     Ambiguous(String),
+    /// The packages asked for can't be installed (a name, or an image without a package manager).
+    #[error("{0}")]
+    Packages(String),
     #[error("{0}")]
     NoBinary(String),
 }
@@ -174,6 +189,16 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         p.uses.push(store);
         p.notes.push(format!("{why}: it uses {}", store.label()));
     }
+    if !overrides.packages.is_empty() {
+        if own_dockerfile {
+            p.notes.push("packages: not added to the tree's own Dockerfile (it installs what it needs)".into());
+        } else if p.provider == Provider::Static {
+            return Err(Error::Packages("packages: a static site runs no container to install them in".into()));
+        } else {
+            p.dockerfile = packages::add(&p.dockerfile, &overrides.packages).map_err(Error::Packages)?;
+            p.notes.push(format!("packages: {}", overrides.packages.join(", ")));
+        }
+    }
     Ok(p)
 }
 
@@ -183,7 +208,9 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         return docker::plan(tree, &o);
     }
     type Detect = fn(&dyn Tree, &Overrides) -> Result<Option<Draft>, Error>;
-    const PROVIDERS: [Detect; 8] = [
+    const PROVIDERS: [Detect; 11] = [
+        // Before Node: a Deno project's deno.json decides, a package.json beside it notwithstanding.
+        deno::detect,
         node::detect,
         python::detect,
         golang::detect,
@@ -191,6 +218,8 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         ruby::detect,
         php::detect,
         java::detect,
+        dotnet::detect,
+        elixir::detect,
         static_site::detect,
     ];
     for detect in PROVIDERS {
@@ -214,7 +243,27 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
             return Ok(p);
         }
     }
-    Err(Error::NothingDetected)
+    Err(Error::NothingDetected(found(tree)))
+}
+
+/// What the root holds that roll doesn't build yet, said with the error: `" (found mix.exs:
+/// Elixir)"`, or nothing.
+fn found(tree: &dyn Tree) -> String {
+    const KNOWN: [(&str, &str); 8] = [
+        ("pubspec.yaml", "Dart"),
+        ("Package.swift", "Swift"),
+        ("build.sbt", "Scala (sbt)"),
+        ("stack.yaml", "Haskell"),
+        ("CMakeLists.txt", "C or C++ (CMake)"),
+        ("Makefile", "make"),
+        ("deps.edn", "Clojure"),
+        ("dune-project", "OCaml"),
+    ];
+    let mut seen: Vec<String> = KNOWN.iter().filter(|(f, _)| tree.exists(f)).map(|(f, what)| format!("{f}: {what}")).collect();
+    if let Some(sln) = tree.list("").into_iter().find(|f| f.ends_with(".sln")) {
+        seen.push(format!("{sln}: a .NET solution (set the root directory to its project)"));
+    }
+    if seen.is_empty() { String::new() } else { format!(" (found {}, which roll doesn't build itself)", seen.join("; ")) }
 }
 
 impl Overrides {
@@ -232,6 +281,7 @@ impl Overrides {
             build: clean(&self.build),
             start: clean(&self.start),
             spa: self.spa,
+            packages: self.packages.clone(),
             build_env: self.build_env.clone(),
             process: self.process.clone(),
         }
