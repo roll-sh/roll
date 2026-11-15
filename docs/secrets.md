@@ -2733,7 +2733,7 @@ user's call).
    `spec.rolloutRestart`, as Infisical's reload annotation and Vault Secrets Operator's
    `rolloutRestartTargets`).
 7. **Audit sinks SIEMs take** (#70, on #62): Splunk HEC, Datadog and bearer formats with a sealed
-   token (Doppler, Infisical). Next: a sink into roll search.
+   token (Doppler, Infisical). A sink into roll search is #71.
 8. **A live rotation that keeps the old password a while** where the resource can (Redis ACL users
    hold two passwords), as managed rotation's grace already does.
 9. **More dynamic credentials**: GitHub App installation tokens (one repository, narrowed
