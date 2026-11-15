@@ -741,6 +741,12 @@ only the host is shown. An answer is read once, never logged, and never part of 
 a key still links to can't be deleted, nor one with a retired credential still waiting out its
 grace period (its revocation goes through the rotator).
 
+A rotator is edited in place (`PATCH …/rotators/{id} {name?, url?}`, the pencil; a new URL is
+checked as adding one is) and its signing secret rotated (`POST …/rotators/{id}/rotate-secret`,
+the key button): the new `whsec_…` is shown once and signs every call from then on. Put it in the
+endpoint right away; a call the endpoint refuses in between fails, changes nothing (the value in
+use stays) and is retried, as any failed rotation or revocation is.
+
 ### Databases outside roll
 
 A Postgres, MySQL, Redis or MongoDB server roll doesn't run (Amazon RDS, Supabase, Neon, PlanetScale, ElastiCache, Upstash, MongoDB Atlas, a server of the customer's own)
@@ -2339,6 +2345,8 @@ isn't in the workspace is 404.
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `PATCH /rotators/{id}` | `{name?, url?}` | `Rotator` (`admin`; a new URL is checked first) |
+| `POST /rotators/{id}/rotate-secret` | | `Rotator & {secret}` (`admin`; the new signing secret, shown once) |
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |

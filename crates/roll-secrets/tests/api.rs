@@ -96,7 +96,7 @@ impl SyncTarget for FakeSync {
 
 /// Audit deliveries, kept instead of sent; and an OIDC issuer's keys, served.
 #[derive(Default)]
-struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool);
+struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>);
 
 impl roll_secrets::Deliver for Sent {
     fn check(&self, url: &str) -> roll_secrets::Result<()> {
@@ -115,7 +115,8 @@ impl roll_secrets::Deliver for Sent {
         Ok(doc.to_string().into_bytes())
     }
     /// A rotator outside roll: each issue is a new vendor key.
-    fn call(&self, _: &str, _: &str, _: &Secret, body: &Value, _: usize) -> roll_secrets::Result<zeroize::Zeroizing<Vec<u8>>> {
+    fn call(&self, url: &str, _: &str, secret: &Secret, body: &Value, _: usize) -> roll_secrets::Result<zeroize::Zeroizing<Vec<u8>>> {
+        *self.3.lock().unwrap() = Some((url.to_string(), secret.expose().to_string()));
         if self.2.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(roll_secrets::Error::Link("rotator.example: connection refused".into()));
         }
@@ -1228,6 +1229,16 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
     // The key it issues keeps it.
     let (s, _) = api.call(Method::DELETE, &format!("/rotators/{}", r["id"].as_str().unwrap()), None).await;
     assert_eq!(s, StatusCode::CONFLICT);
+    // Moved and re-keyed in place: the next call goes to the new URL, signed with the new secret
+    // (shown once), and the link carries on.
+    let id = r["id"].as_str().unwrap();
+    let moved = api.ok(Method::PATCH, &format!("/rotators/{id}"), Some(json!({ "url": "https://rotator2.example/stripe" }))).await;
+    assert_eq!(moved["host"], "rotator2.example");
+    let rekeyed = api.ok(Method::POST, &format!("/rotators/{id}/rotate-secret"), None).await;
+    let secret = rekeyed["secret"].as_str().unwrap().to_string();
+    assert!(secret.starts_with("whsec_") && secret != r["secret"].as_str().unwrap());
+    api.ok(Method::POST, "/environments/production/secrets/STRIPE_KEY/rotate", None).await;
+    assert_eq!(api.sent.3.lock().unwrap().clone(), Some(("https://rotator2.example/stripe".to_string(), secret)));
 
     // A scheduled rotation and a revocation that fail show in health until they succeed.
     api.sent.2.store(true, std::sync::atomic::Ordering::Relaxed);
