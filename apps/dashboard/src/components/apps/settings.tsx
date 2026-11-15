@@ -20,6 +20,8 @@ interface Form {
   name: string;
   sourceKind: Source["kind"];
   repo: string;
+  /** A Git source's URL. */
+  url: string;
   root: string;
   image: string;
   builder: Build["builder"];
@@ -81,7 +83,8 @@ export function formOf(s: Service): Form {
     name: s.name,
     sourceKind: s.source.kind,
     repo: s.source.kind === "repo" ? s.source.repo : "",
-    root: s.source.kind === "repo" ? str(s.source.root) : "",
+    url: s.source.kind === "git" ? s.source.url : "",
+    root: s.source.kind === "repo" || s.source.kind === "git" ? str(s.source.root) : "",
     image: s.source.kind === "image" ? s.source.image : "",
     builder: s.build.builder,
     dockerfile: str(s.build.dockerfile),
@@ -140,13 +143,15 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   const text = (v: string) => (v.trim() ? v.trim() : null);
   const num = (v: string) => (v.trim() ? Number(v) : null);
   if (f.name !== before.name) patch.name = f.name;
-  if (f.sourceKind !== before.sourceKind || f.repo !== before.repo || f.root !== before.root || f.image !== before.image)
+  if (f.sourceKind !== before.sourceKind || f.repo !== before.repo || f.url !== before.url || f.root !== before.root || f.image !== before.image)
     patch.source =
       f.sourceKind === "repo"
         ? { kind: "repo", repo: f.repo.trim(), ...(f.root.trim() ? { root: f.root.trim() } : {}) }
-        : f.sourceKind === "image"
-          ? { kind: "image", image: f.image.trim() }
-          : { kind: "upload" };
+        : f.sourceKind === "git"
+          ? { kind: "git", url: f.url.trim(), ...(f.root.trim() ? { root: f.root.trim() } : {}) }
+          : f.sourceKind === "image"
+            ? { kind: "image", image: f.image.trim() }
+            : { kind: "upload" };
   const build: Reset<Build> = {};
   if (f.builder !== before.builder) build.builder = f.builder;
   if (f.dockerfile !== before.dockerfile) build.dockerfile = text(f.dockerfile);
@@ -286,6 +291,7 @@ export function SettingsTab({
                 value={form.sourceKind}
                 options={[
                   { label: "repo", value: "repo" },
+                  { label: "git url", value: "git" },
                   { label: "image", value: "image" },
                   { label: "upload", value: "upload" },
                 ]}
@@ -296,6 +302,16 @@ export function SettingsTab({
               <>
                 <Field label="Repository" hint="owner/name in roll code">
                   {t("repo", "acme/site")}
+                </Field>
+                <Field label="Root directory" hint="optional">
+                  {t("root", "apps/web")}
+                </Field>
+              </>
+            )}
+            {form.sourceKind === "git" && (
+              <>
+                <Field label="Git URL" hint="a public repository: each new commit on the branch deploys">
+                  {t("url", "https://github.com/owner/name")}
                 </Field>
                 <Field label="Root directory" hint="optional">
                   {t("root", "apps/web")}
@@ -347,7 +363,7 @@ export function SettingsTab({
                 </Field>
               )}
             </Grid>
-            {service.source.kind === "repo" && env && (
+            {(service.source.kind === "repo" || service.source.kind === "git") && env && (
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-5 py-4">
                 <p className="text-[13px] text-muted">For a build a stale cached layer keeps breaking: no cached layers, base images pulled again, the dependency caches empty.</p>
                 <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("deploy", () => appsApi.deploy(service.id, env.name, { no_cache: true }))}>

@@ -3665,3 +3665,89 @@ async fn a_repos_roll_toml_is_read_for_a_deploy_link() {
     w.code.files.lock().insert("roll.toml".into(), "[apps.web]\nrepo = \"acme/site\"\n[apps.web.variables]\nX = { generate = \"uuid\" }\n".into());
     assert_eq!(call(&w.api, "POST", "/v1/apps/import", Some(json!({"repo": "acme/site"}))).await.0, StatusCode::BAD_REQUEST, "only secrets are made");
 }
+
+/// A public Git host (read-only, in memory): what a `git` source fetches from.
+#[derive(Default)]
+struct GitHost {
+    objects: Mutex<std::collections::HashMap<code_git::ObjectId, code_git::Object>>,
+    main: Mutex<Option<code_git::ObjectId>>,
+}
+
+impl GitHost {
+    /// A commit of these files (one directory) on main, after the last one.
+    fn commit(&self, files: &[(&str, &str)]) -> String {
+        use code_git::{Kind, Object, mode};
+        let mut objects = self.objects.lock();
+        let mut tree = Vec::new();
+        let mut sorted = files.to_vec();
+        sorted.sort();
+        for (name, text) in sorted {
+            let blob = Object::new(Kind::Blob, text.as_bytes().to_vec());
+            tree.extend_from_slice(format!("{:o} {name}\0", mode::REGULAR).as_bytes());
+            tree.extend_from_slice(&blob.id.0);
+            objects.insert(blob.id, blob);
+        }
+        let tree = Object::new(Kind::Tree, tree);
+        let mut c = format!("tree {}\n", tree.id);
+        if let Some(p) = *self.main.lock() {
+            c.push_str(&format!("parent {p}\n"));
+        }
+        c.push_str("author a <a@example.com> 1700000000 +0000\ncommitter a <a@example.com> 1700000000 +0000\n\nchange\n");
+        let commit = Object::new(Kind::Commit, c.into_bytes());
+        let id = commit.id;
+        objects.insert(tree.id, tree);
+        objects.insert(id, commit);
+        *self.main.lock() = Some(id);
+        id.to_string()
+    }
+}
+
+#[async_trait]
+impl code_git::GitBackend for GitHost {
+    async fn authorize(&self, _repo: &str, _c: Option<&code_git::Credentials>, access: code_git::Access) -> code_git::GitResult<Option<String>> {
+        match access {
+            code_git::Access::Read => Ok(None),
+            code_git::Access::Write => Err(code_git::GitError::Unauthorized),
+        }
+    }
+    async fn refs(&self, _repo: &str) -> code_git::GitResult<code_git::RefList> {
+        let refs = self.main.lock().iter().map(|oid| code_git::Ref { name: "refs/heads/main".into(), oid: *oid, peeled: None }).collect();
+        Ok(code_git::RefList { head: Some("refs/heads/main".into()), refs })
+    }
+    async fn read_object(&self, _repo: &str, oid: &code_git::ObjectId) -> code_git::GitResult<Option<code_git::Object>> {
+        Ok(self.objects.lock().get(oid).cloned())
+    }
+    async fn receive(&self, _repo: &str, _req: code_git::ReceiveRequest) -> code_git::GitResult<code_git::ReceiveOutcome> {
+        Err(code_git::GitError::Unauthorized)
+    }
+}
+
+/// A public Git URL: made on its default branch's head, fetched shallowly and built, and a new
+/// commit there deploys once (`watch_git`); a branch it hasn't is refused when it's made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
+    let w = world().await;
+    let git = Arc::new(GitHost::default());
+    let first = git.commit(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http')")]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/git/acme/site", listener.local_addr().unwrap());
+    let app = code_git::router(git.clone(), code_git::ServerConfig::default());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let body = |branch: Option<&str>| json!({ "project": w.project, "name": "site", "source": {"kind": "git", "url": url}, "branch": branch, "variables": {"FAKE_ECHO": "ROLL_GIT_COMMIT,ROLL_GIT_BRANCH"} });
+    let (st, v) = call(&w.api, "POST", "/v1/apps/services", Some(body(Some("nope")))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(body(None))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d1 = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!((d1["status"].as_str(), d1["revision"].as_str(), d1["plan"]["provider"].as_str()), (Some("active"), Some(first.as_str()), Some("node")), "{d1}");
+    let (_, out) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d1["id"].as_str().unwrap()).await;
+    assert_eq!((&out["vars"]["ROLL_GIT_COMMIT"], &out["vars"]["ROLL_GIT_BRANCH"]), (&json!(first), &json!("main")), "{out}");
+    assert!(w.apps.watch_git().await.is_empty(), "main is where it runs");
+    let second = git.commit(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v2")]);
+    let started = w.apps.watch_git().await;
+    assert_eq!(started.len(), 1, "one deploy for the new commit");
+    let d2 = settled(&w, &id, "production", &started[0]).await;
+    assert_eq!((d2["status"].as_str(), d2["revision"].as_str(), d2["trigger"].as_str()), (Some("active"), Some(second.as_str()), Some("push")), "{d2}");
+    assert!(w.apps.watch_git().await.is_empty(), "deployed: nothing more to do");
+}

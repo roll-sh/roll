@@ -45,6 +45,7 @@ function same(a: unknown, b: unknown): boolean {
 function fromLabel(source: ProjectImport["apps"][string]["source"] | Service["source"]) {
   if (source.kind === "repo") return `repo ${source.repo}${source.root ? ` at ${source.root}` : ""}`;
   if (source.kind === "image") return `image ${source.image}`;
+  if (source.kind === "git") return `${source.url}${source.root ? ` at ${source.root}` : ""}`;
   return "root" in source ? `from ${source.root}` : "uploaded";
 }
 

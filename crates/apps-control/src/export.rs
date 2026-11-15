@@ -38,10 +38,16 @@ impl Apps {
         let mut file = ProjectFile::default();
         let mut notes = Vec::new();
         for svc in &services {
-            let mut a = AppEntry { root: None, image: None, repo: None, branch: None, kind: None, start: svc.run.start.clone(), schedule: svc.run.schedule.clone(), run: None, links: Vec::new(), port: svc.run.port, variables: BTreeMap::new() };
+            let mut a = AppEntry { root: None, image: None, repo: None, git: None, branch: None, kind: None, start: svc.run.start.clone(), schedule: svc.run.schedule.clone(), run: None, links: Vec::new(), port: svc.run.port, variables: BTreeMap::new() };
             match &svc.source {
                 Source::Repo { repo, root } => {
                     a.repo = Some(repo.clone());
+                    a.root = root.clone();
+                    let (sid, e) = (svc.id.clone(), PRODUCTION.to_string());
+                    a.branch = self.db(move |s| s.environment(&sid, &e)).await.ok().and_then(|e| e.branch);
+                }
+                Source::Git { url, root } => {
+                    a.git = Some(url.clone());
                     a.root = root.clone();
                     let (sid, e) = (svc.id.clone(), PRODUCTION.to_string());
                     a.branch = self.db(move |s| s.environment(&sid, &e)).await.ok().and_then(|e| e.branch);

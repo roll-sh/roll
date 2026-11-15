@@ -644,7 +644,7 @@ static TOOLS: &[Tool] = &[
     t(
         "apps_create_service",
         "Create a service",
-        "A new service in a workspace project, from a roll code repo ({kind: \"repo\", repo: \"owner/name\", root?}), an image ({kind: \"image\", image}) or an upload ({kind: \"upload\"}, deployed with roll up). A repo or image service deploys to production at once (a \"deploy\" action).",
+        "A new service in a workspace project, from a roll code repo ({kind: \"repo\", repo: \"owner/name\", root?}), a public Git URL ({kind: \"git\", url: \"https://github.com/owner/name\", root?}, with branch? to follow), an image ({kind: \"image\", image}) or an upload ({kind: \"upload\"}, deployed with roll up). A repo, Git or image service deploys to production at once (a \"deploy\" action).",
         "apps",
         "POST",
         "/v1/apps/projects/{project}/services",

@@ -34,8 +34,8 @@ pub struct ProjectFile {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppEntry {
-    /// The directory `roll up` uploads (relative to the file), or with `repo` the directory
-    /// in the repo that builds.
+    /// The directory `roll up` uploads (relative to the file), or with `repo` or `git` the
+    /// directory in the repo that builds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
     /// Or a public image.
@@ -44,6 +44,10 @@ pub struct AppEntry {
     /// Or a roll code repo (`owner/name`): it deploys on each landing on `branch`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+    /// Or a public Git repository's URL (`https://github.com/owner/name`): it deploys on each
+    /// new commit on `branch` (its default branch when none is named).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// `web`, `worker` or `cron`.
@@ -136,11 +140,11 @@ pub fn parse_project(text: &str) -> Result<ProjectFile, ProjectError> {
         if let Some(r) = &a.root {
             ensure(!r.starts_with('/') && !r.split('/').any(|c| c == ".."), || format!("app {n}: root is a directory inside this one (or the repo)"))?;
         }
-        match (&a.root, &a.image, &a.repo) {
-            (Some(_), None, None) | (None, Some(_), None) | (_, None, Some(_)) => {}
-            _ => return Err(err(format!("app {n}: give one of root (a directory to upload), image, or repo (with root inside it)"))),
+        let sources = [a.image.is_some(), a.repo.is_some(), a.git.is_some()].into_iter().filter(|s| *s).count();
+        if !(sources == 1 && !(a.image.is_some() && a.root.is_some()) || sources == 0 && a.root.is_some()) {
+            return Err(err(format!("app {n}: give one of root (a directory to upload), image, repo or git (with root inside it)")));
         }
-        ensure(a.branch.is_none() || a.repo.is_some(), || format!("app {n}: branch is for a repo"))?;
+        ensure(a.branch.is_none() || a.repo.is_some() || a.git.is_some(), || format!("app {n}: branch is for a repo or git"))?;
         ensure(a.kind.as_deref().is_none_or(|k| ["web", "worker", "cron"].contains(&k)), || format!("app {n}: type is web, worker or cron"))?;
         for l in &a.links {
             ensure(f.databases.contains_key(l), || format!("app {n} links {l}, which isn't in [databases]"))?;
@@ -191,10 +195,26 @@ pub fn entry_run(a: &AppEntry) -> serde_json::Map<String, Value> {
     run
 }
 
+/// The source a new service from this entry is made with (`POST /v1/apps/services`' `source`).
+pub fn entry_source(a: &AppEntry) -> Value {
+    let mut s = match (&a.repo, &a.git, &a.image) {
+        (Some(r), _, _) => serde_json::json!({ "kind": "repo", "repo": r }),
+        (None, Some(u), _) => serde_json::json!({ "kind": "git", "url": u }),
+        (None, None, Some(i)) => return serde_json::json!({ "kind": "image", "image": i }),
+        (None, None, None) => return serde_json::json!({ "kind": "upload" }),
+    };
+    if let Some(root) = &a.root {
+        s["root"] = Value::from(root.as_str());
+    }
+    s
+}
+
 /// The kind of source an entry makes.
 pub fn entry_kind(a: &AppEntry) -> &'static str {
     if a.repo.is_some() {
         "repo"
+    } else if a.git.is_some() {
+        "git"
     } else if a.image.is_some() {
         "image"
     } else {

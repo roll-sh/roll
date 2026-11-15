@@ -186,13 +186,20 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
-    /// Make a service from a repo (`--repo owner/name`) or an image (`--image`).
+    /// Make a service from a repo (`--repo owner/name`), a public Git URL (`--git
+    /// https://github.com/owner/name`) or an image (`--image`).
     Create {
         name: String,
         #[arg(long, short = 'p')]
         project: String,
-        #[arg(long, conflicts_with = "image")]
+        #[arg(long, conflicts_with_all = ["image", "git"])]
         repo: Option<String>,
+        /// A public Git repository's URL: each new commit on its branch deploys.
+        #[arg(long, conflicts_with = "image")]
+        git: Option<String>,
+        /// The branch production follows (the repo's default when not given).
+        #[arg(long)]
+        branch: Option<String>,
         /// A subdirectory of the repo to build.
         #[arg(long)]
         root: Option<String>,
@@ -1630,7 +1637,7 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
 
 // ── a project in one file: `roll up --all` ──
 
-use apps_build::project::{compose_to_toml, entry_kind, entry_run, parse_project, ProjectFile};
+use apps_build::project::{compose_to_toml, entry_kind, entry_run, entry_source, parse_project, ProjectFile};
 
 /// What `--all` will do, as lines: `+` made, `=` already there, `~` linked, `↑` deployed.
 fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Value>, dbs: &std::collections::BTreeMap<(String, String), String>, links: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<String> {
@@ -1640,8 +1647,8 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
         out.push(format!("{} {} database {n}", if have { "=" } else { "+" }, d.kind));
     }
     for (n, a) in &f.apps {
-        let from = match (&a.repo, &a.image, &a.root) {
-            (Some(r), _, root) => format!("repo {r}{}", root.as_ref().map(|d| format!(" at {d}")).unwrap_or_default()),
+        let from = match (a.repo.as_ref().or(a.git.as_ref()), &a.image, &a.root) {
+            (Some(r), _, root) => format!("{} {r}{}", entry_kind(a), root.as_ref().map(|d| format!(" at {d}")).unwrap_or_default()),
             (None, Some(i), _) => format!("image {i}"),
             (None, None, r) => format!("from {}", r.as_deref().unwrap_or(".")),
         };
@@ -1663,7 +1670,7 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
             }
         }
         let image_moved = a.image.as_ref().is_some_and(|i| have.is_some_and(|s| s["source"]["image"].as_str() != Some(i.as_str())));
-        if (a.root.is_some() && a.repo.is_none()) || image_moved {
+        if entry_kind(a) == "upload" || image_moved {
             out.push(format!("↑ deploy {n}"));
         }
     }
@@ -1829,17 +1836,7 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
         let svc = match services.get(n) {
             Some(svc) => svc.clone(),
             None => {
-                let source = match (&a.repo, &a.image) {
-                    (Some(r), _) => {
-                        let mut src = json!({ "kind": "repo", "repo": r });
-                        if let Some(root) = &a.root {
-                            src["root"] = json!(root);
-                        }
-                        src
-                    }
-                    (None, Some(i)) => json!({ "kind": "image", "image": i }),
-                    (None, None) => json!({ "kind": "upload" }),
-                };
+                let source = entry_source(a);
                 let made_links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "ref": dbs[&(f.databases[l].kind.clone(), l.clone())] })).collect();
                 let mut body = json!({ "project": project, "name": n, "source": source, "links": made_links });
                 // Production follows it from the first deploy (not the default branch's head first).
@@ -1877,7 +1874,7 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
             }
         }
         let dep = match (&a.root, &a.image) {
-            (Some(root), _) if a.repo.is_none() => {
+            (Some(root), _) if entry_kind(a) == "upload" => {
                 let tree = dir.join(root);
                 let bundle = tokio::task::spawn_blocking(move || pack(&tree)).await??;
                 let mut req = api.http.post(format!("{}{}/deploys", api.base, env_path(&svc, &u.target.env))).header("content-type", "application/gzip").body(bundle);
@@ -2126,12 +2123,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             svc
         }
-        AppsCmd::Create { name, project, repo, root, image, kind, port, schedule, timezone } => {
-            let source = match (repo, image) {
-                (Some(r), None) => json!({ "kind": "repo", "repo": r, "root": root }),
-                (None, Some(i)) => json!({ "kind": "image", "image": i }),
-                (None, None) => json!({ "kind": "upload" }),
-                _ => bail!("--repo or --image, not both"),
+        AppsCmd::Create { name, project, repo, git, branch, root, image, kind, port, schedule, timezone } => {
+            let source = match (repo, git, image) {
+                (Some(r), None, None) => json!({ "kind": "repo", "repo": r, "root": root }),
+                (None, Some(u), None) => json!({ "kind": "git", "url": u, "root": root }),
+                (None, None, Some(i)) => json!({ "kind": "image", "image": i }),
+                (None, None, None) => json!({ "kind": "upload" }),
+                _ => bail!("one of --repo, --git or --image"),
             };
             let mut run = serde_json::Map::new();
             if let Some(k) = kind {
@@ -2147,7 +2145,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 run.insert("schedule".into(), sch.into());
             }
             let project = project_id(api, &project).await?;
-            let v = api.post("/v1/apps/services", json!({ "project": project, "name": name, "source": source, "run": run })).await?;
+            let mut body = json!({ "project": project, "name": name, "source": source, "run": run });
+            if let Some(b) = branch {
+                body["branch"] = json!(b);
+            }
+            let v = api.post("/v1/apps/services", body).await?;
             if !json_out {
                 print_service(&v);
                 return Ok(());

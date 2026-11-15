@@ -134,6 +134,17 @@ impl Apps {
                 }
                 (Some(rev.sha), None, trigger)
             }
+            (Source::Git { url, .. }, false, None) => {
+                let sha = match &revision {
+                    Some(r) if r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit()) => r.to_ascii_lowercase(),
+                    Some(_) => return Err(Error::BadRequest("revision is a full commit id (40 hex digits) for a Git URL".into())),
+                    None => crate::git_source::head(&crate::git_source::client(self.cfg.allow_private), url, row.branch.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?.0,
+                };
+                if message.is_empty() {
+                    message = format!("{} at {}", row.branch.as_deref().unwrap_or("HEAD"), &sha[..12]);
+                }
+                (Some(sha), None, trigger)
+            }
         };
         if message.chars().count() > 500 {
             message = message.chars().take(500).collect();
@@ -991,6 +1002,13 @@ impl Apps {
                 sources.materialize(repo, rev, &tree).await?;
                 root.clone()
             }
+            (Source::Git { url, root }, _) => {
+                let rev = d.revision.as_deref().ok_or_else(|| anyhow::anyhow!("no revision to build"))?;
+                log.line(format!("fetching {url} at {}", &rev[..rev.len().min(12)]));
+                let files = crate::git_source::materialize(&crate::git_source::client(self.cfg.allow_private), url, rev, &tree).await?;
+                log.line(format!("fetched {files} files"));
+                root.clone()
+            }
             (Source::Upload, _) => anyhow::bail!("this service deploys uploads"),
             (Source::Image { .. }, _) => unreachable!("images aren't built"),
         };
@@ -1638,6 +1656,7 @@ impl Apps {
                 let this = self.clone();
                 tokio::spawn(async move {
                     this.watch_tags().await;
+                    this.watch_git().await;
                     this.watching.store(false, std::sync::atomic::Ordering::SeqCst);
                 });
             }

@@ -29,6 +29,7 @@ pub mod cron;
 pub mod deploy;
 pub mod drains;
 pub mod export;
+pub mod git_source;
 pub mod integrations;
 pub mod jobs;
 pub mod live;
@@ -396,6 +397,15 @@ impl Apps {
     }
 
     /// `actor`: who asked (the first deployment's).
+    /// A source's shape, and a Git URL's address against this node's private-address rule.
+    fn check_source(&self, source: &Source) -> Result<()> {
+        source.check()?;
+        if let Source::Git { url, .. } = source {
+            git_source::check_url(url, self.cfg.allow_private).map_err(Error::BadRequest)?;
+        }
+        Ok(())
+    }
+
     pub async fn create_service(self: &Arc<Self>, body: Value, actor: Option<String>) -> Result<Service> {
         let o = body.as_object().ok_or_else(|| Error::BadRequest("the body is an object".into()))?;
         for k in o.keys() {
@@ -407,7 +417,7 @@ impl Apps {
         let name = o.get("name").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("name is required".into()))?.to_string();
         check_name("a service name", &name)?;
         let source: Source = serde_json::from_value(o.get("source").cloned().ok_or_else(|| Error::BadRequest("source is required".into()))?).map_err(|e| Error::BadRequest(format!("source: {e}")))?;
-        source.check()?;
+        self.check_source(&source)?;
         let build: Build = merge(&Build::default(), o.get("build"), "build")?;
         build.check()?;
         let run = Run::default().merged(o.get("run"))?;
@@ -462,8 +472,8 @@ impl Apps {
         // first deploy is that branch's head, not the default's).
         let named = match o.get("branch") {
             None | Some(Value::Null) => None,
-            Some(Value::String(b)) if matches!(source, Source::Repo { .. }) && !b.is_empty() && b.len() <= 255 => Some(b.clone()),
-            Some(_) => return Err(Error::BadRequest("branch is a repo source's branch name".into())),
+            Some(Value::String(b)) if matches!(source, Source::Repo { .. } | Source::Git { .. }) && !b.is_empty() && b.len() <= 255 => Some(b.clone()),
+            Some(_) => return Err(Error::BadRequest("branch is a repo or Git source's branch name".into())),
         };
         let branch = match (&source, &self.deps.sources) {
             (Source::Repo { repo, .. }, Some(src)) => {
@@ -474,6 +484,11 @@ impl Apps {
                 })
             }
             (Source::Repo { repo, .. }, None) => return Err(Error::BadRequest(format!("roll code isn't on this node, so {repo} can't be a source"))),
+            // A Git URL's branch must exist now (its default when none is named), as a repo's must.
+            (Source::Git { url, .. }, _) => {
+                let (_, b) = git_source::head(&git_source::client(self.cfg.allow_private), url, named.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e}")))?;
+                Some(b)
+            }
             _ => None,
         };
         let row = ServiceRow { id: new_id("svc"), project: project.clone(), name: name.clone(), source: source.clone(), build, run, created_at: self.store.now()? };
@@ -511,7 +526,7 @@ impl Apps {
         }
         // The project's owner hears what needs someone from its first service on.
         self.offer_email(&row.project).await;
-        // A repo or an image deploys at once; an upload waits for `roll up`.
+        // A repo, a Git URL or an image deploys at once; an upload waits for `roll up`.
         if !matches!(source, Source::Upload) {
             self.deploy(&row.id, PRODUCTION, json!({}), By { trigger: Trigger::Api, actor: actor.clone() }, None, None).await?;
         }
@@ -691,7 +706,7 @@ impl Apps {
         let mut forget_login = false;
         if let Some(s) = o.get("source") {
             let source: Source = serde_json::from_value(s.clone()).map_err(|e| Error::BadRequest(format!("source: {e}")))?;
-            source.check()?;
+            self.check_source(&source)?;
             // A registry login belongs to its registry: another one never receives it.
             let registry = |s: &Source| match s {
                 Source::Image { image } => Some(image_registry(image)),
@@ -1470,6 +1485,19 @@ impl Apps {
             if let Some(b) = branch {
                 vars.insert("ROLL_GIT_BRANCH".into(), (b, "roll"));
             }
+        }
+        // A Git URL's: its environment's branch was resolved when it was made.
+        if let Source::Git { url, .. } = &svc.source {
+            if !deployment.is_empty() {
+                let d = deployment.to_string();
+                if let Ok(Some(sha)) = self.db(move |s| s.deployment(&d)).await.map(|d| d.revision) {
+                    vars.insert("ROLL_GIT_COMMIT".into(), (sha, "roll"));
+                }
+            }
+            if let Some(b) = &env.branch {
+                vars.insert("ROLL_GIT_BRANCH".into(), (b.clone(), "roll"));
+            }
+            vars.insert("ROLL_GIT_URL".into(), (url.clone(), "roll"));
         }
         let sid = svc.id.clone();
         let links = self.db(move |s| s.links_minted(&sid)).await?;

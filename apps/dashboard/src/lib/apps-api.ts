@@ -27,7 +27,9 @@ export interface Overview {
 export type Source =
   | { kind: "repo"; repo: string; root?: string }
   | { kind: "image"; image: string }
-  | { kind: "upload" };
+  | { kind: "upload" }
+  /** A public Git repository by URL: each deploy fetches its branch's head. */
+  | { kind: "git"; url: string; root?: string };
 
 export interface Build {
   builder: "auto" | "dockerfile";
@@ -145,7 +147,7 @@ export interface ProjectImport {
   apps: Record<
     string,
     {
-      source: { kind: "repo"; repo: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
+      source: { kind: "repo"; repo: string; root: string | null } | { kind: "git"; url: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
       branch: string | null;
       run: Partial<Run>;
       links: { kind: "postgres" | "redis"; name: string }[];
@@ -1126,6 +1128,8 @@ export function sourceLabel(s: Source) {
       return s.image;
     case "upload":
       return "roll up";
+    case "git":
+      return s.root ? `${s.url} · ${s.root}` : s.url;
   }
 }
 

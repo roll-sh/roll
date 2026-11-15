@@ -190,6 +190,7 @@ async fn import(State(apps): S, b: Bytes) -> R {
         .map(|(n, a)| {
             let source = match entry_kind(a) {
                 "repo" => json!({ "kind": "repo", "repo": a.repo, "root": a.root }),
+                "git" => json!({ "kind": "git", "url": a.git, "root": a.root }),
                 "image" => json!({ "kind": "image", "image": a.image }),
                 _ => json!({ "kind": "upload", "root": a.root.as_deref().unwrap_or(".") }),
             };

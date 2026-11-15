@@ -113,7 +113,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 
 - Creating a service makes its `production` environment, places its card on the project's canvas
   (at `x`, `y`, or the first free spot when both are left out or 0), and, for a repo or an image,
-  queues the first deploy at once. An upload service waits for `roll up`.
+  queues the first deploy at once (a Git URL too). An upload service waits for `roll up`. A Git
+  source's deploy takes a `revision` only as a full commit id.
 - In `PATCH` bodies (`build`, `run`) a field set to `null` goes back to its default; fields left
   out stay.
 - `…/deploys/{dep}/logs?follow=1` ends when the deployment is done (at once for one that is).
@@ -152,7 +153,8 @@ type Prices = { cpu_second: number; gb_second: number; egress_gb: number; build_
 type Source =
   | { kind: "repo"; repo: string /* owner/name in roll code (GitHub repos are mirrored there) */; root?: string }
   | { kind: "image"; image: string /* docker.io/library/nginx:1.27 */ }
-  | { kind: "upload" } /* `roll up`: each deploy carries its tree, kept only until its build ends */;
+  | { kind: "upload" } /* `roll up`: each deploy carries its tree, kept only until its build ends */
+  | { kind: "git"; url: string /* a public repository: https://, no credentials, a public address (400 otherwise) */; root?: string } /* each deploy fetches its branch's head shallowly; a new commit deploys within five minutes */;
 
 type Build = {
   /** auto: detect (a Dockerfile wins); dockerfile: use `dockerfile`. */
@@ -268,7 +270,7 @@ type EnvironmentSummary = {
 type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
 
 type Patch<T> = { [K in keyof T]?: T[K] | null }; // null: back to the default
-type NewService = { project: string; name: string; source: Source; build?: Patch<Build>; run?: Patch<Run>; variables?: { [name: string]: string } /* production, before its first deploy */; registry?: { username: string; password: string; server?: string } /* an image's login, before its first pull (as PUT …/registry) */; links?: { kind: LinkKind; ref: string; prefix?: string }[] /* at most 20, made before the first deploy (as PUT …/links); one that doesn't resolve makes no service */; branch?: string /* a repo source: production follows it, its first deploy that branch's head (default: the repo's default branch); 400 when the repo has no such branch */; x?: number; y?: number };
+type NewService = { project: string; name: string; source: Source; build?: Patch<Build>; run?: Patch<Run>; variables?: { [name: string]: string } /* production, before its first deploy */; registry?: { username: string; password: string; server?: string } /* an image's login, before its first pull (as PUT …/registry) */; links?: { kind: LinkKind; ref: string; prefix?: string }[] /* at most 20, made before the first deploy (as PUT …/links); one that doesn't resolve makes no service */; branch?: string /* a repo or Git source: production follows it, its first deploy that branch's head (default: the repo's default branch); 400 when the repo has no such branch, or a Git URL doesn't answer */; x?: number; y?: number };
 type ServicePatch = { name?: string; source?: Source; build?: Patch<Build>; run?: Patch<Run> };
 
 type EnvironmentPut = {
@@ -413,7 +415,7 @@ type ProjectImport = {
   roll_toml: string;          // the file as roll.toml (a Compose file's, to keep)
   notes: string[];            // what a Compose file's import left out, and why
   apps: { [name: string]: {
-    source: { kind: "repo"; repo: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
+    source: { kind: "repo"; repo: string; root: string | null } | { kind: "git"; url: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
     branch: string | null;    // a repo's production branch
     run: Patch<Run>;          // the run settings the entry names
     links: { kind: "postgres" | "redis"; name: string }[]; // databases below, by name

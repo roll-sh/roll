@@ -493,7 +493,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           className="rise mt-3 flex flex-wrap items-end gap-3 rounded-xl border border-line bg-panel px-4 py-3"
           onSubmit={async (e) => {
             e.preventDefault();
-            const built = service.source.kind === "repo";
+            const built = service.source.kind === "repo" || service.source.kind === "git";
             const body: NewDeploy = {
               ...(built && rev.trim() ? { revision: rev.trim() } : {}),
               ...(!built && image.trim() ? { image: image.trim() } : {}),
@@ -509,7 +509,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
             }
           }}
         >
-          {service.source.kind === "repo" && (
+          {(service.source.kind === "repo" || service.source.kind === "git") && (
             <label className="flex flex-col gap-1 text-[12px] text-muted">
               Revision
               <input value={rev} onChange={(e) => setRev(e.target.value)} placeholder="the branch's head" spellCheck={false} className={`${input} w-56 font-mono text-[12px]`} />
@@ -529,7 +529,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
             <input type="checkbox" checked={noTraffic} onChange={(e) => setNoTraffic(e.target.checked)} />
             No traffic (try it first)
           </label>
-          {service.source.kind === "repo" && (
+          {(service.source.kind === "repo" || service.source.kind === "git") && (
             <label className="inline-flex items-center gap-1.5 pb-2 text-[12px] text-muted" title="No cached layer; base images pulled again">
               <input type="checkbox" checked={noCache} onChange={(e) => setNoCache(e.target.checked)} />
               Without the cache
@@ -545,7 +545,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
       )}
       {adding && (
         <NewEnvironment
-          repo={service.source.kind === "repo"}
+          repo={service.source.kind === "repo" || service.source.kind === "git"}
           envs={service.environments.map((e) => e.name)}
           busy={busy}
           onCancel={() => setAdding(false)}

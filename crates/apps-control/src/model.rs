@@ -34,6 +34,13 @@ pub enum Source {
     Image { image: String },
     /// `roll up`: each deploy carries its own tree.
     Upload,
+    /// A public Git repository by URL (GitHub, GitLab, any smart-HTTP host), with no app
+    /// installed: each deploy fetches its branch's head (`git_source`).
+    Git {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+    },
 }
 
 impl Source {
@@ -64,6 +71,14 @@ impl Source {
                 Ok(())
             }
             Source::Upload => Ok(()),
+            // Its address is checked again where private ones may be allowed (`Apps::check_source`).
+            Source::Git { url, root } => {
+                crate::git_source::check_url(url, true).map_err(Error::BadRequest)?;
+                if let Some(r) = root {
+                    check_rel_path("source.root", r)?;
+                }
+                Ok(())
+            }
         }
     }
 

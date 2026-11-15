@@ -60,6 +60,9 @@ export function NewServiceSheet({
   const [repos, setRepos] = useState<Repo[] | null>(null);
   const [reposError, setReposError] = useState<string | null>(null);
   const [repo, setRepo] = useState("");
+  // Any public Git URL instead (GitHub, GitLab…): no app to install, no mirror.
+  const [gitUrl, setGitUrl] = useState("");
+  const [gitBranch, setGitBranch] = useState("");
   const [root, setRoot] = useState("");
   const [image, setImage] = useState("");
   const [regUser, setRegUser] = useState("");
@@ -105,14 +108,14 @@ export function NewServiceSheet({
   // The name follows the source until it's typed.
   useEffect(() => {
     if (named) return;
-    const base = from === "repo" ? nameFrom(repo) : from === "image" ? nameFrom(image) : "";
+    const base = from === "repo" ? nameFrom(gitUrl.trim() ? gitUrl.trim().replace(/\.git$/, "") : repo) : from === "image" ? nameFrom(image) : "";
     setName(base);
-  }, [from, repo, image, named]);
+  }, [from, repo, gitUrl, image, named]);
 
   // rolld's plan for the repo and root, looked up when they settle.
   const planKey = `${repo}\n${root.trim()}`;
   useEffect(() => {
-    if (from !== "repo" || !repo) return;
+    if (from !== "repo" || !repo || gitUrl.trim()) return;
     let live = true;
     const t = setTimeout(() => {
       setPlan({ key: planKey });
@@ -125,7 +128,7 @@ export function NewServiceSheet({
       live = false;
       clearTimeout(t);
     };
-  }, [from, repo, root, planKey]);
+  }, [from, repo, gitUrl, root, planKey]);
 
   // What the code uses, ticked until the user picks: the project's one database of that kind,
   // else a new one (with two or more, they choose).
@@ -152,14 +155,26 @@ export function NewServiceSheet({
     });
   };
 
+  const rootPart = root.trim() ? { root: root.trim() } : {};
   const source: Source | null =
-    from === "repo" ? (repo ? { kind: "repo", repo, ...(root.trim() ? { root: root.trim() } : {}) } : null) : from === "image" ? (image.trim() ? { kind: "image", image: image.trim() } : null) : null;
+    from === "repo"
+      ? gitUrl.trim()
+        ? { kind: "git", url: gitUrl.trim(), ...rootPart }
+        : repo
+          ? { kind: "repo", repo, ...rootPart }
+          : null
+      : from === "image"
+        ? image.trim()
+          ? { kind: "image", image: image.trim() }
+          : null
+        : null;
+  const gitOk = !gitUrl.trim() || /^https:\/\/[^/@\s]+\/\S+$/.test(gitUrl.trim());
   const portN = port.trim() ? Number(port) : undefined;
   const portOk = portN === undefined || (Number.isInteger(portN) && portN > 0 && portN < 65536);
   const parsed = useMemo(() => parseEnv(env), [env]);
   const scheduleOk = kind !== "cron" || schedule.trim().split(/\s+/).length === 5;
   const healthOk = !health.trim() || health.trim().startsWith("/");
-  const ready = !!source && SERVICE_NAME.test(name) && portOk && healthOk && scheduleOk && parsed.errors.length === 0 && !busy;
+  const ready = !!source && gitOk && SERVICE_NAME.test(name) && portOk && healthOk && scheduleOk && parsed.errors.length === 0 && !busy;
 
   const create = async () => {
     if (!source) return;
@@ -200,7 +215,8 @@ export function NewServiceSheet({
         ...fresh.map((r) => ({ kind: LINKABLE[r.kind]!, ref: r.ref })),
         ...linkable.filter((v) => links.has(resourceKey(v)) && !freshKeys.has(resourceKey(v))).map((v) => ({ kind: LINKABLE[v.kind]!, ref: v.ref })),
       ];
-      const s = await appsApi.create({ project: project.id, name, source, ...(run ? { run } : {}), ...variables, ...registry, ...(chosen.length ? { links: chosen } : {}), ...spot });
+      const branch = source.kind === "git" && gitBranch.trim() ? { branch: gitBranch.trim() } : {};
+      const s = await appsApi.create({ project: project.id, name, source, ...branch, ...(run ? { run } : {}), ...variables, ...registry, ...(chosen.length ? { links: chosen } : {}), ...spot });
       onCreated(s);
     } catch (e) {
       setError(message(e));
@@ -257,6 +273,20 @@ export function NewServiceSheet({
                 setRepo(full);
               }}
             />
+            <Label>
+              Or a public Git URL <span className="font-normal">no app to install</span>
+            </Label>
+            <input value={gitUrl} onChange={(e) => setGitUrl(e.target.value)} placeholder="https://github.com/owner/name" className={field} spellCheck={false} aria-invalid={!gitOk} />
+            {gitUrl.trim() && (
+              <>
+                {!gitOk && <p className="mt-1.5 text-[11px] text-danger">An https:// URL of a repository, without a login in it.</p>}
+                <Label>
+                  Branch <span className="font-normal">optional</span>
+                </Label>
+                <input value={gitBranch} onChange={(e) => setGitBranch(e.target.value)} placeholder="its default branch" className={field} spellCheck={false} />
+                <p className="mt-1.5 text-[11px] leading-relaxed text-subtle">Each new commit on it deploys (checked every 5 minutes). Private repositories go through roll code.</p>
+              </>
+            )}
             <Label>
               Root directory <span className="font-normal">optional</span>
             </Label>
