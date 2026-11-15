@@ -957,7 +957,8 @@ impl Block {
         }
     }
 
-    /// The whole key of restart `r` compared with `key`.
+    /// The whole key of restart `r` compared with `key` (inlined, as `first_restart`).
+    #[inline(always)]
     fn restart_cmp(&self, r: usize, key: &[u8]) -> std::cmp::Ordering {
         let mut p = self.restarts[r] as u32 as usize;
         let (_, us, _) = head(&self.data, &mut p);
@@ -965,7 +966,9 @@ impl Block {
         cmp_split(stored, if us & F_TS != 0 { &self.ts } else { &[] }, key)
     }
 
-    /// The first restart whose key is >= `key` (`restarts.len()`: none).
+    /// The first restart whose key is >= `key` (`restarts.len()`: none). (Inlined: `seek`, a
+    /// point read's, keeps it in its body now that the multi-get calls it too.)
+    #[inline(always)]
     fn first_restart(&self, key: &[u8]) -> usize {
         let n = self.restarts.len();
         if n == 0 {
@@ -1004,7 +1007,8 @@ impl Block {
 
     /// The restart a `seek` of `key` decodes from: the one before the first whose key is >=
     /// `key` (`seek_from`). (Inlined: `seek`, every point read's, stays the one function it
-    /// was: as two calls, a point select took 0.4% more instructions.)
+    /// was: with these, or `first_restart`, as calls a point select took 0.4-0.9% more
+    /// instructions.)
     #[inline(always)]
     pub fn restart_for(&self, key: &[u8]) -> usize {
         self.first_restart(key).saturating_sub(1)

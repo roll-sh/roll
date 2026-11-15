@@ -64,8 +64,6 @@ struct Bufs {
     seek: Vec<u8>,
     /// `first_raw`'s candidate key.
     cand: Vec<u8>,
-    /// `get_sorted`'s keys.
-    sorted: Vec<Step>,
 }
 
 thread_local! {
@@ -185,13 +183,14 @@ impl PointReader {
         let ts = self.ts;
         let mut out = vec![None; keys.len()];
         let PointReader { view, bufs, .. } = self;
-        let Bufs { held, pos, seek, sorted, .. } = bufs;
+        let Bufs { held, pos, seek, .. } = bufs;
         let l1 = view.l1.as_slice();
         let slot = view.imm.len() + view.l0.len();
         let newer = !view.mem.is_empty() || !view.imm.is_empty() || !view.l0.is_empty();
         // Each key: its seek key (in `seek`), a newer source's version, or where in L1 it is.
         seek.clear();
-        sorted.clear();
+        // (Its own, not in the buffers every point read moves and drops.)
+        let mut sorted: Vec<Step> = Vec::with_capacity(keys.len());
         let mut f = 0;
         // (The block the last key searched for went to.)
         let mut last: Option<(usize, usize)> = None;
