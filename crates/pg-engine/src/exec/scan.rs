@@ -3302,9 +3302,9 @@ impl ScanNode {
         if self.sorted.is_none() && !self.streamed && self.in_order.is_none() {
             self.nblocks = super::sizing::modelled_blocks(self.plan.table.oid, ctx);
             // A table whose heap isn't modelled (too big) has its rows as stored, read as
-            // they're asked for, unless some went in out of key order with their TIDs (an
-            // update's new versions at the end): a plain scan then puts them in heap order
-            // (`next_heap_ordered`).
+            // they're asked for, unless some went in out of key order (an update's new
+            // versions at the end) and the estimate places every row (`EstOrder::Placed`): a
+            // plain scan then puts them in heap order (`next_heap_ordered`).
             if !super::sizing::heap_modelled(&self.plan.table, ctx) {
                 // (Not an UPDATE's or DELETE's scan: their rows' order isn't seen.)
                 let plain = self.keys.is_none()
@@ -3313,8 +3313,8 @@ impl ScanNode {
                     && self.plan.index.is_none()
                     && self.ranges.len() <= 1
                     && !self.plan.with_key;
-                let stamped = matches!(super::sizing::estimated_order(&self.plan.table, ctx), Some((super::sizing::EstOrder::Stamped, _)));
-                if plain && stamped && ctx.snapshot().is_some() {
+                let placed = matches!(super::sizing::estimated_order(&self.plan.table, ctx), Some((super::sizing::EstOrder::Placed, _)));
+                if plain && placed && ctx.snapshot().is_some() {
                     self.in_order = Some(false);
                 } else {
                     self.streamed = true;
@@ -4959,14 +4959,14 @@ impl ScanNode {
             }
             self.in_order = Some(!reordered);
         } else {
-            // A table too big to model whose rows went in out of key order with their TIDs
-            // (`EstOrder::Stamped`): aggregation on this thread that sees its rows' order (a
+            // A table too big to model whose rows went in out of key order, every one placed
+            // (`EstOrder::Placed`): aggregation on this thread that sees its rows' order (a
             // float sum) reads them in heap order, on the serial path, as PostgreSQL's
             // serial scan gives them. Workers read chunks as stored: a parallel scan's
             // rows come in no fixed order in PostgreSQL either.
             if serial
                 && spec.as_ref().is_some_and(|s| !s.unordered)
-                && matches!(super::sizing::estimated_order(&p.table, ctx), Some((super::sizing::EstOrder::Stamped, _)))
+                && matches!(super::sizing::estimated_order(&p.table, ctx), Some((super::sizing::EstOrder::Placed, _)))
             {
                 return Ok(None);
             }

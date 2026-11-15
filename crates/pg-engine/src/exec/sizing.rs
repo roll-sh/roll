@@ -331,7 +331,7 @@ pub enum EstOrder {
     InOrder,
     /// Not: a version went in out of key order (an update's new one at the end), and the
     /// estimate places every row (`EstHeap::rank`). A scan in heap order sorts by it.
-    Stamped,
+    Placed,
     /// Some version's place isn't known (space a VACUUM freed, a rewrite, a restart: the
     /// places are kept in memory only): rows come as stored.
     #[default]
@@ -347,7 +347,7 @@ impl EstHeap {
         } else if h.in_key_order() {
             EstOrder::InOrder
         } else {
-            EstOrder::Stamped
+            EstOrder::Placed
         };
         // (The page being filled is the last one used: a load going on fills it first.)
         let fill = pages.saturating_sub(fresh + 1);
@@ -470,7 +470,7 @@ impl EstHeap {
             self.unplace();
             return false;
         };
-        self.order = EstOrder::Stamped;
+        self.order = EstOrder::Placed;
         if self.moved.len() >= moved_max() {
             self.unplace();
             return false;
@@ -2346,12 +2346,12 @@ fn est_entries(
     old: Option<&[Value]>,
     vals: Option<&[Option<Vec<Value>>]>,
     ctx: &ExecCtx,
-) -> Result<Vec<(u32, u128, usize, bool)>> {
-    let mut out = Vec::new();
+) -> Result<EstEntries> {
+    let mut out = EstEntries::new();
     if !indexes.iter().any(|b| b.index.method == "btree") {
         return Ok(out);
     }
-    let have: Vec<bool> = {
+    let have: smallvec::SmallVec<[bool; 8]> = {
         let rf = ctx.sess.db.relfiles.of(t.oid).read();
         if rf.est_btrees.is_empty() {
             return Ok(out);
@@ -2361,13 +2361,15 @@ fn est_entries(
     let fmt = ctx.fmt();
     let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
     let null = Value::Null;
-    let mut sort = Vec::new();
+    let mut sort: smallvec::SmallVec<[u8; 64]> = smallvec::SmallVec::new();
+    let mut enc = Vec::new();
     for (i, bix) in indexes.iter().enumerate() {
         if !have[i] || bix.index.method != "btree" {
             continue;
         }
         sort.clear();
         let mut size = relsize::IndexTupleSize::default();
+        let mut dup = old.is_some();
         // (An index of plain columns, the usual one: its key and size from the row's values,
         // nothing evaluated or copied.)
         let plain = bix.predicate.is_none() && bix.keys.iter().all(|k| matches!(k, Expr::Col(..)));
@@ -2375,8 +2377,11 @@ fn est_entries(
             for k in &bix.keys {
                 let Expr::Col(c, _) = k else { unreachable!() };
                 let v = row.get(*c).unwrap_or(&null);
-                encode_value(&mut sort, v, false);
-                size.push(v, &k.ty(), &text);
+                enc.clear();
+                encode_value(&mut enc, v, false);
+                sort.extend_from_slice(&enc);
+                size.push(v, &t.columns[*c].ty, &text);
+                dup = dup && old.is_some_and(|o| same(o.get(*c), Some(v)));
             }
         } else {
             let v = match vals {
@@ -2385,18 +2390,26 @@ fn est_entries(
             };
             let Some(v) = v else { continue };
             for (x, k) in v.iter().zip(&bix.keys) {
-                encode_value(&mut sort, x, false);
+                enc.clear();
+                encode_value(&mut enc, x, false);
+                sort.extend_from_slice(&enc);
                 size.push(x, &k.ty(), &text);
             }
+            dup = old.is_some_and(|o| columns_unchanged(bix, o, row));
         }
         for &c in &bix.index.include {
-            size.push(row.get(c).unwrap_or(&null), &t.columns[c].ty, &text);
+            let v = row.get(c).unwrap_or(&null);
+            size.push(v, &t.columns[c].ty, &text);
+            dup = dup && old.is_some_and(|o| same(o.get(c), Some(v)));
         }
-        let dup = old.is_some_and(|o| columns_unchanged(bix, o, row));
         out.push((bix.index.oid, btest::key_prefix(&sort), size.size(), dup));
     }
     Ok(out)
 }
+
+/// A version's btree entries for the estimates (`est_entries`): (index, key's prefix,
+/// tuple size, the key the old version's).
+type EstEntries = smallvec::SmallVec<[(u32, u128, usize, bool); 4]>;
 
 /// An index build measured btree `index` of a table too big to model: its leaves as the
 /// build laid them out (`btest`), what its writes then grow.
@@ -5476,7 +5489,7 @@ pub fn estimated_order(t: &Table, ctx: &ExecCtx) -> Option<(EstOrder, u64)> {
 /// (`EstOrder::Unplaced`): kept unless a version was placed since.
 pub fn estimated_order_found(t: &Table, order: EstOrder, writes: u64, db: &Database) {
     if let Some(e) = db.relfiles.of(t.oid).write().estimated.get_mut(&t.oid)
-        && e.order == EstOrder::Stamped
+        && e.order == EstOrder::Placed
         && e.writes == writes
     {
         e.order = order;

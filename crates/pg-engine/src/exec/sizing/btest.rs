@@ -57,6 +57,8 @@ pub struct BtEst {
     free: usize,
     /// Pages split off a leaf whose key range had no order left to give them.
     stuck: usize,
+    /// The leaf the last insert went to.
+    hint: usize,
     /// The file's blocks (it never shrinks).
     blocks: u32,
 }
@@ -127,6 +129,7 @@ impl EstBuilder {
             inner_base: 0,
             free: 0,
             stuck: 0,
+            hint: 0,
             blocks: 0,
         };
         e.inner_base = e.inner_for(n);
@@ -167,6 +170,7 @@ impl BtEst {
             inner_base: 0,
             free: 0,
             stuck: 0,
+            hint: 0,
             blocks,
         };
         e.inner_base = e.inner_for(n);
@@ -249,8 +253,15 @@ impl BtEst {
             self.store.push(Leaf { max: key, used: 0.0, tuples: 0.0, tids: 0.0, keys: 0.0 });
         }
         // (The last leaf whose low key is at or before the key's: a new entry goes after
-        // its key's others, its heap TID being the greatest.)
-        let i = self.lows.partition_point(|lo| lo.0 <= key).saturating_sub(1);
+        // its key's others, its heap TID being the greatest. Keys in order land where the
+        // last one did, or past it.)
+        let fits = |i: usize| self.lows[i].0 <= key && self.lows.get(i + 1).is_none_or(|n| n.0 > key);
+        let i = match self.hint {
+            h if h < self.lows.len() && fits(h) => h,
+            h if h + 1 < self.lows.len() && fits(h + 1) => h + 1,
+            _ => self.lows.partition_point(|lo| lo.0 <= key).saturating_sub(1),
+        };
+        self.hint = i;
         let rightmost = i + 1 == self.lows.len();
         let room = self.room(rightmost);
         let dedup = self.dedup;
