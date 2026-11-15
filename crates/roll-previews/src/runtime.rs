@@ -156,6 +156,8 @@ pub struct Runtime {
     /// When building [`BROWSERS_IMAGE`] last failed (a node without npm's registry, say): not
     /// tried again for [`BROWSERS_RETRY`], so screenshots don't each wait on a build that fails.
     browsers_failed: Mutex<Option<std::time::Instant>>,
+    /// One build of [`BROWSERS_IMAGE`] at a time (screenshots may run side by side).
+    browsers_building: tokio::sync::Mutex<()>,
 }
 
 const BROWSERS_RETRY: Duration = Duration::from_secs(3600);
@@ -182,6 +184,7 @@ impl Runtime {
             me: me.clone(),
             live: Mutex::new(HashMap::new()),
             browsers_failed: Mutex::new(None),
+            browsers_building: tokio::sync::Mutex::new(()),
             client: Client::builder(TokioExecutor::new()).build_http(),
         })
     }
@@ -1061,6 +1064,7 @@ impl Runtime {
     /// service's network as Chromium's run is, locked down the same way.
     async fn other_browsers(&self, name: &str, port: u16, opts: &crate::ports::ShotOptions) -> anyhow::Result<Vec<crate::ports::PageShot>> {
         use base64::Engine as _;
+        let building = self.browsers_building.lock().await;
         if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", BROWSERS_IMAGE]).await.is_err() {
             if let Some(at) = *self.browsers_failed.lock() {
                 anyhow::ensure!(at.elapsed() >= BROWSERS_RETRY, "building {BROWSERS_IMAGE} failed {} min ago; tried again within the hour", at.elapsed().as_secs() / 60);
@@ -1077,6 +1081,8 @@ impl Runtime {
             }
             *self.browsers_failed.lock() = None;
         }
+        // Only the build is one at a time: the runs go side by side.
+        drop(building);
         let browsers: Vec<&String> = opts.browsers.iter().filter(|b| crate::settings::BROWSERS.contains(&b.as_str())).collect();
         let hide: Vec<&String> = opts.hide.iter().filter(|s| crate::settings::selector_ok(s)).take(crate::settings::MAX_HIDE).collect();
         let run = format!("roll-previews-browsers-{}", name.trim_start_matches("roll-previews-"));
