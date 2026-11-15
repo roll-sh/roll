@@ -223,7 +223,9 @@ class _Relogin:
     def token(self, c: Client, stale: Optional[str] = None) -> str:
         with self.lock:
             margin = max(60.0, (self.expires - self.issued) / 5)
-            if stale == c.token or time.time() > self.expires - margin:
+            # An answer without an expiry is renewed only when the server refuses it.
+            ending = self.expires > 0 and time.time() > self.expires - margin
+            if stale == c.token or ending:
                 r = Client(c.api, "", timeout=c.timeout)._send("", "POST", "/v1/secrets/login", {"identity": self.identity, "token": self.source().strip()})
                 if not r or not r.get("token"):
                     raise SecretsError("the login answered no token", 502)
