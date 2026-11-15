@@ -418,6 +418,30 @@ previews are listed once those products are on.
 | `tasks_list_functions` | Durable functions. | `GET /v1/tasks/functions` |
 | `tasks_list_queues` | Queues with their parallelism, rate and backlog. | `GET /v1/tasks/queues` |
 | `tasks_stats` | Nodes, queue stats, dead letters, schedules and functions. | `GET /v1/tasks/stats` |
+| `tasks_list_dead_letters` | Messages that ran out of retries, newest first. | `GET /v1/tasks/dlq` |
+| `tasks_delete_dead_letter` | Drop a dead-lettered message for good. | `DELETE /v1/tasks/dlq/{id}` |
+| `tasks_get_queue` | A queue's parallelism, rate, retries, backlog and whether it's paused. | `GET /v1/tasks/queues/{name}` |
+| `tasks_configure_queue` | Make a queue, or change its limits: what's left out stays as it is. | `PUT /v1/tasks/queues/{name}` |
+| `tasks_pause_queue` | Hold a queue's deliveries; messages keep arriving. | `POST /v1/tasks/queues/{name}/pause` |
+| `tasks_resume_queue` | Deliver a paused queue's messages again. | `POST /v1/tasks/queues/{name}/resume` |
+| `tasks_list_topics` | Topics: a message published to one goes to each of its endpoints. | `GET /v1/tasks/topics` |
+| `tasks_get_topic` | A topic and its endpoints. | `GET /v1/tasks/topics/{name}` |
+| `tasks_set_topic` | A topic with exactly these endpoints. | `PUT /v1/tasks/topics/{name}` |
+| `tasks_delete_topic` | Delete a topic; its pending messages stay. | `DELETE /v1/tasks/topics/{name}` |
+| `tasks_send_event` | An event that starts the functions it triggers (an id makes it idempotent). | `POST /v1/tasks/events` |
+| `tasks_list_events` | Events received, newest first. | `GET /v1/tasks/events` |
+| `tasks_get_event` | An event and the runs it started. | `GET /v1/tasks/events/{id}` |
+| `tasks_get_function` | A durable function: its triggers, concurrency, retries and whether it's paused. | `GET /v1/tasks/functions/{id}` |
+| `tasks_pause_function` | Start no new runs of a function (running ones carry on). | `POST /v1/tasks/functions/{id}/pause` |
+| `tasks_resume_function` | Start runs of a paused function again. | `POST /v1/tasks/functions/{id}/resume` |
+| `tasks_cancel_function_runs` | Stop every running run of a function, or those an expression matches. | `POST /v1/tasks/functions/{id}/cancel` |
+| `tasks_wait_run` | A run once it finishes, or as it is when the timeout passes. | `GET /v1/tasks/runs/{id}/wait` |
+| `tasks_get_schedule` | A schedule, its next run and what it publishes. | `GET /v1/tasks/schedules/{id}` |
+| `tasks_update_schedule` | Change a schedule's cron, time zone, what it publishes or its label: what's left out stays. | `PATCH /v1/tasks/schedules/{id}` |
+| `tasks_pause_schedule` | Stop a schedule firing until it's resumed. | `POST /v1/tasks/schedules/{id}/pause` |
+| `tasks_resume_schedule` | Fire a paused schedule again. | `POST /v1/tasks/schedules/{id}/resume` |
+| `tasks_trigger_schedule` | Publish what a schedule publishes once, now. | `POST /v1/tasks/schedules/{id}/trigger` |
+| `tasks_usage` | Messages, deliveries and runs by day, and what they cost. | `GET /v1/tasks/usage` |
 | `search_list_clusters` | Elasticsearch-compatible search clusters. | `GET /v1/search/clusters` |
 | `search_get_cluster` | A cluster's settings, state, indices, size, URL and branches. | `GET /v1/search/clusters/{cluster}` |
 | `search_create_cluster` | A new cluster, or a branch of one (its password once, to tokens that may reveal). | `POST /v1/search/clusters` |
