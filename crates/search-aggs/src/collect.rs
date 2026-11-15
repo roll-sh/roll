@@ -525,6 +525,31 @@ impl Subs {
         Ok(())
     }
 
+    /// [`push`](Self::push) of each `(docs[i], ords[i], scores[i])` (`scores` empty: none were
+    /// read), flushing at the same points, a slice at a time.
+    pub fn push_many(&mut self, docs: &[u32], ords: &[u32], scores: &[f32]) -> Result<()> {
+        let score = |i: usize| scores.get(i).copied().unwrap_or(f32::NAN);
+        let mut i = 0;
+        while i < docs.len() {
+            let take = (BATCH - self.docs.len().min(BATCH)).clamp(1, docs.len() - i);
+            if let Some(d) = self.deferred.as_mut() {
+                for j in i..i + take {
+                    d.record(docs[j], ords[j], score(j))?;
+                }
+            }
+            self.docs.extend_from_slice(&docs[i..i + take]);
+            self.ords.extend_from_slice(&ords[i..i + take]);
+            if self.needs_scores {
+                self.scores.extend((i..i + take).map(score));
+            }
+            i += take;
+            if self.docs.len() >= BATCH {
+                self.flush()?;
+            }
+        }
+        Ok(())
+    }
+
     /// Hands queued pairs to the sub-aggregations.
     pub fn flush(&mut self) -> Result<()> {
         if self.docs.is_empty() {
