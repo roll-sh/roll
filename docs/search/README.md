@@ -251,12 +251,14 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    A/Bs' script loads didn't): find why; nested `nested-date-histo` 1.17x OpenSearch (tie);
    http_logs `sort-size-desc-after-force-merge-1-seg` 1.12x OpenSearch (tie); geonames
    `asc_sort_population` 1.11x and `desc_sort_population` 1.07x Elasticsearch (ties), +11-16%
-   server CPU since `5942eea08`'s sort bands; bulk p50 ties (nested, pmc, nyc_taxis, so); http_logs
+   server CPU since `5942eea08`'s sort bands, 7-10% of it won back since (the bands' per-hit
+   accounting is one comparison; fewer instructions than before the bands, the rest is code
+   placement on Cascade Lake: docs/benchmarks/search.md, "The bands' cost"); bulk p50 ties (nested, pmc, nyc_taxis, so); http_logs
    `scroll` 1.03x OpenSearch (tie). Regressions: http_logs indexing +8% CPU per document (noaa
    +14%) since `dbe79f8f7` (every bulk item walked the mapping for `semantic_text` fields,
    building every field's path, three times: now a walk that stops at the first one and builds
    nothing, `6c2834a3e`, nyc_taxis 500k at 8 clients 45.4 → 43.2 µs/doc median, 3 of 4 rounds
-   lower, the same aggregations), and the bands' cost (to fix). Not a loss: `terms_enum`
+   lower, the same aggregations), and the bands' cost (fixed, above). Not a loss: `terms_enum`
    (OpenSearch has no such API; its "0.57 ms" was an error). Still open from before: one-client
    indexing CPU (51.8 against 34.6 µs/doc on the ECS log), BP only for time-series and log
    indices, the request path's allocations, one allocator policy.

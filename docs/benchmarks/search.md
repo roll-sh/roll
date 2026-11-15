@@ -179,7 +179,8 @@ How the numbers were checked:
   (9.23 → 4.48 ms; Rally 4.56 against Elasticsearch's 6.39), where the documents do arrive
   against the sort: the bands cost something on every sort whose values don't follow the doc
   order. With `_source: false` the head still costs 11% more than Round 7's binary, so it is the
-  collection, not the fetch.
+  collection, not the fetch. Fixed after this run: the bands' per-hit accounting is now one
+  comparison, the population sorts 7-10% cheaper than the head (tuning log, "The bands' cost").
 
 **Where roll loses** (roll / best of the other two above 1, ranked by how much; "tie" where the
 ranges overlap):
@@ -1573,6 +1574,78 @@ gain (ECS `range_sort` 10.1 → 1.2, exact totals 38.0 → 20.4). `so`'s text qu
 even across sessions (`match` 2.34 → 1.93, title 2.43 → 1.93 here; the reverse in another
 session). A third less indexing CPU on ECS costs those queries, and `so` saves nothing: not
 adopted. Applying it to log indices only (an index setting) would be the next thing to measure.
+
+### The bands' cost (2026-11-15): adopted
+
+Round 8 measured geonames `asc_sort_population` and `desc_sort_population` +11-16% server CPU
+since the bands (`5942eea08`). Population isn't correlated with the doc order (98% of the values
+are 0), so no band starts there: the cost was the bookkeeping a segment pays while a band still
+may start. `band_stats` ran on every hit the first pass counted (the segment's hit count, its
+first hit, the queue's inserts at each power of two, the check at 256 hits) until the count
+passed its threshold, which in a match_all sort is the first 10,000 hits of every shard. Profiles
+put it, with its call site, at about 5% of all samples, and `collect` at 2.9M → 4.1M cycles per
+request against the parent. The every-32nd sampling and `SMALL_SET` were not involved: they apply
+only inside a band (`Pruner::banded`).
+
+What changed (`search-index` `collector/top_field.rs`): the statistics are read at a few counts
+only, so they are taken there. The segment's hits are the total's growth since the segment began
+(`seg_base`), and `collect` takes a slow path (`count_slow`) when the total reaches `slow_hit`:
+the threshold's passing, the next count the statistics need (the first hit, each power of two,
+the band check; none once bands were tried), or every hit of a count shared between concurrent
+collectors. That one comparison replaces the threshold check, the relation update and the band
+accounting on every hit, so a hit now costs less than before the bands. The threshold's passing
+and the docs outside a band (`passed`, `outside_band`) moved out of `collect`, which is back to its
+size before the bands (3.2 KB; 4.6 KB with them).
+
+Instructions per request (`perf stat`, 2,000 requests of the 1.16M-document geonames load, 5
+shards, 6-7 segments each; `asc` / `desc` population sorts):
+
+| | `asc_sort_population` | `desc_sort_population` |
+|---|---:|---:|
+| `ea811df7e` (before the bands) | 12.60M | 14.65M |
+| head (`6c2834a3e`) | 13.92M | 15.96M |
+| statistics at their counts only | 13.33M | 15.36M |
+| plus one comparison for the threshold too | 12.83M | 14.86M |
+| plus the rare blocks out of `collect` (adopted) | 12.53M | 14.56M |
+
+Server CPU per request on lane b, three binaries on copies of that data directory at once,
+requests interleaved (order rotated), 150 per query per round, 6 rounds; the median of the
+rounds' medians, ms, and the new binary against the head per round:
+
+| geonames | `ea811df7e` | head | new | new / head |
+|---|---:|---:|---:|---:|
+| `desc_sort_population` | 5.88 | 6.73 | 6.24 | 0.93 (0.92-0.94) |
+| `asc_sort_population` | 5.12 | 5.92 | 5.24 | 0.91 (0.87-0.93) |
+| `asc_sort_with_after_population` | 5.19 | 6.11 | 5.74 | 0.92 (0.90-0.95) |
+| `asc_sort_geonameid` | 5.04 | 5.73 | 5.21 | 0.91 (0.90-0.93) |
+| `desc_sort_geonameid` (a band) | 14.63 | 6.27 | 6.31 | 0.99 (0.96-1.04) |
+
+The bands' own cases, head against new in the same rounds (the method and queries of the section
+above; 1M documents, 100 requests per query per round, 6 rounds): every sort query's median
+ratio is 0.92-1.02, the median over all 57 queries 0.976. ECS `sort_desc` over natural
+(time-ordered) segments 1.44 → 1.44 ms, nyc_taxis `sort_desc` 1.50 → 1.47 and `term_sort` 1.56 →
+1.46, http_logs `range_sort` 7.21 → 6.88, ECS `after_desc` 0.76 → 0.76; exact totals 3-8% cheaper
+(ECS natural segments 28.3 → 26.5, nyc_taxis 25.9 → 24.5). The controls that never use this
+collector (`term`, `match`) moved 0.99-1.05: the noise floor. Every query returned the same
+totals, hits, sort values and aggregations on every binary.
+
+What's left of the gap to `ea811df7e` on this host (5-9% above it, with fewer instructions) is
+code placement, not work. A binary of the same code with a switch that skips the bands at run
+time measured within 2% of `ea811df7e` with the switch on, and +0-6% with bands on, in the same
+rounds where the adopted code's twin measured +10-16%: same instructions, different layout.
+`FastValues::get` and `LeafKey::native`, unchanged by any of this, start at 48 mod 64 in the fast
+binaries and at 32 in the slow ones. The slow ones get 1.4-1.7M more uops per request from the
+legacy decoder instead of the uop cache (`idq.mite_uops`), and more switch penalties. The Xeon
+W-2295 is Cascade Lake, which has the jump-conditional-code erratum: a jump that crosses or ends
+on a 32-byte boundary isn't cached as decoded uops. Any change to search-index's code size can
+move those functions by 16 bytes either way. A build-wide fix (`-x86-branches-within-32B-boundaries`
+or 32-byte function alignment) would be its own measurement.
+
+Not kept: taking the statistics at their counts but keeping the threshold check and relation
+update on every hit (13.33M instructions: 45% of the extra); it is the first half of the adopted
+change. Starting the per-segment band check later (each later segment of a sort with a full queue
+tries a band when it opens, rank and estimate over the points index): 0.13M instructions per
+request with the bands skipped at run time, within the spread of the CPU numbers.
 
 ## Fetch phase (round 6, perf-fetch lane)
 

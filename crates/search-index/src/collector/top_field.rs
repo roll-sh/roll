@@ -942,10 +942,11 @@ struct TopFieldLeaf<'a> {
     /// Hits before a band may start ([`BAND_START_HITS`] or four queues); 0: bands can't help
     /// this segment, which then keeps no statistics for them.
     band_start: u64,
-    /// Hits the first pass counted in this segment, its first hit, and the doc where the count
-    /// passed its threshold: the hits per doc since the first hit size a band (a range's hits
-    /// lie together).
-    seg_hits: u64,
+    /// The total hits when this segment started (the first pass's hits here are the total's
+    /// growth since), this segment's first hit, and the doc where the count passed its
+    /// threshold: the hits per doc since the first hit size a band (a range's hits lie
+    /// together).
+    seg_base: u64,
     first_hit: u32,
     passed_at: Option<u32>,
     /// Hits the first pass queued in this segment, and how many it had queued when its hits
@@ -953,6 +954,13 @@ struct TopFieldLeaf<'a> {
     /// doubling of the hits).
     seg_inserts: u64,
     pow2_inserts: [u64; 2],
+    /// The total hits at which [`TopFieldLeaf::band_stats`] runs next (`u64::MAX`: never): the
+    /// statistics are only read at a few counts.
+    next_stat: u64,
+    /// The total hits at which `collect` next takes its slow path ([`TopFieldLeaf::count_slow`]:
+    /// the count passing its threshold, `next_stat`, every hit of a count shared with other
+    /// collectors): a hit before it costs an increment and a comparison.
+    slow_hit: u64,
     /// Docs outside the band the first pass counted before its threshold passed, with their
     /// scores: when the band comes up short they are offered to the queue instead of visited
     /// again. Buffered from the band's start until `deferred_end` (`u32::MAX` while the count
@@ -1703,7 +1711,7 @@ impl TopFieldLeaf<'_> {
         // about `n ln 2` do whatever the count. Fewer than eight queues' worth of hits tell
         // nothing.
         let n = self.c.n as u64;
-        if !pruning_failed && self.seg_hits >= 8 * n && self.pow2_inserts[1] - self.pow2_inserts[0] < 4 * n {
+        if !pruning_failed && self.seg_hits() >= 8 * n && self.pow2_inserts[1] - self.pow2_inserts[0] < 4 * n {
             return;
         }
         self.band_tried = true;
@@ -1715,8 +1723,9 @@ impl TopFieldLeaf<'_> {
         let n = self.c.n as u64;
         // Twice the queue's worth of matches, at the hits per doc since this segment's first
         // hit (or in the segments before).
-        let (hits, seen) = if self.seg_hits > 0 {
-            (self.seg_hits, u64::from(from - self.first_hit))
+        let seg_hits = self.seg_hits();
+        let (hits, seen) = if seg_hits > 0 {
+            (seg_hits, u64::from(from - self.first_hit))
         } else {
             (self.c.total, u64::from(self.base) + u64::from(from))
         };
@@ -1764,25 +1773,52 @@ impl TopFieldLeaf<'_> {
         self.deferred_end = (!self.c.passed).then_some(u32::MAX);
     }
 
-    /// Accounts a hit the first pass counted (bands possible), and starts a band once enough
-    /// were counted.
+    /// Hits the first pass counted in this segment.
     #[inline]
+    fn seg_hits(&self) -> u64 {
+        self.c.total - self.seg_base
+    }
+
+    /// The hit just counted reached `slow_hit`: accounts it against the threshold and for
+    /// bands. True exactly when the count passes the threshold.
+    #[inline(never)]
+    fn count_slow(&mut self, doc: u32) -> bool {
+        let just_passed = self.c.note_hit();
+        if self.c.passed {
+            self.c.relation = TotalRelation::GreaterThanOrEqualTo;
+        }
+        if self.c.total == self.next_stat {
+            self.band_stats(doc, just_passed);
+        }
+        self.refresh_slow();
+        just_passed
+    }
+
+    /// Sets `slow_hit` from the threshold and `next_stat`.
+    fn refresh_slow(&mut self) {
+        let pass = if self.c.shared.is_some() {
+            0
+        } else if self.c.passed {
+            u64::MAX
+        } else {
+            self.c.threshold.saturating_add(1)
+        };
+        self.slow_hit = pass.min(self.next_stat);
+    }
+
+    /// Takes the statistics bands read at the counts they read them (the first hit, each power
+    /// of two, [`TopFieldLeaf::band_start`]: `collect` calls this when the count reaches
+    /// `next_stat`), and starts a band once enough hits were counted.
+    #[inline(never)]
     fn band_stats(&mut self, doc: u32, just_passed: bool) {
-        if self.seg_hits == 0 {
+        let hits = self.seg_hits();
+        if hits == 1 {
             self.first_hit = doc;
         }
-        self.seg_hits += 1;
-        if just_passed {
-            self.passed_at = Some(doc);
-            // From here the pruner skips docs: a later pass visits them from this one on.
-            if self.deferred_end == Some(u32::MAX) {
-                self.deferred_end = Some(doc);
-            }
-        }
-        if self.seg_hits & (self.seg_hits - 1) == 0 {
+        if hits.is_power_of_two() {
             self.pow2_inserts = [self.pow2_inserts[1], self.seg_inserts];
         }
-        if self.seg_hits == self.band_start && !just_passed {
+        if hits == self.band_start && !just_passed {
             self.start_band(doc + 1, false);
             self.prune(doc + 1);
             // No band, and exact totals leave no other chance for one: stop accounting.
@@ -1790,6 +1826,14 @@ impl TopFieldLeaf<'_> {
                 self.band_start = 0;
             }
         }
+        // Once bands were tried the counts no longer matter (a band's sizes read only the hits
+        // and the first one).
+        self.next_stat = if self.band_start == 0 || self.band_tried {
+            u64::MAX
+        } else {
+            let next = (hits + 1).next_power_of_two();
+            self.seg_base + if hits < self.band_start { next.min(self.band_start) } else { next }
+        };
     }
 
     /// The queue is full of hits at or before the band's edge `lo`: nothing past it can enter.
@@ -1824,6 +1868,50 @@ impl TopFieldLeaf<'_> {
             }
         }
         self.insert(doc, score)
+    }
+
+    /// The hit count just passed the threshold at `doc`: pruning may start, whatever this doc
+    /// turns out to be (one before `search_after` must not keep it from starting: Lucene's
+    /// `setHitsThresholdReached` runs on the count alone). A pruner that can't narrow the docs to
+    /// visit calls for a band. (Out of `collect`, as `outside_band` is, to keep its hot path
+    /// short.)
+    #[inline(never)]
+    fn passed(&mut self, doc: u32) {
+        if self.band_start > 0 {
+            self.passed_at = Some(doc);
+            // From here the pruner skips docs: a later pass visits them from this one on.
+            if self.deferred_end == Some(u32::MAX) {
+                self.deferred_end = Some(doc);
+            }
+        }
+        self.prune(doc + 1);
+        let failed = self.pruner.as_ref().is_some_and(|p| p.set.is_none() && !p.absent);
+        self.start_band(doc + 1, failed);
+        self.prune(doc + 1);
+        // The last chance for a band in this segment: without one, stop accounting.
+        if self.band.is_none() {
+            self.band_start = 0;
+            self.next_stat = u64::MAX;
+            self.refresh_slow();
+        }
+    }
+
+    /// Collecting by bands, whether `doc` lies outside the current band: then the first pass
+    /// buffers it while its count is short of the threshold (see `deferred`).
+    #[inline(never)]
+    fn outside_band(&mut self, doc: u32, score: f32) -> bool {
+        if self.in_band(doc) {
+            return false;
+        }
+        if self.deferred_end == Some(u32::MAX) {
+            if self.deferred.len() < DEFER_CAP {
+                self.deferred.push((doc, score));
+            } else {
+                self.deferred_end = None;
+                self.deferred = Vec::new();
+            }
+        }
+        true
     }
 
     /// Whether `doc` lies in the current band (taking it into account), when collecting by
@@ -1904,6 +1992,8 @@ impl LeafCollector for TopFieldLeaf<'_> {
         let numeric = self.pruner.as_ref().is_some_and(|p| p.width > 0 && !p.absent && !p.missing_competitive);
         if numeric && !self.scripted && !self.doc_first && !self.c.early_terminate && self.c.n > 0 {
             self.band_start = BAND_START_HITS.max(4 * self.c.n as u64);
+            self.next_stat = self.seg_base + 1;
+            self.refresh_slow();
         }
         // With the queue already full (or the count already past its threshold), bands start
         // with the segment, sized by the segments before; otherwise once this one counted enough
@@ -1944,9 +2034,10 @@ impl LeafCollector for TopFieldLeaf<'_> {
         // hits per doc the first pass counted.
         let n = self.c.n as u64;
         let held = (band.rank - band.prev_rank).max(n);
+        let seg_hits = self.c.total - self.seg_base;
         let scanned = u64::from(self.passed_at.map_or(p.reader.max_doc(), |d| d + 1) - self.first_hit);
         let more = match band.found {
-            0 if self.seg_hits > 0 => (2 * n * scanned).div_ceil(self.seg_hits).max(held.saturating_mul(2)),
+            0 if seg_hits > 0 => (2 * n * scanned).div_ceil(seg_hits).max(held.saturating_mul(2)),
             0 => held.saturating_mul(16),
             f => held.saturating_mul((2 * n).div_ceil(f).clamp(2, 64)),
         };
@@ -2008,12 +2099,8 @@ impl LeafCollector for TopFieldLeaf<'_> {
         let mut just_passed = false;
         if self.counting {
             self.c.total += 1;
-            just_passed = self.c.note_hit();
-            if self.band_start > 0 {
-                self.band_stats(doc, just_passed);
-            }
-            if self.c.passed {
-                self.c.relation = TotalRelation::GreaterThanOrEqualTo;
+            if self.c.total >= self.slow_hit {
+                just_passed = self.count_slow(doc);
             }
         }
         let score = if self.scores || self.script_score { scorer.score() } else { f32::NAN };
@@ -2033,28 +2120,9 @@ impl LeafCollector for TopFieldLeaf<'_> {
             return Ok(());
         }
         if just_passed {
-            // The hit count just passed the threshold: pruning may start, whatever this doc
-            // turns out to be (one before `search_after` must not keep it from starting:
-            // Lucene's `setHitsThresholdReached` runs on the count alone). A pruner that can't
-            // narrow the docs to visit calls for a band.
-            self.prune(doc + 1);
-            let failed = self.pruner.as_ref().is_some_and(|p| p.set.is_none() && !p.absent);
-            self.start_band(doc + 1, failed);
-            self.prune(doc + 1);
-            // The last chance for a band in this segment: without one, stop accounting.
-            if self.band.is_none() {
-                self.band_start = 0;
-            }
+            self.passed(doc);
         }
-        if self.band.is_some() && !self.in_band(doc) {
-            if self.deferred_end == Some(u32::MAX) {
-                if self.deferred.len() < DEFER_CAP {
-                    self.deferred.push((doc, score));
-                } else {
-                    self.deferred_end = None;
-                    self.deferred = Vec::new();
-                }
-            }
+        if self.band.is_some() && self.outside_band(doc, score) {
             return Ok(());
         }
         if self.doc_first {
@@ -2243,6 +2311,7 @@ impl Collector for TopFieldCollector {
             _ => None,
         };
         let scripted = keys.iter().any(|k| matches!(k, LeafKeyKind::Field(lk, _) if matches!(lk.src, Source::Script(_))));
+        let seg_base = self.total;
         let mut leaf = TopFieldLeaf {
             c: self,
             base,
@@ -2263,11 +2332,13 @@ impl Collector for TopFieldCollector {
             band: None,
             band_tried: false,
             band_start: 0,
-            seg_hits: 0,
+            seg_base,
             first_hit: 0,
             passed_at: None,
             seg_inserts: 0,
             pow2_inserts: [0; 2],
+            next_stat: u64::MAX,
+            slow_hit: 0,
             deferred: Vec::new(),
             deferred_end: None,
         };
@@ -2303,6 +2374,7 @@ impl Collector for TopFieldCollector {
             }
             leaf.skip_before = lo;
         }
+        leaf.refresh_slow();
         leaf.refresh_bottom();
         leaf.prune(0);
         Ok(Box::new(leaf))
