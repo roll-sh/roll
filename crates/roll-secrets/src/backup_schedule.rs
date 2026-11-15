@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS backup_schedules (
 ) WITHOUT ROWID;
 ";
 
+/// The most backups a schedule keeps: under the 1000 keys one listing returns, so pruning always
+/// sees one more than it keeps.
+const MAX_KEEP: u32 = 500;
+
 /// Where a project's backups go, under this prefix in its bucket.
 fn prefix(project: &str) -> String {
     format!("roll-secrets/backups/{project}/")
@@ -98,8 +102,8 @@ impl Secrets {
         if self.deliver.is_none() {
             return Err(Error::BadRequest("scheduled backups aren't on this server".into()));
         }
-        if !(1..=24 * 31).contains(&n.every_hours) || !(1..=1000).contains(&n.keep) {
-            return Err(Error::BadRequest("every_hours is 1 to 744, keep 1 to 1000".into()));
+        if !(1..=24 * 31).contains(&n.every_hours) || !(1..=MAX_KEEP).contains(&n.keep) {
+            return Err(Error::BadRequest(format!("every_hours is 1 to 744, keep 1 to {MAX_KEEP}")));
         }
         if !self.members(project)?.contains(&("bucket".to_string(), n.bucket.clone())) {
             return Err(Error::BadRequest(self.not_linkable(project, "bucket", &n.bucket)));
@@ -182,14 +186,19 @@ impl Secrets {
         let caller = Caller { principal: format!("backup:{project}"), grants: Arc::new(Everything), ip: None, runtime: false };
         // As `POST …/backup` answers it, so `roll secrets restore` takes either.
         let sealed = serde_json::json!({ "sealed": self.backup(project, &recipient, &caller)?, "context": crate::backup::context(project) });
-        let at = chrono::DateTime::from_timestamp_millis(self.db.now_ms()?).unwrap_or_default().format("%Y%m%dT%H%M%S%.3fZ");
+        let ms = self.db.now_ms()?;
+        let t = time::OffsetDateTime::from_unix_timestamp(ms.div_euclid(1000)).map_err(|e| Error::Internal(e.to_string()))?;
+        // Sortable as text: oldest first, as pruning reads them.
+        let at = format!("{:04}{:02}{:02}T{:02}{:02}{:02}.{:03}Z", t.year(), u8::from(t.month()), t.day(), t.hour(), t.minute(), t.second(), ms.rem_euclid(1000));
         let key = format!("{}{at}.json", prefix(project));
         deliver.put_object(&bucket, &key, &sealed)?;
-        // Read back: a backup that didn't land whole isn't counted as made.
-        if deliver.get_object(&bucket, &key)? != sealed {
+        // Read back (no more than was written): a backup that didn't land whole isn't counted as made.
+        if deliver.get_object(&bucket, &key, sealed.to_string().len())? != sealed {
             return Err(Error::Link(format!("{key} in {bucket} doesn't read back as written")));
         }
-        let mut kept = deliver.list_objects(&bucket, &prefix(project))?;
+        // Only roll's own backups (`<time>.json` straight under the prefix) are ever pruned. The
+        // listing is oldest first and up to 1000 long, more than `keep` may be: the oldest go each time.
+        let mut kept: Vec<String> = deliver.list_objects(&bucket, &prefix(project))?.into_iter().filter(|k| k.strip_prefix(&prefix(project)).is_some_and(|name| !name.contains('/') && name.ends_with(".json"))).collect();
         kept.sort();
         let extra = kept.len().saturating_sub(keep.max(1) as usize);
         for old in kept.into_iter().take(extra) {

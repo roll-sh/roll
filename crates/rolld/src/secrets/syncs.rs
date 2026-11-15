@@ -311,8 +311,8 @@ impl roll_secrets::Deliver for AuditDeliver {
         self.1.call(axum::http::Method::PUT, &format!("/v1/storage/buckets/{}/upload?key={}", urlencoding::encode(bucket), urlencoding::encode(key)), Some(body.clone())).map(|_| ())
     }
 
-    fn get_object(&self, bucket: &str, key: &str) -> Result<Json> {
-        self.1.call(axum::http::Method::GET, &format!("/v1/storage/buckets/{}/download?key={}", urlencoding::encode(bucket), urlencoding::encode(key)), None)
+    fn get_object(&self, bucket: &str, key: &str, limit: usize) -> Result<Json> {
+        self.1.get_bounded(&format!("/v1/storage/buckets/{}/download?key={}", urlencoding::encode(bucket), urlencoding::encode(key)), limit)
     }
 
     fn list_objects(&self, bucket: &str, prefix: &str) -> Result<Vec<String>> {

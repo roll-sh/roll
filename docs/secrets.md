@@ -1526,10 +1526,11 @@ before any environment is protected, so a restore isn't a change request; what c
 as a warning, by name. Disaster recovery, and moving a project between roll servers.
 
 **Scheduled backups** (Vault's automated snapshots, Akeyless' DR): `PUT …/backup/schedule
-{bucket, recipient, every_hours?, keep?}` (admin; default every 24 h, keeping 30) writes the same
+{bucket, recipient, every_hours?, keep?}` (admin; default every 24 h, keeping 30, at most 500) writes the same
 sealed file (`{sealed, context}`, as `POST …/backup` answers) into one of the project's own roll
 buckets, as `roll-secrets/backups/<project>/<time>.json`, the first one at once. Each is read back
-and compared before it counts, and the oldest beyond `keep` are deleted. roll never holds the key
+and compared before it counts, and the oldest beyond `keep` are deleted (only roll's own
+`<time>.json` files there: nothing else in the bucket is touched). roll never holds the key
 that opens them: the recipient's secret key restores one as above. One node runs each (a schedule
 is claimed by moving its next time on); what a person set up runs only while they can still reach
 the project, and only into a bucket the project still has. `GET …/backup/schedule` says when the

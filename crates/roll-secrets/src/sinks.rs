@@ -65,9 +65,9 @@ pub trait Deliver: Send + Sync {
         let _ = (bucket, key, body);
         Err(crate::Error::Link("buckets aren't on this server".into()))
     }
-    /// Object `key` of roll bucket `bucket`, as JSON.
-    fn get_object(&self, bucket: &str, key: &str) -> Result<Json> {
-        let _ = (bucket, key);
+    /// Object `key` of roll bucket `bucket`, as JSON; an object over `limit` bytes is an error.
+    fn get_object(&self, bucket: &str, key: &str, limit: usize) -> Result<Json> {
+        let _ = (bucket, key, limit);
         Err(crate::Error::Link("buckets aren't on this server".into()))
     }
     /// The keys under `prefix` in roll bucket `bucket`.

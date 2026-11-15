@@ -119,7 +119,7 @@ impl roll_secrets::Deliver for Sent {
         self.3.lock().unwrap().insert((bucket.into(), key.into()), body.clone());
         Ok(())
     }
-    fn get_object(&self, bucket: &str, key: &str) -> roll_secrets::Result<Value> {
+    fn get_object(&self, bucket: &str, key: &str, _: usize) -> roll_secrets::Result<Value> {
         self.3.lock().unwrap().get(&(bucket.into(), key.into())).cloned().ok_or_else(|| roll_secrets::Error::Link("404".into()))
     }
     fn list_objects(&self, bucket: &str, prefix: &str) -> roll_secrets::Result<Vec<String>> {
@@ -2253,14 +2253,16 @@ async fn scheduled_backups_land_sealed_in_the_projects_bucket_and_keep_the_newes
     assert_eq!(s, StatusCode::BAD_REQUEST, "only a bucket of the project's own");
     api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/assets", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
     api.ok(Method::PUT, "/backup/schedule", Some(schedule)).await;
-    // Two older ones there already: the run leaves the newest two.
+    // Two older ones there already: the run leaves the newest two, and nothing roll didn't write.
     let prefix = format!("roll-secrets/backups/{}/", api.project);
-    for old in ["20200101T000000.000Z", "20200102T000000.000Z"] {
-        api.sent.3.lock().unwrap().insert(("assets".into(), format!("{prefix}{old}.json")), json!({}));
+    for old in ["20200101T000000.000Z.json", "20200102T000000.000Z.json", "notes.txt"] {
+        api.sent.3.lock().unwrap().insert(("assets".into(), format!("{prefix}{old}")), json!({}));
     }
     let s = api.secrets.clone();
     tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
-    let kept: Vec<String> = api.sent.3.lock().unwrap().keys().map(|(_, k)| k.clone()).collect();
+    let mut kept: Vec<String> = api.sent.3.lock().unwrap().keys().map(|(_, k)| k.clone()).collect();
+    kept.sort();
+    assert_eq!(kept.pop().as_deref(), Some(format!("{prefix}notes.txt").as_str()));
     assert!(kept.len() == 2 && kept[0].ends_with("20200102T000000.000Z.json"), "{kept:?}");
     let schedule = api.ok(Method::GET, "/backup/schedule", None).await;
     assert!(schedule["last_error"].is_null() && schedule["last_key"] == kept[1], "{schedule}");
@@ -2273,7 +2275,7 @@ async fn scheduled_backups_land_sealed_in_the_projects_bucket_and_keep_the_newes
     // Not due again for a day.
     let s = api.secrets.clone();
     tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
-    assert_eq!(api.sent.3.lock().unwrap().len(), 2);
+    assert_eq!(api.sent.3.lock().unwrap().len(), 3);
 }
 
 #[tokio::test]
