@@ -428,6 +428,8 @@ previews are listed once those products are on.
 | `secrets_diff` | A local .env against an environment, by fingerprint (names only). | `POST /v1/secrets/projects/{project}/environments/{env}/diff` |
 | `secrets_list_rotations` | A project's secret rotations: what rotated and what's due. | `GET /v1/secrets/projects/{project}/rotations` |
 | `secrets_ca_certificates` | The certificates a project's CA has issued (never a key). | `GET /v1/secrets/projects/{project}/cas/{ca}/certificates` |
+| `secrets_list_leases` | A project's live leases on dynamic credentials, never a credential. | `GET /v1/secrets/projects/{project}/leases` |
+| `secrets_end_lease` | End a dynamic credential's lease now (one's own with reveal). | `DELETE /v1/secrets/projects/{project}/leases/{id}` |
 | `secrets_get_values` | All of an environment's values at once, resolved, as one reveal (`dynamic=false` leaves dynamic keys out). | `GET /v1/secrets/projects/{project}/environments/{env}/values` |
 | `secrets_health` | What needs fixing in a project's secrets, by name, in the environments you may read: expired, missing, exposed, weak, expiring, stale, unread, rotations or revocations failing, certificates expiring, public (`code`: keys no repository mentions). | `GET /v1/secrets/projects/{project}/health` |
 | `secrets_findings` | Every project's secrets health findings you may read. | `GET /v1/secrets/findings` |
