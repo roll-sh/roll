@@ -214,6 +214,12 @@ pub trait Source: Send + Sync {
     async fn head(&self, repo: &str, branch: Option<&str>) -> anyhow::Result<Option<String>>;
     /// The services `repo` runs at `revision`.
     async fn services(&self, repo: &str, revision: &str) -> anyhow::Result<Vec<ServiceSpec>>;
+    /// What a service's screenshots take beyond its first page from its repo at `revision`
+    /// (`<root>/roll.toml`'s `[app.previews.screenshots]`: a service on roll apps, whose `[app]`
+    /// describes it). `None`: nothing there.
+    async fn screenshots(&self, _repo: &str, _revision: &str, _root: &str) -> anyhow::Result<Option<code_preview::config::Screenshots>> {
+        Ok(None)
+    }
     /// The paths `head` of `repo` changes since it left the default branch (`None`: not known,
     /// which the path filters take as a match).
     async fn paths(&self, _repo: &str, _head: &str) -> anyhow::Result<Option<Vec<String>>> {
