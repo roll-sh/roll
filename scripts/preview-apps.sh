@@ -51,7 +51,9 @@ BODY_INIT=$(python3 - <<'PY'
 import json
 start = "#!/bin/sh\necho \"$REDIS_URL\" | sed -E 's#.*default:(rdb_[a-z0-9]+)_.*#\\1#' > where\nexec python -m http.server ${PORT:-8000}\n"
 docker = 'FROM python:3.13-alpine\nWORKDIR /app\nCOPY . .\nCMD ["sh", "start.sh"]\n'
-print(json.dumps({"message": "init", "files": {"Dockerfile": {"content": docker}, "start.sh": {"content": start}, "index.html": {"content": "main"}}}))
+# What previews' screenshots of the service take, in roll apps' own config ([app.previews.screenshots]).
+toml = '[app.previews.screenshots]\n[[app.previews.screenshots.states]]\nname = "apps-tab"\npage = "/"\nsteps = [{ press = "Tab" }]\n'
+print(json.dumps({"message": "init", "files": {"Dockerfile": {"content": docker}, "start.sh": {"content": start}, "index.html": {"content": "main"}, "roll.toml": {"content": toml}}}))
 PY
 )
 api POST /v1/code/repos/acme/web/land "$BODY_INIT" >/dev/null
@@ -135,6 +137,9 @@ for _ in $(seq 1 240); do
 done
 SHOT=$(curl -sS "http://$API/v1/previews/$PV/screenshot" | python3 -c "import sys; b=sys.stdin.buffer.read(); print(f'{len(b)} bytes, PNG' if b[:4]==b'\x89PNG' else 'not a PNG: ' + b[:200].decode('utf-8','replace'))")
 case "$SHOT" in *PNG) ;; *) echo "the roll apps service should be screenshotted: $SHOT"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1;; esac
+# Its state from roll apps' own config ([app.previews.screenshots]), read from the change's tree.
+APPS_STATE=$(api GET "/v1/previews/$PV" | jq_ "[p['path'] for p in d.get('pages', []) if p['path'].startswith('state:')]")
+[ "$APPS_STATE" = "['state:apps-tab']" ] || { echo "the roll apps service's [app.previews.screenshots] state should be taken: $APPS_STATE"; exit 1; }
 LOAD=$(api GET "/v1/previews/$PV" | jq_ "(d.get('page_speed') or {}).get('now', {}).get('load_ms')")
 BASE=""
 for _ in $(seq 1 600); do
@@ -198,7 +203,7 @@ cat <<EOF
 | What | Measured |
 | --- | --- |
 | Change opened → preview ready (Redis branched, roll apps environment made, deploy queued) | $((T1 - T0)) ms |
-| The roll apps service's screenshot (its instance's network) / load / against main's baseline on roll apps | $SHOT / $LOAD ms / $BASE |
+| The roll apps service's screenshot (its instance's network) / load / against main's baseline on roll apps / its [app.previews.screenshots] states | $SHOT / $LOAD ms / $BASE / $APPS_STATE |
 | The feedback button on the roll apps environment (a visitor through roll) / its notes | tagged / $NOTES |
 | … → its deploy active (a Docker build of the change's commit) | $((T2 - T0)) ms |
 | First request through roll apps (cold) | $((T4 - T3)) ms |
