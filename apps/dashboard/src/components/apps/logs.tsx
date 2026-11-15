@@ -14,6 +14,9 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
   const [instance, setInstance] = useState("");
   // Only what the app says is at this level or worse (lines that say none are left out).
   const [level, setLevel] = useState<LogLevel | "">("");
+  // One deployment's lines (a canary beside the live one), or one stream's, as `roll logs` narrows.
+  const [deployment, setDeployment] = useState("");
+  const [stream, setStream] = useState<"" | "stdout" | "stderr" | "system">("");
   // The app's output, or the requests it served (the proxy's access log).
   const [requests, setRequests] = useState(false);
   // The Requests view narrowed: a status class (a 5xx alert, followed to its requests) and slow ones.
@@ -27,7 +30,7 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
     setSearching(true);
     try {
       const narrow = requests ? { status: status || undefined, min_ms: slow || undefined } : {};
-      const got = await appsApi.readLogs(service, env, { ...q, ...narrow, since: Date.now() - 7 * 86_400_000, instance: instance || undefined, level: (!requests && level) || undefined, http: requests, tail: q.q ? 2000 : 500 });
+      const got = await appsApi.readLogs(service, env, { ...q, ...narrow, since: Date.now() - 7 * 86_400_000, instance: instance || undefined, level: (!requests && level) || undefined, deployment: (!requests && deployment) || undefined, stream: (!requests && stream) || undefined, http: requests, tail: q.q ? 2000 : 500 });
       setFound({ ...q, ...got });
     } catch (e) {
       setFound({ ...q, lines: [], truncated: false, error: e instanceof Error ? e.message : String(e) });
@@ -81,6 +84,7 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
   }, [paused]);
 
   const instances = useMemo(() => [...new Set(lines.map((l) => l.instance).filter((i): i is string => !!i))], [lines]);
+  const deployments = useMemo(() => [...new Set(lines.map((l) => l.deployment).filter((d): d is string => !!d))], [lines]);
   const shown = useMemo(() => {
     const q = filter.trim().toLowerCase();
     const request = (l: LogLine) => {
@@ -92,8 +96,14 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
         return false;
       }
     };
-    return lines.filter((l) => (!instance || l.instance === instance) && (!q || l.text.toLowerCase().includes(q)) && request(l) && (requests || atLeast(l, level)));
-  }, [lines, filter, instance, requests, status, slow, level]);
+    return lines.filter(
+      (l) =>
+        (!instance || l.instance === instance) &&
+        (!q || l.text.toLowerCase().includes(q)) &&
+        request(l) &&
+        (requests || (atLeast(l, level) && (!deployment || l.deployment === deployment) && (!stream || l.stream === stream))),
+    );
+  }, [lines, filter, instance, requests, status, slow, level, deployment, stream]);
 
   return (
     <div>
@@ -170,6 +180,24 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
               <option value="error">errors and worse</option>
               <option value="info">info and worse</option>
               <option value="debug">debug and worse</option>
+            </select>
+          )}
+          {!requests && (
+            <select value={stream} onChange={(e) => setStream(e.target.value as typeof stream)} className="h-8 rounded-lg border border-line bg-panel px-2 text-[12px] outline-none" aria-label="Stream">
+              <option value="">every stream</option>
+              <option value="stdout">stdout</option>
+              <option value="stderr">stderr</option>
+              <option value="system">roll's lines</option>
+            </select>
+          )}
+          {!requests && deployments.length > 1 && (
+            <select value={deployment} onChange={(e) => setDeployment(e.target.value)} className="h-8 rounded-lg border border-line bg-panel px-2 font-mono text-[12px] outline-none" aria-label="Deployment">
+              <option value="">every deployment</option>
+              {deployments.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
             </select>
           )}
           {instances.length > 1 && (

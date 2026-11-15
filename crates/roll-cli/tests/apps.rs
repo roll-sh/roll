@@ -92,10 +92,21 @@ impl T {
 async fn variables_and_an_environment_through_the_cli() {
     let t = start().await;
     t.ok(&["create", "web", "-p", "acme", "--image", "nginx:1.27", "--port", "80"]).await;
+    // Live first, so what's set next is the next deploy's.
+    for _ in 0..200 {
+        if t.json(&["deploys", "-s", "web", "-p", "acme"]).await[0]["status"] == "active" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     // Sealed: run with, never shown again, `--reveal` included; the rest reveal as a `.env`
     // `--from-file` reads back exactly (quotes, line breaks).
     let pem = "-----BEGIN-----\nab \"c\"\n-----END-----";
     t.ok(&["vars", "-s", "web", "-p", "acme", "API_KEY=sk-live-123", &format!("PEM={pem}"), "--seal", "API_KEY"]).await;
+    // What the next deploy changes, by name; and where it answers.
+    let pending = t.ok(&["pending", "-s", "web", "-p", "acme"]).await;
+    assert!(pending.contains("+ API_KEY") && pending.contains("+ PEM") && !pending.contains("sk-live"), "{pending}");
+    assert!(t.ok(&["open", "--print", "-s", "web", "-p", "acme"]).await.trim().starts_with("http"));
     let listed = t.ok(&["vars", "-s", "web", "-p", "acme"]).await;
     assert!(listed.lines().any(|l| l.starts_with("API_KEY") && l.ends_with("sealed")) && !listed.contains("sk-live-123"), "{listed}");
     let revealed = t.ok(&["vars", "-s", "web", "-p", "acme", "--reveal"]).await;
@@ -158,6 +169,18 @@ async fn a_local_tree_is_planned_before_anything_is_made() {
     std::fs::write(app.join("package.json"), r#"{"scripts":{"start":"node server.js"}}"#).unwrap();
     let plan = t.json(&["plan", "web"]).await;
     assert_eq!((plan["provider"].as_str(), plan["start"].as_str()), (Some("node"), Some("node server.js")), "{plan}");
+    // Its roll.toml `[app]` applied as the environment's deploy would, and a mistake in it said
+    // here, before anything is uploaded.
+    std::fs::write(app.join("roll.toml"), "[app.environments.production]\nstart = \"node cluster.js\"\n").unwrap();
+    let plan = t.json(&["plan", "web"]).await;
+    assert_eq!(plan["start"], "node cluster.js", "{plan}");
+    assert_eq!(t.json(&["plan", "web", "-e", "staging"]).await["start"], "node server.js");
+    std::fs::write(app.join("roll.toml"), "[app.run]\nmin_instaces = 1\n").unwrap();
+    let (code, _, err) = t.run(&["plan", "web"]).await;
+    assert!(code != Some(0) && err.contains("min_instaces"), "{err}");
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).args(["up", "web", "-p", "acme"]).current_dir(t.work.path()).env("ROLL_API_URL", &t.api).env_remove("ROLL_API_KEY").output().await.unwrap();
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("min_instaces"), "{}", String::from_utf8_lossy(&out.stderr));
+    std::fs::remove_file(app.join("roll.toml")).unwrap();
     // A tree nothing builds: said before any project or service is made.
     std::fs::create_dir_all(t.work.path().join("empty")).unwrap();
     std::fs::write(t.work.path().join("empty/notes.txt"), "hi").unwrap();

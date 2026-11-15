@@ -582,3 +582,17 @@ impl AppsNode {
         self.apps.flush_meters(true).await;
     }
 }
+
+/// roll apps' email to a project's owner: roll-accounts' mailer, to the account's own address.
+pub struct AccountsMail(pub Arc<roll_accounts::Accounts>);
+
+#[async_trait::async_trait]
+impl apps_control::integrations::Mailbox for AccountsMail {
+    fn on(&self) -> bool {
+        self.0.mail_available()
+    }
+
+    async fn send(&self, user: &str, subject: &str, text: &str) -> anyhow::Result<()> {
+        self.0.mail_user(user, subject, text).await
+    }
+}

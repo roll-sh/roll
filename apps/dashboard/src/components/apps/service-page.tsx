@@ -218,6 +218,20 @@ function Conditions({ service, env, runner, go }: { service: Service; env: Envir
         </button>
       ),
     });
+  if (env.held_after)
+    lines.push({
+      key: "held",
+      text: (
+        <>
+          Deploys are held after the rollback <span className="font-mono">{env.held_after}</span>: pushes, deploy hooks and tag moves aren't put live until you deploy or resume them.
+        </>
+      ),
+      action: (
+        <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => runner.run("resume-deploys", () => appsApi.putEnvironment(service.id, env.name, { held: false }))}>
+          Resume deploys
+        </button>
+      ),
+    });
   if (env.paused)
     lines.push({
       key: "paused",
@@ -615,7 +629,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           <p className="text-[13px] text-muted">
             {service.source.kind === "upload" ? (
               <>
-                Nothing's deployed to {envName} yet. From the app's directory, run <code className="font-mono text-fg">roll up -s {service.name}</code>.
+                Nothing's deployed to {envName} yet. From the app's directory, run <code className="font-mono text-fg">roll up -s {service.name}{envName !== PRODUCTION ? ` -e ${envName}` : ""}</code>.
               </>
             ) : (
               <>Nothing's deployed to {envName} yet. Deploy builds the source and rolls it out here.</>

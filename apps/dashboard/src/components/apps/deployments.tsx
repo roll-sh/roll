@@ -106,7 +106,7 @@ export function Deployments({
       <section className={`${panel} flex flex-col items-start gap-2 p-6`}>
         <HorizonMark state="sleep" size={32} />
         <h2 className="text-[15px] font-medium">Nothing deployed to {env.name} yet</h2>
-        <p className="text-[13px] text-muted">Deploy builds the service's source and rolls it out here. Upload services deploy with <code className="font-mono text-fg">roll up</code>.</p>
+        <p className="text-[13px] text-muted">Deploy builds the service's source and rolls it out here. Upload services deploy with <code className="font-mono text-fg">roll up -s {service}{env.name !== "production" ? ` -e ${env.name}` : ""}</code>.</p>
       </section>
     );
 
@@ -175,7 +175,7 @@ export function Deployments({
                         disabled={runner.busy !== null}
                         sure={d.status === "ready" ? `Sure? Put it live in ${env.name}` : `Sure? Roll ${env.name} back`}
                         onSure={() => runner.run(`rollback:${d.id}`, () => appsApi.rollback(service, env.name, d.id, keepVars))}
-                        title={d.status === "ready" ? "Run this deployment's image, without a build" : keepVars ? "Run this deployment's image again, without a build, with today's variables" : "Run this deployment's image again, without a build, with its variables as they were then"}
+                        title={d.status === "ready" ? "Run this deployment's image, without a build" : keepVars ? "Run this deployment's image and settings again, without a build, with today's variables (the volume stays)" : "Run this deployment's image and settings again, without a build, with its variables as they were then (the volume stays)"}
                       >
                         {d.status === "ready" ? (
                           <>

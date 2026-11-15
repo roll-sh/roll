@@ -20,12 +20,14 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "domain.expiring", label: "Domain unverified" },
   { value: "domain.expired", label: "Domain removed" },
   { value: "domain.tls_failed", label: "Certificate failed" },
+  { value: "volume.backup_failed", label: "Backup failed" },
 ];
 
 const KINDS: { value: NotifyTarget["kind"]; label: string; placeholder: string }[] = [
   { value: "slack", label: "Slack", placeholder: "https://hooks.slack.com/services/…" },
   { value: "discord", label: "Discord", placeholder: "https://discord.com/api/webhooks/…" },
   { value: "webhook", label: "Webhook", placeholder: "https://example.com/roll-events" },
+  { value: "email", label: "Email", placeholder: "" },
 ];
 
 /** A project's notification targets: where its services' failed deploys and crash loops go. */
@@ -33,7 +35,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   const [targets, setTargets] = useState<NotifyTarget[] | null>(null);
   const [kind, setKind] = useState<NotifyTarget["kind"]>("slack");
   const [url, setUrl] = useState("");
-  const [events, setEvents] = useState<NotifyEvent[]>(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed"]);
+  const [events, setEvents] = useState<NotifyEvent[]>(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed"]);
   const [envs, setEnvs] = useState("");
   const [previews, setPreviews] = useState(false);
   // Only some of the project's services (none chosen: every one).
@@ -54,7 +56,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
 
   const add = async () => {
     const environments = envs.split(",").map((e) => e.trim()).filter(Boolean);
-    const t = await runner.run("notification", () => appsApi.addNotifyTarget(project, { kind, url: url.trim(), events, environments, previews, ...(only.length ? { services: only } : {}) }));
+    const t = await runner.run("notification", () => appsApi.addNotifyTarget(project, { kind, ...(kind === "email" ? {} : { url: url.trim() }), events, environments, previews, ...(only.length ? { services: only } : {}) }));
     if (t) {
       setUrl("");
       setEnvs("");
@@ -133,7 +135,11 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
             </option>
           ))}
         </select>
-        <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder={KINDS.find((k) => k.value === kind)?.placeholder} aria-label="URL" spellCheck={false} autoComplete="off" className={`${input} min-w-0 flex-1 font-mono text-[12px]`} />
+        {kind === "email" ? (
+          <p className="min-w-0 flex-1 text-[12px] text-muted">To the project's owner, at their account's address.</p>
+        ) : (
+          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder={KINDS.find((k) => k.value === kind)?.placeholder} aria-label="URL" spellCheck={false} autoComplete="off" className={`${input} min-w-0 flex-1 font-mono text-[12px]`} />
+        )}
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-muted">
           {EVENTS.map((e) => (
             <label key={e.value} className="inline-flex items-center gap-1">
@@ -157,7 +163,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
           <input type="checkbox" checked={previews} onChange={(e) => setPreviews(e.target.checked)} />
           Include previews
         </label>
-        <button type="submit" className={primary} disabled={!url.trim() || !events.length || runner.busy !== null}>
+        <button type="submit" className={primary} disabled={(kind !== "email" && !url.trim()) || !events.length || runner.busy !== null}>
           Add
         </button>
       </form>

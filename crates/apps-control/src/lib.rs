@@ -28,6 +28,7 @@ pub mod config;
 pub mod cron;
 pub mod deploy;
 pub mod drains;
+pub mod export;
 pub mod integrations;
 pub mod jobs;
 pub mod live;
@@ -41,6 +42,7 @@ pub mod runtime;
 pub mod shell;
 pub mod spend;
 pub mod store;
+pub mod traffic;
 
 use integrations::{DomainTls, Resolver, Resources, SecretSource, Sources};
 use live::{EnvLive, LiveConfig};
@@ -132,6 +134,8 @@ pub struct AppsConfig {
     pub allow_private: bool,
     /// Between two passes over spend limits (`spend`).
     pub spend_every: Duration,
+    /// A failed cron run's first retry waits this long, each next one twice as long (10 min at most).
+    pub cron_retry_after: Duration,
     /// Built deployments each environment keeps to roll back to; older ones' images go
     /// ([`Apps::prune`]).
     pub keep_deployments: usize,
@@ -159,6 +163,7 @@ impl AppsConfig {
             web_url: None,
             allow_private: false,
             spend_every: Duration::from_secs(30),
+            cron_retry_after: Duration::from_secs(30),
             keep_deployments: 10,
             keep_recent: Duration::from_secs(24 * 3600),
         }
@@ -206,6 +211,8 @@ pub struct Apps {
     capped_refresh: tokio::sync::Mutex<()>,
     /// roll previews' notes for a preview's feedback button ([`Apps::set_feedback_notes`]).
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
+    /// Email to projects' owners (`notify`), once rolld has accounts.
+    mail: std::sync::OnceLock<Arc<dyn integrations::Mailbox>>,
     /// Log drains whose batch came back (the drainer sends the next).
     drain_done: Arc<Mutex<Vec<String>>>,
     /// Projects whose drains changed on this node: the drainer reads theirs again (only theirs).
@@ -337,6 +344,7 @@ impl Apps {
             capped: Mutex::new(Default::default()),
             capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
+            mail: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
             access: Mutex::new(HashMap::new()),
@@ -500,6 +508,8 @@ impl Apps {
             let _ = self.delete_service(&row.id).await;
             return Err(e);
         }
+        // The project's owner hears what needs someone from its first service on.
+        self.offer_email(&row.project).await;
         // A repo or an image deploys at once; an upload waits for `roll up`.
         if !matches!(source, Source::Upload) {
             self.deploy(&row.id, PRODUCTION, json!({}), By { trigger: Trigger::Api, actor: actor.clone() }, None, None).await?;
@@ -651,6 +661,9 @@ impl Apps {
         if e.paused {
             attention.push("paused");
         }
+        if e.held_by.is_some() {
+            attention.push("held");
+        }
         if e.maintenance.is_some() {
             attention.push("maintenance");
         }
@@ -708,9 +721,16 @@ impl Apps {
         let sid = id.to_string();
         let envs = self.db(move |s| s.environments(&sid)).await?;
         let sid = id.to_string();
-        let project = self.db(move |s| s.service(&sid)).await?.project;
+        let row = self.db(move |s| s.service(&sid)).await?;
+        let project = row.project.clone();
         for e in &envs {
             self.teardown_live(id, &e.name).await;
+        }
+        // Each environment's volume goes with it (a last backup first, kept a week).
+        for e in &envs {
+            let had = row.for_env(e).map(|s| s.run.volume.is_some()).unwrap_or(row.run.volume.is_some());
+            self.last_backup(id, &e.name, had).await;
+            self.deps.runtime.remove_volume(&volume_name(id, &e.name)).await;
         }
         for name in self.deps.runtime.list(Some(id)).await {
             self.deps.runtime.remove(&name).await;
@@ -934,6 +954,7 @@ impl Apps {
             feedback: r.feedback,
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             paused: r.paused,
+            held_after: r.held_by.clone(),
             pages: r.pages.clone(),
             allow_ips: r.allow_ips.clone(),
             rate_limit: r.rate_limit,
@@ -951,11 +972,21 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused", "held"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
         // The new settings are checked before anything is written: a 400 changes nothing.
+        // Resume deploys held after a rollback (`false`); a hold is only ever a rollback's.
+        match o.get("held") {
+            None => {}
+            Some(Value::Bool(false)) => {
+                let (sid, e) = (service.to_string(), env.to_string());
+                self.db(move |s| s.set_hold(&sid, &e, None)).await?;
+                self.changed(service);
+            }
+            Some(_) => return Err(Error::BadRequest("held is false (deploys resume); a rollback holds them".into())),
+        }
         let paused = match o.get("paused") {
             None => None,
             Some(Value::Bool(b)) => Some(*b),
@@ -1270,6 +1301,10 @@ impl Apps {
         self.release_domains(&domains).await;
         self.teardown_live(service, env).await;
         self.set_access_cache(service, env, None);
+        // Its last backup before the volume goes (kept a week), its instances stopped first.
+        let sid = service.to_string();
+        let had = self.db(move |s| s.service(&sid)).await.is_ok_and(|s| s.run.volume.is_some());
+        self.last_backup(service, env, had).await;
         self.deps.runtime.remove_volume(&volume_name(service, env)).await;
         let sid = service.to_string();
         if let Ok(svc) = self.db(move |s| s.service(&sid)).await {
@@ -1412,6 +1447,23 @@ impl Apps {
         ];
         for (k, v) in roll {
             vars.insert(k.to_string(), (v, "roll"));
+        }
+        // What a repo's deployment was built from (Railway's `RAILWAY_GIT_*`, Render's
+        // `RENDER_GIT_*`): an error tracker's release, a log's version.
+        if let (Source::Repo { repo, .. }, Some(sources)) = (&svc.source, self.deps.sources.as_ref()) {
+            if !deployment.is_empty() {
+                let d = deployment.to_string();
+                if let Ok(Some(sha)) = self.db(move |s| s.deployment(&d)).await.map(|d| d.revision) {
+                    vars.insert("ROLL_GIT_COMMIT".into(), (sha, "roll"));
+                }
+            }
+            let branch = match &env.branch {
+                Some(b) => Some(b.clone()),
+                None => sources.default_branch(repo).await.ok(),
+            };
+            if let Some(b) = branch {
+                vars.insert("ROLL_GIT_BRANCH".into(), (b, "roll"));
+            }
         }
         let sid = svc.id.clone();
         let links = self.db(move |s| s.links_minted(&sid)).await?;
@@ -2140,6 +2192,23 @@ impl Apps {
         self.notes.get().cloned()
     }
 
+    /// How email reaches people (roll-accounts' mailer). Set once.
+    pub fn set_mailbox(&self, mail: Arc<dyn integrations::Mailbox>) {
+        let _ = self.mail.set(mail);
+    }
+
+    /// The mailbox, when mail goes out.
+    pub(crate) fn mailbox(&self) -> Option<Arc<dyn integrations::Mailbox>> {
+        self.mail.get().filter(|m| m.on()).cloned()
+    }
+
+    /// The project's owner (`usr_…`); none for the operator's projects or without a workspace.
+    pub(crate) async fn project_owner(&self, project: &str) -> Option<String> {
+        let ws = self.deps.workspace.clone()?;
+        let p = project.to_string();
+        tokio::task::spawn_blocking(move || ws.get(roll_workspace::Scope::All, &p).ok().map(|p| p.owner)).await.ok().flatten().filter(|o| !o.is_empty())
+    }
+
     /// Where a preview's feedback goes (the preview in roll's dashboard), for a visitor who came
     /// in through its access link, when roll previews turned the button on and the dashboard is
     /// known.
@@ -2293,9 +2362,10 @@ impl Apps {
 }
 
 impl ResolvedVars {
-    /// The variables that decide whether a deployment is stale (not roll's per-deployment ones).
+    /// The variables that decide whether a deployment is stale (not roll's per-deployment ones:
+    /// a new commit is a new deployment already).
     fn vars_for_hash(&self) -> Vec<(String, String)> {
-        self.vars.iter().filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT")).cloned().collect()
+        self.vars.iter().filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH")).cloned().collect()
     }
 }
 

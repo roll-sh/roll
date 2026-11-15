@@ -355,6 +355,9 @@ pub struct EnvRow {
     /// Paused (Render's Suspend): nothing of it runs, wakes, deploys or is scheduled until it's
     /// resumed.
     pub paused: bool,
+    /// Deploys held after this rollback (Vercel's Instant Rollback): pushes, hooks and tag moves
+    /// don't put anything live until a person deploys or resumes them.
+    pub held_by: Option<String>,
 }
 
 /// A link: its kind, resource, variables' prefix, and the credentials it made for itself.
@@ -454,7 +457,7 @@ pub struct Store {
 }
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -524,6 +527,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         secrets_seen: r.get(21)?,
         headers: r.get::<_, Option<String>>(22)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
         paused: r.get::<_, i64>(23)? != 0,
+        held_by: r.get(24)?,
     })
 }
 
@@ -547,6 +551,7 @@ fn run_row(r: &code_sql::Row<'_>) -> code_sql::Result<CronRun> {
         exit_code: r.get::<_, Option<i64>>(3)?.map(|c| c as i32),
         started_at: r.get(4)?,
         finished_at: r.get(5)?,
+        attempt: r.get::<_, i64>(6)? as u32,
     })
 }
 
@@ -640,6 +645,8 @@ impl Store {
         db.add_column("environments", "firewall", "TEXT")?;
         db.add_column("environments", "headers", "TEXT")?;
         db.add_column("environments", "paused", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("runs", "attempt", "INTEGER NOT NULL DEFAULT 1")?;
+        db.add_column("environments", "held_by", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
         db.add_column("log_drains", "environments", "TEXT")?;
@@ -818,7 +825,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1654,7 +1661,7 @@ impl Store {
 
     pub fn runs(&self, service: &str, env: &str, limit: usize) -> Result<Vec<CronRun>> {
         Ok(self.db.query(
-            "SELECT id, deployment, status, exit_code, started_at, finished_at FROM runs WHERE service = ? AND env = ? ORDER BY started_at DESC, id DESC LIMIT ?",
+            "SELECT id, deployment, status, exit_code, started_at, finished_at, attempt FROM runs WHERE service = ? AND env = ? ORDER BY started_at DESC, id DESC LIMIT ?",
             params![service, env, limit as i64],
             run_row,
         )?)
@@ -1662,7 +1669,7 @@ impl Store {
 
     pub fn run(&self, service: &str, env: &str, id: &str) -> Result<CronRun> {
         self.db
-            .query_row("SELECT id, deployment, status, exit_code, started_at, finished_at FROM runs WHERE service = ? AND env = ? AND id = ?", params![service, env, id], run_row)
+            .query_row("SELECT id, deployment, status, exit_code, started_at, finished_at, attempt FROM runs WHERE service = ? AND env = ? AND id = ?", params![service, env, id], run_row)
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("no run {id}")))
     }
@@ -1671,7 +1678,7 @@ impl Store {
     /// skipped rows come between), decided in one transaction. A `running` row older than
     /// `timeout_ms` is one a stopped node left: its run is over whatever the row says.
     /// `id`: made by the caller, which knows it's running before its row says so.
-    pub fn start_run(&self, id: &str, service: &str, env: &str, deployment: &str, timeout_ms: i64) -> Result<CronRun> {
+    pub fn start_run(&self, id: &str, service: &str, env: &str, deployment: &str, timeout_ms: i64, attempt: u32) -> Result<CronRun> {
         let id = id.to_string();
         let now = self.now()?;
         self.db.write(|c| {
@@ -1682,17 +1689,17 @@ impl Store {
             let status = if going { RunStatus::Skipped } else { RunStatus::Running };
             let finished = going.then_some(now);
             c.execute(
-                "INSERT INTO runs (id, service, env, deployment, status, exit_code, started_at, finished_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
-                params![id, service, env, deployment, status.as_str(), now, finished],
+                "INSERT INTO runs (id, service, env, deployment, status, exit_code, started_at, finished_at, attempt) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+                params![id, service, env, deployment, status.as_str(), now, finished, attempt as i64],
             )?;
-            Ok(CronRun { id: id.clone(), deployment: deployment.into(), status, exit_code: None, started_at: now, finished_at: finished })
+            Ok(CronRun { id: id.clone(), deployment: deployment.into(), status, exit_code: None, started_at: now, finished_at: finished, attempt })
         })
     }
 
     /// A cron run ends, if it's still running: a failure is its `cron.failed` event in the same
-    /// transaction. Whether it was still running.
-    pub fn finish_run(&self, id: &str, status: RunStatus, exit_code: Option<i32>) -> Result<bool> {
-        self.finish("runs", "cron.failed", "run", id, status, exit_code)
+    /// transaction, unless another try follows (`retrying`). Whether it was still running.
+    pub fn finish_run(&self, id: &str, status: RunStatus, exit_code: Option<i32>, retrying: bool) -> Result<bool> {
+        self.finish("runs", if retrying { "" } else { "cron.failed" }, "run", id, status, exit_code)
     }
 
     // ── private registries ──
@@ -1769,7 +1776,7 @@ impl Store {
             if c.execute(&format!("UPDATE {table} SET status = ?, exit_code = ?, finished_at = ? WHERE id = ? AND status = 'running'"), params![status.as_str(), exit_code, now, id])? == 0 {
                 return Ok(false);
             }
-            if matches!(status, RunStatus::Failed | RunStatus::TimedOut) {
+            if matches!(status, RunStatus::Failed | RunStatus::TimedOut) && !kind.is_empty() {
                 insert_event(c, now, kind, &svc, &env, Some(&dep), &serde_json::json!({ key: id, "status": status.as_str(), "exit_code": exit_code }))?;
             }
             Ok(true)
@@ -1956,6 +1963,16 @@ impl Store {
             c.execute("UPDATE environments SET pages = ? WHERE service = ? AND name = ?", params![j, service, env])?;
             Ok(())
         })
+    }
+
+    /// Hold the environment's deploys after `rollback` (or lift the hold): whether it changed.
+    pub fn set_hold(&self, service: &str, env: &str, rollback: Option<&str>) -> Result<bool> {
+        // Written only when it changes (whether it did is what's said); SQL both SQLite and Postgres take.
+        let n = match rollback {
+            Some(r) => self.db.execute("UPDATE environments SET held_by = ? WHERE service = ? AND name = ? AND (held_by IS NULL OR held_by <> ?)", params![r, service, env, r])?,
+            None => self.db.execute("UPDATE environments SET held_by = NULL WHERE service = ? AND name = ? AND held_by IS NOT NULL", params![service, env])?,
+        };
+        Ok(n > 0)
     }
 
     pub fn set_paused(&self, service: &str, env: &str, on: bool) -> Result<()> {

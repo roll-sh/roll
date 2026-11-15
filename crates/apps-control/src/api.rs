@@ -66,6 +66,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/notifications", get(targets).post(add_target))
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
+        .route("/v1/apps/projects/{project}/export", post(export_project))
         .route("/v1/apps/projects/{project}/drains/{did}", axum::routing::delete(delete_drain).patch(update_drain))
         .route("/v1/apps/projects/{project}/drains/{did}/test", post(test_drain))
         .route("/v1/apps/projects/{project}/notifications/{nid}", axum::routing::delete(delete_target).patch(update_target))
@@ -95,6 +96,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/variables/values"), get(reveal))
         .route(&format!("{env}/logs"), get(env_logs))
         .route(&format!("{env}/metrics"), get(metrics))
+        .route(&format!("{env}/routes"), get(routes))
         .route(&format!("{env}/usage"), get(usage))
         .route(&format!("{env}/runs"), get(runs).post(run_now))
         .route(&format!("{env}/runs/{{run}}"), get(get_run))
@@ -208,6 +210,7 @@ async fn plan(State(apps): S, b: Bytes) -> R {
             None => dir.clone(),
         };
         // What a build would use: roll.toml `[app]` over the settings sent, said in the notes.
+        use crate::config::Apply;
         let (mut build, mut said) = match crate::config::read(&root)? {
             Some(app) => {
                 let (b, _, said) = app.apply(&overrides, &crate::model::Run::default(), None)?;
@@ -346,6 +349,10 @@ async fn update_drain(State(apps): S, Path((project, did)): Path<(String, String
 
 async fn test_drain(State(apps): S, Path((project, did)): Path<(String, String)>) -> R {
     ok(apps.test_drain(&project, &did).await?)
+}
+
+async fn export_project(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
+    ok(apps.export_project(&project, body(&b)?).await?)
 }
 
 async fn drains(State(apps): S, Path(project): Path<String>) -> R {
@@ -514,6 +521,7 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
     } else {
         apps.deploy(&id, &env, body(&b)?, By { trigger: Trigger::Manual, actor }, None, key).await?
     };
+    apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
@@ -761,6 +769,7 @@ async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: 
         None => None,
     };
     let d = apps.redeploy(&id, &env, if b.is_empty() { Value::Null } else { body(&b)? }, actor(&ext), key).await?;
+    apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
@@ -830,6 +839,7 @@ async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, 
 
 async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let d = apps.promote(&id, &env, body(&b)?, actor(&ext)).await?;
+    apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
@@ -914,6 +924,11 @@ async fn metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(
         return Ok(([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], text).into_response());
     }
     ok(apps.metrics(&id, &env, w.minutes.unwrap_or(60)).await?)
+}
+
+/// `GET …/routes?minutes=`: errors and latency by route, from the access log (`crate::traffic`).
+async fn routes(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
+    ok(apps.routes(&id, &env, w.minutes.unwrap_or(60)).await?)
 }
 
 async fn usage(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {

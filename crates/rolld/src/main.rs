@@ -510,6 +510,10 @@ async fn run() -> anyhow::Result<()> {
     // evaluator joins the gate: setting sessions makes the gate anew.)
     let accounts = accounts::open(&args, &home, code.as_ref().map(|c| c.code.clone()), !auth.enforcing()).await?;
     auth.sessions(accounts.sessions(), &accounts.config().api_url);
+    // roll apps emails a project's owner what needs them, through their account.
+    if let Some(a) = &apps {
+        a.apps.set_mailbox(std::sync::Arc::new(apps::AccountsMail(accounts.clone())));
+    }
     router = router.merge(roll_accounts::router(accounts));
     // Scoped tokens, approvals, audit and OAuth (access.rs): the evaluator joins the gate.
     let access = access::open(

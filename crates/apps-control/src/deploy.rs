@@ -5,6 +5,7 @@
 //! Also the owner's background loops: the reaper and meter, deploy-on-push from roll code's
 //! land log, cron schedules, and custom domains' DNS checks.
 
+use crate::config::Apply;
 use crate::live::{EnvLive, Template};
 use crate::logs::{LogSink, Stream};
 use crate::model::*;
@@ -323,6 +324,13 @@ impl Apps {
                 self.audit("variables.restored", service, env, actor.clone(), json!({ "from": old.id, "set": set.keys().collect::<Vec<_>>(), "unset": unset })).await;
             }
         }
+        // Its settings as they were (a rollback over a bad start command needs them), but the
+        // volume is the service's as it is now: its data lives there, and a deployment from before
+        // the volume was added must not run without it.
+        let mut run = old.run.clone();
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
+        run.volume = svc.for_env(&row).map(|s| s.run.volume).unwrap_or(svc.run.volume);
         let d = NewDeployment {
             trigger: Trigger::Rollback,
             revision: old.revision.clone(),
@@ -330,7 +338,7 @@ impl Apps {
             image: Some(image),
             plan: old.plan.clone(),
             rollback_of: Some(old.id.clone()),
-            run: old.run.clone(),
+            run,
             upload: None,
             status: DeployStatus::Queued,
             actor,
@@ -339,8 +347,28 @@ impl Apps {
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
+        // Held from here: the next push mustn't put back what was just rolled away from.
+        let (sid, e, rid) = (service.to_string(), env.to_string(), dep.id.clone());
+        if self.db(move |s| s.set_hold(&sid, &e, Some(&rid))).await.unwrap_or(false) {
+            self.logs.sink(format!("env:{service}/{env}"), Stream::System).line("deploys held after the rollback: pushes, hooks and tag moves aren't put live until you deploy or resume them");
+        }
         self.kick(service, env);
         Ok(dep)
+    }
+
+    /// A person deployed (a deploy, a redeploy, a promotion): a hold after a rollback is lifted.
+    pub async fn lift_hold(self: &Arc<Self>, service: &str, env: &str) {
+        let (sid, e) = (service.to_string(), env.to_string());
+        if self.db(move |s| s.set_hold(&sid, &e, None)).await.unwrap_or(false) {
+            self.logs.sink(format!("env:{service}/{env}"), Stream::System).line("deploys resumed");
+            self.changed(service);
+        }
+    }
+
+    /// The rollback the environment's deploys are held after, if they are.
+    pub(crate) async fn held(self: &Arc<Self>, service: &str, env: &str) -> Option<String> {
+        let (sid, e) = (service.to_string(), env.to_string());
+        self.db(move |s| s.environment(&sid, &e)).await.ok().and_then(|r| r.held_by)
     }
 
     /// `POST …/rollback` with no deployment: back to the one live before what runs, walking back
@@ -866,6 +894,7 @@ impl Apps {
         spec.port = None;
         spec.volume = None;
         spec.aliases.clear();
+        spec.vars.push(("ROLL_INSTANCE".into(), spec.name.clone()));
         let limit = self.cfg.build_timeout;
         log.stream(Stream::System).line(format!("pre-deploy: {cmd}"));
         let rt = &self.deps.runtime;
@@ -1010,6 +1039,10 @@ impl Apps {
         let mut build_env = self.resolve_vars(svc, &env_row, &d.id).await?.vars;
         // Per deployment (the cache would never hit) or only for the running app.
         build_env.retain(|(k, _)| k != "ROLL_DEPLOYMENT" && k != "PORT");
+        // The commit changes every push: out of the hash and the secrets, or no build would hit
+        // the cache. A tree's own Dockerfile still gets it as an `ARG` it declares, which Docker
+        // keys its own cache on.
+        let commit = build_env.iter().position(|(k, _)| k == "ROLL_GIT_COMMIT").map(|i| build_env.remove(i));
         build_env.sort();
         let env_hash = {
             use sha2::{Digest, Sha256};
@@ -1093,6 +1126,9 @@ impl Apps {
         };
         let log = &log;
         let plan_json = serde_json::to_value(&plan)?;
+        if plan.provider == apps_build::Provider::Dockerfile {
+            build_env.extend(commit);
+        }
         let job = BuildJob {
             service: svc.id.clone(),
             deployment: d.id.clone(),
@@ -1747,6 +1783,10 @@ impl Apps {
                     log.line(format!("push {sha} not deployed: its check {which} failed"));
                     true
                 }
+                Ok(_) if self.held(&w.service, &w.env).await.is_some() => {
+                    log.line(format!("push {sha} not deployed: its checks passed while deploys are held after a rollback"));
+                    true
+                }
                 Ok(_) if self.refuse_paused(&w.service, &w.env).await.is_err() => {
                     log.line(format!("push {sha} not deployed: its checks passed while the environment is paused"));
                     true
@@ -1806,6 +1846,18 @@ impl Apps {
             for e in envs.iter().filter(|e| e.service == svc.id && !e.ephemeral && e.branch.as_deref() == Some(l.branch.as_str())) {
                 if e.paused {
                     self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} not deployed: the environment is paused", &l.revision.sha[..l.revision.sha.len().min(12)]));
+                    continue;
+                }
+                if let Some(r) = &e.held_by {
+                    self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} not deployed: deploys are held after the rollback {r}", &l.revision.sha[..l.revision.sha.len().min(12)]));
+                    continue;
+                }
+                // `[skip deploy]` or `[skip ci]` in its message (Render's `[skip render]`): a push
+                // that says so isn't deployed, which the log and the timeline say.
+                if let Some(tag) = skip_tag(&l.revision.message) {
+                    self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} not deployed: its message says {tag}", &l.revision.sha[..l.revision.sha.len().min(12)]));
+                    let (sid, en, data) = (svc.id.clone(), e.name.clone(), serde_json::json!({ "revision": l.revision.sha, "tag": tag }));
+                    let _ = self.db(move |s| s.add_event("deploy.skipped", &sid, &en, None, &data)).await;
                     continue;
                 }
                 let watch = file.as_ref().and_then(|f| f.watch_for(&e.name)).or_else(|| svc.build.watch.clone()).filter(|w| !w.is_empty());
@@ -1892,6 +1944,16 @@ impl Apps {
 
     /// One run of a cron service now (`POST …/runs`, or the schedule).
     pub async fn run_cron(self: &Arc<Self>, service: &str, env: &str) -> Result<CronRun> {
+        self.run_cron_try(service, env, 1).await
+    }
+
+    /// One try of a run: a failed or timed-out one (not a canceled one) is tried again after a
+    /// backoff while `run.retries` allows, its `cron.failed` only when no try follows.
+    fn run_cron_try<'a>(self: &'a Arc<Self>, service: &'a str, env: &'a str, attempt: u32) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CronRun>> + Send + 'a>> {
+        Box::pin(self.run_cron_inner(service, env, attempt))
+    }
+
+    async fn run_cron_inner(self: &Arc<Self>, service: &str, env: &str, attempt: u32) -> Result<CronRun> {
         let (sid, e) = (service.to_string(), env.to_string());
         let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
         if svc.run.kind != RunType::Cron {
@@ -1911,7 +1973,7 @@ impl Apps {
         let cancel = CancellationToken::new();
         self.cancels.lock().insert(rid.clone(), cancel.clone());
         let r2 = rid.clone();
-        let run = match self.db(move |s| s.start_run(&r2, &sid, &e, &a, t)).await {
+        let run = match self.db(move |s| s.start_run(&r2, &sid, &e, &a, t, attempt)).await {
             Ok(r) if r.status != RunStatus::Skipped => r,
             other => {
                 self.running_runs.lock().remove(&rid);
@@ -1923,13 +1985,14 @@ impl Apps {
             Ok(l) => l,
             Err(err) => {
                 let r2 = rid.clone();
-                let _ = self.db(move |s| s.finish_run(&r2, RunStatus::Failed, None)).await;
+                let _ = self.db(move |s| s.finish_run(&r2, RunStatus::Failed, None, false)).await;
                 self.running_runs.lock().remove(&rid);
                 self.cancels.lock().remove(&rid);
                 return Err(err);
             }
         };
         let (this, id, sid, run_dep) = (self.clone(), run.id.clone(), service.to_string(), run.deployment.clone());
+        let retries = svc.run.retries.unwrap_or(0) as u32;
         tokio::spawn(async move {
             // Its output stays in the environment's log (drains read it there); its container's
             // name, its own id in it, is what picks its own lines out.
@@ -1945,13 +2008,31 @@ impl Apps {
                 }
             };
             this.cancels.lock().remove(&id);
+            // Tried again while retries allow (never a canceled one): only the last try's failure
+            // is an incident.
+            let retry = matches!(status, RunStatus::Failed | RunStatus::TimedOut) && attempt <= retries;
             // A failed or timed-out run is an incident's start: its event (notified by default)
             // in the same transaction, and only if it was still running (a takeover may have
             // failed it already).
             let id2 = id.clone();
-            let _ = this.db(move |s| s.finish_run(&id2, status, code)).await;
+            let still = this.db(move |s| s.finish_run(&id2, status, code, retry)).await.unwrap_or(false);
             this.running_runs.lock().remove(&id);
             this.changed(&sid);
+            if retry && still {
+                let wait = this.cfg.cron_retry_after.saturating_mul(1 << (attempt - 1).min(10)).min(Duration::from_secs(600));
+                live.log.stream(Stream::System).line(format!("the run {}: trying again in {} s (try {} of {})", status.as_str().replace('_', " "), wait.as_secs().max(1), attempt + 1, retries + 1));
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = this.stop.cancelled() => return,
+                }
+                // Still this node's, still a cron service, not paused: run_cron_try says no otherwise.
+                if this.owns(&sid) {
+                    let env = live.env.clone();
+                    if let Err(e) = this.run_cron_try(&sid, &env, attempt + 1).await {
+                        live.log.stream(Stream::System).line(format!("the retry didn't start: {e}"));
+                    }
+                }
+            }
         });
         Ok(run)
     }
@@ -1974,7 +2055,7 @@ impl Apps {
             // instead of holding the schedule back until its timeout.
             None => {
                 let i = id.to_string();
-                self.db(move |s| s.finish_run(&i, RunStatus::Canceled, None)).await?;
+                self.db(move |s| s.finish_run(&i, RunStatus::Canceled, None, false)).await?;
             }
         }
         Ok(run)
@@ -2111,3 +2192,21 @@ ERROR: failed to solve: process \"/bin/sh -c npm ci\" did not complete successfu
     }
 }
 
+
+/// What in a commit's message skips its deploy: `[skip deploy]`, `[skip ci]`, `[skip roll]` and
+/// each the other way round (`[ci skip]`), in any case, anywhere in it.
+pub(crate) fn skip_tag(message: &str) -> Option<&'static str> {
+    const TAGS: [&str; 6] = ["[skip deploy]", "[deploy skip]", "[skip ci]", "[ci skip]", "[skip roll]", "[roll skip]"];
+    let m = message.to_ascii_lowercase();
+    TAGS.into_iter().find(|t| m.contains(t))
+}
+
+#[cfg(test)]
+mod skip_tests {
+    #[test]
+    fn a_message_can_skip_its_deploy() {
+        assert_eq!(super::skip_tag("docs: typo\n\n[Skip CI]"), Some("[skip ci]"));
+        assert_eq!(super::skip_tag("readme [deploy skip]"), Some("[deploy skip]"));
+        assert_eq!(super::skip_tag("skip the cache"), None);
+    }
+}

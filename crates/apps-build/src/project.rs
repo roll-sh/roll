@@ -36,27 +36,35 @@ pub struct ProjectFile {
 pub struct AppEntry {
     /// The directory `roll up` uploads (relative to the file), or with `repo` the directory
     /// in the repo that builds.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
     /// Or a public image.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     /// Or a roll code repo (`owner/name`): it deploys on each landing on `branch`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// `web`, `worker` or `cron`.
-    #[serde(rename = "type")]
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub start: Option<String>,
     /// A cron service's five fields (UTC).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
     /// Any other run setting, as `[app.run]` takes it (checked by the API).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<toml::Table>,
     /// Databases below, by name: their connection variables go in.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<String>,
     /// The port it listens on (an image's; a root's own roll.toml can say it too).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
     /// Variables it starts with (set when the service is made, never over what it has).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub variables: BTreeMap<String, String>,
 }
 
@@ -102,6 +110,23 @@ pub fn parse_project(text: &str) -> Result<ProjectFile, ProjectError> {
         }
     }
     Ok(f)
+}
+
+/// A project as roll.toml's `[apps]` and `[databases]`, `notes` first as comments (what a file
+/// doesn't carry). [`parse_project`] reads it back as it was.
+pub fn to_toml(f: &ProjectFile, notes: &[String]) -> Result<String, ProjectError> {
+    let body = toml::to_string(f).map_err(|e| err(format!("the project as roll.toml: {e}")))?;
+    let mut out = String::from("# roll.toml: this project's services and databases (`roll up --all` makes what's missing).\n");
+    for n in notes {
+        for line in n.lines() {
+            out.push_str("# ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push('\n');
+    out.push_str(&body);
+    Ok(out)
 }
 
 /// The run settings an entry names (its `run` table, then `type`, `start`, `schedule` and

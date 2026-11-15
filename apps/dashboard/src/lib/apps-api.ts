@@ -55,6 +55,8 @@ export interface Run {
   /** The zone a cron schedule's fields are in (IANA); UTC when unset. */
   timezone?: string;
   timeout_s?: number;
+  /** A cron service's failed run is tried again this many times (0–5). */
+  retries?: number;
   min_instances: number;
   max_instances: number;
   concurrency: number;
@@ -103,7 +105,7 @@ export interface EnvironmentSummary {
   active: { id: string; revision: string | null; created_at: number } | null;
   latest: { id: string; status: DeployStatus } | null;
   /** What wants its owner's eye: a crash loop, the project capped by its spend limit, paused, maintenance, its latest deploy failed. */
-  attention?: ("crash_loop" | "capped" | "paused" | "maintenance" | "deploy_failed")[];
+  attention?: ("crash_loop" | "capped" | "paused" | "held" | "maintenance" | "deploy_failed")[];
 }
 
 export interface Service {
@@ -342,6 +344,8 @@ export interface EnvironmentPut {
   redeploy_on_secrets?: boolean;
   /** Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until false. */
   paused?: boolean;
+  /** `false` resumes deploys held after a rollback. */
+  held?: false;
   /** Maintenance: its public names answer roll's page with the message; false ends it. */
   maintenance?: boolean | { message?: string | null };
   /** Its own HTML (at most 64 KiB) instead of roll's pages; null goes back to roll's, an absent field stays. */
@@ -422,6 +426,8 @@ export interface Environment extends EnvironmentSummary {
   waiting_for_ci?: string | null;
   /** Paused: nothing runs, wakes, deploys or is scheduled. Absent: not paused. */
   paused?: boolean;
+  /** Deploys are held after this rollback: pushes, hooks and tag moves aren't put live until a person deploys or resumes them. */
+  held_after?: string;
   /** In maintenance: what visitors read (null: roll's words). Null: serving. */
   maintenance?: { message: string | null } | null;
   /** Its own pages (Heroku's): `error` for the 502/503/504 while the app can't answer or wake, `maintenance` while in maintenance. Absent: roll's. */
@@ -457,7 +463,7 @@ export interface NewDeploy {
 export type DeployTrigger = "push" | "manual" | "rollback" | "upload" | "api" | "settings" | "promote";
 
 export interface Plan {
-  provider: "dockerfile" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "static";
+  provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "static";
   framework: string | null;
   language_version: string | null;
   install: string | null;
@@ -537,6 +543,29 @@ export const LOG_LEVELS: LogLevel[] = ["trace", "debug", "info", "warn", "error"
 /** At `min` or worse: a line that says no level isn't. */
 export const atLeast = (l: LogLine, min: LogLevel | "") => !min || (!!l.level && LOG_LEVELS.indexOf(l.level) >= LOG_LEVELS.indexOf(min));
 
+/** One route's last minutes, from the access log: ids folded (`/users/:id`), no query. */
+export interface RouteStat {
+  method: string;
+  route: string;
+  requests: number;
+  /** 5xx */
+  errors: number;
+  /** 4xx */
+  client_errors: number;
+  p50_ms: number;
+  p95_ms: number;
+  max_ms: number;
+}
+
+export interface RouteStats {
+  minutes: number;
+  requests: number;
+  /** Read only the newest 50,000 requests: the counts are theirs. */
+  cut: boolean;
+  /** The busiest, the most 5xx and the slowest (5 requests or more), each at most 50. */
+  routes: RouteStat[];
+}
+
 export interface Metrics {
   minutes: number[];
   requests: number[];
@@ -561,8 +590,9 @@ export interface Usage {
 export interface NotifyTarget {
   id: string;
   project: string;
-  kind: "webhook" | "slack" | "discord";
-  /** The URL's host (the URL itself isn't returned). */
+  /** `email`: the project's owner, at their account's address (never an address someone names). */
+  kind: "webhook" | "slack" | "discord" | "email";
+  /** The URL's host (the URL itself isn't returned); an email target's says who it reaches. */
   host: string;
   events: NotifyEvent[];
   /** Only these environments' events; empty: every environment's. */
@@ -591,7 +621,8 @@ export type NotifyEvent =
   | "domain.active"
   | "domain.expiring"
   | "domain.expired"
-  | "domain.tls_failed";
+  | "domain.tls_failed"
+  | "volume.backup_failed";
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {
@@ -663,6 +694,8 @@ export interface CronRun {
   exit_code: number | null;
   started_at: number;
   finished_at: number | null;
+  /** Which try of its due time (1: the first; `run.retries` more may follow a failure). */
+  attempt: number;
 }
 
 /** A one-off command in a fresh container of the active deployment (`roll apps run`). */
@@ -708,6 +741,8 @@ export interface LogQuery {
 export const appsApi = {
   overview: () => call<Overview>("GET", "/v1/apps"),
   plan: (req: PlanRequest) => call<Plan>("POST", "/v1/apps/plan", req),
+  /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
+  exportProject: (project: string, databases: Record<string, string>) => call<{ roll_toml: string; notes: string[] }>("POST", `/v1/apps/projects/${enc(project)}/export`, { databases }),
   /** A roll.toml or Compose file read as a project (nothing made). */
   importProject: (file: { roll_toml: string } | { compose: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
 
@@ -736,7 +771,7 @@ export const appsApi = {
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
   setLimits: (project: string, body: { alert_usd: number | null; hard_usd: number | null }) => call<SpendLimits>("PUT", `/v1/apps/projects/${enc(project)}/limits`, body),
-  addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url: string; events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
+  addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url?: string; events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
   /** Its events and filters (given ones replace); its URL and secret stay. */
   updateNotifyTarget: (project: string, id: string, body: { events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) =>
     call<NotifyTarget>("PATCH", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}`, body),
@@ -807,6 +842,8 @@ export const appsApi = {
     return { lines: data as LogLine[], truncated: res.headers.get("x-roll-search-truncated") === "1" };
   },
   metrics: (id: string, e: string, minutes = 60) => call<Metrics>("GET", `${env(id, e)}/metrics${qs({ minutes })}`),
+  /** Errors and latency by route over the last `minutes` (5–60). */
+  routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   usage: (id: string, e: string, days = 30) => call<Usage>("GET", `${env(id, e)}/usage${qs({ days })}`),
 
   runs: (id: string, e: string) => call<CronRun[]>("GET", `${env(id, e)}/runs`),

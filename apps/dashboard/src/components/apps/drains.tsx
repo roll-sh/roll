@@ -1,4 +1,4 @@
-import { Send, Trash2 } from "lucide-react";
+import { Pencil, Send, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { appsApi, type DrainSource, type LogDrain } from "@/lib/apps-api";
 import { btn, CopyButton, input, Panel, primary, useCopy } from "../ui";
@@ -38,6 +38,8 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
   const [headerText, setHeaderText] = useState("");
   const [secret, setSecret] = useState<string | null>(null);
   const [tested, setTested] = useState<Record<string, string>>({});
+  /** The drain the form edits (its URL fixed: a new URL is a new drain), or null to add one. */
+  const [editing, setEditing] = useState<LogDrain | null>(null);
   const { copied, copy } = useCopy();
   const load = useCallback(() => appsApi.drains(project).then(setDrains, () => setDrains([])), [project]);
   useEffect(() => {
@@ -45,7 +47,25 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
     appsApi.services(project).then((s) => setAll(s.map((x) => ({ id: x.id, name: x.name }))), () => setAll([]));
   }, [load, project]);
   const parsed = parseHeaders(headerText);
-  const ok = /^https?:\/\/\S+$/.test(url.trim()) && sources.length > 0 && parsed.bad.length === 0;
+  const ok = (editing !== null || /^https?:\/\/\S+$/.test(url.trim())) && sources.length > 0 && parsed.bad.length === 0;
+  const clear = () => {
+    setEditing(null);
+    setUrl("");
+    setSources(["runtime"]);
+    setEnvs("");
+    setOnly([]);
+    setPreviews(false);
+    setHeaderText("");
+  };
+  const edit = (d: LogDrain) => {
+    setEditing(d);
+    setUrl(d.host);
+    setSources(d.sources);
+    setEnvs(d.environments.join(", "));
+    setOnly(d.services);
+    setPreviews(d.previews);
+    setHeaderText("");
+  };
   const label = (d: LogDrain) => {
     const what = d.sources.map((s) => SOURCES.find((x) => x.value === s)?.label.toLowerCase() ?? s).join(", ");
     const who = d.services.length ? d.services.map((id) => all.find((s) => s.id === id)?.name ?? id).join(", ") : "every service";
@@ -68,6 +88,9 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
                 <span className="min-w-0 flex-1 text-[11.5px] text-subtle">{label(d)}</span>
                 {tested[d.id] && <span className="text-[11.5px] text-muted">{tested[d.id]}</span>}
                 <span className="text-[11.5px] text-subtle">added {since(d.created_at, Date.now())}</span>
+                <button type="button" className={btn} disabled={runner.busy !== null} aria-pressed={editing?.id === d.id} onClick={() => (editing?.id === d.id ? clear() : edit(d))}>
+                  <Pencil className="size-3.5" /> Edit
+                </button>
                 <button
                   type="button"
                   className={btn}
@@ -84,7 +107,13 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
                   label={`Remove the drain to ${d.host}`}
                   sure="Sure? Remove"
                   disabled={runner.busy !== null}
-                  onSure={() => runner.run("drain", () => appsApi.removeDrain(project, d.id).then(load))}
+                  onSure={() =>
+                    runner.run("drain", async () => {
+                      await appsApi.removeDrain(project, d.id);
+                      if (editing?.id === d.id) clear();
+                      await load();
+                    })
+                  }
                 >
                   <Trash2 className="size-3.5" />
                 </SureButton>
@@ -106,26 +135,48 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
           onSubmit={(e) => {
             e.preventDefault();
             const environments = envs.split(",").map((s) => s.trim()).filter(Boolean);
+            const headers = Object.keys(parsed.headers).length ? { headers: parsed.headers } : {};
             void runner.run("drain", async () => {
-              const d = await appsApi.addDrain(project, {
-                url: url.trim(),
-                sources,
-                ...(environments.length ? { environments } : {}),
-                ...(only.length ? { services: only } : {}),
-                ...(previews ? { previews } : {}),
-                ...(Object.keys(parsed.headers).length ? { headers: parsed.headers } : {}),
-              });
-              setSecret(d.secret ?? null);
-              setUrl("");
-              setHeaderText("");
+              if (editing) {
+                // A cleared filter goes back to every; services only when changed, and never one since
+                // deleted (it would be refused, and can't be unticked); headers only when typed (they replace them all).
+                const same = only.length === editing.services.length && only.every((id) => editing.services.includes(id));
+                const services = same ? {} : { services: only.filter((id) => all.some((s) => s.id === id)) };
+                await appsApi.updateDrain(project, editing.id, { sources, environments, previews, ...services, ...headers });
+              } else {
+                const d = await appsApi.addDrain(project, {
+                  url: url.trim(),
+                  sources,
+                  ...(environments.length ? { environments } : {}),
+                  ...(only.length ? { services: only } : {}),
+                  ...(previews ? { previews } : {}),
+                  ...headers,
+                });
+                setSecret(d.secret ?? null);
+              }
+              clear();
               await load();
             });
           }}
         >
           <div className="flex gap-2">
-            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://http-intake.logs.datadoghq.com/api/v2/logs" spellCheck={false} className={`${input} min-w-0 flex-1 font-mono text-[12px]`} aria-label="Drain URL" />
+            <input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              readOnly={editing !== null}
+              title={editing ? "A drain keeps its URL: add a new one for another" : undefined}
+              placeholder="https://http-intake.logs.datadoghq.com/api/v2/logs"
+              spellCheck={false}
+              className={`${input} min-w-0 flex-1 font-mono text-[12px] ${editing ? "text-muted" : ""}`}
+              aria-label="Drain URL"
+            />
+            {editing && (
+              <button type="button" className={btn} onClick={clear}>
+                Cancel
+              </button>
+            )}
             <button type="submit" className={primary} disabled={!ok || runner.busy !== null}>
-              Add
+              {editing ? "Save" : "Add"}
             </button>
           </div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted" role="group" aria-label="What it's sent">
@@ -157,7 +208,13 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
             value={headerText}
             onChange={(e) => setHeaderText(e.target.value)}
             rows={2}
-            placeholder={"Headers, one a line (sealed, never shown again):\nDD-API-KEY: …"}
+            placeholder={
+              editing
+                ? editing.headers.length
+                  ? `Its headers (${editing.headers.join(", ")}) stay unless you type new ones here,\nwhich replace them all: Name: value a line`
+                  : "Headers, one a line (sealed, never shown again):\nDD-API-KEY: …"
+                : "Headers, one a line (sealed, never shown again):\nDD-API-KEY: …"
+            }
             aria-label="Headers, Name: value a line"
             spellCheck={false}
             className={`${input} w-full resize-y py-1.5 font-mono text-[12px] ${parsed.bad.length ? "border-danger/60" : ""}`}

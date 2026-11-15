@@ -2,14 +2,17 @@
  * The last hour, day or week as small multiples (a minute a point, or buckets of minutes past
  * 360 points: sums for counts, peaks for gauges and latencies), drawn by the dataviz skill's rules: one measure per
  * chart (one axis each, never two scales), single series in neutral ink with no legend, the
- * latency chart's three percentiles in the validated chart tokens (`--viz-1…3`) with a legend that
+ * latency chart's three percentiles in chart tokens `--viz-2…4` (the three that pass the skill's
+ * validator against each other in both modes, not just as neighbours: 1 and 3 are both green) with a legend that
  * carries each latest value, hairline grid, a crosshair and a value-first tooltip on hover or
- * focus, and the same numbers as a table.
+ * focus, and the same numbers as a table. Each deployment that went live in the window is a
+ * dashed rule on every chart (Vercel's and Render's deploy markers): did this deploy move the
+ * errors or the latency.
  */
 
 import { Table2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, formatMs, type Metrics as MetricsData } from "@/lib/apps-api";
+import { appsApi, formatMs, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats } from "@/lib/apps-api";
 import { formatBytes } from "@/lib/roll-api";
 import { btn, CopyButton, panel, useCopy } from "../ui";
 import { usePageVisible } from "./live";
@@ -63,6 +66,33 @@ export function bucketed(m: MetricsData, size: number): MetricsData {
   return out;
 }
 
+/** A deployment going live, on the charts: `i` the point it fell in. */
+export interface Mark {
+  i: number;
+  at: number;
+  /** Its commit's first 7, or its id. */
+  short: string;
+  label: string;
+}
+
+/** The deployments that went live inside the window (`minutes`, points `size` minutes apart), each at the point it fell in, oldest first. */
+export function deployMarks(deploys: Deployment[], minutes: number[], size: number): Mark[] {
+  if (!minutes.length) return [];
+  const first = minutes[0];
+  const end = minutes[minutes.length - 1] + size;
+  const marks: Mark[] = [];
+  for (const d of deploys) {
+    // Live once: what's live now, or was until another replaced it.
+    if ((d.status !== "active" && d.status !== "inactive") || d.finished_at == null) continue;
+    const t = d.finished_at / 60_000;
+    if (t < first || t >= end) continue;
+    const short = d.revision ? d.revision.slice(0, 7) : d.id;
+    const what = [short, d.rollback_of ? "rollback" : "", d.message.split("\n")[0] ?? ""].filter(Boolean).join(" · ");
+    marks.push({ i: Math.min(minutes.length - 1, Math.floor((t - first) / size)), at: d.finished_at, short, label: d.actor ? `${what} · ${d.actor}` : what });
+  }
+  return marks.sort((a, b) => a.at - b.at);
+}
+
 function Chart({
   title,
   minutes,
@@ -72,6 +102,7 @@ function Chart({
   agg,
   range,
   limit,
+  marks,
 }: {
   title: string;
   minutes: number[];
@@ -82,8 +113,10 @@ function Chart({
   range: Range;
   /** A ceiling the values run against (the memory limit): a dashed line, inside the axis. */
   limit?: number;
+  marks: Mark[];
 }) {
   const [hover, setHover] = useState<number | null>(null);
+  const deployed = hover === null ? 0 : marks.filter((k) => k.i === hover).length;
   const n = minutes.length;
   const top = niceMax(Math.max(0, limit ?? 0, ...series.flatMap((s) => s.values)));
   const x = (i: number) => (n <= 1 ? W : (i / (n - 1)) * W);
@@ -102,7 +135,9 @@ function Chart({
     <figure className={`${panel} p-4`}>
       <figcaption className="flex items-baseline justify-between gap-2">
         <span className="text-[12px] text-muted">{title}</span>
-        <span className="font-mono text-[11px] text-subtle tabular-nums">{hover !== null && minutes[hover] ? clock(minutes[hover] * 60_000, range.minutes > 60 * 24).slice(0, range.minutes > 60 * 24 ? 12 : 5) : `${agg} · last ${range.label}`}</span>
+        <span className="font-mono text-[11px] text-subtle tabular-nums">{hover !== null && minutes[hover]
+            ? `${clock(minutes[hover] * 60_000, range.minutes > 60 * 24).slice(0, range.minutes > 60 * 24 ? 12 : 5)}${deployed ? ` · ${deployed > 1 ? `${deployed} deploys` : "deploy"}` : ""}`
+            : `${agg} · last ${range.label}`}</span>
       </figcaption>
       <div className="mt-1 flex flex-wrap items-baseline gap-x-3">
         {series.map((s) => (
@@ -120,7 +155,7 @@ function Chart({
         className="relative mt-2 text-fg outline-none"
         tabIndex={0}
         role="img"
-        aria-label={`${title}: ${summary}`}
+        aria-label={`${title}: ${summary}${marks.length ? `; ${marks.length} deploy${marks.length > 1 ? "s" : ""} went live` : ""}`}
         onPointerMove={(e) => pick(e.clientX, e.currentTarget.getBoundingClientRect())}
         onPointerLeave={() => setHover(null)}
         onBlur={() => setHover(null)}
@@ -133,6 +168,9 @@ function Chart({
           <line x1={0} x2={W} y1={y(top)} y2={y(top)} stroke="var(--line)" vectorEffect="non-scaling-stroke" />
           <line x1={0} x2={W} y1={y(top / 2)} y2={y(top / 2)} stroke="var(--line)" vectorEffect="non-scaling-stroke" />
           <line x1={0} x2={W} y1={y(0)} y2={y(0)} stroke="var(--line-2)" vectorEffect="non-scaling-stroke" />
+          {marks.map((k) => (
+            <line key={k.at} x1={x(k.i)} x2={x(k.i)} y1={y(top)} y2={H} stroke="var(--muted)" strokeOpacity={0.6} strokeDasharray="2 3" vectorEffect="non-scaling-stroke" />
+          ))}
           {series.map((s) => (
             <path key={s.label} d={path(s.values)} fill="none" stroke={s.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
           ))}
@@ -145,10 +183,81 @@ function Chart({
   );
 }
 
+type RouteSort = "requests" | "errors" | "p95_ms";
+const ROUTE_SORTS: { key: RouteSort; label: string }[] = [
+  { key: "requests", label: "busiest" },
+  { key: "errors", label: "most 5xx" },
+  { key: "p95_ms", label: "slowest" },
+];
+
+/** Errors and latency by route (Vercel's Observability): the last hour's access log, ids folded. */
+function Routes({ stats }: { stats: RouteStats }) {
+  const [sort, setSort] = useState<RouteSort>("requests");
+  const rows = useMemo(() => {
+    const keep = (r: RouteStat) => (sort === "errors" ? r.errors > 0 : sort === "p95_ms" ? r.requests >= 5 : true);
+    return stats.routes.filter(keep).sort((a, b) => b[sort] - a[sort] || b.requests - a.requests).slice(0, 15);
+  }, [stats, sort]);
+  return (
+    <section className={`${panel} overflow-hidden`} aria-label="Routes">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2.5">
+        <p className="text-[12px] text-muted">
+          Routes, the last hour <span className="text-subtle">· {count(stats.requests)} requests{stats.cut ? ", the newest read" : ""}; ids folded as :id</span>
+        </p>
+        <div className="flex rounded-lg border border-line p-0.5" role="radiogroup" aria-label="Sort routes">
+          {ROUTE_SORTS.map((s) => (
+            <button
+              key={s.key}
+              role="radio"
+              aria-checked={sort === s.key}
+              onClick={() => setSort(s.key)}
+              className={`h-6 rounded-md px-2 text-[11.5px] ${sort === s.key ? "bg-fg/[0.08] text-fg" : "text-muted hover:text-fg"}`}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {rows.length === 0 ? (
+        <p className="px-4 py-3 text-[12.5px] text-subtle">{stats.requests ? (sort === "errors" ? "No route answered a 5xx." : "No route had 5 requests yet.") : "No requests in the last hour."}</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full font-mono text-[11.5px] tabular-nums">
+            <thead className="text-left text-subtle">
+              <tr>
+                {["route", "req", "5xx", "4xx", "p50", "p95"].map((h, i) => (
+                  <th key={h} className={`px-4 py-1.5 font-normal ${i ? "text-right" : ""}`}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={`${r.method} ${r.route}`} className="border-t border-line">
+                  <td className="max-w-[28rem] truncate px-4 py-1" title={`${r.method} ${r.route}`}>
+                    <span className="text-subtle">{r.method}</span> {r.route}
+                  </td>
+                  <td className="px-4 py-1 text-right">{count(r.requests)}</td>
+                  <td className={`px-4 py-1 text-right ${r.errors ? "text-danger" : "text-subtle"}`}>{r.errors ? count(r.errors) : "—"}</td>
+                  <td className="px-4 py-1 text-right text-muted">{r.client_errors ? count(r.client_errors) : "—"}</td>
+                  <td className="px-4 py-1 text-right text-muted">{formatMs(r.p50_ms)}</td>
+                  <td className="px-4 py-1 text-right">{formatMs(r.p95_ms)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** Requests, errors, latency, CPU, memory, instances and cold starts over the last hour, day or week. */
 export function MetricsTab({ service, env, memoryMb }: { service: string; env: string; /** Its memory limit, MB. */ memoryMb?: number }) {
   const [range, setRange] = useState<Range>(RANGES[0]);
   const [raw, setM] = useState<MetricsData | null>(null);
+  const [deploys, setDeploys] = useState<Deployment[]>([]);
+  const [routes, setRoutes] = useState<RouteStats | null>(null);
   const size = raw ? Math.max(1, Math.ceil(raw.minutes.length / MAX_POINTS)) : 1;
   const m = useMemo(() => (raw ? bucketed(raw, size) : null), [raw, size]);
   const per = size === 1 ? "min" : `${size} min`;
@@ -158,15 +267,23 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
   const scrape = appsApi.prometheusUrl(service, env);
 
   const visible = usePageVisible();
+  // Another environment's deploys and routes never stay on this one's charts.
+  useEffect(() => {
+    setDeploys([]);
+    setRoutes(null);
+  }, [service, env]);
   useEffect(() => {
     if (!visible) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout>;
     const load = async () => {
       try {
-        const next = await appsApi.metrics(service, env, range.minutes);
+        // The deploys only mark the charts: metrics still show without them.
+        const [next, deps, byRoute] = await Promise.all([appsApi.metrics(service, env, range.minutes), appsApi.deploys(service, env).catch(() => null), appsApi.routes(service, env).catch(() => null)]);
         if (alive) {
           setM(next);
+          if (deps) setDeploys(deps);
+          if (byRoute) setRoutes(byRoute);
           setError(null);
         }
       } catch (e) {
@@ -182,6 +299,7 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
     };
   }, [service, env, visible, range]);
 
+  const marks = useMemo(() => (m ? deployMarks(deploys, m.minutes, size) : []), [deploys, m, size]);
   const ink = "var(--soft)";
   const charts = useMemo(() => {
     if (!m) return [];
@@ -194,9 +312,9 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
         title: "Latency",
         agg: "peak" as Agg,
         series: [
-          { label: "p50", values: m.p50_ms, color: "var(--viz-1)" },
-          { label: "p95", values: m.p95_ms, color: "var(--viz-2)" },
-          { label: "p99", values: m.p99_ms, color: "var(--viz-3)" },
+          { label: "p50", values: m.p50_ms, color: "var(--viz-2)" },
+          { label: "p95", values: m.p95_ms, color: "var(--viz-3)" },
+          { label: "p99", values: m.p99_ms, color: "var(--viz-4)" },
         ],
         format: formatMs,
         summary: `p99 peaked at ${formatMs(peak(m.p99_ms))}`,
@@ -242,7 +360,7 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
           <table className="w-full font-mono text-[11.5px] tabular-nums">
             <thead className="sticky top-0 bg-panel text-left text-subtle">
               <tr>
-                {["minute", "req", "5xx", "p50", "p95", "p99", "cpu", "memory", "inst", "cold", "cold ms"].map((h) => (
+                {["minute", "req", "5xx", "p50", "p95", "p99", "cpu", "memory", "inst", "cold", "cold ms", "deploy"].map((h) => (
                   <th key={h} className="border-b border-line px-3 py-2 font-normal">
                     {h}
                   </th>
@@ -263,6 +381,7 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
                   <td className="px-3 py-1">{m.instances[i]}</td>
                   <td className="px-3 py-1">{m.cold_starts[i]}</td>
                   <td className="px-3 py-1">{m.cold_starts[i] ? formatMs(m.cold_start_ms[i]) : "—"}</td>
+                  <td className="px-3 py-1 text-muted">{marks.filter((k) => k.i === i).map((k) => k.short).join(", ")}</td>
                 </tr>
               ))}
             </tbody>
@@ -271,10 +390,27 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {charts.map((c) => (
-            <Chart key={c.title} minutes={m.minutes} range={range} {...c} />
+            <Chart key={c.title} minutes={m.minutes} range={range} marks={marks} {...c} />
           ))}
         </div>
       )}
+      {marks.length > 0 && (
+        <div className="text-[12px] text-subtle">
+          <span>Dashed: a deploy went live.</span>
+          <ul className="mt-1 space-y-0.5">
+            {marks.slice(-6).map((k) => (
+              <li key={k.at} className="flex min-w-0 gap-2">
+                <span className="shrink-0 font-mono tabular-nums">{clock(k.at, range.minutes > 60 * 24).slice(0, range.minutes > 60 * 24 ? 12 : 5)}</span>
+                <span className="min-w-0 truncate text-muted" title={k.label}>
+                  {k.label}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {marks.length > 6 && <p className="mt-0.5">and {marks.length - 6} earlier (the table marks them)</p>}
+        </div>
+      )}
+      {routes && <Routes stats={routes} />}
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-subtle">
         <span>For a scraper:</span>
         <code className="min-w-0 truncate font-mono text-[11.5px] text-muted">{scrape}</code>

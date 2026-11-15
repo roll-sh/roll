@@ -58,6 +58,10 @@ impl Apps {
             }
             body["image"] = json!(img.trim());
         }
+        // A hook is automation: after a rollback, what it would deploy waits for a person.
+        if let Some(r) = self.held(service, env).await {
+            return Err(crate::Error::Conflict(format!("deploys are held after the rollback {r}: resume them (or deploy) first")));
+        }
         self.deploy(service, env, body, By { trigger: Trigger::Api, actor: Some("deploy hook".into()) }, None, None).await
     }
 }
