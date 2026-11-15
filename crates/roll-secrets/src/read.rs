@@ -989,13 +989,14 @@ impl<'a> Resolver<'a> {
         }
         let now = self.s.db.now_ms()?;
         let consumer = self.consumer.clone();
+        let by = self.caller.principal.clone();
         let project = self.project.to_string();
         let ids: Vec<String> = issued.iter().map(|_| names::new_id("lse", 16)).collect();
         let res = self.s.db.write(|c| {
             for ((env_id, handle, link, (key, path)), id) in issued.iter().zip(&ids) {
                 c.execute(
-                    "INSERT INTO leases (id, project_id, env_id, key, path, kind, link, handle, consumer, issued_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, 'dynamic', ?, ?, ?, ?, ?, NULL)",
-                    params![id, project, env_id, key, path, json(link), json(handle), consumer, now, now + link.ttl_minutes() as i64 * 60_000],
+                    "INSERT INTO leases (id, project_id, env_id, key, path, kind, link, handle, consumer, issued_at, expires_at, revoked_at, issued_by) VALUES (?, ?, ?, ?, ?, 'dynamic', ?, ?, ?, ?, ?, NULL, ?)",
+                    params![id, project, env_id, key, path, json(link), json(handle), consumer, now, now + link.ttl_minutes() as i64 * 60_000, by],
                 )?;
             }
             Ok::<_, Error>(())

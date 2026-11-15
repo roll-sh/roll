@@ -185,16 +185,21 @@ impl Secrets {
         self.lease(project, id)
     }
 
-    /// Revoke a lease now: whoever could reveal the credential may end it (it only takes access
-    /// away; Terraform's ephemeral reads close their leases with a read token), or delete there.
+    /// Revoke a lease now: whoever may delete there, or the caller it was issued to while it may
+    /// still reveal there (Terraform's ephemeral reads close their own leases with a read token).
+    /// A reader can't end another's: that would drop a running service's credential.
     pub fn revoke_lease(&self, project: &str, id: &str, caller: &Caller) -> Result<()> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let l = self.lease(project, id)?;
         let env = l.environment;
         let at = Scope::at(project, &env, &l.path);
-        if !caller.allows(Action::Reveal, &at) {
-            caller.need(Action::Delete, &at)?;
+        if !caller.allows(Action::Delete, &at) {
+            caller.need(Action::Reveal, &at)?;
+            let by: Option<String> = self.db.read(|c| c.query_row("SELECT issued_by FROM leases WHERE id = ?", [id], |r| r.get(0)))?;
+            if by.as_deref() != Some(caller.principal.as_str()) {
+                return Err(Error::Forbidden(format!("{id} wasn't issued to you: ending another's lease needs delete on {env}")));
+            }
         }
         match self.revoke_one(id)? {
             true => {

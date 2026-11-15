@@ -434,6 +434,9 @@ impl Secrets {
         db.add_column("secrets", "rotation_error", "TEXT")?;
         db.add_column("secrets", "rotation_failed_at", "INTEGER")?;
         db.add_column("leases", "revoke_error", "TEXT")?;
+        // Who a dynamic lease was issued to (the caller's principal; `consumer` is a name it chose):
+        // a reader may end its own leases, not another's.
+        db.add_column("leases", "issued_by", "TEXT")?;
         // A deleted project kept only until what it issued is revoked (forget_project).
         db.add_column("projects", "forgotten_at", "INTEGER")?;
         db.ensure_schema(notices::SCHEMA)?;

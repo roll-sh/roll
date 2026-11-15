@@ -828,10 +828,16 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     let renewed = api.ok(Method::POST, &format!("/leases/{lease}/renew"), Some(json!({ "ttl_minutes": 120 }))).await;
     assert!(renewed["expires_at"].as_i64().unwrap() > before + 60 * 60_000);
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
-    // Whoever could reveal it may end it (Terraform's ephemeral reads close theirs with a read token).
+    // A reader ends its own lease (Terraform's ephemeral reads close theirs with a read token), but
+    // not another's: that would drop a running service's credential.
     let reader = api.ok(Method::POST, "/tokens", Some(json!({ "name": "tf", "environments": ["staging"], "actions": ["read", "reveal"] }))).await;
+    let mine = api.req(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "app:web" })), reader["token"].as_str()).await.1;
     let other = b["leases"][0].as_str().unwrap();
-    assert_eq!(api.req(Method::DELETE, &format!("/leases/{other}"), None, reader["token"].as_str()).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(api.req(Method::DELETE, &format!("/leases/{other}"), None, reader["token"].as_str()).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(api.req(Method::DELETE, &format!("/leases/{}", mine["leases"][0].as_str().unwrap()), None, reader["token"].as_str()).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
+    // Whoever may delete there ends any.
+    api.ok(Method::DELETE, &format!("/leases/{other}"), None).await;
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 2);
     // A reader that can't renew (External Secrets Operator) asks for none: the key is left out
     // (named in `dynamic`), no lease. With `strict`, a key that doesn't resolve fails the whole
