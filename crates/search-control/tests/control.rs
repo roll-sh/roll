@@ -1459,11 +1459,12 @@ async fn a_link_credential_uses_the_data_and_is_revoked() {
     assert_eq!(as_user(&u, &p, reqwest::Method::GET, "/items/_doc/2", None).await, 401, "removed");
     let (s, _) = e.call(reqwest::Method::DELETE, "/v1/search/clusters/os-link/keys/admin", None).await;
     assert_eq!(s, 404, "the keys route removes only users it made");
-    let k = e.post("/v1/search/clusters/os-link/keys", json!({"name": "brief", "expires_in_s": 1})).await;
+    // Three seconds, not one: a loaded host can take a second between minting and first use.
+    let k = e.post("/v1/search/clusters/os-link/keys", json!({"name": "brief", "expires_in_s": 3})).await;
     assert!(k["expires_at"].as_i64().is_some(), "{k}");
     let (u, p) = (k["username"].as_str().unwrap().to_string(), k["password"].as_str().unwrap().to_string());
     assert_eq!(as_user(&u, &p, reqwest::Method::GET, "/items/_doc/2", None).await, 200);
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(3100)).await;
     assert_eq!(as_user(&u, &p, reqwest::Method::GET, "/items/_doc/2", None).await, 401, "expired");
 }
 
