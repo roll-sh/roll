@@ -345,7 +345,8 @@ async fn an_image_service_scales_to_zero_and_wakes_on_the_first_request() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a_build() {
     let w = world().await;
-    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    let echo = json!({"FAKE_ECHO": "ROLL_GIT_COMMIT,ROLL_GIT_BRANCH,ROLL_INSTANCE"});
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"}, "variables": echo }))).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
     let first = svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string();
@@ -355,6 +356,10 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     assert_eq!(d1["plan"]["provider"], "node", "{d1}");
     let steps: Vec<&str> = d1["steps"].as_array().unwrap().iter().map(|s| s["step"].as_str().unwrap()).collect();
     assert_eq!(steps, ["build", "rollout", "live"], "{d1}");
+    // The app knows its commit, its branch and which instance it is.
+    let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), &first).await;
+    assert_eq!((&body["vars"]["ROLL_GIT_COMMIT"], &body["vars"]["ROLL_GIT_BRANCH"]), (&json!("a1a1a1a1a1a1"), &json!("main")), "{body}");
+    assert!(w.fake.instances(&id).iter().any(|(n, ..)| body["vars"]["ROLL_INSTANCE"] == n.as_str()), "{body}");
     let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{first}/logs"), None).await;
     assert!(log.as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap().contains("generated Dockerfile")), "the build log shows the Dockerfile");
     // Its cache mounts are its own (another service's build can't name them, and the log

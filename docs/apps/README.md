@@ -692,7 +692,14 @@ copy would read them, and that can take less than deploying where they are). A s
   environment not made `trusted` never reads a protected one), so the port carries no trust flag.
 - What a deploy injects, lowest to highest precedence: roll's own (`PORT`,
   `ROLL_SERVICE`, `ROLL_ENVIRONMENT`, `ROLL_DEPLOYMENT`, `ROLL_PUBLIC_URL`,
-  `ROLL_PRIVATE_HOST`), links, the environment's project secrets, the service's variables.
+  `ROLL_PRIVATE_HOST`; for a repo service `ROLL_GIT_COMMIT`, the deployment's commit, and
+  `ROLL_GIT_BRANCH`, the branch the environment follows; and in each container
+  `ROLL_INSTANCE`, its name as roll's log lines give it: Railway's `RAILWAY_GIT_COMMIT_SHA` and
+  `RAILWAY_REPLICA_ID`, Heroku's `DYNO`, for an error tracker's release and a log's source),
+  links, the environment's project secrets, the service's variables. The commit and branch never
+  mark an environment "needs deploy", and the commit stays out of the build's steps and their
+  hash (or no build would keep the cache past a push); a tree's own Dockerfile gets it as an
+  `ARG ROLL_GIT_COMMIT` it declares, which Docker caches by its value.
 - A deployment records the variables' names and a hash of their values: changing a variable
   marks the environment "needs deploy" (like Railway's staged changes). When a deployment goes
   live, the environment's own variables are kept with it, sealed under the deployment
@@ -1852,54 +1859,49 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (a second product review of the experience, a product review of what one engineer can close here now, bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **The dashboard's Promote confirms** with the deployment, its commit and the variable names the
-   target lacks (names only), and sends `expect`.
-2. **Apps know their commit and instance** (Railway's `RAILWAY_GIT_COMMIT_SHA`, Render's
-   `RENDER_GIT_COMMIT`, Heroku's `DYNO`): `ROLL_GIT_COMMIT`, `ROLL_GIT_BRANCH`, `ROLL_INSTANCE`,
-   kept out of the change fingerprint and the build-environment hash.
-3. **Deploys marked on the metrics charts**: each deployment's switch as a tick, its status and
+1. **Deploys marked on the metrics charts**: each deployment's switch as a tick, its status and
    who.
-4. **The CLI and dashboard reach the same things again**: editing a drain in the dashboard;
+2. **The CLI and dashboard reach the same things again**: editing a drain in the dashboard;
    `roll apps pending`, a deploy's commits and a target's deliveries in the CLI; `roll open`.
-5. **roll.toml checked before a push**: `[app]`'s parser in apps-build so `roll apps plan DIR`
+3. **roll.toml checked before a push**: `[app]`'s parser in apps-build so `roll apps plan DIR`
    applies and checks it, and a JSON schema for editors from the same structs.
-6. **Errors and latency by route** (Vercel's Observability): the access log's last minutes grouped
+4. **Errors and latency by route** (Vercel's Observability): the access log's last minutes grouped
    by method and path (id-like segments folded), top paths by 5xx and p95 in Metrics.
-7. **Tests for flows people rely on**: billing end to end (requests and CPU through the proxy to
+5. **Tests for flows people rely on**: billing end to end (requests and CPU through the proxy to
    `/usage` and the spend limit), what a deletion leaves (volume, backups, network), and apps'
    rows in docs/code/test-coverage.md.
-8. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+6. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-9. **Region**: the region shown on the overview and each environment, defaulting to the project's
+7. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-10. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+8. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-11. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+9. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-12. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+10. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-13. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+11. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-14. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-15. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+12. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+13. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-16. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+14. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-17. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+15. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-18. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+16. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-19. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+17. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

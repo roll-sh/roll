@@ -545,6 +545,7 @@ impl EnvLive {
                 format!("{}run{n}", instance_prefix(&self.service, &self.env, &tpl.deployment))
             }
         };
+        spec.vars.push(("ROLL_INSTANCE".into(), spec.name.clone()));
         self.runtime.create(&spec).await?;
         Ok(Inst::new(spec.name, tpl.deployment.clone()))
     }
@@ -553,6 +554,9 @@ impl EnvLive {
         anyhow::ensure!(!self.closed.load(Ordering::SeqCst), "this environment was torn down");
         let mut spec = tpl.spec.clone();
         spec.name = self.name_for(tpl);
+        // Which instance a line or an error came from (Railway's `RAILWAY_REPLICA_ID`): its name,
+        // as roll's own log lines name it.
+        spec.vars.push(("ROLL_INSTANCE".into(), spec.name.clone()));
         self.mine.lock().insert(spec.name.clone());
         self.runtime.create(&spec).await?;
         Ok(Inst::new(spec.name, tpl.deployment.clone()))

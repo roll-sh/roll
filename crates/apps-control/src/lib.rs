@@ -1442,6 +1442,23 @@ impl Apps {
         for (k, v) in roll {
             vars.insert(k.to_string(), (v, "roll"));
         }
+        // What a repo's deployment was built from (Railway's `RAILWAY_GIT_*`, Render's
+        // `RENDER_GIT_*`): an error tracker's release, a log's version.
+        if let (Source::Repo { repo, .. }, Some(sources)) = (&svc.source, self.deps.sources.as_ref()) {
+            if !deployment.is_empty() {
+                let d = deployment.to_string();
+                if let Ok(Some(sha)) = self.db(move |s| s.deployment(&d)).await.map(|d| d.revision) {
+                    vars.insert("ROLL_GIT_COMMIT".into(), (sha, "roll"));
+                }
+            }
+            let branch = match &env.branch {
+                Some(b) => Some(b.clone()),
+                None => sources.default_branch(repo).await.ok(),
+            };
+            if let Some(b) = branch {
+                vars.insert("ROLL_GIT_BRANCH".into(), (b, "roll"));
+            }
+        }
         let sid = svc.id.clone();
         let links = self.db(move |s| s.links_minted(&sid)).await?;
         for (kind, r, prefix, minted) in links {
@@ -2322,9 +2339,10 @@ impl Apps {
 }
 
 impl ResolvedVars {
-    /// The variables that decide whether a deployment is stale (not roll's per-deployment ones).
+    /// The variables that decide whether a deployment is stale (not roll's per-deployment ones:
+    /// a new commit is a new deployment already).
     fn vars_for_hash(&self) -> Vec<(String, String)> {
-        self.vars.iter().filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT")).cloned().collect()
+        self.vars.iter().filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH")).cloned().collect()
     }
 }
 

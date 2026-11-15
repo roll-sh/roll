@@ -1037,6 +1037,10 @@ impl Apps {
         let mut build_env = self.resolve_vars(svc, &env_row, &d.id).await?.vars;
         // Per deployment (the cache would never hit) or only for the running app.
         build_env.retain(|(k, _)| k != "ROLL_DEPLOYMENT" && k != "PORT");
+        // The commit changes every push: out of the hash and the secrets, or no build would hit
+        // the cache. A tree's own Dockerfile still gets it as an `ARG` it declares, which Docker
+        // keys its own cache on.
+        let commit = build_env.iter().position(|(k, _)| k == "ROLL_GIT_COMMIT").map(|i| build_env.remove(i));
         build_env.sort();
         let env_hash = {
             use sha2::{Digest, Sha256};
@@ -1120,6 +1124,9 @@ impl Apps {
         };
         let log = &log;
         let plan_json = serde_json::to_value(&plan)?;
+        if plan.provider == apps_build::Provider::Dockerfile {
+            build_env.extend(commit);
+        }
         let job = BuildJob {
             service: svc.id.clone(),
             deployment: d.id.clone(),
