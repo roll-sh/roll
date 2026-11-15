@@ -1013,7 +1013,16 @@ impl Runtime {
         // A page state's steps take up to about 25 s more.
         let state_pages = pages.iter().filter(|p| crate::settings::state_entry(p).is_some()).count() as u64;
         let within = Duration::from_secs(90 + 30 * pages.len() as u64 + 25 * state_pages + if endpoints.is_empty() { 0 } else { 25 });
-        let out = match tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)).await {
+        let chromium = std::time::Instant::now();
+        // The other browsers the project asked for, in a run of their own alongside Chromium's (a
+        // container each in the service's network): the slot is held for the longer, not both.
+        let browsers_run = async {
+            let started = std::time::Instant::now();
+            let r = if opts.browsers.is_empty() { None } else { Some(self.other_browsers(name, port, opts).await) };
+            (r, started.elapsed().as_millis() as u64)
+        };
+        let (run, (more, browsers_ms)) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)), browsers_run);
+        let out = match run {
             Ok(Ok(out)) => out,
             // Its container outlives a docker CLI that gave up on it (too much output).
             Ok(Err(e)) => {
@@ -1037,13 +1046,14 @@ impl Runtime {
         anyhow::ensure!(png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX, "the screenshot isn't a PNG of at most {SCREENSHOT_MAX} bytes");
         let phone = b64e.decode(phone.trim()).ok().filter(|p| p.starts_with(b"\x89PNG") && p.len() <= SCREENSHOT_MAX);
         let mut shot = crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed), a11y: crate::PageA11y::parse(speed), text: crate::page_text(speed), links: crate::PageLinks::parse(speed), api: crate::openapi::lines(speed), phone, pages: page_shots(&pages, said, lines) };
-        // The other browsers the project asked for, best effort: Chromium's screenshot stands.
-        if !opts.browsers.is_empty() {
-            match self.other_browsers(name, port, opts).await {
-                Ok(more) => shot.pages.extend(more),
-                Err(e) => tracing::warn!(container = name, error = %e, "previews: other browsers' screenshots"),
-            }
+        // The other browsers', best effort: Chromium's screenshot stands.
+        match more {
+            Some(Ok(more)) => shot.pages.extend(more),
+            Some(Err(e)) => tracing::warn!(container = name, error = %e, "previews: other browsers' screenshots"),
+            None => {}
         }
+        // How long it took, and the other browsers' run within it.
+        tracing::info!(container = name, pages = pages.len(), run_ms = chromium.elapsed().as_millis() as u64, browsers_ms, "previews: screenshot run");
         Ok(shot)
     }
 

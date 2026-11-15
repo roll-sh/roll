@@ -610,6 +610,7 @@ impl Engine {
         let own_keys: Vec<String> = states.iter().map(|s| format!("state:{}", s.name)).chain(browsers.iter().map(|b| format!("browser:{b}"))).collect();
         first_paths.extend(own_keys.iter().filter(|k| k.starts_with("state:")).cloned());
         let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers };
+        let started = std::time::Instant::now();
         match self.apps.screenshot(&r.id, &first.name, &opts).await {
             Ok(Some(shot)) => {
                 // Kept under the entry that asked for each (`/pricing`, or `web:/pricing`).
@@ -661,7 +662,7 @@ impl Engine {
                 if kept {
                     Counters::add(&self.counters.screenshots);
                     self.shots_failed.lock().retain(|(p, _)| *p != r.id);
-                    let _ = self.store.log(&r.id, &format!("took a screenshot of {}", first.name));
+                    let _ = self.store.log(&r.id, &format!("took a screenshot of {} in {:.1} s", first.name, started.elapsed().as_secs_f64()));
                 }
                 kept
             }

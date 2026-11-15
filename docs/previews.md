@@ -1038,7 +1038,11 @@ type Settings = {
     run a second one, in the service's network and locked down the same way, takes the first page
     in each, stilled as Chromium's capture is (`browsers.js`), with its errors counted; each is a
     page of its own (`browser:firefox`), compared with main's in that browser and reviewed like a
-    page. Best effort: a browser that fails leaves Chromium's screenshot as it is, and its page
+    page. The run goes alongside Chromium's (a container each in the service's network), so the
+    node's one screenshot slot is held for the longer of the two, not both: measured 2026-11-15, a
+    first page with five more pages and two other browsers 12–14 s instead of about 21 s
+    (Chromium's alone 12–14 s, the browsers' 6–10 s); both load the service at once, as main's
+    run does, so the two stay comparable. Best effort: a browser that fails leaves Chromium's screenshot as it is, and its page
     from an earlier push is dropped rather than compared and reviewed as this one's. The image is
     built `FROM` the configured screenshot image, `playwright-core` pinned and installed without
     its scripts, within 180 s; a build that fails (a node without npm's registry) isn't tried
@@ -1267,6 +1271,8 @@ Ranked by what a person notices first. Done so far:
 - page states, pages and hidden selectors in the repo's own `roll.toml` (`[[preview.states]]`,
   `pages`, `hide`; a roll apps service's `[app.previews.screenshots]`), versioned with the code
   they name, with the project's;
+- the other browsers' run alongside Chromium's (a screenshot run 12–14 s instead of about 21 s),
+  and each run's time in rolld's log and the activity;
 - search masks on an index whose name has dots (`logs.2024`): split off at the longest index name
   the cluster has, for masking and for the check when set;
 - a tenth review (states, browsers, search masks) and its fixes: a dialog a state's step opens
@@ -1412,12 +1418,12 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Screenshot runs got long: measure them, then overlap them**: a node takes one screenshot at
-   a time (`shooting`, one slot), and a full run now holds pages, states (up to 25 s each), the
-   other browsers' run and the second capture of each page; in the live script main's and the
-   change's back to back went past a minute. Measure a run's parts (EMF: the first page, each
-   other page, the browsers run), then let the other browsers' run go in a slot of its own after
-   Chromium's, or give a node two slots when it has the cores.
+1. **Two screenshot slots a node, when it has the cores**: a node takes one screenshot at a time
+   (`shooting`). Measured (rolld's `previews: screenshot run` lines): a first page with five more
+   pages, a state and two other browsers is 12–14 s now that the browsers' run goes alongside
+   Chromium's (it was about 21 s), another service's run about 3 s; a project's main and change
+   back to back are about half a minute. Two slots on a node with the cores would halve the wait
+   when several previews are pushed at once; each run is two containers of 1 CPU and 1 GiB.
 2. **Promote a preview's deployment to production on roll apps** (Vercel's promote): built on
    the stacked `feature/roll-previews-on-apps`. The sheet's "Promote <service> to production"
    (its name typed to confirm) calls roll apps' own `POST …/environments/production/promote`
