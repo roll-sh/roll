@@ -2747,8 +2747,13 @@ async fn sinks(c: &Client<'_>, cmd: Sinks, json_out: bool) -> anyhow::Result<()>
                 body["token"] = json!(token.trim());
             }
             let v = c.call(Method::POST, &base, Some(body)).await?;
-            println!("{}", s(&v["secret"]));
-            eprintln!("Streaming the audit log to {url} ({}). That's its signing secret, shown this once.", s(&v["id"]));
+            if format == "roll" {
+                println!("{}", s(&v["secret"]));
+                eprintln!("Streaming the audit log to {url} ({}). That's its signing secret, shown this once.", s(&v["id"]));
+            } else {
+                // Its batches carry the SIEM's token, not roll's signature: nothing to keep.
+                eprintln!("Streaming the audit log to {url} as {format} ({}); the token is sealed in roll.", s(&v["id"]));
+            }
         }
         Sinks::Rm { id } => {
             c.call(Method::DELETE, &format!("{base}/{}", enc(&id)), None).await?;
