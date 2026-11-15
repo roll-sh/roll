@@ -323,6 +323,13 @@ impl Apps {
                 self.audit("variables.restored", service, env, actor.clone(), json!({ "from": old.id, "set": set.keys().collect::<Vec<_>>(), "unset": unset })).await;
             }
         }
+        // Its settings as they were (a rollback over a bad start command needs them), but the
+        // volume is the service's as it is now: its data lives there, and a deployment from before
+        // the volume was added must not run without it.
+        let mut run = old.run.clone();
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
+        run.volume = svc.for_env(&row).map(|s| s.run.volume).unwrap_or(svc.run.volume);
         let d = NewDeployment {
             trigger: Trigger::Rollback,
             revision: old.revision.clone(),
@@ -330,7 +337,7 @@ impl Apps {
             image: Some(image),
             plan: old.plan.clone(),
             rollback_of: Some(old.id.clone()),
-            run: old.run.clone(),
+            run,
             upload: None,
             status: DeployStatus::Queued,
             actor,

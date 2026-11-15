@@ -175,7 +175,7 @@ export function Deployments({
                         disabled={runner.busy !== null}
                         sure={d.status === "ready" ? `Sure? Put it live in ${env.name}` : `Sure? Roll ${env.name} back`}
                         onSure={() => runner.run(`rollback:${d.id}`, () => appsApi.rollback(service, env.name, d.id, keepVars))}
-                        title={d.status === "ready" ? "Run this deployment's image, without a build" : keepVars ? "Run this deployment's image again, without a build, with today's variables" : "Run this deployment's image again, without a build, with its variables as they were then"}
+                        title={d.status === "ready" ? "Run this deployment's image, without a build" : keepVars ? "Run this deployment's image and settings again, without a build, with today's variables (the volume stays)" : "Run this deployment's image and settings again, without a build, with its variables as they were then (the volume stays)"}
                       >
                         {d.status === "ready" ? (
                           <>

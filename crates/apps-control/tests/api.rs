@@ -3368,3 +3368,20 @@ async fn a_project_is_written_as_roll_toml_that_reads_back() {
     assert_eq!((back["apps"]["web"]["run"]["port"].as_u64(), back["apps"]["web"]["run"]["min_instances"].as_u64(), back["apps"]["web"]["run"]["health_path"].as_str()), (Some(80), Some(1), Some("/healthz")), "{back}");
     assert_eq!((back["apps"]["nightly"]["run"]["type"].as_str(), back["apps"]["nightly"]["run"]["schedule"].as_str()), (Some("cron"), Some("0 3 * * *")), "{back}");
 }
+
+/// A rollback runs the old deployment's settings, but the volume is the service's as it is now:
+/// rolling back past the volume's addition keeps the data mounted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rollback_keeps_the_services_volume() {
+    let w = world().await;
+    let (svc, first) = image_service(&w, "db", json!({"type": "worker"})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"volume": {"mount": "/data", "size_gb": 1}}}))).await;
+    let (_, second) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    assert_eq!(settled(&w, &id, "production", second["id"].as_str().unwrap()).await["status"], "active");
+    let (st, back) = call(&w.api, "POST", &format!("{base}/deploys/{}/rollback", first["id"].as_str().unwrap()), Some(json!({}))).await;
+    assert!(st.is_success(), "{back}");
+    let row = w.apps.store.deployment(back["id"].as_str().unwrap()).unwrap();
+    assert_eq!(row.run.volume.as_ref().map(|v| v.mount.as_str()), Some("/data"), "the volume stays mounted");
+}
