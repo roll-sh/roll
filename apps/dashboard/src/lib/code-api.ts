@@ -396,6 +396,8 @@ export interface PreviewEnvironment {
     /** Each page that differs (`path` `""`: the first page) and who accepted it at this head. */
     pages?: { path: string; percent: number; by: string | null; unstable?: boolean }[];
   };
+  /** The notes left with the preview page's Feedback button that nobody resolved (newest first, a few): untrusted text; `crop_url` a public preview's signed picture of the note's element. */
+  notes?: { path: string; note: string; by: string; crop_url?: string }[];
   /** What a screen reader can't name on that page. */
   page_links?: { checked: number; broken: { path: string; status: number }[] };
   page_a11y?: { issues: { kind: string; count: number; first: string | null; impact?: "minor" | "moderate" | "serious" | "critical" | null; help?: string | null }[]; lang: boolean; title: boolean; seo?: string[] };

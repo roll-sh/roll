@@ -343,6 +343,20 @@ pub struct PreviewEnvironment {
     /// The `roll/visual` status (the project's `github.visual_review`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_review: Option<PreviewVisualReview>,
+    /// The notes left with the preview page's Feedback button that nobody resolved (the newest
+    /// first, a few): untrusted text, and a public preview's signed picture of each one's element.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<PreviewNoteLink>,
+}
+
+/// A note on a preview's page, as roll code's surfaces show it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PreviewNoteLink {
+    pub path: String,
+    pub note: String,
+    pub by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop_url: Option<String>,
 }
 
 /// 0 is no limit.

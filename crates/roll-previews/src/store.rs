@@ -199,6 +199,11 @@ CREATE TABLE IF NOT EXISTS leases (
 /// How long a screenshot link (in a pull request comment) works after the screenshot was taken.
 pub const SCREENSHOT_LINK_MS: i64 = 30 * 24 * 3_600_000;
 
+/// A note's id (its review's) as links carry it.
+pub fn note_id_ok(note: &str) -> bool {
+    !note.is_empty() && note.len() <= 64 && note.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 /// The largest crop of a note's element kept (a PNG).
 pub const CROP_MAX: usize = 512 << 10;
 /// The most crops kept per preview.
@@ -1710,6 +1715,14 @@ impl Store {
         self.link(id, Some("diff=base"))
     }
 
+    /// The same for a note's crop (`note=<id>`): its own signature per note.
+    pub fn note_crop_link(&self, id: &str, note: &str) -> Result<Option<(i64, String)>> {
+        if !note_id_ok(note) {
+            return Ok(None);
+        }
+        self.link(id, Some(&format!("note={note}")))
+    }
+
     fn link(&self, id: &str, variant: Option<&str>) -> Result<Option<(i64, String)>> {
         match self.screenshot_at(id)? {
             Some(at) => self.link_at(id, at, variant).map(Some),
@@ -2146,6 +2159,7 @@ impl Store {
             page_a11y,
             screenshot_link,
             diff_link,
+            notes: Vec::new(),
             last_reset_at: r.last_reset_at,
             last_active_at: r.last_active_at,
             expires_at: r.expires_at,

@@ -995,7 +995,17 @@ impl Engine {
 
     pub(super) async fn report(&self, row: Row) {
         let Ok(s) = self.store.settings(&row.project_id) else { return };
-        if let Ok(p) = self.store.view(row) {
+        if let Ok(mut p) = self.store.view(row) {
+            // The open notes, newest first (a few), for the pull request's comment.
+            if p.change.is_some() {
+                let mut notes = self.open_notes(&p.id).await.unwrap_or_default();
+                notes.reverse();
+                notes.truncate(10);
+                p.notes = notes.into_iter().map(|n| {
+                    let link = if n.crop { self.store.note_crop_link(&p.id, &n.id).ok().flatten() } else { None };
+                    (n, link)
+                }).collect();
+            }
             self.source.report(&p, &s).await;
         }
     }

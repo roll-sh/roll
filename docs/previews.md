@@ -752,6 +752,12 @@ land on the change.
   one whose element isn't on the page has none. `GET …/notes/{note}/crop` serves it, the notes
   list says `crop`, and the sheet shows it with the note.
   `a_notes_element_is_cropped_by_the_next_screenshot`.
+- The open notes reach the pull request (Vercel's comments): the preview's own comment, updated
+  in place, lists them (newest first, at most 10), each with its page, who and what as plain
+  words (one line, markdown escaped: a note can't link, embed an image, mention or close
+  anything), and a public preview's signed link to its crop (`screenshot.png?note=<id>`, a
+  signature of its own per note, as the screenshot's). Resolved ones drop out on the comment's
+  next update. `the_pages_notes_are_listed_as_plain_words`.
 - A note is a thread (Vercel Comments' replies): its Reply opens roll (`?fb_reply=<review id>`)
   on the same view, the note with its replies, a reply box and Resolve. A reply is a `comment`
   review on the change starting "**Reply on the preview** · `<the note's id>`"
@@ -1321,6 +1327,8 @@ Ranked by what a person notices first. Done so far:
 - the sheet leads with what changed (a verdict strip: failed services, breaking API changes,
   migration risks, new problems, pages to review, slower endpoints, pages that move by
   themselves; most serious first, each jumping to its section; `lib/preview-verdict.ts`);
+- the page's open notes in the pull request's comment, with a signed picture of each one's
+  element for a public preview;
 - search masks on an index whose name has dots (`logs.2024`): split off at the longest index name
   the cluster has, for masking and for the check when set;
 - a tenth review (states, browsers, search masks) and its fixes: a dialog a state's step opens
