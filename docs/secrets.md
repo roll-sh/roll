@@ -2765,7 +2765,8 @@ few reviewable ones and closes what they supersede:
 1. **#20 → main** (the store, links, CLI, dashboard, integrations; green and mergeable), after
    roll MCP's #24 if that's ready first; whichever lands second merges main and gates again.
 2. **#62 → main**: retargeted once #20 is in. It is #31–#61 merged in order with every
-   conflict resolved and seventeen independent reviews' fixes, so it lands as one squash, and
+   conflict resolved and seventeen independent reviews' fixes, so it lands as one squash
+   (decided 2026-11-15: splitting it would redo conflict resolutions #62 already settled), and
    #31–#61 close as superseded by it (their branches stay; #35 and #59, which conflict on their
    own, are in it too). #30 closes as superseded by #64.
 3. **The follow-ups, one at a time**, each a small pull request of its own: each merges main,
