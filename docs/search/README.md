@@ -246,9 +246,10 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    noaa indexing (Elasticsearch 1.29x roll's docs/s: `double_range` kept every document off the
    direct parser; it takes them now, -34% server CPU per document, Rally rerun pending); nyc_taxis `distance_amount_agg` 1.27x Elasticsearch (103 against 81 ms: roll
    runs a shard on one thread, Elasticsearch splits its segments across threads at twice roll's
-   CPU); nyc_taxis `autohisto_agg` 1.19x OpenSearch (tie), with `date_histogram_agg`, because the
-   points-tree counts don't apply to segments of 0.8M+ documents (Rally's merges make them; the
-   A/Bs' script loads didn't): find why; nested `nested-date-histo` 1.17x OpenSearch (tie);
+   CPU); nyc_taxis `autohisto_agg` 1.19x OpenSearch (tie), with `date_histogram_agg`: the
+   counted segments were still searched for the `size: 0` hit count, at a cost growing with the
+   segment (not since `7584df9f3`: -69% and -83% server CPU at one segment, Rally rerun pending);
+   nested `nested-date-histo` 1.17x OpenSearch (tie);
    http_logs `sort-size-desc-after-force-merge-1-seg` 1.12x OpenSearch (tie); geonames
    `asc_sort_population` 1.11x and `desc_sort_population` 1.07x Elasticsearch (ties), +11-16%
    server CPU since `5942eea08`'s sort bands, 7-10% of it won back since (the bands' per-hit

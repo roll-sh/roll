@@ -132,14 +132,22 @@ How the numbers were checked:
 - OpenSearch has no `_terms_enum` API ("no handler found"): every one of its `terms_enum`
   requests failed, in Round 7's races as in these (Rally's error rate 100%). Its 0.57 ms was the
   time to an error, not a win; roll leads Elasticsearch on `terms_enum` 1.34 ms to 2.86.
-- `autohisto_agg` and `date_histogram_agg` are not counted from the points tree in Rally. The
-  A/Bs in the tuning log (`date_histogram_agg` 65.9 → 3.4 ms, `autohisto_agg` 27.8 → 3.0) loaded
-  2M nyc_taxis documents with a script, which leaves segments of up to ~530k documents. Rally's
-  8 clients and the merges after them leave a segment of 0.8-0.9M, and on a segment that large
-  the count costs what collecting does. Server CPU per request (p50): on the index of a Rally
-  race, `autohisto_agg` 10.6 ms and `date_histogram_agg` 7.0; the same documents loaded by the
-  script as four segments of 0.27-0.53M, 2.5 and 1.4 ms; those merged into one segment, 6.7 and
-  6.1 ms. Why a large segment isn't counted is the next thing to find.
+- `autohisto_agg` and `date_histogram_agg` cost more in Rally than the tuning log's A/Bs
+  (`date_histogram_agg` 65.9 → 3.4 ms, `autohisto_agg` 27.8 → 3.0), which loaded 2M nyc_taxis
+  documents with a script (segments of up to ~530k documents; Rally's 8 clients and the merges
+  after them leave one of 0.8-0.9M). Server CPU per request (p50): on the index of a Rally race,
+  `autohisto_agg` 10.6 ms and `date_histogram_agg` 7.0; the script's four segments of
+  0.27-0.53M, 2.5 and 1.4 ms; those merged into one segment, 6.7 and 6.1 ms. The buckets were
+  counted from the points tree on every segment; the segment was searched anyway. The `size: 0`
+  hit count collected its first hits, building the range query's scorer (a doc set of the whole
+  segment, so the cost grew with the segment), and a segment every aggregation had counted still
+  built its scorer before its leaf asked to skip. Since `7584df9f3` the hit count takes the
+  segments `Weight::count` knows whole (Elasticsearch's `PartialHitCountCollector`) and a fully
+  counted segment ends the aggregations' leaf (`CollectionTerminated`), so neither builds a
+  scorer. Server CPU per request against `4bb8289d9` (2M documents, lane b, 3 alternating
+  rounds, identical aggregations and totals): one segment `date_histogram_agg` 6.5-7.2 → 1.1-1.25
+  ms, `autohisto_agg` 6.5-7.1 → 2.2-2.3; two segments 2.2 → 1.05-1.3 and 3.1-3.4 → 2.05-2.8; as
+  loaded 2.1-2.25 → 1.15-1.3 and 3.6-3.9 → 2.75-4.65. Rally rerun pending.
   Roll still leads Elasticsearch on both (9.0 against 29.3 ms, 6.7 against 11.8); OpenSearch's
   rewrite holds at 7.6 ms on both.
 - `distance_amount_agg` (a 1-wide `histogram` with a `stats` sub-aggregation over 2M trips): Round
@@ -209,8 +217,9 @@ ranges overlap):
    noaa's documents (34% less server CPU per document; the noaa notes). Not rerun in Rally yet.
 7. nyc_taxis `distance_amount_agg`: 1.27x Elasticsearch (103.2 ms against 81.1; the ranges are
    apart). One thread per shard against Elasticsearch's concurrent segments (above).
-8. nyc_taxis `autohisto_agg`: 1.19x OpenSearch (9.0 against 7.6, tie). The points-tree count
-   doesn't apply to Rally's 0.8M+ document segments (above).
+8. nyc_taxis `autohisto_agg`: 1.19x OpenSearch (9.0 against 7.6, tie). The counted segments were
+   still searched for the hit count (above); not since `7584df9f3` (server CPU at one segment
+   -69%, `date_histogram_agg` -83%), Rally rerun pending.
 9. nested `nested-date-histo`: 1.17x OpenSearch (324 against 277, tie; Elasticsearch 302; Round
    6: 2.6x).
 10. http_logs `sort-size-desc-after-force-merge-1-seg`: 1.12x OpenSearch (6.37 against 5.69,
