@@ -239,7 +239,8 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    each). Roll leads most tasks 1.3-4x (percolator up to 300x) and indexes 1.05-2.6x
    Elasticsearch's docs/s on every track but noaa, on 0.63-0.95x its server CPU. Where it still
    loses, ranked: noaa `range_field_conjunction_big_range_big_term_query` 5.12x Elasticsearch
-   (49.4 against 9.6 ms); nested inner hits `big_size` 2.25x Elasticsearch (49 against 22 ms;
+   (49.4 against 9.6 ms; roll leads since `96c8d2fc5`, 2.7 against 13-14.5 ms, Rally rerun
+   pending); nested inner hits `big_size` 2.25x Elasticsearch (49 against 22 ms;
    `default` 1.20x; roll leads both since `7fe679918`, 13 against 22-26 ms, Rally rerun pending); dense_vector `knn-search-100-1000_multiple_segments` 2.09x; so_vector, 25 of
    32 `knn` tasks 1.03-1.92x (filtered and `concurrency` worst; segments are searched
    concurrently since, `66d16fce6`); nested `randomized-sorted-term-queries` 1.62x OpenSearch;

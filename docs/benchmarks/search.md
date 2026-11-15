@@ -194,7 +194,15 @@ How the numbers were checked:
 ranges overlap):
 
 1. noaa `range_field_conjunction_big_range_big_term_query`: 5.12x Elasticsearch (49.4 ms against
-   9.6; the other seven range-field queries lead, from Round 6's 3.5-12x losses).
+   9.6; the other seven range-field queries lead, from Round 6's 3.5-12x losses). Leads since
+   `96c8d2fc5`: the `station.country_code` term (a keyword, indexed without frequencies) bounded
+   its score only over its own 128-doc block, so the block-max conjunction, led by the range's doc
+   set in 64k-doc windows, never skipped and collected all 1,188,182 matches, where Elasticsearch
+   stops at 10,001 (Lucene gives such a term one impact level over the whole term). After: p50
+   2.5-2.7 ms against Elasticsearch 9.5.5's 13.3-14.5 on the same lane-b CPUs (was 50.4-57.5;
+   server CPU 2.1 against 25.6-27.7 ms per request); noaa 5M merged to 8 segments (Elasticsearch
+   13), 3 alternating rounds of 30 requests, `96c8d2fc5`'s code against its parent, identical
+   responses; Rally rerun pending.
 2. nested `randomized-nested-queries-with-inner-hits_default_big_size`: 2.25x Elasticsearch (49.3
    against 21.9; Round 6: 2.3x); `..._default`: 1.20x (11.2 against 9.4). Leads since `7fe679918`
    (each hit's inner query runs over its own block, the block leading, so a range reads that
