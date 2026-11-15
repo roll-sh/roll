@@ -378,6 +378,10 @@ impl Secrets {
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let who = consumer.unwrap_or(&caller.principal).to_string();
         let mut r = Resolver::new(self, project, &dek, caller, resolve, &who);
+        // Code nobody vetted (a check, a sandbox, an untrusted preview) never gets a dynamic
+        // credential, whatever it asks: a GitHub App token, an AWS session or a database login
+        // would act for the project until its lease ends.
+        let dynamic = dynamic && !caller.grants.untrusted();
         r.no_dynamic = !dynamic;
         let mut values = BTreeMap::new();
         let mut problems = vec![];

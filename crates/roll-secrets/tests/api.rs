@@ -841,6 +841,9 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     // So does a service's resolve that can't renew (a preview's): no credential, no lease.
     let preview = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "preview:pr-7", "dynamic": false }))).await;
     assert!(preview["values"].get("TEMP_KEY").is_none() && preview["dynamic"] == json!(["TEMP_KEY"]) && preview["leases"] == json!([]), "{preview}");
+    // Code nobody vetted never gets one, even asking: a fork's check acting for the project.
+    let check = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "check:fork#1", "untrusted": true }))).await;
+    assert!(check["values"].get("TEMP_KEY").is_none() && check["leases"] == json!([]), "{check}");
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
     api.set("staging", "BROKEN", "${NOPE}").await;
     let (s, e) = api.call(Method::GET, "/environments/staging/values?dynamic=false&strict=1", None).await;

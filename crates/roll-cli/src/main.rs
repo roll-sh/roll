@@ -117,6 +117,7 @@ enum Cmd {
     /// Print a completion script for your shell: `roll completions zsh > "${fpath[1]}/_roll"`,
     /// `roll completions bash > ~/.local/share/bash-completion/completions/roll`,
     /// `roll completions fish > ~/.config/fish/completions/roll.fish`.
+    #[command(visible_alias = "completion")]
     Completions { shell: clap_complete::Shell },
     /// SSH with an environment's short-lived certificate (an SSH CA's `ssh` link): the key and
     /// certificate go to a private temporary directory for the session, then are deleted:

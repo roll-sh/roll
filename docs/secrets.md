@@ -1323,7 +1323,9 @@ unresolved reference or a dynamic credential fails the deploy, saying which. It 
 - **Untrusted consumers.** Anything that runs code nobody vetted resolves untrusted
   (`Secrets::untrusted` in process, `"untrusted": true` over HTTP): no protected environment is
   read, asked for or reached through a reference, an import or a base, whatever the caller may
-  otherwise do. Checks and sandboxes always are.
+  otherwise do, and no dynamic credential is issued (it's left out and named in `dynamic`: a
+  GitHub App token, an AWS session or a database login would act for the project until its lease
+  ends). Checks and sandboxes always are; so are untrusted previews, and roll apps reading one.
 - **roll tasks** runs functions in the user's own app, so it has no environment to inject. The app
   itself uses `roll run` or the resolve call.
 
