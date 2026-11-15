@@ -91,9 +91,17 @@ pub async fn running(name: &str) -> bool {
     docker(&["inspect", "-f", "{{.State.Running}}", name]).await.is_ok_and(|s| s == "true")
 }
 
-/// The host port a container's `port/tcp` is published on.
+/// The host port a container's `port/tcp` is published on. A container that already stopped
+/// (its command exited at once) publishes nothing: that's said, with its exit code, rather than
+/// Docker's "no public port".
 pub async fn host_port(name: &str, port: u16) -> anyhow::Result<u16> {
-    let out = docker(&["port", name, &format!("{port}/tcp")]).await?;
+    let out = match docker(&["port", name, &format!("{port}/tcp")]).await {
+        Ok(out) => out,
+        Err(e) => match docker(&["inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}", name]).await.ok().as_deref().and_then(|s| s.strip_prefix("false ")) {
+            Some(code) => anyhow::bail!("it exited with code {code} before listening on port {port}"),
+            None => return Err(e),
+        },
+    };
     out.lines()
         .filter_map(|l| l.rsplit_once(':').and_then(|(_, p)| p.trim().parse().ok()))
         .next()

@@ -415,10 +415,22 @@ pub trait Secrets: Send + Sync {
     /// latest, so a teardown that never happened leaves nothing for long; each converge pushes
     /// that out.
     async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], trusted: bool, expires_at: i64) -> anyhow::Result<()>;
-    /// Every variable of `env`, inherited ones included.
+    /// Every variable of `env`, inherited ones included, for `consumer` (a start of one service,
+    /// a job): a dynamic link issues it a fresh credential under a lease ([`Resolved::leases`]),
+    /// which the caller renews while it runs and revokes when it stops.
     /// `untrusted`: nothing of a protected environment resolves (directly, by reference, by
     /// import or through the base): what the preview's code reads is its own overrides and links.
-    async fn resolve(&self, project: &str, env: &str, untrusted: bool) -> anyhow::Result<Resolved>;
+    async fn resolve(&self, project: &str, env: &str, untrusted: bool, consumer: &str) -> anyhow::Result<Resolved>;
+    /// Push a lease's end out: `Some(its new end, ms)`, or `None` once it has ended (revoked,
+    /// expired, past its longest life): a new start resolves a new credential then.
+    async fn renew(&self, _project: &str, _lease: &str) -> anyhow::Result<Option<i64>> {
+        Ok(None)
+    }
+    /// End a lease now (Ok when it already has).
+    async fn revoke(&self, _project: &str, _lease: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Delete the environment, revoking every lease it issued.
     async fn delete(&self, project: &str, env: &str) -> anyhow::Result<()>;
 }
 
@@ -428,6 +440,8 @@ pub trait Secrets: Send + Sync {
 pub struct Resolved {
     pub values: Vec<(String, String)>,
     pub problems: Vec<String>,
+    /// The leases of the dynamic credentials among `values`.
+    pub leases: Vec<String>,
 }
 
 /// Until roll secrets lands: no environments, so services get the project's overrides and the
@@ -440,7 +454,7 @@ impl Secrets for NoSecrets {
         Ok(())
     }
 
-    async fn resolve(&self, _: &str, _: &str, _: bool) -> anyhow::Result<Resolved> {
+    async fn resolve(&self, _: &str, _: &str, _: bool, _: &str) -> anyhow::Result<Resolved> {
         Ok(Resolved::default())
     }
 

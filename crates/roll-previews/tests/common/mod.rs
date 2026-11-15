@@ -220,6 +220,9 @@ pub struct FakeApps {
     pub fail_remove: AtomicUsize,
     /// Runs inside a deploy (an API call landing while the reconciler works).
     pub on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// Services the runtime says run on this node, and those put to sleep.
+    pub running: Mutex<std::collections::HashSet<(String, String)>>,
+    pub slept: Mutex<Vec<(String, String)>>,
     /// The PNG every screenshot is (unset: the backend can't take one), and the previews taken.
     pub shot: Mutex<Option<Vec<u8>>>,
     /// The API operations a screenshot reads when it's asked to (`github.openapi`), by a
@@ -268,7 +271,9 @@ impl Apps for FakeApps {
         self.woken.lock().push((preview.to_string(), service.to_string()));
         Ok(())
     }
-    async fn sleep(&self, _: &str, _: &str) {}
+    async fn sleep(&self, p: &str, s: &str) {
+        self.slept.lock().push((p.to_string(), s.to_string()));
+    }
     async fn remove(&self, p: &str, s: &str) -> anyhow::Result<()> {
         if self.fail_remove.load(Ordering::SeqCst) > 0 {
             self.fail_remove.fetch_sub(1, Ordering::SeqCst);
@@ -304,15 +309,22 @@ impl Apps for FakeApps {
             .collect();
         Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None, api }))
     }
-    fn status(&self, _: &str, _: &str) -> Option<ServiceState> {
-        None
+    fn status(&self, p: &str, s: &str) -> Option<ServiceState> {
+        self.running.lock().contains(&(p.to_string(), s.to_string())).then_some(ServiceState::Running)
     }
 }
 
-/// roll secrets as previews see it: every `ensure` (environment, trusted).
+/// roll secrets as previews see it: every `ensure` (environment, trusted). With `dynamic`, each
+/// resolve issues a credential (`DB_PASSWORD=pw-<n>` under lease `lease-<n>`); renewals and
+/// revocations are recorded, and a lease in `ended` can't be renewed.
 #[derive(Default)]
 pub struct FakeSecrets {
     pub ensured: Mutex<Vec<(String, bool)>>,
+    pub dynamic: std::sync::atomic::AtomicBool,
+    pub issued: AtomicUsize,
+    pub renewed: Mutex<Vec<String>>,
+    pub revoked: Mutex<Vec<String>>,
+    pub ended: Mutex<std::collections::HashSet<String>>,
 }
 
 #[async_trait]
@@ -321,8 +333,23 @@ impl roll_previews::ports::Secrets for FakeSecrets {
         self.ensured.lock().push((env.to_string(), trusted));
         Ok(())
     }
-    async fn resolve(&self, _: &str, _: &str, _: bool) -> anyhow::Result<roll_previews::ports::Resolved> {
-        Ok(Default::default())
+    async fn resolve(&self, _: &str, _: &str, _: bool, _: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
+        if !self.dynamic.load(Ordering::SeqCst) {
+            return Ok(Default::default());
+        }
+        let n = self.issued.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(roll_previews::ports::Resolved { values: vec![("DB_PASSWORD".into(), format!("pw-{n}"))], problems: Vec::new(), leases: vec![format!("lease-{n}")] })
+    }
+    async fn renew(&self, _: &str, lease: &str) -> anyhow::Result<Option<i64>> {
+        if self.ended.lock().contains(lease) {
+            return Ok(None);
+        }
+        self.renewed.lock().push(lease.to_string());
+        Ok(Some(i64::MAX / 2))
+    }
+    async fn revoke(&self, _: &str, lease: &str) -> anyhow::Result<()> {
+        self.revoked.lock().push(lease.to_string());
+        Ok(())
     }
     async fn delete(&self, _: &str, _: &str) -> anyhow::Result<()> {
         Ok(())

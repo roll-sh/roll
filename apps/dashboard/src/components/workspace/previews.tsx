@@ -101,7 +101,9 @@ export function ProjectPreviews({
 
   return (
     <>
-      <div className="absolute inset-0 overflow-y-auto [scrollbar-width:thin]">
+      {/* On a wide screen the list makes room for the open sheet (340 px and its 8 px inset), so
+          no row hides under it; on a narrow one the sheet covers the list, as a drawer does. */}
+      <div className={`absolute inset-0 overflow-y-auto [scrollbar-width:thin] transition-[padding] duration-300 ease-drawer motion-reduce:transition-none ${opened ? "lg:pr-[356px]" : ""}`}>
         <div className="mx-auto w-full max-w-[960px] px-4 pt-5 pb-10">
           <header className="flex flex-wrap items-end gap-x-4 gap-y-3">
             <div className="min-w-0 flex-1">

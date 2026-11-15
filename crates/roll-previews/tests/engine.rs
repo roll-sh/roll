@@ -943,6 +943,45 @@ async fn a_pages_notes_by_its_environment_name() {
     assert!(e.engine.resolve_note(&p.id, "rv_someone else's", "bob").await.is_err());
 }
 
+/// A start's dynamic credentials (roll secrets' leases) live as long as it runs: renewed near
+/// their end, the previous start's revoked by the next, revoked once the service stops; one that
+/// can't be renewed puts the service to sleep, so its next request starts it with a new one.
+#[tokio::test]
+async fn a_start_s_dynamic_credentials_live_as_long_as_it_runs() {
+    use roll_previews::ports::EnvSource;
+    let e = env(json!({ "enabled": true }));
+    e.secrets.dynamic.store(true, Ordering::SeqCst);
+    e.code.open(change("chg_d", 7));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_d").unwrap().unwrap();
+    let web = (p.id.clone(), "web".to_string());
+    let password = |vars: &[(String, String)]| vars.iter().find(|(k, _)| k == "DB_PASSWORD").map(|(_, v)| v.clone());
+    let held = || e.engine.store.leases(Some(&p.id)).unwrap().into_iter().map(|l| l.lease).collect::<Vec<_>>();
+    let (_, vars) = e.engine.env(&p.id, "web").await.unwrap();
+    assert_eq!((password(&vars).as_deref(), held()), (Some("pw-1"), vec!["lease-1".to_string()]));
+    e.apps.running.lock().insert(web.clone());
+    e.engine.pass().await.unwrap();
+    assert!(e.secrets.renewed.lock().is_empty() && e.secrets.revoked.lock().is_empty(), "far from its end: left alone");
+    let soon = e.engine.store.now_ms().unwrap() + 60_000;
+    e.engine.store.set_lease_expiry(&p.id, "lease-1", soon).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(*e.secrets.renewed.lock(), ["lease-1"]);
+    assert!(e.engine.store.leases(Some(&p.id)).unwrap()[0].expires_at > soon, "its new end kept");
+    // A new start (a redeploy, a wake): the one before's credential goes.
+    let (_, vars) = e.engine.env(&p.id, "web").await.unwrap();
+    assert_eq!((password(&vars).as_deref(), held(), e.secrets.revoked.lock().clone()), (Some("pw-2"), vec!["lease-2".to_string()], vec!["lease-1".to_string()]));
+    // Ended (revoked in roll secrets, at its longest life): the service sleeps.
+    e.secrets.ended.lock().insert("lease-2".into());
+    e.engine.store.set_lease_expiry(&p.id, "lease-2", soon).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!((e.apps.slept.lock().clone(), held()), (vec![web.clone()], Vec::<String>::new()));
+    // Asleep or gone, it holds none.
+    e.engine.env(&p.id, "web").await.unwrap();
+    e.apps.running.lock().remove(&web);
+    e.engine.pass().await.unwrap();
+    assert_eq!((e.secrets.revoked.lock().last().map(String::as_str), held()), (Some("lease-3"), Vec::<String>::new()));
+}
+
 /// A preview's services send mail to roll's catcher, signed in as the preview, never with the
 /// project's own mail settings or a provider's API key (its data is production's people); what
 /// it caught is listed with it. `mail: "deliver"` hands the project's settings through.

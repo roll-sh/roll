@@ -779,7 +779,8 @@ impl Engine {
 
     async fn run_job(&self, r: &Row, s: &Settings, vars: &[(String, String)], what: &str, job: &crate::settings::Seed) -> anyhow::Result<()> {
         let untrusted = !(s.secrets.allow_production && r.trusted);
-        let mut env = self.resolve_secrets(r, untrusted).await?;
+        // Its dynamic credentials last as long as the job does.
+        let (mut env, leases) = self.resolve_secrets(r, untrusted, what).await?;
         for (k, v) in vars {
             set(&mut env, k, v.clone());
         }
@@ -788,7 +789,13 @@ impl Engine {
         set(&mut env, "ROLL_CHANGESET", r.build().to_string());
         let run = crate::ports::SeedJob { preview: r.id.clone(), repo: r.repo.clone(), revision: r.build().to_string(), seed: job.clone(), env };
         self.store.log(&r.id, &format!("{what}: {}", job.run.lines().next().unwrap_or("")))?;
-        let (code, tail) = self.apps.seed(&run).await.map_err(|e| anyhow::anyhow!("{what}: {e:#}"))?;
+        let ran = self.apps.seed(&run).await;
+        for l in &leases {
+            if let Err(e) = self.secrets.revoke(&r.project_id, l).await {
+                warn!(preview = %r.id, lease = %l, error = %e, "previews: revoking a job's dynamic credential (it expires by itself)");
+            }
+        }
+        let (code, tail) = ran.map_err(|e| anyhow::anyhow!("{what}: {e:#}"))?;
         if code != 0 {
             anyhow::bail!("the {what} command failed with exit code {code}\n\n{}", tail.trim_end());
         }

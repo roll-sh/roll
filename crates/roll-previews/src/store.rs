@@ -179,6 +179,14 @@ CREATE TABLE IF NOT EXISTS bypass (
     hash TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS leases (
+    preview_id TEXT NOT NULL,
+    service TEXT NOT NULL,
+    lease TEXT NOT NULL,
+    issued_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, lease)
+);
 ";
 
 /// How long a screenshot link (in a pull request comment) works after the screenshot was taken.
@@ -757,7 +765,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1851,6 +1859,42 @@ impl Store {
             }
             Ok::<_, Error>(old.into_iter().map(|rev| format!("{service}@{rev}")).collect())
         })
+    }
+
+    // ── leases: the dynamic credentials a service started with (roll secrets'; ids only) ──
+
+    /// Lease ids a start of `service` was given, each thought to end `expires_at` (ms) until a
+    /// renewal says otherwise.
+    pub fn add_leases(&self, id: &str, service: &str, leases: &[String], expires_at: i64) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            for l in leases {
+                c.execute(
+                    "INSERT INTO leases (preview_id, service, lease, issued_at, expires_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (preview_id, lease) DO NOTHING",
+                    params![id, service, l, now, expires_at],
+                )?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// Every lease held, `id`'s only when given.
+    pub fn leases(&self, id: Option<&str>) -> Result<Vec<crate::LeaseRow>> {
+        let row = |r: &code_sql::Row<'_>| Ok(crate::LeaseRow { preview: r.get(0)?, service: r.get(1)?, lease: r.get(2)?, issued_at: r.get(3)?, expires_at: r.get(4)? });
+        Ok(self.db.read(|c| match id {
+            Some(id) => c.query("SELECT preview_id, service, lease, issued_at, expires_at FROM leases WHERE preview_id = ? ORDER BY issued_at", [id], row),
+            None => c.query("SELECT preview_id, service, lease, issued_at, expires_at FROM leases ORDER BY issued_at", (), row),
+        })?)
+    }
+
+    pub fn set_lease_expiry(&self, id: &str, lease: &str, expires_at: i64) -> Result<()> {
+        self.db.write(|c| c.execute("UPDATE leases SET expires_at = ? WHERE preview_id = ? AND lease = ?", params![expires_at, id, lease]).map(drop))?;
+        Ok(())
+    }
+
+    pub fn drop_lease(&self, id: &str, lease: &str) -> Result<()> {
+        self.db.write(|c| c.execute("DELETE FROM leases WHERE preview_id = ? AND lease = ?", params![id, lease]).map(drop))?;
+        Ok(())
     }
 
     /// A link that opens the preview until `expires_at` (Vercel's shareable links), on a token of

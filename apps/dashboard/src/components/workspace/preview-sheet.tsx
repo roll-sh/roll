@@ -124,7 +124,7 @@ export function PreviewSheet({
       <div key={tab} className="rise flex-1 overflow-y-auto p-3 [scrollbar-width:none]">
         {tab === "Overview" ? (
           <>
-            {p.error && <p className="mb-3 rounded-lg border border-danger/40 bg-danger/10 px-2.5 py-2 text-[11.5px] break-words text-danger">{p.error}</p>}
+            {p.error && <p className="mb-3 rounded-lg border border-danger/40 bg-danger/10 px-2.5 py-2 text-[11.5px] break-words whitespace-pre-line text-danger">{p.error}</p>}
             {feedback && (
               <div className="mb-3">
                 <FeedbackForm preview={p} feedback={feedback} onPosted={onFeedbackPosted} />
@@ -168,7 +168,7 @@ export function PreviewSheet({
                       </button>
                     </div>
                     {phoneFor === s.name && <PhoneCode id={p.id} service={s.name} />}
-                    {s.error && <p className="mt-0.5 text-[11px] break-words text-danger">{s.error}</p>}
+                    {s.error && <p className="mt-0.5 text-[11px] break-words whitespace-pre-line text-danger">{s.error}</p>}
                   </div>
                 ))}
               </div>
@@ -228,7 +228,7 @@ export function PreviewSheet({
                             </span>
                           )}
                         </div>
-                        {r.error && <p className="mt-0.5 text-[11px] break-words text-danger">{r.error}</p>}
+                        {r.error && <p className="mt-0.5 text-[11px] break-words whitespace-pre-line text-danger">{r.error}</p>}
                       </div>
                       {!gone && r.ref && <CopyConnection previewId={p.id} kind={r.kind} parent={r.parent} name={names.get(id) ?? r.parent} />}
                       {!gone && (
