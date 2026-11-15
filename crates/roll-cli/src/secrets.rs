@@ -3158,8 +3158,8 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
                     }
                 }
             }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))) => {
-                let now = match digests(c, &follow).await {
+            now = next_digests(c, &follow, &last, std::time::Duration::from_secs(interval.max(1))) => {
+                let now = match now {
                     Ok(d) => d,
                     Err(e) => {
                         eprintln!("roll secrets render: couldn't check {} ({e}); {out} stays as it is", c.at.env);
@@ -3581,6 +3581,25 @@ async fn digests(c: &Client<'_>, follow: &[String]) -> anyhow::Result<Digests> {
 
 type Digests = std::collections::BTreeMap<String, String>;
 
+/// The followed folders' digests, once they may have moved. One folder (the usual case) is
+/// long-polled: the answer comes as soon as it moves (or after 25 s unchanged); a server that
+/// answers at once is asked again after `every`. Several are checked every `every`.
+async fn next_digests(c: &Client<'_>, follow: &[String], last: &Digests, every: std::time::Duration) -> anyhow::Result<Digests> {
+    if let [p] = follow
+        && let Some(d) = last.get(p)
+    {
+        let asked = std::time::Instant::now();
+        let sep = if p.contains('?') { '&' } else { '?' };
+        let now = Digests::from([(p.clone(), s(&c.call(Method::GET, &format!("{p}{sep}since={}&wait=25", enc(d)), None).await?["digest"]))]);
+        if now == *last && asked.elapsed() < std::time::Duration::from_secs(1) {
+            tokio::time::sleep(every).await;
+        }
+        return Ok(now);
+    }
+    tokio::time::sleep(every).await;
+    digests(c, follow).await
+}
+
 /// Which followed folders moved between two polls, as `env:/path` (another project's as
 /// `prj_…@env:/path`), for a watch's message.
 fn moved(c: &Client<'_>, last: &Digests, now: &Digests) -> String {
@@ -3798,8 +3817,8 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: 
                         }
                     }
                 }
-                _ = tokio::time::sleep(every) => {
-                    let now = match digests(c, &follow).await {
+                now = next_digests(c, &follow, &last, every) => {
+                    let now = match now {
                         Ok(d) => d,
                         Err(e) => {
                             eprintln!("roll run: couldn't check {} ({e}); still running", at.env);
