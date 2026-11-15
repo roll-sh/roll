@@ -757,6 +757,10 @@ pub enum AppsCmd {
         /// A target's latest deliveries, newest first: what was sent, how it answered, the tries.
         #[arg(long, value_name = "ID", conflicts_with_all = ["add", "remove", "edit", "test"])]
         deliveries: Option<String>,
+        /// Email the project's owner (at their account's address; a project's first service
+        /// adds this once, so it's for one removed before).
+        #[arg(long, conflicts_with_all = ["add", "remove", "edit", "test", "deliveries"])]
+        email: bool,
     },
     /// The project's spend limits this month: show them, or set `--alert` and `--hard` (dollars;
     /// `0` removes one). At the hard limit its services stop until it's raised.
@@ -2934,10 +2938,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::Notifications { target, add, kind, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries } => {
-            if add.is_none() && edit.is_none() && (events.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some()) {
-                bail!("--events, --only-env, --only-service and --previews go with --add or --edit");
+        AppsCmd::Notifications { target, add, kind, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries, email } => {
+            if add.is_none() && edit.is_none() && !email && (events.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some()) {
+                bail!("--events, --only-env, --only-service and --previews go with --add, --email or --edit");
             }
+            let (add, kind) = if email { (Some(String::new()), "email".to_string()) } else { (add, kind) };
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/projects/{}/notifications", enc(&s(&svc["project"])));
             let events: Option<Vec<String>> = events.map(|e| e.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect());
@@ -2972,6 +2977,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 t
             } else if let Some(url) = add {
                 let mut body = json!({ "kind": kind, "url": url, "environments": only_env, "services": only_service, "previews": previews.unwrap_or(false) });
+                if kind == "email" {
+                    body.as_object_mut().expect("object").remove("url");
+                }
                 if let Some(e) = events {
                     body["events"] = json!(e);
                 }

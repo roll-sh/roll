@@ -633,10 +633,10 @@ fn secrets_import_sources(b: &Value) -> Sources {
 }
 
 /// A new apps notification: a webhook (the default) answers its signing secret once, so `reveal`;
-/// a Slack or Discord one answers none, so `write`.
+/// a Slack, Discord or email one (the project's owner) answers none, so `write`.
 fn apps_notification_action(b: &Value) -> Action {
     match b["kind"].as_str() {
-        Some("slack" | "discord") => Action::Write,
+        Some("slack" | "discord" | "email") => Action::Write,
         _ => Action::Reveal,
     }
 }

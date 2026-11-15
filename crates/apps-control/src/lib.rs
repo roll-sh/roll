@@ -211,6 +211,8 @@ pub struct Apps {
     capped_refresh: tokio::sync::Mutex<()>,
     /// roll previews' notes for a preview's feedback button ([`Apps::set_feedback_notes`]).
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
+    /// Email to projects' owners (`notify`), once rolld has accounts.
+    mail: std::sync::OnceLock<Arc<dyn integrations::Mailbox>>,
     /// Log drains whose batch came back (the drainer sends the next).
     drain_done: Arc<Mutex<Vec<String>>>,
     /// Projects whose drains changed on this node: the drainer reads theirs again (only theirs).
@@ -342,6 +344,7 @@ impl Apps {
             capped: Mutex::new(Default::default()),
             capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
+            mail: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
             access: Mutex::new(HashMap::new()),
@@ -505,6 +508,8 @@ impl Apps {
             let _ = self.delete_service(&row.id).await;
             return Err(e);
         }
+        // The project's owner hears what needs someone from its first service on.
+        self.offer_email(&row.project).await;
         // A repo or an image deploys at once; an upload waits for `roll up`.
         if !matches!(source, Source::Upload) {
             self.deploy(&row.id, PRODUCTION, json!({}), By { trigger: Trigger::Api, actor: actor.clone() }, None, None).await?;
@@ -2185,6 +2190,23 @@ impl Apps {
 
     pub(crate) fn feedback_notes(&self) -> Option<Arc<dyn integrations::FeedbackNotes>> {
         self.notes.get().cloned()
+    }
+
+    /// How email reaches people (roll-accounts' mailer). Set once.
+    pub fn set_mailbox(&self, mail: Arc<dyn integrations::Mailbox>) {
+        let _ = self.mail.set(mail);
+    }
+
+    /// The mailbox, when mail goes out.
+    pub(crate) fn mailbox(&self) -> Option<Arc<dyn integrations::Mailbox>> {
+        self.mail.get().filter(|m| m.on()).cloned()
+    }
+
+    /// The project's owner (`usr_…`); none for the operator's projects or without a workspace.
+    pub(crate) async fn project_owner(&self, project: &str) -> Option<String> {
+        let ws = self.deps.workspace.clone()?;
+        let p = project.to_string();
+        tokio::task::spawn_blocking(move || ws.get(roll_workspace::Scope::All, &p).ok().map(|p| p.owner)).await.ok().flatten().filter(|o| !o.is_empty())
     }
 
     /// Where a preview's feedback goes (the preview in roll's dashboard), for a visitor who came

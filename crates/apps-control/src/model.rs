@@ -208,7 +208,7 @@ pub const DRAIN_SOURCES: [&str; 3] = ["runtime", "http", "build"];
 pub struct NotifyTarget {
     pub id: String,
     pub project: String,
-    /// `webhook`, `slack`, `discord`.
+    /// `webhook`, `slack`, `discord`, `email` (the project's owner).
     pub kind: String,
     /// The URL's host, for recognising it (the URL itself is a secret).
     pub host: String,

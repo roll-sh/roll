@@ -1,5 +1,8 @@
 //! Notifications (docs/apps/README.md, "Notifications"): a project's events go to its targets, a
-//! webhook (JSON, signed with HMAC-SHA256), a Slack or a Discord incoming webhook.
+//! webhook (JSON, signed with HMAC-SHA256), a Slack or a Discord incoming webhook, or email to the
+//! project's owner (on by default: a project's first service adds it, once; Render's and Vercel's).
+//! Email only ever goes to the owner's own account address ([`crate::integrations::Mailbox`]),
+//! never to one a caller names, so no tenant can make roll mail a stranger.
 //!
 //! One node (the singleton `apps:notify`) follows the event log after a cursor kept in `state`;
 //! the deliveries of a page of events and the cursor's move are one transaction, so an event is
@@ -57,8 +60,22 @@ impl Apps {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
         let kind = o.get("kind").and_then(Value::as_str).unwrap_or("webhook").to_string();
-        let url = o.get("url").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("url is required".into()))?.trim().to_string();
-        let host = self.check_target(&kind, &url)?;
+        let (url, host) = if kind == "email" {
+            if o.contains_key("url") {
+                return Err(Error::BadRequest("an email target goes to the project's owner, not to an address".into()));
+            }
+            if self.mailbox().is_none() {
+                return Err(Error::BadRequest("email isn't set up on this deployment (ROLL_MAIL)".into()));
+            }
+            if self.project_owner(project).await.is_none() {
+                return Err(Error::BadRequest("this project has no owner with an account to email".into()));
+            }
+            ("owner".to_string(), "the project's owner".to_string())
+        } else {
+            let url = o.get("url").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("url is required".into()))?.trim().to_string();
+            let host = self.check_target(&kind, &url)?;
+            (url, host)
+        };
         let (events, filters) = self.target_fields(project, &o, None).await?;
         let p = project.to_string();
         {
@@ -78,6 +95,28 @@ impl Apps {
             v["secret"] = json!(s);
         }
         Ok(v)
+    }
+
+    /// A project's first service: its owner is emailed what needs someone, once per project (a
+    /// removed target stays removed). Nothing without mail, or for an operator's project.
+    pub(crate) async fn offer_email(self: &Arc<Self>, project: &str) {
+        if self.mailbox().is_none() || self.project_owner(project).await.is_none() {
+            return;
+        }
+        let key = format!("apps.email_offered.{project}");
+        let first = self
+            .db(move |s| {
+                if s.get_state(&key)?.is_some() {
+                    return Ok(false);
+                }
+                s.set_state(&key, "1")?;
+                Ok(true)
+            })
+            .await
+            .unwrap_or(false);
+        if first && let Err(e) = self.add_target(project, json!({ "kind": "email" })).await {
+            tracing::warn!(project, error = %e, "apps: the owner's email target wasn't added");
+        }
     }
 
     /// A target's events and filters from a body: what's absent is `current`'s (an edit), else
@@ -171,7 +210,7 @@ impl Apps {
             "slack" if !self.cfg.allow_private => return bad("a Slack incoming webhook is on hooks.slack.com"),
             "discord" if !self.cfg.allow_private => return bad("a Discord webhook is https://discord.com/api/webhooks/…"),
             "slack" | "discord" => {}
-            _ => return Err(Error::BadRequest("kind is webhook, slack or discord".into())),
+            _ => return Err(Error::BadRequest("kind is webhook, slack, discord or email".into())),
         }
         Ok(host)
     }
@@ -388,6 +427,17 @@ impl Apps {
     #[allow(clippy::too_many_arguments)]
     async fn send(&self, t: &NotifyTarget, url: &str, secret: Option<&str>, delivery: &str, e: &Event, title: &str, text: &str) -> (Option<u16>, Option<String>) {
         let link = self.cfg.web_url.as_ref().filter(|_| !e.service.is_empty()).map(|w| format!("{w}/dashboard/apps/{}?env={}", e.service, e.environment));
+        if t.kind == "email" {
+            // The owner as they are now (a project handed over mails its new owner).
+            let Some(mail) = self.mailbox() else { return (None, Some("email isn't set up on this node".into())) };
+            let Some(owner) = self.project_owner(&t.project).await else { return (None, Some("the project has no owner with an account".into())) };
+            let open = link.map(|l| format!("\n\nOpen it in roll: {l}")).unwrap_or_default();
+            let text = format!("{text}{open}\n\nYou get this because you own the project. Its notification settings in roll say what's sent, or remove this email.");
+            return match mail.send(&owner, &format!("[roll] {title}"), &text).await {
+                Ok(()) => (None, None),
+                Err(err) => (None, Some(err.to_string())),
+            };
+        }
         let body = match t.kind.as_str() {
             // Slack reads `<…>` as links and mentions (`<!channel>`) and `&` as an entity start:
             // a commit author or an error can't ping a channel or hide a link.

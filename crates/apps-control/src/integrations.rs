@@ -140,6 +140,16 @@ pub trait FeedbackNotes: Send + Sync {
     async fn notes(&self, env: &str, path: &str) -> anyhow::Result<Vec<Note>>;
 }
 
+/// Email to a person through their account (rolld fills it with roll-accounts' mailer). Unset or
+/// off: no email targets.
+#[async_trait]
+pub trait Mailbox: Send + Sync {
+    /// Whether mail goes out.
+    fn on(&self) -> bool;
+    /// Mail `user` (`usr_…`) at their own account's address.
+    async fn send(&self, user: &str, subject: &str, text: &str) -> anyhow::Result<()>;
+}
+
 /// One of a project's secrets as a variable.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SecretVar {

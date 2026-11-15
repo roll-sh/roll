@@ -3511,3 +3511,50 @@ async fn a_deleted_service_leaves_nothing_behind() {
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{web}"), None).await.0, StatusCode::NO_CONTENT);
     assert!(!w.fake.networks().contains(&net) && w.fake.instances(&web).is_empty(), "{:?}", w.fake.networks());
 }
+
+/// Mail a fake mailbox took: (user, subject, text).
+#[derive(Default)]
+struct FakeMail(parking_lot::Mutex<Vec<(String, String, String)>>);
+
+#[async_trait::async_trait]
+impl apps_control::integrations::Mailbox for FakeMail {
+    fn on(&self) -> bool {
+        true
+    }
+    async fn send(&self, user: &str, subject: &str, text: &str) -> anyhow::Result<()> {
+        self.0.lock().push((user.into(), subject.into(), text.into()));
+        Ok(())
+    }
+}
+
+/// A project's owner is emailed what needs them from its first service on (Render's and
+/// Vercel's default), only ever at their account (never an address a caller names); a removed
+/// email target stays removed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_projects_owner_is_emailed_by_default() {
+    let w = world().await;
+    let mail = Arc::new(FakeMail::default());
+    w.apps.set_mailbox(mail.clone());
+    let project = w.apps.deps.workspace.as_ref().unwrap().create("usr_ada", "shop", "", None).unwrap().id;
+    let new = |name: &str| json!({ "project": project, "name": name, "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80} });
+    assert_eq!(call(&w.api, "POST", "/v1/apps/services", Some(new("web"))).await.0, StatusCode::CREATED);
+    let base = format!("/v1/apps/projects/{project}/notifications");
+    let (_, list) = call(&w.api, "GET", &base, None).await;
+    let t = list.as_array().unwrap().iter().find(|t| t["kind"] == "email").cloned().unwrap_or_else(|| panic!("{list}"));
+    assert!(t["events"].as_array().unwrap().contains(&json!("deploy.failed")), "{t}");
+    let tid = t["id"].as_str().unwrap();
+    assert_eq!(call(&w.api, "POST", &format!("{base}/{tid}/test"), None).await.1["ok"], true);
+    let sent = mail.0.lock().clone();
+    assert_eq!((sent.len(), sent[0].0.as_str()), (1, "usr_ada"), "{sent:?}");
+    assert!(sent[0].1.starts_with("[roll] ") && sent[0].2.contains("you own the project"), "{sent:?}");
+    // Never to an address someone names.
+    let (st, _) = call(&w.api, "POST", &base, Some(json!({"kind": "email", "url": "someone@example.com"}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    // Removed, it stays removed when the project gets another service.
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/{tid}"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(call(&w.api, "POST", "/v1/apps/services", Some(new("api"))).await.0, StatusCode::CREATED);
+    assert_eq!(call(&w.api, "GET", &base, None).await.1, json!([]));
+    // An operator's project has no owner to email.
+    let (st, _) = call(&w.api, "POST", &format!("/v1/apps/projects/{}/notifications", w.project), Some(json!({"kind": "email"}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}
