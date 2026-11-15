@@ -10,16 +10,19 @@ export const ACTIONS = ["read", "write", "delete", "reveal", "deploy", "admin"] 
 export type Action = (typeof ACTIONS)[number];
 export type Effect = "allow" | "ask";
 
-/** `index`: only some indices of it (search: `logs-*`, `a,b`). */
+/** `index`: only some named parts of it (search's indices, `logs-*,a`; secrets' encryption keys). */
 export type Selector = { project: string } | { id: string; index?: string };
 
+/** What a product's resources narrow to by name (`{id, index}`), as roll-auth's `sub_resources`. */
+export const SUB_RESOURCES: Record<string, string> = { search: "indices", secrets: "encryption keys" };
+
 /**
- * A selector as the builder writes it: an id, or for search `cluster/indices` (`cl_1/logs-*`;
- * neither a cluster id nor an index name has a `/`).
+ * A selector as the builder writes it: an id, or `id/names` where the product has named parts
+ * (`cl_1/logs-*`, `prj_1/payments`; neither an id nor such a name has a `/`).
  */
 export const selectorText = (s: { id: string; index?: string }): string => (s.index ? `${s.id}/${s.index}` : s.id);
 export function selectorOf(product: string, text: string): { id: string; index?: string } {
-  const at = product === "search" ? text.indexOf("/") : -1;
+  const at = SUB_RESOURCES[product] ? text.indexOf("/") : -1;
   return at > 0 && at < text.length - 1 ? { id: text.slice(0, at), index: text.slice(at + 1) } : { id: text };
 }
 
@@ -42,12 +45,32 @@ export interface OAuthClient {
   last_used_at: number | null;
 }
 
+/** A token's MCP offer: its tools, its prompts and what the list costs an agent's context. */
+export interface AgentSees {
+  tools: { name: string; title: string; product: string; read_only: boolean; destructive: boolean }[];
+  prompts: { name: string; title: string; description: string }[];
+  context_tokens?: number;
+  live: boolean;
+}
+
 export interface Grant {
   id: string;
   name: string;
-  kind: "token" | "oauth";
+  /** `workload`: a short-lived token a workload got by proving who it is (roll secrets' identity logins). */
+  kind: "token" | "oauth" | "workload";
   rules: Rule[];
   expires_at: number | null;
+  /** It works only from then on (Cloudflare's TTL start); before, it's refused. */
+  not_before?: number | null;
+  /** A person's token waiting for an admin's approval: it doesn't work until then. */
+  pending?: boolean;
+  /** When an admin approved it, and who decided (an admin's id, or "operator"). */
+  approved_at?: number | null;
+  decided_by?: string | null;
+  /** What its secret looks like (`rlt_…a1b2`), to match one found in a config to this row. */
+  hint?: string | null;
+  /** The person it's theirs (`usr_…`), when it isn't the operator's. */
+  user?: string | null;
   ip_allow: string[];
   /** "operator", or the grant that made it. */
   created_by: string;
@@ -56,7 +79,7 @@ export interface Grant {
   last_used_ip: string | null;
   revoked_at: number | null;
   client?: OAuthClient;
-  /** Requests a minute it may make (per node); absent: no limit. */
+  /** Requests a minute it may make, across the fleet (each node enforces its share); absent: no limit. */
   rate_per_minute?: number;
   /** Why roll revoked it (a leaked secret: "found in acme/site .env at …"). */
   revoked_why?: string;
@@ -72,6 +95,7 @@ export interface NewGrant {
   name: string;
   rules: Rule[];
   expires_at?: number | null;
+  not_before?: number | null;
   ip_allow?: string[];
   rate_per_minute?: number | null;
   ask_otherwise?: boolean;
@@ -81,11 +105,11 @@ export interface NewGrant {
 export interface Checkup {
   grant: { id: string; name: string; kind: Grant["kind"]; last_used_at: number | null; expires_at: number | null; created_at: number };
   /** Most serious first. */
-  findings: { kind: "everything" | "never_expires" | "unused" | "narrower" | "roams"; why: string; fix: "tighten" | "expire" | "revoke" | "limit_addresses" }[];
+  findings: { kind: "pending" | "unapproved" | "everything" | "never_expires" | "unused" | "narrower" | "roams"; why: string; fix: "approve" | "tighten" | "expire" | "revoke" | "limit_addresses" }[];
 }
 
 /** Checkup findings, most serious first. */
-const FINDING_ORDER: Checkup["findings"][number]["kind"][] = ["everything", "never_expires", "unused", "roams", "narrower"];
+const FINDING_ORDER: Checkup["findings"][number]["kind"][] = ["pending", "unapproved", "everything", "never_expires", "unused", "roams", "narrower"];
 
 /** The checkup's tokens, the most serious first (by each one's worst finding, then how many). */
 export function byConcern(list: Checkup[]): Checkup[] {
@@ -95,6 +119,7 @@ export function byConcern(list: Checkup[]): Checkup[] {
 
 /** What a checkup fix is called on its button. */
 export const FIX_LABEL: Record<Checkup["findings"][number]["fix"], string> = {
+  approve: "Approve or deny",
   tighten: "Tighten",
   expire: "Give it an expiry",
   revoke: "Revoke",
@@ -183,9 +208,11 @@ export function approvableTogether(shown: Approval[]): { grant_id: string; grant
 export interface AuditEvent {
   id: string;
   at: number;
+  /** A request's grant (`null`: the operator's); for a change (`source: "access"`), the token it's about. */
   grant_id: string | null;
   grant_name: string | null;
-  source: "api" | "mcp";
+  /** A request (`api`, `mcp`), a change to tokens and access (`access`: who in `args.by`), or roll's own act (`leak`, `workload`). */
+  source: "api" | "mcp" | "access" | "leak" | "workload";
   tool: string | null;
   method: string;
   /** The route pattern, never the path. */
@@ -193,7 +220,8 @@ export interface AuditEvent {
   product: string | null;
   action: Action | null;
   resource: string | null;
-  decision: "allow" | "deny" | "ask";
+  /** A request's `allow`, `deny` or `ask`; a change's name (`create`, `change`, `rotate`, `revoke`, `connect`, `approve`, `policy`, …). */
+  decision: string;
   approval: string | null;
   status: number;
   args: unknown;
@@ -220,22 +248,46 @@ export interface Catalog {
   api_url: string;
 }
 
-export type Me = { kind: "operator"; locked: boolean } | { kind: "token" | "oauth"; grant: Grant; locked: boolean };
+export type Me =
+  | { kind: "operator"; locked: boolean }
+  | { kind: "token" | "oauth"; grant: Grant; locked: boolean }
+  /** A signed-in user who isn't an admin: their tokens act as them and reach only `reach`. */
+  | { kind: "user"; user: { id: string; handle: string }; reach: string[]; approve_people?: Action[]; locked: boolean };
+
+/** Whether a token `me` makes with these rules waits for an admin (the server's `Policy::needs_approval`). */
+export function waitsForAdmin(me: Me | null, rules: Rule[], askOtherwise: boolean): boolean {
+  const approve = me?.kind === "user" ? (me.approve_people ?? []) : [];
+  return approve.length > 0 && (askOtherwise || rules.some((r) => (Object.keys(r.actions) as Action[]).some((a) => approve.includes(a))));
+}
+
+/** The catalogue as `me` may use it: a user's tokens reach only what their account does. */
+export function catalogFor(c: Catalog, me: Me | null): Catalog {
+  if (me?.kind !== "user") return c;
+  return { ...c, products: c.products.filter((p) => me.reach.includes(p)) };
+}
+
+/** How long a rotated token's old secret may keep working, in seconds (0: it stops at once). */
+export const KEEP_OLD: { label: string; s: number }[] = [
+  { label: "stops now", s: 0 },
+  { label: "works 1 hour", s: 3600 },
+  { label: "works 1 day", s: 86_400 },
+  { label: "works 7 days", s: 604_800 },
+];
 
 export interface Policy {
   max_days?: number | null;
   require_expiry?: boolean;
   /** Tokens unused this many days stop working. */
   max_idle_days?: number | null;
+  /** A person's token reaching any of these waits for an admin's approval (GitHub's organizations' rule). */
+  approve_people?: Action[];
 }
 
-export interface Consent {
-  client_id: string;
-  redirect_uri: string;
-  code_challenge: string;
-  code_challenge_method?: string;
-  state?: string;
-  resource?: string;
+/** The actions an admin may require approval for in people's tokens, strongest first. */
+export const APPROVABLE: Action[] = ["admin", "reveal", "deploy", "delete"];
+
+/** What a person allows a client: on the consent screen, or for a device signing in. */
+export interface Allowed {
   name?: string;
   rules: Rule[];
   expires_at?: number | null;
@@ -244,8 +296,31 @@ export interface Consent {
   ask_otherwise?: boolean;
 }
 
+export interface Consent extends Allowed {
+  client_id: string;
+  redirect_uri: string;
+  code_challenge: string;
+  code_challenge_method?: string;
+  state?: string;
+  resource?: string;
+}
+
+/** A device signing in (RFC 8628), as the person who entered its code sees it. */
+export interface DeviceRequest {
+  user_code: string;
+  client: { id: string; name: string; uri?: string | null };
+  scope?: string | null;
+  /** The network it asked from (`203.0.113.0/24`), to tell it isn't yours. */
+  network?: string | null;
+  /** Whether it asked from this browser's network: when not, someone may have sent you the code. */
+  same_network?: boolean;
+  created_at: number;
+  expires_at: number;
+}
+
 const token = (id: string) => `/v1/access/tokens/${encodeURIComponent(id)}`;
 const approval = (id: string) => `/v1/access/approvals/${encodeURIComponent(id)}`;
+const device = (code: string) => `/v1/access/oauth/devices/${encodeURIComponent(code.trim())}`;
 
 export interface AuditFilter {
   grant?: string;
@@ -290,6 +365,8 @@ export const accessApi = {
   me: () => call<Me>("GET", "/v1/access"),
   catalog: () => call<Catalog>("GET", "/v1/access/catalog"),
   tokens: () => call<Grant[]>("GET", "/v1/access/tokens"),
+  /** The latest workload tokens (they're not in `tokens`). */
+  workloads: () => call<Grant[]>("GET", "/v1/access/tokens?kind=workload"),
   token: (id: string) => call<Grant>("GET", token(id)),
   /** The token is in the answer this once. */
   create: (g: NewGrant) => call<{ grant: Grant; token: string }>("POST", "/v1/access/tokens", g),
@@ -299,6 +376,8 @@ export const accessApi = {
   checkup: () => call<Checkup[]>("GET", "/v1/access/checkup"),
   /** The networks it's been used from (/24s and /48s), newest first. */
   networks: (id: string) => call<{ network: string; first_at: number; last_at: number }[]>("GET", `${token(id)}/networks`),
+  /** What an agent connected with this token is offered over MCP (`tools/list`, `prompts/list`). */
+  agentSees: (id: string) => call<AgentSees>("GET", `${token(id)}/tools`),
   /** Take back what an approval allowed it for a while (and the approval, if unused). */
   forget: (id: string, approval: string) => call<Grant>("DELETE", `${token(id)}/temporary/${encodeURIComponent(approval)}`),
   /** Its rules narrowed to what its allowed requests used in the last `days` (never wider): a proposal. */
@@ -306,7 +385,11 @@ export const accessApi = {
   /** Apply it, made again now, if its rules are still `from` (else 409: look again). */
   applyTighten: (id: string, from: Rule[], days?: number) => call<Grant>("POST", `${token(id)}/tighten`, { from, days }),
   /** A new secret, the same rules; the old one stops at once. Shown this once. */
-  rotate: (id: string) => call<{ grant: Grant; token: string }>("POST", `${token(id)}/rotate`),
+  /** A new secret; `keepOldS`: the old one keeps working that long (at most a week), as Stripe's roll key. */
+  rotate: (id: string, keepOldS?: number) => call<{ grant: Grant; token: string }>("POST", `${token(id)}/rotate`, keepOldS ? { keep_old_for_s: keepOldS } : {}),
+  /** An admin decides a person's pending token: approved it works, denied it's revoked. */
+  approveToken: (id: string) => call<Grant>("POST", `${token(id)}/approve`),
+  denyToken: (id: string) => call<Grant>("POST", `${token(id)}/deny`),
   /** What the evaluator would decide for a request, without running it (`token`: the operator asks for one). */
   check: (method: string, path: string, opts: { body?: unknown; token?: string } = {}) =>
     call<{ decision: "allow" | "ask" | "deny"; product?: string; action?: Action; resource?: string | null; route?: string; why?: string }>(
@@ -320,9 +403,9 @@ export const accessApi = {
   approve: (id: string, remember?: Remember) => call<Approval>("POST", `${approval(id)}/approve`, remember && remember !== "once" ? { remember } : {}),
   deny: (id: string, reason?: string) => call<Approval>("POST", `${approval(id)}/deny`, { reason }),
   audit: (f: AuditFilter = {}) => call<AuditEvent[]>("GET", `/v1/access/audit${query(f)}`),
-  /** The log as JSON lines (one event per line), for a download. */
-  auditExport: async (f: AuditFilter = {}) => {
-    const res = await fetch(`${ROLL_API}/v1/access/audit${query({ ...f, format: "jsonl" })}`, { headers: apiHeaders(), cache: "no-store" });
+  /** The log as CSV (a spreadsheet) or JSON lines (a log tool), for a download. */
+  auditExport: async (f: AuditFilter = {}, format: "csv" | "jsonl" = "csv") => {
+    const res = await fetch(`${ROLL_API}/v1/access/audit${query({ ...f, format })}`, { headers: apiHeaders(), cache: "no-store" });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     return res.blob();
   },
@@ -339,11 +422,46 @@ export const accessApi = {
   client: (id: string) => call<OAuthClient>("GET", `/v1/access/oauth/clients/${encodeURIComponent(id)}`),
   /** The consent screen's answer: where to send the browser (the client's redirect, with a code). */
   authorize: (c: Consent) => call<{ redirect: string }>("POST", "/v1/access/oauth/authorize", c),
+  /** A device's request by the code its person typed (any case, with or without the dash). */
+  device: (code: string) => call<DeviceRequest>("GET", device(code)),
+  allowDevice: (code: string, a: Allowed) => call<{ grant_id: string; pending: boolean }>("POST", device(code), a),
+  denyDevice: (code: string) => call<null>("DELETE", device(code)),
   /** A search cluster's indices by name (search's own route; it wakes the cluster), for the builder. */
+  /** Each product's tool count and context cost, for the connect panel (counts only). */
+  toolsetCosts: () => call<{ products: ToolsetCost[] }>("GET", "/v1/mcp/toolsets").then((r) => r.products),
   searchIndices: (cluster: string) => call<{ index: string }[]>("GET", `/v1/search/clusters/${encodeURIComponent(cluster)}/indices`),
+  /** A secrets project's encryption keys by name (secrets' own route), for the builder. */
+  encryptionKeys: (project: string) => call<{ name: string }[]>("GET", `/v1/secrets/projects/${encodeURIComponent(project)}/transit`),
 };
 
 // ── pure helpers (tested in access-api.test.ts) ──
+
+/**
+ * Whether a token matches what someone typed in the list's filter: every word in its name, id,
+ * hint, client, person or the products it reaches. A whole secret pasted in matches the token it
+ * is by its hint (prefix and last four), so a token found in a config finds its row; it's only
+ * compared here, never sent.
+ */
+export function grantMatches(g: Pick<Grant, "name" | "id" | "hint" | "client" | "user" | "created_by" | "rules">, typed: string): boolean {
+  const q = typed.trim().toLowerCase();
+  if (!q) return true;
+  if (/^rl[a-z]_[a-z2-7]{30,}$/.test(q)) return Boolean(g.hint) && g.hint === `${q.slice(0, q.indexOf("_") + 1)}…${q.slice(-4)}`;
+  const hay = [g.name, g.id, g.hint ?? "", g.client?.name ?? "", g.user ?? "", g.created_by, ...g.rules.map((r) => r.product)].join(" ").toLowerCase();
+  return q.split(/\s+/).every((w) => hay.includes(w));
+}
+
+/** Who an audit row is by: a change's person (`args.by`), else a request's grant, else the operator. */
+export function auditWho(e: AuditEvent): string {
+  const by = e.source === "access" && e.args && typeof e.args === "object" ? (e.args as { by?: unknown }).by : undefined;
+  if (typeof by === "string") return by;
+  return e.source === "access" ? "operator" : (e.grant_name ?? "operator");
+}
+
+/** What an audit row did: a tool, a request's route, or a change and the token it's about. */
+export function auditWhat(e: AuditEvent): string {
+  if (e.tool) return e.tool;
+  return e.source === "access" && e.grant_name ? `${e.method} ${e.route} · ${e.grant_name}` : `${e.method} ${e.route}`;
+}
 
 /** A preset's rules for a project (`project` → that project; none picked → every resource). */
 export function presetRules(p: Preset, project?: string): Rule[] {
@@ -394,7 +512,7 @@ export function describeRule(r: Rule, projectName: (id: string) => string = (id)
     r.resources === "*"
       ? "all resources"
       : r.resources
-          .map((s) => ("project" in s ? `project ${projectName(s.project)}` : s.index ? `${resourceName(r.product, s.id)} indices ${s.index}` : resourceName(r.product, s.id)))
+          .map((s) => ("project" in s ? `project ${projectName(s.project)}` : s.index ? `${resourceName(r.product, s.id)} ${SUB_RESOURCES[r.product] ?? "parts"} ${s.index}` : resourceName(r.product, s.id)))
           .join(", ");
   const parts = [productName(r.product), actions.join(", ") || "nothing", where];
   if (r.environments?.length) parts.push(r.environments.join(", "));
@@ -411,6 +529,9 @@ export function reach(g: Pick<Grant, "rules">): "read only" | "can change things
 }
 
 export type GrantStatus = "active" | "revoked" | "expired";
+
+/** When a live token starts working, if that's still ahead. */
+export const startsLater = (g: Pick<Grant, "not_before">, now = Date.now()): number | null => (g.not_before && g.not_before > now ? g.not_before : null);
 
 export function statusOf(g: Pick<Grant, "revoked_at" | "expires_at">, now = Date.now()): GrantStatus {
   if (g.revoked_at) return "revoked";
@@ -467,15 +588,38 @@ export const CLIENT_NAMES: Record<McpClient, string> = {
   other: "Any MCP client",
 };
 
+/** One product's tools as `GET /v1/mcp/toolsets` counts them (the whole list, no narrowing). */
+export type ToolsetCost = { product: string; tools: number; read_only: number; context_tokens: number };
+
+/**
+ * Tools a client can take in one request. VS Code: 128, its own built-in tools included (its
+ * docs, "Use tools with agents"). Cursor: reported to drop tools past about 40.
+ */
+export const CLIENT_TOOL_LIMIT: Partial<Record<McpClient, { tools: number; note: string }>> = {
+  vscode: { tools: 128, note: "VS Code refuses a chat request with more than 128 tools, its own built-in ones included" },
+  cursor: { tools: 40, note: "Cursor is reported to drop tools past about 40" },
+};
+
+/** What a choice of toolsets lists (none picked: every product; the access tools always). */
+export function toolsetCost(costs: ToolsetCost[], picked: string[], readonly: boolean): { tools: number; tokens: number } {
+  const listed = costs.filter((c) => c.product === "access" || picked.length === 0 || picked.includes(c.product));
+  const tools = listed.reduce((n, c) => n + (readonly ? c.read_only : c.tools), 0);
+  // Read-only lists fewer tools: their share of the product's cost, near enough.
+  const tokens = listed.reduce((n, c) => n + (readonly && c.tools ? Math.round((c.context_tokens * c.read_only) / c.tools) : c.context_tokens), 0);
+  return { tools, tokens };
+}
+
 /** The MCP server's address for an API base. */
 export const mcpUrl = (api: string = ROLL_API) => `${api.replace(/\/+$/, "")}/v1/mcp`;
 
 /** How to connect a client: OAuth by default (no secret in the config), a bearer token with one. */
 /** The MCP URL listing only these products' tools (`?toolsets=`); none: every product's. */
-export function withToolsets(url: string, products: string[]): string {
-  if (products.length === 0) return url;
+export function withToolsets(url: string, products: string[], readonly = false): string {
+  if (products.length === 0 && !readonly) return url;
   const u = new URL(url);
-  u.searchParams.set("toolsets", [...products].sort().join(","));
+  if (products.length > 0) u.searchParams.set("toolsets", [...products].sort().join(","));
+  // Read-only: the server lists and runs only read-only tools (the token's rules still decide).
+  if (readonly) u.searchParams.set("readonly", "1");
   return u.toString().replace(/%2C/g, ",");
 }
 
