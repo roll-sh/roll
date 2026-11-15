@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { appsApi, atLeast, followLog, PRODUCTION, type LogLevel, type LogLine, type Service } from "@/lib/apps-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { btn, input, panel } from "../ui";
-import { clock } from "./shared";
+import { clock, lineTone } from "./shared";
 
 /** Lines kept on screen, newest last. */
 const KEEP = 2000;
@@ -116,14 +116,14 @@ export function ProjectLogs({ project }: { project: WorkspaceProject }) {
         ) : (
           shown.map((l) => (
             <div key={l.key} className="flex gap-3 px-3 hover:bg-fg/[0.03]">
-              <span className="shrink-0 text-subtle tabular-nums select-none">{clock(l.t)}</span>
-              <span className="w-24 shrink-0 truncate text-muted select-none" title={l.service}>
+              <span className="shrink-0 text-subtle tabular-nums select-none max-sm:hidden">{clock(l.t)}</span>
+              <span className="w-24 shrink-0 truncate text-muted select-none max-sm:w-14" title={`${l.service} · ${clock(l.t)}`}>
                 {l.service}
               </span>
               {l.level && (l.level === "warn" || l.level === "error" || l.level === "fatal") && (
                 <span className={`w-9 shrink-0 select-none uppercase ${l.level === "warn" ? "text-muted" : "text-danger"}`}>{l.level === "error" ? "err" : l.level}</span>
               )}
-              <span className={`min-w-0 flex-1 break-all whitespace-pre-wrap ${l.stream === "stderr" ? "text-danger/90" : l.stream === "system" ? "text-subtle" : ""}`}>{l.text}</span>
+              <span className={`min-w-0 flex-1 [overflow-wrap:anywhere] whitespace-pre-wrap ${lineTone(l)}`}>{l.text}</span>
             </div>
           ))
         )}

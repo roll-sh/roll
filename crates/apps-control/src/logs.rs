@@ -107,8 +107,10 @@ pub fn level_of(text: &str) -> Option<Level> {
         }
     }
     t.split_whitespace().take(3).find_map(|w| {
+        // `[notice]`, `[error]` (nginx's, Apache's): a bracketed level word is a level in any case.
+        let bracketed = w.starts_with('[') && w.trim_end_matches(':').ends_with(']');
         let w = w.trim_matches(|c: char| matches!(c, '[' | ']' | '(' | ')' | ':' | '|'));
-        (w.len() >= 3 && w.bytes().all(|b| b.is_ascii_uppercase())).then(|| Level::parse(w)).flatten()
+        (bracketed || (w.len() >= 3 && w.bytes().all(|b| b.is_ascii_uppercase()))).then(|| Level::parse(w)).flatten()
     })
 }
 
@@ -540,6 +542,9 @@ mod level_tests {
             ("2026-11-14 10:00:00,123 ERROR app.db: connection refused", Some(Level::Error)),
             ("[INFO] listening on :8080", Some(Level::Info)),
             ("FATAL: out of memory", Some(Level::Fatal)),
+            ("2026/11/14 23:57:32 [notice] 7#7: start worker process 51", Some(Level::Info)),
+            ("2026/11/14 23:57:32 [error] 7#7: open() failed", Some(Level::Error)),
+            ("[here] is a note", None),
             ("an error happened while retrying", None),
             ("Error: something", None),
             (r#"{"msg":"no level"}"#, None),

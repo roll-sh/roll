@@ -106,6 +106,14 @@ export function until(t: number, now = Date.now()) {
   return `in ${Math.round(s / 86400)}d`;
 }
 
+/** A line's colour: what the app says its level is when it says one (an nginx notice on stderr
+ *  isn't an error), else its stream. */
+export function lineTone(l: LogLine): string {
+  if (l.level === "error" || l.level === "fatal") return "text-danger";
+  if (l.level) return l.level === "debug" || l.level === "trace" ? "text-muted" : "text-fg";
+  return STREAM_TEXT[l.stream];
+}
+
 const STREAM_TEXT: Record<LogLine["stream"], string> = {
   stdout: "text-fg",
   stderr: "text-danger",
@@ -187,7 +195,7 @@ export function LogView({ lines, columns = false, empty, className = "h-[420px]"
                   {l.level === "fatal" ? "fatal" : l.level === "error" ? "err" : "warn"}
                 </span>
               )}
-              <span className={`min-w-0 flex-1 break-all whitespace-pre-wrap ${STREAM_TEXT[l.stream]}`}>{l.stream === "http" ? <AccessText text={l.text} /> : l.text}</span>
+              <span className={`min-w-0 flex-1 [overflow-wrap:anywhere] whitespace-pre-wrap ${lineTone(l)}`}>{l.stream === "http" ? <AccessText text={l.text} /> : l.text}</span>
             </div>
           ))
         )}
