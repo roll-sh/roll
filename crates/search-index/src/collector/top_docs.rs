@@ -118,6 +118,8 @@ pub struct TopScoreCollector {
     shared: Option<Arc<SharedTopScore>>,
     /// Part of `total` already added to the shared count.
     flushed: u64,
+    /// [`with_segment_counts`](Self::with_segment_counts)' weight.
+    count_weight: Option<Box<dyn crate::search::Weight>>,
 }
 
 impl TopScoreCollector {
@@ -133,7 +135,19 @@ impl TopScoreCollector {
             min_score: None,
             shared: None,
             flushed: 0,
+            count_weight: None,
         }
+    }
+
+    /// A `size: 0` hit count (Elasticsearch's `PartialHitCountCollector`) takes the segments
+    /// whose match count `w` knows without iterating ([`Weight::count`](crate::search::Weight::count))
+    /// whole, and enters no segment once the count passed the threshold, so the query's
+    /// scorer is never built for them. The total is the one counting doc by doc gives. Only
+    /// for `n == 0` in one slice; `w` must be the searched query's weight, with nothing (a post
+    /// filter, `min_score`) between it and this collector.
+    pub fn with_segment_counts(mut self, w: Box<dyn crate::search::Weight>) -> Self {
+        self.count_weight = Some(w);
+        self
     }
 
     /// Shares the hit count and score bar with the other collectors of a concurrent search.
@@ -345,6 +359,23 @@ impl Collector for TopScoreCollector {
     }
 
     fn leaf<'a>(&'a mut self, seg: &SegmentContext) -> Result<Box<dyn LeafCollector + 'a>> {
+        if let Some(w) = &self.count_weight
+            && self.n == 0
+            && self.min_score.is_none()
+            && self.shared.is_none()
+        {
+            if self.total > self.threshold {
+                return Err(crate::error::Error::CollectionTerminated);
+            }
+            if let Some(c) = w.count(seg)? {
+                // Counting doc by doc stops one past the threshold.
+                self.total = self.total.saturating_add(u64::from(c)).min(self.threshold.saturating_add(1));
+                if self.total > self.threshold {
+                    self.relation = TotalRelation::GreaterThanOrEqualTo;
+                }
+                return Err(crate::error::Error::CollectionTerminated);
+            }
+        }
         let base = seg.base;
         let mut min_announced = 0.0;
         if (self.heap.len() >= self.n && self.n > 0 && self.global_total() > self.threshold)

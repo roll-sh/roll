@@ -1486,6 +1486,12 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
             return Err(EsError::illegal_argument("Sort must contain at least one field."));
         }
         let mut top = TopScoreCollector::new(n, threshold.unwrap_or(0).max(n as u64));
+        // `size: 0` with aggregations: the hit count takes the segments `Weight::count` knows
+        // whole (`PartialHitCountCollector`), so a segment the aggregations take from their
+        // statistics too is never iterated (no scorer is built for it).
+        if n == 0 && agg_collector.is_some() && post.is_none() && src.min_score.is_none() && src.terminate_after.is_none() && scroll_after.is_none() && profiler.is_none() {
+            top = top.with_segment_counts(searcher.create_weight(&q, search_index::search::ScoreMode::CompleteNoScores).map_err(crate::engine::convert::index_error)?);
+        }
         if let Some(a) = scroll_after {
             top = top.with_after(a);
         }

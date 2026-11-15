@@ -885,26 +885,24 @@ impl Collector for AggCollector {
         for n in &mut self.nodes {
             n.agg.set_segment(seg)?;
         }
-        let done = !self.nodes.is_empty() && self.nodes.iter().all(|n| n.agg.segment_done());
-        Ok(Box::new(TopLeaf { c: self, done }))
+        // Every aggregator took the segment from its statistics: none of its docs are wanted
+        // (Elasticsearch's `CollectionTerminatedException` from `getLeafCollector`), so a
+        // `MultiCollector` drops this leaf and the segment ends once the others are done too.
+        if !self.nodes.is_empty() && self.nodes.iter().all(|n| n.agg.segment_done()) {
+            for n in &mut self.nodes {
+                n.agg.finish_segment()?;
+            }
+            return Err(search_index::Error::CollectionTerminated);
+        }
+        Ok(Box::new(TopLeaf { c: self }))
     }
 }
 
 struct TopLeaf<'a> {
     c: &'a mut AggCollector,
-    /// Every aggregator took the segment from its statistics.
-    done: bool,
 }
 
 impl LeafCollector for TopLeaf<'_> {
-    fn skips(&self) -> bool {
-        self.done
-    }
-
-    fn competitive_from(&mut self, doc: u32) -> u32 {
-        if self.done { search_codec::NO_MORE_DOCS } else { doc }
-    }
-
     #[inline]
     fn collect(&mut self, doc: u32, scorer: &mut dyn Scorable) -> search_index::Result<()> {
         self.c.docs.push(doc);
