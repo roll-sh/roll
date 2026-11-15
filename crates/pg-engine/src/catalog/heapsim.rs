@@ -1054,14 +1054,10 @@ impl Heap {
         self.fsm.recorded(blk) as usize * 32
     }
 
-    /// The free space of the last page (PageGetHeapFreeSpace; 0 without pages).
-    pub fn last_page_free(&self) -> usize {
-        self.pages.last().map_or(0, Page::heap_free)
-    }
 
-    /// The last page's line pointers.
-    pub fn last_page_items(&self) -> u16 {
-        self.pages.last().map_or(0, |p| p.lps.len() as u16)
+    /// Page `blk`'s free space (PageGetHeapFreeSpace) and line pointers.
+    pub fn page_room(&self, blk: u32) -> (usize, u16) {
+        self.pages.get(blk as usize).map_or((0, 0), |p| (p.heap_free(), p.lps.len() as u16))
     }
 
     /// The pages at the end a bulk extension added and nothing used yet (all zeroes).

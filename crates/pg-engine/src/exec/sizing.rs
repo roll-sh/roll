@@ -304,11 +304,14 @@ impl EstHeap {
         } else {
             EstOrder::Stamped
         };
+        // (The page being filled is the last one used: a load going on fills it first.)
+        let fill = pages.saturating_sub(fresh + 1);
+        let (room, items) = h.page_room(fill);
         EstHeap {
             pages,
-            fill: pages.saturating_sub(fresh + 1),
-            room: if fresh > 0 { 0 } else { h.last_page_free() },
-            items: if fresh > 0 { 0 } else { h.last_page_items() },
+            fill,
+            room,
+            items,
             reusable: 0,
             fresh,
             order,
