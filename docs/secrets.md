@@ -89,7 +89,9 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    ```
 
    In Go, `sdk/go/secrets` has the same surface, and `FromEnv` logs a workload identity in with
-   its own OIDC token as `roll run` does (`ROLL_IDENTITY`):
+   its own OIDC token as `roll run` does (`ROLL_IDENTITY`). It logs in again before the login's
+   token ends, and when the server refuses it, reading the OIDC token afresh each time, so a
+   long-running watch keeps working:
 
    ```go
    c, err := secrets.FromEnv(ctx)
@@ -1018,7 +1020,9 @@ suffix such as `com`, `co.uk` or `github.io` is refused (from a built-in list of
 A key tagged `sensitive` (`roll secrets set KEY --tag sensitive`, or its tags in the dashboard) can be
 written but never read back by a person or a token, as Vercel's sensitive environment variables and
 Doppler's restricted secrets: only roll apps' builds and instances get its value (`ForApps`
-resolves as a runtime), where the service's code uses it.
+resolves as a runtime), where the service's code uses it. An untrusted ephemeral environment is
+read without it by everyone, roll apps included: a fork's preview deployed on roll apps doesn't get
+it, and leaves out dynamic keys and what doesn't resolve instead of failing the deploy.
 - Everything else is a person or acts for one, so it's withheld there. The operator is no exception.
   - `…/values` and `roll run` leave it out and name it in `withheld`, so `roll run` still starts,
     saying so. `…/secrets/{key}/value` answers 403, and so does every version of a key that's
@@ -2718,55 +2722,70 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **The Secrets Store CSI Driver provider** (#63, on #62): secrets mounted
-   into a pod as files, never a Kubernetes Secret in etcd, as Vault's, AWS', Azure's, GCP's and
-   Infisical's providers do; each pod logs in with its own service account. Checked live against
-   the driver v1.6.2 on k3s (mount, no Secret, another account refused, rotation in about 20 s, a
-   key that stops resolving keeps the files).
-2. **`roll login` for people** (roll MCP is building it on #25, where a person's own token acts as
-   them): a browser sign-in with PKCE and a loopback redirect, the token kept and refreshed, as
-   `doppler login`, `infisical login` and `op signin` do.
-3. **Conditional reads and caching in the SDKs** (#65, on #62): `ETag` and `If-None-Match` on
-   `…/values` (a 304 reads, issues and audits nothing; never for dynamic credentials), and a TTL
-   cache in the TypeScript, Go and Python clients that revalidates with it.
-4. **Terraform without values in state** (#66, on #62): an `ephemeral "roll_secrets_values"`
-   resource (dynamic credentials revoked when the run closes) and a write-only `value_wo`. Next:
-   resources for CAs, SSH CAs, encryption keys and outside databases. Transit in the Go and Python
-   clients is #67.
-5. **AWS through roll's own issuer** (#68, on #62): `trust: "oidc"` roles, assumed with
-   `AssumeRoleWithWebIdentity` and a token roll's issuer signs for the project (`sub` pinned, as GCP
-   and Azure): no AWS credential of roll's at all.
-6. **The operator restarts what reads a Secret** when it changes (#69, on #62:
-   `spec.rolloutRestart`, as Infisical's reload annotation and Vault Secrets Operator's
-   `rolloutRestartTargets`).
-7. **Audit sinks SIEMs take** (#70, on #62): Splunk HEC, Datadog and bearer formats with a sealed
-   token (Doppler, Infisical). Next: a sink into roll search.
-8. **A live rotation that keeps the old password a while** where the resource can (Redis ACL users
-   hold two passwords), as managed rotation's grace already does.
-9. **More dynamic credentials**: GitHub App installation tokens (one repository, narrowed
-   permissions), Kubernetes service account tokens, Snowflake.
-10. **A gateway into private networks**: an agent in the customer's network that connects out and
-   carries rotation and per-lease logins to private databases (Infisical's and Akeyless'
-   gateways).
-11. **ACME on project CAs**, starting with external account binding (Vault PKI, step-ca).
-12. *The user's call:* land the stack (#62).
-13. *Waits on roll MCP's #25 on `main`:* #64 (#30 onto #62: roll-access's tokens replace `rlst_`,
-   re-keyed identities revoke their workload tokens, reach lists roll-access's tokens; every suite
-   passes; roll MCP's `feature/mcp-on-landing` is #25 with it, its gate passing), then a workload identity a person creates
-   asks roll-access's policy (held until an admin approves, `policy_now().needs_approval(&scope,
-   false)`, admins told through `Access::tell_admins`), and the Access tab shows tokens waiting
-   for approval and rotations that keep the old secret (`keep_old_for_s`).
-14. *Waits on other threads:* transit keys scoped by name (#24/#25 with #47), roll search's #29 (it
-   echoes a key's `access`: then a key that doesn't say `data` is refused), previews resolving with
-   `dynamic: false`, a live check of OpenSearch links (#29 with #51), splitting the CLI's
-   `secrets.rs` once the stack has landed.
-15. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
-16. *Waits on products serving signed-in people:* a person's project linking their own databases,
+Built, in pull requests on #62 (each reviewed, its fixes in): the Secrets Store CSI Driver provider
+(#63), conditional reads and client caches (#65), Terraform without values in state, transit in the
+Go and Python clients and Terraform resources for registrations (#66, #67, #72), AWS through roll's
+issuer (#68), the operator's restarts (#69), SIEM and roll search audit sinks (#70, #71), GitHub
+App installation tokens (#73).
+
+1. **Live links' digests follow their values** (built, #74 on #65): the digest counts each live
+   value's keyed fingerprint (read at most every 10 s), and a product's own password, reset or
+   restore route moves it at once, so watches, syncs, apps' redeploys and conditional reads see a
+   credential however it changed (and #65's 304s come back for live links).
+2. **Rotating a registration's admin credential, and editing registrations in place** (built for
+   databases outside roll, #75: `rotate-admin`, `PATCH`, checked live on Postgres and MySQL),
+   as Vault's `rotate-root`; next the same for AWS users and rotators, and Terraform updating
+   registrations in place (#72).
+3. **Syncs driven by changes** (building), not digest polling: a write marks its environment's syncs due, so
+   a change reaches Vercel or GitHub in seconds however many syncs there are (Doppler, Infisical).
+4. **Metrics**: resolves, 304s, KMS refusals, sync failures and lag, leases, sweeper lag and
+   rotation failures, in rolld's metrics (Vault telemetry, CloudWatch).
+5. **Scheduled sealed backups** into a roll bucket or S3, with retention and a restore check (Vault
+   snapshots, Akeyless DR).
+6. **Read quotas per token** on values, resolve and reveal (Vault's rate-limit quotas).
+7. **Java and .NET clients and a Pulumi provider** (Spring property source, `IConfiguration`;
+   Pulumi bridged from the Terraform provider).
+8. **More dynamic credentials**: Kubernetes service account tokens, Snowflake.
+9. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
+   CAs**.
+10. *The user's call:* land the stack (#62, then #63–#73; roll search before #62).
+11. *Waits on roll MCP's #25 on `main`:* #64 (#30 onto #62: roll-access's tokens replace `rlst_`;
+   roll MCP's `feature/mcp-on-landing` is #25 with it, its gate passing), then a workload identity
+   a person creates asks roll-access's policy (held until an admin approves), and the Access tab
+   shows tokens waiting for approval and rotations that keep the old secret (`keep_old_for_s`).
+12. *Waits on other threads:* transit keys scoped by name (#24/#25 with #47), roll search's #29 (it
+   echoes a key's `access`: then a key that doesn't say `data` is refused), a live check of
+   OpenSearch links (#29 with #51), roll redis and nosql keeping a rotated password a while,
+   splitting the CLI's `secrets.rs` once the stack has landed.
+13. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
+14. *Waits on products serving signed-in people:* a person's project linking their own databases,
    buckets and streams.
-17. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+15. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
 
 ### Landing
+
+**To main** (merges are approved from 2026-11-15; one thread at a time behind
+`~/.local/share/roll-merge/lock`). About 50 pull requests sit on #20; the plan folds them into a
+few reviewable ones and closes what they supersede:
+
+1. **#20 → main** (the store, links, CLI, dashboard, integrations; green and mergeable), after
+   roll MCP's #24 if that's ready first; whichever lands second merges main and gates again.
+2. **#62 → main**: retargeted once #20 is in. It is #31–#61 merged in order with every
+   conflict resolved and seventeen independent reviews' fixes, so it lands as one squash, and
+   #31–#61 close as superseded by it (their branches stay; #35 and #59, which conflict on their
+   own, are in it too). #30 closes as superseded by #64.
+3. **The follow-ups, one at a time**, each a small pull request of its own: each merges main,
+   is retargeted to main and lands in order — #63 (CSI provider), #65 (conditional reads),
+   then #74 (live digests, after #65), #66, #67, #68, #69, #70, #71 (#70 and #71 together:
+   see the merge note below), #72, #73, #75, #76.
+4. **#64** (the landed stack on roll-access) waits for roll MCP's #25 on main, then lands
+   like the rest.
+
+Before each lands: origin/main merged, the full gate (`cargo build/test/clippy`, roll-secrets on
+Postgres, `pnpm typecheck` and the dashboard's tests, the SDK suites, `pnpm test:code --docker`
+where AGENTS.md asks for it), CI green, a squash titled like #18–#27, main's CI green on the
+merge commit, a line in the merge log.
 
 Merging the stack in order (2026-11-14) found what no single pull request could:
 
@@ -2784,6 +2803,39 @@ Merging the stack in order (2026-11-14) found what no single pull request could:
   registries a forgotten project drops lost `cloud_accounts` (#43). Every pull request's added lines
   were checked against the landing branch afterwards; everything else is there or extended.
 - Additive everywhere else: routes, catalogue rows, `Options` fields, types and this document.
+
+A seventeenth independent review (2026-11-15, of #62 and #63–#72 against the other threads' heads)
+found four high-severity issues, each fixed on its pull request:
+- roll apps deploying a fork's preview got its unprotected base's sensitive keys: an untrusted
+  ephemeral environment kept the runtime flag (#62: it's read as a non-runtime by everyone, and
+  `ForApps` reads one as previews do, leaving out dynamic keys and what doesn't resolve);
+- a reveal token could end every lease in its environment (#66: leases record who they were
+  issued to; a reader ends only its own);
+- a 304 could hide a password its product changed itself (#65: never a 304 for a folder that reads
+  a live link, until products report their own rotations);
+- the Go and Python clients never logged a workload identity in again, so a watch failed after
+  15 minutes (#62: they renew before the token ends and on a 401, reading the OIDC token afresh).
+
+Also fixed: every preview converge writing an audit row (#62), the operator stopping at the first
+failed restart and letting a RollSecret's author restart anything in its namespace (#69: opt-in
+per workload, every target tried, failures retried), a write and an audit scan on every 304 (#65),
+the CSI provider logging in on every mount (#63: a login reused per service account token), and
+every node checking the same oldest syncs (#62: each claims its own). For the other threads: roll
+MCP's secrets tool descriptions have drifted (seven database engines, rotation of any managed
+link, health's newer finding kinds), and roll search should merge before #62, since the landing
+branch's in-tree search issues admin keys until it echoes `access`.
+
+A sixteenth independent review (2026-11-15, of #63–#72) found three high-severity bugs, all
+fixed on their pull requests: a watch on a caching client delivering old values and stopping
+(#65: watches read fresh, answers with problems aren't kept, and a 304 records one
+`secrets.revalidate` row a day so health and insights still see the reads), the maker chain stopping
+at tokens (#64: resolved through roll-access, and reach judges tokens as their requests are), and
+Terraform refusing values roll normalises (#72, with encryption keys now protected from destroy). Also
+fixed: restarts on unchanged data (#69), leases a read token couldn't end (#66), a decoy check
+passed by throttling (#68), the CSI provider's API over plain HTTP or any host (#63), a signing
+secret printed for SIEM sinks (#70) and system indices for search sinks (#71). Merging #70 and #71
+together: both add `with_project` to rolld's `syncs.rs` (keep one) and change the stream form's
+`urlOk` (keep #71's targets with #70's formats).
 
 A fifteenth independent review (2026-11-14, against Doppler, Infisical, Vault, 1Password, AWS
 Secrets Manager and Akeyless, and the other threads' heads) found two high-severity issues, both
