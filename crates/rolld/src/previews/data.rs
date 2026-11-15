@@ -792,6 +792,15 @@ impl Brancher for Search {
         Kind::Search
     }
 
+    /// A string mask (`redact`, `email`) on a field of the parent's that isn't text (a vector, a
+    /// number) would fail the masking, and the preview: named when the rule is set.
+    async fn mask_problems(&self, parent: &str, fields: &std::collections::BTreeMap<String, String>) -> anyhow::Result<Vec<String>> {
+        let v = self.0.post(&format!("/v1/search/clusters/{}/request", seg(parent)), json!({ "method": "GET", "path": "/_mapping" })).await?;
+        anyhow::ensure!(v["status"].as_u64() == Some(200), "reading {parent}'s mappings: {}", v["status"]);
+        let mapping: Value = serde_json::from_str(v["body"].as_str().unwrap_or("{}"))?;
+        Ok(roll_previews::mask::search_field_masks(&mapping, fields))
+    }
+
     async fn find(&self, parent: &str, name: &str) -> anyhow::Result<Option<String>> {
         match self.0.get(&format!("/v1/search/clusters/{}", seg(name))).await {
             Ok(c) if c["name"] == name && (c["parent_id"] == parent || c["parent_name"] == parent) => Ok(s(&c["id"])),

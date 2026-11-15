@@ -194,6 +194,57 @@ pub struct GithubRule {
     /// parent's, and compared with main's, so an endpoint that got slower shows before it lands.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<String>,
+    /// Page states reached by a few steps before their screenshot (Chromatic's interaction
+    /// tests): each taken, compared with main's and reviewed like a page (`state:<name>`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub states: Vec<StateRule>,
+}
+
+/// A page state (`github.states`): `page` of the first service's, then its steps.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateRule {
+    pub name: String,
+    pub page: String,
+    pub steps: Vec<Step>,
+}
+
+/// One step towards a state, on the page's own elements: `{"click": selector}`, `{"type":
+/// [selector, text]}`, `{"press": key}`, `{"wait": ms}`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Step {
+    Click(String),
+    Type(String, String),
+    Press(String),
+    Wait(u32),
+}
+
+/// The most states, and steps in each.
+pub const MAX_STATES: usize = 3;
+pub const MAX_STEPS: usize = 10;
+/// The keys a `press` step may name.
+pub const STEP_KEYS: [&str; 9] = ["Enter", "Escape", "Tab", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Space", "Backspace"];
+
+/// A state's name: 1–40 of a-z, 0-9 and `-`.
+pub fn state_name_ok(n: &str) -> bool {
+    (1..=40).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// A `state:<name>` page entry's name.
+pub fn state_entry(e: &str) -> Option<&str> {
+    e.strip_prefix("state:").filter(|n| state_name_ok(n))
+}
+
+fn step_ok(s: &Step) -> bool {
+    let text = |t: &str| t.len() <= 200 && !t.chars().any(char::is_control);
+    let selector = |t: &str| !t.trim().is_empty() && text(t);
+    match s {
+        Step::Click(sel) => selector(sel),
+        Step::Type(sel, t) => selector(sel) && text(t),
+        Step::Press(k) => STEP_KEYS.contains(&k.as_str()),
+        Step::Wait(ms) => *ms <= 5000,
+    }
 }
 
 /// The most endpoints timed (`github.endpoints`).
@@ -316,7 +367,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None, endpoints: Vec::new() }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None, endpoints: Vec::new(), states: Vec::new() }
     }
 }
 
@@ -480,6 +531,16 @@ impl Settings {
                 "github.pages: at most {MAX_PAGES} different paths besides /, each starting with / or naming a service (admin:/users), up to 200 characters, no #, quotes or spaces"
             ));
         }
+        let states = &self.github.states;
+        let bad_state = states.iter().enumerate().any(|(i, s)| {
+            !state_name_ok(&s.name) || states[..i].iter().any(|o| o.name == s.name) || !page_path_ok(&s.page) || s.steps.is_empty() || s.steps.len() > MAX_STEPS || !s.steps.iter().all(step_ok)
+        });
+        if states.len() > MAX_STATES || bad_state {
+            return bad(format!(
+                "github.states: at most {MAX_STATES}, each a name (a-z, 0-9, -), a page of the first service's and 1 to {MAX_STEPS} steps: click or type on a selector (text up to 200 characters), press one of {}, or wait up to 5000 ms",
+                STEP_KEYS.join(", ")
+            ));
+        }
         let eps = &self.github.endpoints;
         if eps.len() > MAX_ENDPOINTS || eps.iter().any(|p| !page_path_ok(p)) || eps.iter().enumerate().any(|(i, p)| eps[..i].contains(p)) {
             return bad(format!("github.endpoints: at most {MAX_ENDPOINTS} different GET paths of the first service's (/api/users), up to 200 characters, no #, quotes or spaces"));
@@ -526,6 +587,22 @@ fn merge(into: &mut Value, patch: &Value) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Page states are a few, named, each a page of the first service's and a few known steps;
+    /// anything past that is refused when set.
+    #[test]
+    fn page_states_are_few_and_their_steps_known() {
+        let ok = |states: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "states": states } })).is_ok();
+        assert!(ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [{ "click": "#open" }, { "type": ["#q", "shoes"] }, { "press": "Enter" }, { "wait": 500 }] }])));
+        assert!(!ok(serde_json::json!([{ "name": "Cart", "page": "/", "steps": [{ "click": "#open" }] }])), "a name of a-z, 0-9 and -");
+        assert!(!ok(serde_json::json!([{ "name": "cart", "page": "//evil.example", "steps": [{ "click": "#open" }] }])), "a page on the service's own origin");
+        assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [{ "press": "F12" }] }])), "a key from the list");
+        assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [{ "wait": 60000 }] }])), "a wait up to 5 s");
+        assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [{ "eval": "alert(1)" }] }])), "no other step");
+        assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [] }])), "a step at least");
+        let four: Vec<serde_json::Value> = (0..4).map(|i| serde_json::json!({ "name": format!("s{i}"), "page": "/", "steps": [{ "wait": 1 }] })).collect();
+        assert!(!ok(serde_json::json!(four)), "at most 3");
+    }
 
     #[test]
     fn patches_merge_and_production_needs_a_yes() {

@@ -369,6 +369,8 @@ export interface PreviewEnvironment {
   /** The project's other pages: each one's checks too, and what of them is new against main's same page. */
   pages?: {
     path: string;
+    /** A page state's step that found nothing. */
+    step?: string | null;
     errors: number;
     percent: number | null;
     base_percent: number | null;

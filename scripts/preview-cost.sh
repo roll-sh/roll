@@ -97,7 +97,7 @@ SEARCH_URL_PARENT=$(echo "$SEARCH_C" | jq_ "d['url'].replace('://', '://' + d['u
 curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/1?refresh=true" -H 'content-type: application/json' -d '{"name":"parent"}' >/dev/null
 # An address inside an array of objects, and one under a literal dotted key: masks reach both.
 curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/3?refresh=true" -H 'content-type: application/json' -d '{"name":"other","owner":[{"email":"ada@corp.example"}]}' >/dev/null
-curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/4?refresh=true" -H 'content-type: application/json' -d '{"name":"dotted","owner.email":"bob@corp.example"}' >/dev/null
+curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/4?refresh=true" -H 'content-type: application/json' -d '{"name":"dotted","owner.email":"bob@corp.example","stock":3}' >/dev/null
 PG=$(api POST /v1/projects '{"name":"shop-db"}' | jq_ "d['id']")
 # A real-looking row in the parent, which previews mask.
 PG_PARENT_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['parent_id'] is None][0]")
@@ -139,6 +139,10 @@ api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"
 KEY_MASK=$(curl -s -o /tmp/roll-previews-keymask.json -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' \
   -d "{\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\",\"app.users_by_email.email\":\"mask_default()\"}}}")
 [ "$KEY_MASK" = 400 ] && grep -q "app.users_by_email's primary key" /tmp/roll-previews-keymask.json || { echo "a NoSQL mask on a key column should be refused, not $KEY_MASK $(cat /tmp/roll-previews-keymask.json)"; exit 1; }
+# Nor can a string mask go into a search field that isn't text (a number, a vector): named too.
+NUM_MASK=$(curl -s -o /tmp/roll-previews-nummask.json -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' \
+  -d "{\"masking\":{\"search:$SEARCH\":{\"products.name\":\"redact\",\"products.owner.email\":\"redact\",\"products.stock\":\"redact\"}}}")
+[ "$NUM_MASK" = 400 ] && grep -q "products.stock is a long field" /tmp/roll-previews-nummask.json || { echo "a string mask on a number field should be refused, not $NUM_MASK $(cat /tmp/roll-previews-nummask.json)"; exit 1; }
 
 say "open a change"
 T0=$(now_ms)
@@ -334,7 +338,7 @@ ACTIVE=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
-api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json"]}}' >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"}]}]}}' >/dev/null
 # roll keeps a preview of the default branch (github.baseline): the change's screenshots are
 # compared with its.
 MAINPV=""
@@ -590,6 +594,8 @@ case "$PAGES" in "/pricing: "[1-9]*" error(s), "*"% against main") ;; *) echo "/
 PRICING=$(api GET "/v1/previews/$PV" | jq_ "(lambda p: 'a11y %s, seo %s; new: a11y %s, seo %s, links %s' % (p.get('a11y') is not None, ((p.get('a11y') or {}).get('seo')) is not None, (p.get('against') or {}).get('a11y_added'), (p.get('against') or {}).get('seo_added'), (p.get('against') or {}).get('links_added')))([x for x in d['pages'] if x['path'] == '/pricing'][0])")
 [ "$PRICING" = "a11y True, seo True; new: a11y 0, seo 0, links 0" ] || { echo "/pricing should get the first page's checks, against main's /pricing: $PRICING"; exit 1; }
 case "$PAGES" in *"wiki:/: 0 error(s), "*"% against main"*) ;; *) echo "the wiki service's page should be taken in its own run and compared: $PAGES"; exit 1;; esac
+# A page state (github.states: Tab pressed on /), taken after its step and compared with main's.
+case "$PAGES" in *"state:tab: "*"% against main"*) ;; *) echo "the page state should be taken after its steps and compared: $PAGES"; exit 1;; esac
 # The first page at a tablet's width too, compared with main's at that width.
 case "$PAGES" in *"@768: "*"% against main"*) ;; *) echo "the first page should be taken at 768 px and compared: $PAGES"; exit 1;; esac
 [ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?page=%2Fpricing")" = image/png ] || { echo "/pricing's screenshot should be there"; exit 1; }
@@ -679,7 +685,7 @@ cat <<EOF
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
 | NoSQL branch's mask on app.users.email / masks on the parent | $MASKED / $PARENT_MASKED |
 | NoSQL: app.users.email in the branch / a filter on the real address there | $NOSQL_READ / $NOSQL_FILTER |
-| NoSQL: a mask on app.users_by_email's key, set | $KEY_MASK |
+| NoSQL: a mask on app.users_by_email's key, set / search: a string mask on a number field, set | $KEY_MASK / $NUM_MASK |
 | What each branch hands the preview's code | $DATA |
 | Core Web Vitals of the first page (the screenshot's load) | $VITALS |
 | The first page's words against main's | $WORDS |

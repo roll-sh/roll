@@ -851,9 +851,10 @@ function PageChecks({ page, branch }: { page: PageCheck; branch: string }) {
   const a11y = page.a11y ? a11yWords(page.a11y) : [];
   const seo = page.a11y?.seo ? seoWords(page.a11y.seo) : [];
   const broken = page.links?.broken ?? [];
-  if (!a11y.length && !seo.length && !broken.length && !page.against?.text?.added_n && !page.against?.text?.removed_n) return null;
+  if (!page.step && !a11y.length && !seo.length && !broken.length && !page.against?.text?.added_n && !page.against?.text?.removed_n) return null;
   return (
     <div className="mb-1.5 space-y-0.5 text-[11.5px]">
+      {page.step && <p className="break-words text-danger">Its steps stopped at {page.step}: taken as it was then.</p>}
       {broken.length > 0 && (
         <p className="break-words text-danger">
           {broken.length} broken {broken.length === 1 ? "link" : "links"}: <span className="font-mono text-[11px]">{broken.map((b) => `${b.path} ${b.status || "no answer"}`).join(", ")}</span>

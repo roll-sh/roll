@@ -853,7 +853,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -862,7 +862,7 @@ type Settings = {
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
   teardown: Job | null;               // once when the preview goes, before its services and branches
-  masking: Record<string, Record<string, string>>; // "postgres:<ref>" → {"schema.table.column": "email"}, "nosql:<ref>" → {"ks.table.column": "mask_default()"}, "search:<ref>" → {"index.field": "redact" | "remove" | "email"}
+  masking: Record<string, Record<string, string>>; // "postgres:<ref>" → {"schema.table.column": "email"}, "nosql:<ref>" → {"ks.table.column": "mask_default()"}, "search:<ref>" → {"index.field": "redact" | "remove" | "email"} (redact and email only on a text-like field of the parent's: a number, a date or a vector is refused when set, use remove)
 };
 ```
 
@@ -1005,6 +1005,18 @@ type Settings = {
     more than 20 ms called slower: in the comment's folded checks ("1 endpoint slower than
     main"; "`GET /api/users` 140 ms (main 40 ms), slower"), the sheet and the change page (live:
     `/openapi.json` timed on both).
+    Page states too (Chromatic's interaction tests, Percy's scripted snapshots): much of what a
+    change touches shows only after a click (a cart open, a dialog, a form's errors). A project
+    names up to 3 (`github.states`: a name, a page of the first service's, and 1 to 10 steps:
+    `{"click": selector}`, `{"type": [selector, text]}`, `{"press": key}` from a short list,
+    `{"wait": ms}` up to 5 s), and the first service's run reaches each one after loading its page,
+    in the checks' world (the page's DOM, none of its JavaScript; a value typed the way a person's
+    input sets it, so a framework's change handler sees it), 15 s at most. Each is a page of its own
+    (`state:<name>`): screenshotted, checked, compared with main's same state and reviewed. The
+    first step that finds nothing ends the steps and is said (`step`, "its steps stopped at `click
+    #open: nothing matched`"), the state taken as it was then (checked by hand in the screenshot
+    image: a click opening a cart, typing reaching the page's handler, Escape closing it, a missing
+    element named; live: a Tab state compared with main's).
     A page that moves by itself (Argos's and Chromatic's flake detection): after each page's
     capture the session waits a second and captures it again, stilled as before; Chrome encodes
     the same pixels the same way, so different data is a page that changed with nobody touching
@@ -1225,6 +1237,12 @@ Ranked by what a person notices first. Done so far:
 - a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
+- page states reached by a few steps (Chromatic's interaction tests): `github.states`, each
+  taken after its steps, compared with main's and reviewed like a page, a step that finds nothing
+  said;
+- search masks checked when set against the parent's mapping: `redact` or `email` on a field that
+  isn't text (a vector from semantic search, a number, a date) is refused with what it is, where it
+  used to fail the masking and the preview; checked live on a number field;
 - a ninth review (of the work since the eighth) and its fixes: migration risks read from every
   line, not the 200 shown, `NOT NULL` read before a default, view columns apart; each API line
   bounded in the session so a huge document can't blank the page's report; a change whose API

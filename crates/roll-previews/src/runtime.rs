@@ -952,12 +952,23 @@ impl Runtime {
         args.extend(code_preview::docker::limits(1024, 1.0));
         args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
         args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}"), "--env".into(), "AXE=/tmp/axe.js".into()]);
-        let pages: Vec<&String> = opts.pages.iter().filter(|p| crate::settings::page_path_ok(p) || crate::settings::width_entry(p).is_some()).take(crate::settings::MAX_PAGES).collect();
+        let pages: Vec<&String> = opts
+            .pages
+            .iter()
+            .filter(|p| crate::settings::page_path_ok(p) || crate::settings::width_entry(p).is_some() || crate::settings::state_entry(p).is_some())
+            .take(crate::settings::MAX_PAGES)
+            .collect();
         args.extend(["--env".into(), format!("PAGES={}", serde_json::to_string(&pages)?)]);
         let hide: Vec<&String> = opts.hide.iter().filter(|s| crate::settings::selector_ok(s)).take(crate::settings::MAX_HIDE).collect();
         args.extend(["--env".into(), format!("HIDE={}", serde_json::to_string(&hide)?)]);
         if let Some(path) = opts.openapi.as_deref().filter(|p| crate::settings::page_path_ok(p)) {
             args.extend(["--env".into(), format!("OPENAPI={path}")]);
+        }
+        // Each state's page and steps, by name (`shot.js` reaches them before the capture).
+        let states: std::collections::BTreeMap<&str, serde_json::Value> =
+            opts.states.iter().filter(|s| crate::settings::state_name_ok(&s.name)).map(|s| (s.name.as_str(), serde_json::json!({ "page": s.page, "steps": s.steps }))).collect();
+        if !states.is_empty() {
+            args.extend(["--env".into(), format!("STATES={}", serde_json::to_string(&states)?)]);
         }
         let endpoints: Vec<&String> = opts.endpoints.iter().filter(|p| crate::settings::page_path_ok(p)).take(crate::settings::MAX_ENDPOINTS).collect();
         if !endpoints.is_empty() {
@@ -1056,6 +1067,8 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
         text: Option<String>,
         #[serde(default)]
         unstable: bool,
+        #[serde(default)]
+        step: Option<String>,
     }
     let said: Vec<Said> = serde_json::from_str(said.trim()).unwrap_or_default();
     let mut out: Vec<crate::ports::PageShot> = Vec::new();
@@ -1068,6 +1081,8 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
                 links: s.links.and_then(|l| crate::PageLinks::parse(&serde_json::json!({ "links": l }).to_string())),
                 text: s.text.and_then(|t| crate::page_text(&serde_json::json!({ "text": t }).to_string())),
                 unstable: s.unstable,
+                // A state's step that found nothing (the page's own words in it: one bounded line).
+                step: s.step.map(|t| t.chars().filter(|c| !c.is_control()).take(200).collect()),
             };
             out.push(crate::ports::PageShot { path: s.path, png, errors: s.errors.min(10_000), report });
         }

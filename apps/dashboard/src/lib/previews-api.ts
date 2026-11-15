@@ -175,6 +175,15 @@ export interface PageCheck {
   links?: { checked: number; broken: { path: string; status: number }[] } | null;
   /** Against main's page at the same path. */
   against?: { a11y_added: number | null; links_added: number | null; seo_added: number | null; text: TextDiff | null } | null;
+  /** A page state's step that found nothing (the state taken as it was then). */
+  step?: string | null;
+}
+
+/** A page state (`github.states`): a page of the first service's, reached by its steps. */
+export interface PageState {
+  name: string;
+  page: string;
+  steps: ({ click: string } | { type: [string, string] } | { press: string } | { wait: number })[];
 }
 
 /** How slow and heavy the first page may get (0: no limit): over it, `roll/speed` fails. */
@@ -320,7 +329,7 @@ export interface PreviewSettings {
   secrets: { base: string; allow_production: boolean };
   /** A patch replaces the whole map. */
   env: Record<string, string>;
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[] };
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[] };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). */
   access: "link" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */

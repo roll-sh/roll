@@ -219,6 +219,8 @@ pub struct FakeApps {
     /// Each service's last deploy asked for the feedback button.
     pub feedback: Mutex<HashMap<(String, String), bool>>,
     pub shots: Mutex<Vec<String>>,
+    /// The page states each screenshot was asked to reach, by name.
+    pub states: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -281,6 +283,7 @@ impl Apps for FakeApps {
         let revs: Vec<String> = self.deployed.lock().iter().filter(|((p, _), _)| p == preview).map(|(_, r)| r.clone()).collect();
         let api = opts.openapi.as_ref().and_then(|_| revs.iter().find_map(|r| self.api.lock().get(r).cloned()));
         self.shots.lock().push(preview.to_string());
+        self.states.lock().extend(opts.states.iter().map(|s| s.name.clone()));
         let pages = opts.pages.iter().map(|p| roll_previews::ports::PageShot { path: p.clone(), png: png.clone(), errors: 0, report: Default::default() }).collect();
         Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None, api }))
     }

@@ -339,6 +339,47 @@ const STILL = `(() => {
   document.querySelectorAll("video").forEach((v) => { try { v.pause(); v.currentTime = 0; } catch {} });
   return true;
 })()`;
+// The project's page states ($STATES: name → {page, steps}), reached by their steps before the
+// capture (Chromatic's interaction tests): `click`, `type` and `press` on the page's own elements,
+// `wait`. Run in the checks' world (the page's DOM, none of its JavaScript); the first step that
+// finds nothing ends the state's steps and is reported, and the page is taken as it is then.
+const STATES = (() => {
+  try {
+    const s = JSON.parse(process.env.STATES || "{}");
+    return s && typeof s === "object" ? s : {};
+  } catch {
+    return {};
+  }
+})();
+const KEYS = { Enter: 13, Escape: 27, Tab: 9, ArrowDown: 40, ArrowUp: 38, ArrowLeft: 37, ArrowRight: 39, Space: 32, Backspace: 8 };
+const step = async (sessionId, s) => {
+  const sel = (x) => JSON.stringify(String(x));
+  if (typeof s.click === "string") {
+    const r = await check({ expression: `(() => { const el = document.querySelector(${sel(s.click)}); if (!el) return false; el.scrollIntoView({ block: "center" }); el.click(); return true; })()`, returnByValue: true }, sessionId);
+    return r?.result?.value === true ? null : `click ${s.click}: nothing matched`;
+  }
+  if (Array.isArray(s.type) && s.type.length === 2) {
+    const [target, text] = s.type;
+    const r = await check({
+      expression: `(() => { const el = document.querySelector(${sel(target)}); if (!el || !("value" in el)) return false; el.focus();
+        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, "value").set.call(el, ${sel(text)});
+        el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); return true; })()`,
+      returnByValue: true,
+    }, sessionId);
+    return r?.result?.value === true ? null : `type ${target}: nothing to type into`;
+  }
+  if (typeof s.press === "string" && KEYS[s.press]) {
+    const key = s.press === "Space" ? " " : s.press;
+    for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key, code: s.press, windowsVirtualKeyCode: KEYS[s.press], text: type === "keyDown" && key.length === 1 ? key : undefined }, sessionId).catch(() => null);
+    return null;
+  }
+  if (typeof s.wait === "number") {
+    await sleep(Math.min(Math.max(s.wait, 0), 5000));
+    return null;
+  }
+  return "a step roll doesn't know";
+};
 const still = async (sessionId) => {
   await send("Runtime.evaluate", { expression: STILL }, sessionId).catch(() => null);
   await sleep(100);
@@ -424,17 +465,32 @@ const moves = async (sessionId, first) => {
   try {
     for (const [n, path] of JSON.parse(process.env.PAGES || "[]").slice(0, 5).entries()) {
       const width = /^@[1-9][0-9]*$/.test(path) ? Number(path.slice(1)) : null;
+      const state = /^state:[a-z0-9-]{1,40}$/.test(path) ? STATES[path.slice(6)] : null;
+      const at = state && typeof state.page === "string" && /^\/[^\s#"'`]{0,199}$/.test(state.page) ? state.page : null;
       if (width) await send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: width < 600 }, sessionId);
       else await send("Emulation.clearDeviceMetricsOverride", {}, sessionId);
       const before = errors.length + failed.length;
       const done = once("Page.loadEventFired");
-      await send("Page.navigate", { url: width ? process.env.URL : new URL(path, process.env.URL).href }, sessionId);
+      await send("Page.navigate", { url: width ? process.env.URL : new URL(at || path, process.env.URL).href }, sessionId);
       await Promise.race([done, sleep(10000)]);
       await sleep(300);
+      // A state's steps, at most 10, 15 s in all; the first that fails ends them.
+      let stepFailed = null;
+      if (state) {
+        const until = Date.now() + 15000;
+        for (const s of (Array.isArray(state.steps) ? state.steps : []).slice(0, 10)) {
+          if (Date.now() > until) break;
+          stepFailed = await step(sessionId, s || {});
+          if (stepFailed) break;
+          await sleep(150);
+        }
+        await sleep(300);
+      }
       await still(sessionId);
       const shot = await send("Page.captureScreenshot", { format: "png" }, sessionId);
       fs.writeFileSync(`${process.env.OUT}.${n}.png`, Buffer.from(shot.data, "base64"));
       const page = { path, errors: errors.length + failed.length - before, unstable: await moves(sessionId, shot) };
+      if (stepFailed) page.step = stepFailed;
       // The same checks as the first page's, each bounded in time.
       const value = async (expression, wait) => {
         const r = await Promise.race([check({ expression, awaitPromise: !!wait, returnByValue: true }, sessionId), sleep(wait || 5000).then(() => null)]);

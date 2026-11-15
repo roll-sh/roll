@@ -397,6 +397,7 @@ impl PreviewVisualReview {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PreviewPageCheck {
+    /// A path, `@<width>`, or `state:<name>` (a page state roll previews reaches by its steps).
     pub path: String,
     pub errors: u32,
     pub percent: Option<f64>,
@@ -413,6 +414,10 @@ pub struct PreviewPageCheck {
     pub a11y_added: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub links_added: Option<u32>,
+    /// A page state's step that found nothing (the state taken as it was then). Untrusted: the
+    /// page's own selector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

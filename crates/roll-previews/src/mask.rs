@@ -118,6 +118,40 @@ pub fn nosql_key_masks(schema: &serde_json::Value, columns: &BTreeMap<String, St
     out
 }
 
+/// Search field masks that can't work against a `_mapping` answer (index → `mappings`): `redact`
+/// and `email` write a string, which only a text-like field takes (a `dense_vector`, a number, a
+/// date would refuse it and fail the masking, and the preview with it); such a field can only be
+/// `remove`d. One line per problem; a field the mapping doesn't have yet (a document may add it)
+/// is none.
+pub fn search_field_masks(mapping: &serde_json::Value, fields: &BTreeMap<String, String>) -> Vec<String> {
+    const TEXT: [&str; 6] = ["text", "keyword", "match_only_text", "wildcard", "search_as_you_type", "constant_keyword"];
+    let mut out = Vec::new();
+    for (spec, rule) in fields {
+        if rule == "remove" {
+            continue;
+        }
+        let Some((index, path)) = spec.split_once('.') else { continue };
+        let Some(props) = mapping.get(index).map(|m| &m["mappings"]["properties"]) else { continue };
+        // Down the path through objects' `properties` (nested ones too).
+        let mut at = props;
+        let mut ty = None;
+        let parts: Vec<&str> = path.split('.').collect();
+        for (i, part) in parts.iter().enumerate() {
+            let Some(f) = at.get(*part) else { break };
+            if i == parts.len() - 1 {
+                ty = Some(f["type"].as_str().unwrap_or(if f.get("properties").is_some() { "object" } else { "?" }).to_string());
+            } else {
+                at = &f["properties"];
+            }
+        }
+        if let Some(t) = ty.filter(|t| !TEXT.contains(&t.as_str()) && t != "?") {
+            let a = if t.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+            out.push(format!("{spec} is {a} {t} field: {rule} writes a string it won't take; use remove"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -157,5 +191,30 @@ mod tests {
         assert!(p.update.contains(r#"UPDATE "app"."we""ird" SET "ip" = NULL"#), "a quote in a name stays a name: {}", p.update);
         assert_eq!(p.after.len(), 4, "two tables' vacuums, the views, a checkpoint");
         assert!(super::postgres(&[("a.b.c".to_string(), "mask_default()".to_string())].into_iter().collect(), "s").is_err());
+    }
+
+    /// A string mask on a vector, a number or an object is named with what it is; on text, or
+    /// `remove` on anything, or a field the mapping doesn't have, it isn't.
+    #[test]
+    fn search_masks_only_write_strings_into_text() {
+        let mapping = serde_json::json!({ "products": { "mappings": { "properties": {
+            "name": { "type": "text" }, "sku": { "type": "keyword" }, "emb": { "type": "dense_vector", "dims": 3 },
+            "price": { "type": "float" }, "owner": { "properties": { "email": { "type": "keyword" }, "age": { "type": "integer" } } },
+        } } } });
+        let rules: BTreeMap<String, String> = [
+            ("products.name", "redact"), ("products.sku", "email"), ("products.emb", "redact"), ("products.price", "remove"),
+            ("products.owner.email", "email"), ("products.owner.age", "redact"), ("products.owner", "redact"), ("products.later", "redact"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        assert_eq!(
+            super::search_field_masks(&mapping, &rules),
+            [
+                "products.emb is a dense_vector field: redact writes a string it won't take; use remove",
+                "products.owner is an object field: redact writes a string it won't take; use remove",
+                "products.owner.age is an integer field: redact writes a string it won't take; use remove",
+            ]
+        );
     }
 }
