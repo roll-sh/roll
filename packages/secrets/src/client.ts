@@ -52,12 +52,13 @@ export function createClient(options: ClientOptions) {
   const doFetch = options.fetch ?? fetch;
   let project: Promise<string> | null = options.project ? Promise.resolve(options.project) : null;
 
-  async function call(method: string, path: string, body?: unknown, raw = false): Promise<unknown> {
+  async function call(method: string, path: string, body?: unknown, raw = false, signal?: AbortSignal): Promise<unknown> {
     const res = await doFetch(`${base}${path}`, {
       method,
       headers: { authorization: `Bearer ${options.token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: "no-store",
+      signal,
     });
     const text = await res.text();
     if (!res.ok) {
@@ -99,9 +100,9 @@ export function createClient(options: ClientOptions) {
    * The folder's digest. With `since` and `waitSeconds` (at most 60), a long poll: it answers as
    * soon as the digest differs from `since`, or with the same one when the wait runs out.
    */
-  async function digest(environment: string, path?: string, o: { since?: string; waitSeconds?: number } = {}): Promise<string> {
-    const wait = o.since && o.waitSeconds ? { since: o.since, wait: String(Math.min(60, Math.max(1, Math.round(o.waitSeconds)))) } : {};
-    return ((await call("GET", `${await env(environment)}/digest${qs({ path, ...wait })}`)) as { digest: string }).digest;
+  async function digest(environment: string, path?: string, o: { since?: string; waitSeconds?: number; signal?: AbortSignal } = {}): Promise<string> {
+    const wait = o.since && o.waitSeconds ? { since: o.since, wait: String(Math.min(25, Math.max(1, Math.round(o.waitSeconds)))) } : {};
+    return ((await call("GET", `${await env(environment)}/digest${qs({ path, ...wait })}`, undefined, false, o.signal)) as { digest: string }).digest;
   }
 
   async function renew(lease: string, ttlMinutes?: number): Promise<Lease> {
@@ -118,6 +119,8 @@ export function createClient(options: ClientOptions) {
     const every = Math.max(1, o.intervalMs ?? 5000);
     const fail = o.onError ?? (() => {});
     let stopped = false;
+    // Stopping abandons a held long poll (nothing is called back after stop).
+    const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let leases: string[] = [];
     let last: string | null = null;
@@ -133,7 +136,8 @@ export function createClient(options: ClientOptions) {
       let next = every;
       try {
         const asked = Date.now();
-        const now = await digest(environment, o.path, last === null ? {} : { since: last, waitSeconds: 25 });
+        const now = await digest(environment, o.path, last === null ? { signal: abort.signal } : { since: last, waitSeconds: 25, signal: abort.signal });
+        if (stopped) return;
         if (last !== null && (now !== last || Date.now() - asked >= 1000)) next = 0;
         if (last === null || now !== last) {
           const before = last;
@@ -163,6 +167,7 @@ export function createClient(options: ClientOptions) {
     void tick();
     return () => {
       stopped = true;
+      abort.abort();
       clearTimeout(timer);
       clearInterval(renewing);
     };

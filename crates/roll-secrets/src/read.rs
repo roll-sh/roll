@@ -484,10 +484,6 @@ impl Secrets {
         Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, withheld, sensitive: vec![] }))
     }
 
-    /// A digest of a folder's effective secrets (keys, where they come from, versions,
-    /// fingerprints, links): it changes when what `values` would return changes, except a live
-    /// link's resource rotating. Decrypts nothing, issues nothing, isn't audited: what
-    /// `roll run --watch` polls.
     /// What moves when the project's values may have: its change counter and its resources'
     /// rotation generations (a long-polled digest is worked out again only when this moves).
     pub(crate) fn change_marker(&self, project: &str) -> Result<(i64, i64)> {
@@ -498,6 +494,10 @@ impl Secrets {
         })
     }
 
+    /// A digest of a folder's effective secrets (keys, where they come from, versions,
+    /// fingerprints, links): it changes when what `values` would return changes, except a live
+    /// link's resource rotating. Decrypts nothing, issues nothing, isn't audited: what
+    /// `roll run --watch` polls.
     pub fn digest(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<String> {
         use sha2::{Digest, Sha256};
         let path = names::path(path)?;

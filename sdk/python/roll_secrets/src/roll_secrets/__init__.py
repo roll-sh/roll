@@ -144,7 +144,8 @@ class Client:
         ``since``, or with the same one when ``wait`` runs out."""
         q = _q(path)
         if since and wait >= 1:
-            q += ("&" if q else "?") + "since=" + urllib.parse.quote(since, safe="") + "&wait=" + str(int(min(wait, 60)))
+            # Under this client's own timeout, and the server's 25.
+            q += ("&" if q else "?") + "since=" + urllib.parse.quote(since, safe="") + "&wait=" + str(int(max(1, min(wait, 25, self.timeout - 5))))
         return self._call("GET", self._env(env) + "/digest" + q)["digest"]
 
     def renew(self, lease: str, ttl_minutes: Optional[int] = None) -> Dict[str, Any]:
@@ -181,6 +182,8 @@ class Client:
                 until_renew = max(1.0, renew_every - (asked - renewed))
                 now = self.digest(env, path, since=last, wait=min(25.0, until_renew)) if last else self.digest(env, path)
                 held = last is not None and (now != last or time.monotonic() - asked >= 1)
+                if stop.is_set():
+                    break  # stopped while the poll was held: nothing more is called back
                 if now != last:
                     v = self.resolve(env, consumer, path) if consumer else self.values(env, path)
                     before, last = last, now

@@ -567,14 +567,48 @@ async fn insights(State(s): S, Who(c): Who, Path((project, env)): Path<(String, 
     Ok(ok(blocking(s, move |s| s.insights(&project, &env, &path_of(&q), &c)).await?))
 }
 
-/// The folder's digest. With `since` (the digest a watcher has) and `wait` (seconds, at most 60), a
+/// Long polls held at once: by principal, and on this node. Past either, a poll answers at once
+/// (watchers then ask again after their interval).
+static HELD: std::sync::LazyLock<std::sync::Mutex<HashMap<String, usize>>> = std::sync::LazyLock::new(Default::default);
+const HELD_PER_PRINCIPAL: usize = 32;
+const HELD_PER_NODE: usize = 4096;
+
+/// One held poll, counted until it's dropped.
+struct Held(String);
+
+impl Held {
+    fn take(principal: &str) -> Option<Held> {
+        let mut m = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        if m.values().sum::<usize>() >= HELD_PER_NODE || m.get(principal).copied().unwrap_or(0) >= HELD_PER_PRINCIPAL {
+            return None;
+        }
+        *m.entry(principal.to_string()).or_default() += 1;
+        Some(Held(principal.to_string()))
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let mut m = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = m.get_mut(&self.0) {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// The folder's digest. With `since` (the digest a watcher has) and `wait` (seconds, at most 25:
+/// under a load balancer's idle timeout, and as long as a revoked token keeps a held answer), a
 /// long poll: it answers as soon as the digest differs from `since`, or with the same digest when
 /// `wait` runs out. Meanwhile it reads the project's change counter each second (cheap) and works
 /// the digest out again only when that moved, or every 10 s (what the counter can't see: a live
-/// link's value, a folder another project shares).
+/// link's value, a folder another project shares). At most 32 held per principal and 4096 per
+/// node; past that it answers at once.
 async fn digest(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
     let path = path_of(&q);
-    let wait = q.get("wait").and_then(|w| w.parse::<u64>().ok()).unwrap_or(0).min(60);
+    let wait = q.get("wait").and_then(|w| w.parse::<u64>().ok()).unwrap_or(0).min(25);
     let since = q.get("since").cloned();
     let read = |s: Arc<Secrets>| {
         let (project, env, path, c) = (project.clone(), env.clone(), path.clone(), c.clone());
@@ -584,6 +618,7 @@ async fn digest(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
     if wait == 0 || since.as_deref() != Some(d.as_str()) {
         return Ok(ok(json!({ "digest": d })));
     }
+    let Some(_held) = Held::take(&c.principal) else { return Ok(ok(json!({ "digest": d }))) };
     let marker = |s: Arc<Secrets>| {
         let project = project.clone();
         blocking(s, move |s| s.change_marker(&project))

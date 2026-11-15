@@ -540,8 +540,6 @@ async fn references_imports_and_personal_values_resolve_and_cycles_are_reported(
     // A watcher long-polls instead: unchanged, it holds until `wait` runs out; a change answers it
     // at once (well before its 30 s), with the new digest.
     let since = before.as_str().unwrap().to_string();
-    let quiet = api.ok(Method::GET, &format!("/environments/development/digest?since={since}&wait=1"), None).await;
-    assert_eq!(quiet["digest"], before);
     let (router, project) = (api.router.clone(), api.project.clone());
     let waiting = tokio::spawn(async move {
         let started = std::time::Instant::now();

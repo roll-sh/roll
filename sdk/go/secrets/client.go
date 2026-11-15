@@ -262,12 +262,16 @@ func (c *Client) DigestSince(ctx context.Context, env, path, since string, wait 
 		return "", err
 	}
 	q := query(path)
+	// Under the client's own timeout, and the server's 25 s.
+	if c.HTTP != nil && c.HTTP.Timeout > 0 {
+		wait = min(wait, c.HTTP.Timeout-5*time.Second)
+	}
 	if since != "" && wait >= time.Second {
 		sep := "?"
 		if q != "" {
 			sep = "&"
 		}
-		q += sep + "since=" + url.QueryEscape(since) + "&wait=" + strconv.Itoa(int(min(wait, time.Minute)/time.Second))
+		q += sep + "since=" + url.QueryEscape(since) + "&wait=" + strconv.Itoa(int(min(wait, 25*time.Second)/time.Second))
 	}
 	var d struct {
 		Digest string `json:"digest"`
