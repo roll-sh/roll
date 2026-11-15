@@ -176,6 +176,15 @@ function RequestCard({ env, request: r, onChanged }: { env: Environment; request
         {r.path !== "/" && <span className="font-mono">· {r.path}</span>}
         {r.applied_seq !== null && <span>· applied as change #{r.applied_seq}</span>}
       </p>
+      {r.gates.length > 1 || r.gates.some((g) => g.path) ? (
+        <p className="mt-1 flex flex-wrap gap-1.5 text-[10.5px]">
+          {r.gates.map((g) => (
+            <span key={g.path ?? "env"} className={`rounded border border-line-2 px-1 font-mono ${g.approved >= g.approvals ? "text-ok" : "text-muted"}`} title={g.approvers?.length ? `approvers: ${g.approvers.join(", ")}` : "any approver"}>
+              {g.path ?? r.environment} {g.approved}/{g.approvals}
+            </span>
+          ))}
+        </p>
+      ) : null}
       <ul className="mt-2 divide-y divide-line rounded-lg border border-line-2 bg-panel-2/60 px-2.5">
         {r.items.map((i) => {
           const v = values?.find((x) => x.key === i.key && x.path === i.path && x.type === i.type);

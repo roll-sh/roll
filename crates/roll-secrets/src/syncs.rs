@@ -48,6 +48,10 @@ const RETRY_MS: i64 = 5 * 60_000;
 const PER_PROJECT: i64 = 50;
 /// Pushes one sweep makes (the rest wait for the next one).
 const PER_SWEEP: usize = 20;
+/// How many syncs a sweep claims for checking at a time.
+const CLAIM: usize = 25;
+/// How long one sweep spends checking environments' digests before it stops.
+const CHECK_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 /// The longest target, as JSON.
 const TARGET_MAX: usize = 4096;
 /// The longest stored error.
@@ -437,7 +441,7 @@ impl Secrets {
     fn sync_caller(&self, r: &Row) -> Result<Caller> {
         let principal = format!("sync:{}", r.info.id);
         if r.info.created_by == "operator" {
-            return Ok(Caller { principal, grants: Arc::new(Everything), ip: None });
+            return Ok(Caller { principal, grants: Arc::new(Everything), ip: None, runtime: false });
         }
         let gone = || Error::Forbidden(format!("{} made this sync and can't reach secrets any more: make the sync again", r.info.created_by));
         // A person's: as they are now, while their account can sign in.
@@ -457,7 +461,7 @@ impl Secrets {
         // A roll-access grant: as it is now, or gone once revoked or expired.
         if !ours {
             let g = self.grants.as_ref().and_then(|g| g.grant(token)).ok_or_else(gone)?;
-            return Ok(Caller { principal, grants: Arc::new(crate::access::GrantGrants(g)), ip: None });
+            return Ok(Caller { principal, grants: Arc::new(crate::access::GrantGrants(g)), ip: None, runtime: false });
         }
         type Grants = (Option<String>, Option<String>, String, Option<i64>, Option<i64>);
         let found: Option<Grants> = self.db.read(|c| {
@@ -476,7 +480,7 @@ impl Secrets {
             paths: paths.and_then(|p| serde_json::from_str(&p).ok()),
             actions: from_json(&actions),
         };
-        Ok(Caller { principal, grants: Arc::new(scope), ip: None })
+        Ok(Caller { principal, grants: Arc::new(scope), ip: None, runtime: false })
     }
 
     /// One pass over the syncs (the sweeper): push those whose environment changed.
@@ -485,42 +489,61 @@ impl Secrets {
         let now = self.db.now_ms()?;
         // Syncs of deleted environments and projects go with them.
         self.db.write(|c| c.execute("DELETE FROM syncs WHERE env_id NOT IN (SELECT id FROM environments)", ()))?;
-        let rows = self.db.read(|c| {
-            // Least recently checked first: every sync gets its turn, however many there are.
-            c.query(
-                &format!("SELECT {COLUMNS} FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.running_until <= ? AND s.retry_at <= ? ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT 500"),
-                params![now, now],
-                row,
-            )
-        })?;
         let (mut pushed, mut failed) = (0, 0);
-        let mut checked: Vec<String> = vec![];
-        for r in rows {
-            if pushed + failed >= PER_SWEEP {
+        // A digest of a large folder takes a tenth of a second: a sweep checks for so long, and
+        // the next one goes on from the least recently checked. Every node sweeps: each claims a
+        // few at a time (marking them checked before it reads their digests), so nodes check
+        // different syncs instead of all the same oldest ones.
+        let started = std::time::Instant::now();
+        // Claimed but not reached: their turn is given back.
+        let mut unreached: Vec<(String, Option<i64>)> = vec![];
+        'sweep: loop {
+            if pushed + failed >= PER_SWEEP || started.elapsed() >= CHECK_BUDGET {
                 break;
             }
-            checked.push(r.info.id.clone());
-            // Only a sync whose environment changed, or that never ran. One whose creator lost
-            // access fails here, and waits out `retry_at` like any failed push.
-            let digest = self.sync_caller(&r).and_then(|c| self.digest(&r.project, &r.info.environment, &r.info.path, &c));
-            if let Ok(d) = &digest
-                && r.info.last_digest.as_deref() == Some(d.as_str())
-            {
-                continue;
+            let batch: Vec<(Row, Option<i64>)> = self.db.write(|c| {
+                // Least recently checked first: every sync gets its turn, however many there are.
+                let rows = c.query(
+                    &format!("SELECT {COLUMNS}, s.checked_at FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.running_until <= ? AND s.retry_at <= ? AND COALESCE(s.checked_at, 0) < ? ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT {CLAIM}"),
+                    params![now, now, now],
+                    |r| Ok((row(r)?, r.get::<_, Option<i64>>(16)?)),
+                )?;
+                for (r, _) in &rows {
+                    c.execute("UPDATE syncs SET checked_at = ? WHERE id = ?", params![now, r.info.id])?;
+                }
+                Ok::<_, Error>(rows)
+            })?;
+            if batch.is_empty() {
+                break;
             }
-            let Some(hold) = self.claim_sync(&r.info.id, r.info.last_digest.as_deref())? else {
-                continue;
-            };
-            match self.push_sync(r, hold, digest.ok(), false) {
-                true => pushed += 1,
-                false => failed += 1,
+            let mut batch = batch.into_iter();
+            while let Some((r, was)) = batch.next() {
+                if pushed + failed >= PER_SWEEP || started.elapsed() >= CHECK_BUDGET {
+                    unreached.push((r.info.id, was));
+                    unreached.extend(batch.map(|(r, was)| (r.info.id, was)));
+                    break 'sweep;
+                }
+                // Only a sync whose environment changed, or that never ran. One whose creator lost
+                // access fails here, and waits out `retry_at` like any failed push.
+                let digest = self.sync_caller(&r).and_then(|c| self.digest(&r.project, &r.info.environment, &r.info.path, &c));
+                if let Ok(d) = &digest
+                    && r.info.last_digest.as_deref() == Some(d.as_str())
+                {
+                    continue;
+                }
+                let Some(hold) = self.claim_sync(&r.info.id, r.info.last_digest.as_deref())? else {
+                    continue;
+                };
+                match self.push_sync(r, hold, digest.ok(), false) {
+                    true => pushed += 1,
+                    false => failed += 1,
+                }
             }
         }
-        if !checked.is_empty() {
-            let at = self.db.now_ms()?;
+        if !unreached.is_empty() {
             self.db.write(|c| {
-                for id in &checked {
-                    c.execute("UPDATE syncs SET checked_at = ? WHERE id = ?", params![at, id])?;
+                for (id, was) in &unreached {
+                    c.execute("UPDATE syncs SET checked_at = ? WHERE id = ? AND checked_at = ?", params![was, id, now])?;
                 }
                 Ok::<_, Error>(())
             })?;
@@ -530,11 +553,14 @@ impl Secrets {
 
     /// Push a claimed sync and record what happened. `true`: it pushed.
     fn push_sync(&self, r: Row, hold: i64, digest: Option<String>, force: bool) -> bool {
+        // Within what its maker may do. Not a runtime: a sync's target is one its maker chose and
+        // may read back (a webhook sealed to their key, a cluster of theirs), so sensitive keys
+        // stay out (named under "not synced"; the target keeps what it had).
         let caller = self.sync_caller(&r);
         let outcome = caller.and_then(|caller| self.push_once(&r, &caller, digest, force));
         let now = self.db.now_ms().unwrap_or(hold - HOLD_MS);
         let (project, id, env, path) = (r.project.as_str(), r.info.id.as_str(), r.info.environment.as_str(), r.info.path.as_str());
-        let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None };
+        let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None, runtime: false };
         let ok = outcome.is_ok();
         let res = self.db.write(|c| {
             match &outcome {
@@ -552,7 +578,8 @@ impl Secrets {
             match &outcome {
                 Ok(o) if !o.keys.is_empty() || force => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &o.keys, &o.summary, now)?,
                 Ok(_) => {}
-                Err(e) => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &[], &clip(format!("{} sync failed: {e}", r.info.kind)), now)?,
+                // Which keys reached the target before it failed isn't known: the row says so.
+                Err(e) => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &[], &clip(format!("{} sync failed (values may have reached the target in part): {e}", r.info.kind)), now)?,
             }
             Ok::<_, Error>(())
         });

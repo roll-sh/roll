@@ -567,33 +567,150 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: MCP 2026-07-28 checked end to end with the official TypeScript SDK v2 (`@modelcontextprotocol/client` 2.4.0, `live/sdk2/`): pinned to 2026-07-28, on `auto` (it probes `server/discover` and picks the modern era) and legacy, each listing tools, calling one, reading a resource and listing prompts; and an approval as a Multi Round-Trip Request, the SDK's own elicitation handler fulfilling it and retrying the call by itself (#24); apps reading a roll code repo for the caller (a plan, an import, a service built from it) needs read on that repo (any apps grant reached it; roll apps' finding) (#24); rolld builds in its image again (roll-mcp included the dashboard's icon from apps/, which the image leaves out) and the cluster e2e builds only its own checkout's code (a shared cargo cache id handed one branch's crates to another; roll previews' finding) (#24); MCP 2026-07-28, the stateless core, beside the handshake revisions (a dual-era server): `server/discover`, requests served on their own `_meta` with no `initialize` or session, `MCP-Protocol-Version`/`Mcp-Method`/`Mcp-Name` checked against the body (`-32020`), unsupported versions answered with the list (`-32022`), unknown methods 404, `resultType` and `serverInfo` on every result, lists cacheable a minute for the caller only, and approvals as Multi Round-Trip Requests (`input_required` with the approval page; the retry runs once approved); a modern-only client failed against roll before (#24); Redis's `@dangerous` commands are admin (`MONITOR` and `SYNC` stream everyone's commands and data, `CLIENT` ends other connections, `SLOWLOG` shows others' arguments: they were write) and `SWAPDB` is delete; `run.rollback_on_crash` is deploy (it puts an older deployment live by itself; apps' review) (#24); an apps service's run settings fail closed: only size, scale, health checks, timers, alerts, rollout and restarts are write, every other run key is deploy, a new one too until it's listed (a list of deploy keys let `run.tcp`, a port on the internet, through as write, as it had `run.schedules`) (#24); setting a service's `run.schedules` (apps-next: commands run as jobs of the live deployment on a timer) is deploy, as a production job is (it was write: a token that couldn't run one production job could schedule one every minute), and `apps_update_service` says how to set it; `secrets_get_values` (one reveal for an environment, not one per key), `secrets_list_leases` and `secrets_end_lease`, and the secrets tools' descriptions brought up to date (secrets' seventeenth review) (#24); `secrets_set`, `secrets_delete` and `secrets_propose` take `if_version` (Vault's check-and-set: an agent can't silently overwrite a person's edit; 409 `stale`; secrets #62); this round's gate additions cost nothing measurable (`gate_latency`, release, pinned, eight alternating runs each at load ~44: CPU 2.88 s against 2.96 s, within ±0.25 s run to run; 32-at-once token throughput median ~60k against ~55k, ranges 35–89k and 23–86k overlapping; one resource p50 84–97 µs against 114–133 µs); `apps_set_environment` takes `paused` and `apps_create_service` a repo's `branch` (apps-next); every answer to an expiring token says when (`Roll-Token-Expiration`, GitHub's `GitHub-Authentication-Token-Expiration`), and the CLI warns a week ahead; `apps_import` (a roll.toml or compose file checked before `roll up --all`; apps-next); the approval UI checked in a browser against `users-live` (the policy's checkboxes, a waiting token's badge with an admin's Approve and Deny, "Needs attention" leading with it, the person's view without them), which moved rotation's choice into a step Rotate opens (it was a select on every row); the `tune_slow_query` prompt (Neon's query tuning: the plan, an index tried on a branch, both plans compared, main only when you say so); the sixteenth review (this round's token surface): a rotated secret in its grace calls products but manages no tokens (it couldn't rotate, change or make one that outlives the grace), and a token whose checksum is wrong is refused before any lookup; `debug_failing_service` starts from what roll already flags (an environment's `attention`, `apps_activity` with `all`); `apps_activity` takes `all` (the whole timeline: deploys, failures, crash loops, alerts; apps-next); `secrets_reach` and `secrets_folder_policies` (secrets #61, #53); rotating a token can keep the old secret working a while (`keep_old_for_s`, at most a week: Stripe's roll key), from the dashboard's Rotate and `roll token rotate --keep-old 1h`, so deployments switch without an outage; `postgres_typescript_types` (Supabase's generated types, written by one read-only query: enums as unions, arrays, nullable) and the `compare_branch_schemas` prompt (Neon's schema compare: both branches described, the difference listed, advisors on the branch); people's tokens past the policy wait for an admin (on #25); open registration's limit is a sliding minute per network (a fixed minute let twice the limit through at its edge, and its test failed when a run crossed one); a token used before its start says so (401 `not_yet_valid`, "this token works from <time>", with `not_before`; the token list and page show the start); the ninth review's findings (apps settings that change what production runs, its
-source, build, start and pre-deploy commands, schedule, kind, port, volume and `run.public`, are
-deploy; `create_grant` refuses extensions that name no caller; the expiry digest leaves out tokens
-made for a day or less); a token can start later (`not_before`, Cloudflare's TTL start): refused
-until then as an unknown token, the dashboard's "Starts" and `roll token create --starts 2h` (the
-expiry counts from the start), changeable and clearable; a person's own token's page tested to show
-only their reach; `roll token list --product/--resource` and `--workloads`; a workload token makes
-no tokens; workload tokens (`Access::mint_workload`: minutes, within an identity's scope, owned by
-its maker, out of the list and caps) for secrets' identity logins; a person's own tokens' news is
-mailed to them (an approval waiting on them, used from a new network, revoked as leaked, about to
-expire; only their own, never a secret); `previews_resolve_note` (a preview page's note, write by
-the prefix; previews-next), and `apps_logs` takes `before`, `instance`, `deployment` and `stream`
-(apps-next); Postgres analysis as Neon's and Supabase's MCP servers have it: `postgres_explain`,
-`postgres_slow_queries`, `postgres_advisors`, `postgres_list_extensions` (read-only SQL through the
-query route, checked on Postgres 18); names people choose can't hide text: a token's name with
-invisible characters is refused, OAuth clients' names (registered or from a metadata document) drop
-them, and `initialize`'s instructions escape them; `apps_set_environment` takes response header
-rules (`headers`, apps-next); a cron run's logs are read again, as apps-next decided (its lines were
-always in the read-level environment log); `apps_restart_instance` (apps-next, reviewed under the
-environment prefix: deploy in production); invisible characters (tag characters, zero-width and bidi
-controls, variation selectors) escaped in results' text, so instructions hidden in other people's
-text stay visible to the model; plain-read answers checked for credentials (key listings: streams'
-are usernames, storage's skip the secret, tasks' are hashes and prefixes); the fifteenth review: a
-list's credentials redacted item by item (a token with reveal on one Postgres database and read on
-all saw every database's password in `GET /v1/projects`; the same for every list with credential
-fields), a preview's `share_url` redacted without reveal (its access token: the QR code's reveal row
-protected nothing), and a cron run's logs reveal on this branch too; `previews_list_notes` and
+Done lately: a token's "last day" counts only its own requests (its change history and roll's
+revocations were counted as asks: "1 asked" on a token that never made a request; seen in the review
+pack) (#25); ended OAuth connections and their kept clients are forgotten after the audit log's days
+(each `roll login` made one of each, kept forever) (#25); `roll login` checked live against a rolld
+set up as a deployment is (`ROLL_CODE_PUBLIC_URL`, over the tailnet; `users-live/login.sh`): over
+SSH it shows a code and link, the device page sees it with its network, allowing it signs the CLI in
+(0600), `whoami` names the login, the same server's `127.0.0.1` alias is refused naming the address
+to use, and logout revokes the grant (#25); the access page's token list has a filter (name, id,
+hint, client, person or product; GitHub and Stripe search theirs), and a token pasted into it finds
+its own row by its hint without leaving the browser (#25); a scoped token's row shows what its
+secret looks like (`rlt_…a1b2`, Stripe's last four), in the dashboard, `roll token list` and the
+API, so a token found in a config can be matched to its row (#25); the seventeenth review (#25's
+device flow, `roll login`, the change audit and the mails; nothing high), all fixed: past the
+wrong-code limit every code answers 429, a right one too (a hit still answered 200, so guessing went
+on); `roll login` checks the server's issuer is the address it was pointed at and its endpoints are
+on that origin, and never follows a redirect (a crafted `ROLL_API_URL` could have a real token kept
+and sent elsewhere); the device mail names the network the device asked from (it named the
+approver's, a phished victim's own) and the page warns when the networks differ; only redirect-less
+clients use the device grant; a stray callback doesn't end a login and a silent connection doesn't
+stall it; the token file is a fresh random file, never through a symlink; a client's own revoke is
+audited and a person doesn't see an admin's address; an allowed device never collected has its grant
+revoked (#25); a person is mailed at once when a token, MCP client or device is added to their
+account (GitHub's "a new personal access token was added": what it may do, from which network, where
+to revoke it; a phished device code reaches its victim) (#25); changes to tokens and access are
+audited (GitHub's `personal_access_token.create`, Stripe's key history): who made, changed, rotated,
+revoked or approved a token, connected a client or set the policy, from one layer on `/v1/access`,
+and the audit page shows who made each change (it showed the token changed) (#25); `roll token
+whoami` names the credential that runs and where it came from, and each one set that loses to it
+(`gh auth status`; exits 1 with none) (#25); `/oauth/device` checked in a browser against a live
+rolld, wide and at phone width (`users-live/device-shot.mjs`: the code entry, a wrong code, a
+request with its network and age, allowing it and the poll taking tokens, refusing one and the poll
+hearing `access_denied`; the wrong-code page said "start connecting again from your MCP client", now
+its own words) (#25); `roll login` signs in with a code where there's no browser (RFC 8628's device
+flow, `gh auth login`'s: `/oauth/device` on any device, the consent screen's form, the asking
+network shown against device-code phishing, ten wrong codes a minute; over SSH by default) (#25);
+`apps_set_environment` takes `held` (apps #26's rollback hold) (#24); `apps_export_project` (apps
+#26: a project as a roll.toml, variables by name only; pairs with `apps_import`) (#24); `roll login`
+and `roll logout` (#25): the CLI signs in through the browser (`gh auth login`'s flow: RFC 7591
+registration, a loopback redirect, PKCE, `state` and `iss` checked, `--no-browser` to paste the
+answer back), keeps the login 0600 per API URL, uses it only when no credential is set, refreshes it
+under a lock, and logout revokes it; revoking a refresh token now revokes its connection (RFC 7009
+2.1: a client's sign-out left the grant listed as live with no secrets) (#25); the integration with
+secrets' landing branch built as `feature/mcp-on-landing` (#25 + 43cb35162) and every sibling head
+route-checked with #25; approving or denying a person's token is audited and keeps who decided
+(`decided_by`; GitHub's `personal_access_token.request_approved`), and the token row says "approved
+… by …" (#25); a waiting token answers 403 `pending_approval`, not 401 (a 401 sent an OAuth MCP
+client back through sign-in and consent for a connection that was only waiting) (#25); a person is
+told before making a token or connecting a client that it will wait for an admin (GitHub's "this
+token will require approval"; `approve_people` in `GET /v1/access`) (#25); the sixteenth review's
+#25 findings fixed: a person's OAuth connection past the policy waits too (it didn't), a waiting
+token's rules are frozen until an admin decides (an approval took whatever it had become), widening
+and waiting again are one transaction, admins' mail is cleaned names and once an hour per token, and
+tokens made before the policy show as `unapproved` in an admin's checkup; the approval of people's
+tokens checked live with accounts and mail (`users-live/approval.sh`: waits, 401 `pending_approval`,
+the admin mailed, approved from the CLI, the person mailed, then 200); a person's pending token
+leads an admin's checkup ("Needs attention": approve or deny), and stays out of the person's own
+(#25); admins are mailed when a person's token waits for them (who asked, what it may do, the link
+to decide; `Sessions::admins`, accounts' list) (#25); `roll token list --pending` and `roll token
+approve|deny <id>` (#25); people's tokens past the policy wait for an admin (#25; GitHub's
+organization approval: `approve_people`, 401 `pending_approval`, approve or deny on the access page,
+the person mailed, widening waits again); the ninth review's findings (people's mail in roll's words
+only: names as words, an approval's mail without its resource, a leak's without where, one approval
+mail per token per ten minutes and 20 a person an hour; workload tokens capped per owner and a
+person's listed before the limit; a refresh token's retry within its grace audited; apps settings
+that change what production runs, its source, build, start and pre-deploy commands, schedule, kind,
+port, volume and `run.public`, are deploy; `create_grant` refuses extensions that name no caller;
+the expiry digest leaves out tokens made for a day or less); MCP 2026-07-28 checked end to end with
+the official TypeScript SDK v2 (`@modelcontextprotocol/client` 2.4.0, `live/sdk2/`): pinned to
+2026-07-28, on `auto` (it probes `server/discover` and picks the modern era) and legacy, each
+listing tools, calling one, reading a resource and listing prompts; and an approval as a Multi
+Round-Trip Request, the SDK's own elicitation handler fulfilling it and retrying the call by itself
+(#24); apps reading a roll code repo for the caller (a plan, an import, a service built from it)
+needs read on that repo (any apps grant reached it; roll apps' finding) (#24); rolld builds in its
+image again (roll-mcp included the dashboard's icon from apps/, which the image leaves out) and the
+cluster e2e builds only its own checkout's code (a shared cargo cache id handed one branch's crates
+to another; roll previews' finding) (#24); MCP 2026-07-28, the stateless core, beside the handshake
+revisions (a dual-era server): `server/discover`, requests served on their own `_meta` with no
+`initialize` or session, `MCP-Protocol-Version`/`Mcp-Method`/`Mcp-Name` checked against the body
+(`-32020`), unsupported versions answered with the list (`-32022`), unknown methods 404,
+`resultType` and `serverInfo` on every result, lists cacheable a minute for the caller only, and
+approvals as Multi Round-Trip Requests (`input_required` with the approval page; the retry runs once
+approved); a modern-only client failed against roll before (#24); Redis's `@dangerous` commands are
+admin (`MONITOR` and `SYNC` stream everyone's commands and data, `CLIENT` ends other connections,
+`SLOWLOG` shows others' arguments: they were write) and `SWAPDB` is delete; `run.rollback_on_crash`
+is deploy (it puts an older deployment live by itself; apps' review) (#24); an apps service's run
+settings fail closed: only size, scale, health checks, timers, alerts, rollout and restarts are
+write, every other run key is deploy, a new one too until it's listed (a list of deploy keys let
+`run.tcp`, a port on the internet, through as write, as it had `run.schedules`) (#24); setting a
+service's `run.schedules` (apps-next: commands run as jobs of the live deployment on a timer) is
+deploy, as a production job is (it was write: a token that couldn't run one production job could
+schedule one every minute), and `apps_update_service` says how to set it; `secrets_get_values` (one
+reveal for an environment, not one per key), `secrets_list_leases` and `secrets_end_lease`, and the
+secrets tools' descriptions brought up to date (secrets' seventeenth review) (#24); `secrets_set`,
+`secrets_delete` and `secrets_propose` take `if_version` (Vault's check-and-set: an agent can't
+silently overwrite a person's edit; 409 `stale`; secrets #62); this round's gate additions cost
+nothing measurable (`gate_latency`, release, pinned, eight alternating runs each at load ~44: CPU
+2.88 s against 2.96 s, within ±0.25 s run to run; 32-at-once token throughput median ~60k against
+~55k, ranges 35–89k and 23–86k overlapping; one resource p50 84–97 µs against 114–133 µs);
+`apps_set_environment` takes `paused` and `apps_create_service` a repo's `branch` (apps-next); every
+answer to an expiring token says when (`Roll-Token-Expiration`, GitHub's
+`GitHub-Authentication-Token-Expiration`), and the CLI warns a week ahead; `apps_import` (a
+roll.toml or compose file checked before `roll up --all`; apps-next); the approval UI checked in a
+browser against `users-live` (the policy's checkboxes, a waiting token's badge with an admin's
+Approve and Deny, "Needs attention" leading with it, the person's view without them), which moved
+rotation's choice into a step Rotate opens (it was a select on every row); the `tune_slow_query`
+prompt (Neon's query tuning: the plan, an index tried on a branch, both plans compared, main only
+when you say so); the sixteenth review (this round's token surface): a rotated secret in its grace
+calls products but manages no tokens (it couldn't rotate, change or make one that outlives the
+grace), and a token whose checksum is wrong is refused before any lookup; `debug_failing_service`
+starts from what roll already flags (an environment's `attention`, `apps_activity` with `all`);
+`apps_activity` takes `all` (the whole timeline: deploys, failures, crash loops, alerts; apps-next);
+`secrets_reach` and `secrets_folder_policies` (secrets #61, #53); rotating a token can keep the old
+secret working a while (`keep_old_for_s`, at most a week: Stripe's roll key), from the dashboard's
+Rotate and `roll token rotate --keep-old 1h`, so deployments switch without an outage;
+`postgres_typescript_types` (Supabase's generated types, written by one read-only query: enums as
+unions, arrays, nullable) and the `compare_branch_schemas` prompt (Neon's schema compare: both
+branches described, the difference listed, advisors on the branch); open registration's limit is a
+sliding minute per network (a fixed minute let twice the limit through at its edge, and its test
+failed when a run crossed one); a token used before its start says so (401 `not_yet_valid`, "this
+token works from <time>", with `not_before`; the token list and page show the start); a token can
+start later (`not_before`, Cloudflare's TTL start): refused until then as an unknown token, the
+dashboard's "Starts" and `roll token create --starts 2h` (the expiry counts from the start),
+changeable and clearable; a person's own token's page tested to show only their reach; `roll token
+list --product/--resource` and `--workloads`; a workload token makes no tokens; workload tokens
+(`Access::mint_workload`: minutes, within an identity's scope, owned by its maker, out of the list
+and caps) for secrets' identity logins; a person's own tokens' news is mailed to them (an approval
+waiting on them, used from a new network, revoked as leaked, about to expire; only their own, never
+a secret); `previews_resolve_note` (a preview page's note, write by the prefix; previews-next), and
+`apps_logs` takes `before`, `instance`, `deployment` and `stream` (apps-next); Postgres analysis as
+Neon's and Supabase's MCP servers have it: `postgres_explain`, `postgres_slow_queries`,
+`postgres_advisors`, `postgres_list_extensions` (read-only SQL through the query route, checked on
+Postgres 18); names people choose can't hide text: a token's name with invisible characters is
+refused, OAuth clients' names (registered or from a metadata document) drop them, and `initialize`'s
+instructions escape them; `apps_set_environment` takes response header rules (`headers`, apps-next);
+a cron run's logs are read again, as apps-next decided (its lines were always in the read-level
+environment log); `apps_restart_instance` (apps-next, reviewed under the environment prefix: deploy
+in production); invisible characters (tag characters, zero-width and bidi controls, variation
+selectors) escaped in results' text, so instructions hidden in other people's text stay visible to
+the model; plain-read answers checked for credentials (key listings: streams' are usernames,
+storage's skip the secret, tasks' are hashes and prefixes); the fifteenth review: a list's
+credentials redacted item by item (a token with reveal on one Postgres database and read on all saw
+every database's password in `GET /v1/projects`; the same for every list with credential fields), a
+preview's `share_url` redacted without reveal (its access token: the QR code's reveal row protected
+nothing), and a cron run's logs reveal on this branch too; `previews_list_notes` and
 `previews_resolve_note` (a preview page's note, write by the prefix; previews-next), and `apps_logs`
 takes `before`, `instance`, `deployment` and `stream` (apps-next); apps-next's cron runs as tools
 (`apps_get_cron_run`, `apps_cron_run_logs`, `apps_cancel_cron_run`); a preview's caught mail as

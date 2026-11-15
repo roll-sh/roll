@@ -1,6 +1,6 @@
 import { SecretsError } from "./errors.js";
 import { openSealed } from "./seal.js";
-import type { ExportFormat, Lease, SealedValues, Values } from "./types.js";
+import type { ExportFormat, Lease, SealedValues, TransitPublicKey, Values } from "./types.js";
 
 export type ClientOptions = {
   /** rolld's API, e.g. `https://api.roll.example` (no trailing `/v1`). */
@@ -28,6 +28,13 @@ export type WatchOptions = {
 };
 
 const enc = encodeURIComponent;
+const bytes = (d: Uint8Array | string) => (typeof d === "string" ? new TextEncoder().encode(d) : d);
+const toB64 = (d: Uint8Array) => {
+  let bin = "";
+  for (const b of d) bin += String.fromCharCode(b);
+  return btoa(bin);
+};
+const fromB64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 const qs = (q: Record<string, string | undefined>) => {
   const parts = Object.entries(q)
     .filter(([, v]) => v !== undefined && v !== "")
@@ -151,12 +158,31 @@ export function createClient(options: ClientOptions) {
     };
   }
 
+  /**
+   * An encryption key (docs/secrets.md, "Encryption keys"): the key stays in roll; data goes there
+   * and back. Strings are sent as UTF-8; decrypt answers bytes.
+   */
+  function transit(name: string) {
+    const at = async (op: string) => `/v1/secrets/projects/${enc(await projectId())}/transit/${enc(name)}/${op}`;
+    const post = async <T>(op: string, body: unknown) => (await call("POST", await at(op), body)) as T;
+    return {
+      encrypt: async (data: Uint8Array | string, context?: string) => (await post<{ ciphertext: string }>("encrypt", { plaintext: toB64(bytes(data)), context })).ciphertext,
+      decrypt: async (ciphertext: string, context?: string) => fromB64((await post<{ plaintext: string }>("decrypt", { ciphertext, context })).plaintext),
+      /** Ed25519 over the bytes as given: anyone with `publicKeys()` checks it. */
+      sign: async (data: Uint8Array | string) => (await post<{ signature: string }>("sign", { input: toB64(bytes(data)) })).signature,
+      verify: async (data: Uint8Array | string, signature: string) => (await post<{ valid: boolean }>("verify", { input: toB64(bytes(data)), signature })).valid,
+      /** HMAC-SHA256, the same for the same input: a lookup column over encrypted fields. */
+      hmac: async (data: Uint8Array | string) => (await post<{ hmac: string }>("hmac", { input: toB64(bytes(data)) })).hmac,
+      publicKeys: async () => (await call("GET", await at("public"))) as TransitPublicKey[],
+    };
+  }
+
   /** A sealed resolve's values, opened with the key pair whose public key was `sealTo`. */
   function open(r: SealedValues, secretKey: Uint8Array): Record<string, string> {
     return JSON.parse(new TextDecoder().decode(openSealed(r.sealed, secretKey, r.context))) as Record<string, string>;
   }
 
-  return { values, resolve, digest, renew, watch, open, project: projectId };
+  return { values, resolve, digest, renew, watch, open, transit, project: projectId };
 }
 
 export type SecretsClient = ReturnType<typeof createClient>;

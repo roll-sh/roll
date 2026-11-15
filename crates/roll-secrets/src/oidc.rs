@@ -13,6 +13,10 @@
 //!   identity checks `sub` and its other claims.
 //!
 //! Public keys are cached, never a token or what it maps to.
+//!
+//! An identity may instead pin its issuer's keys (a JWKS given when it's made, as Vault's
+//! `jwt_validation_pubkeys`): then the issuer is only compared with `iss`, never fetched, so an
+//! issuer roll can't reach (a cluster's own, `https://kubernetes.default.svc`) works.
 
 use crate::{Error, Result};
 use serde_json::{Map, Value as Json};
@@ -23,6 +27,8 @@ use std::time::{Duration, Instant};
 /// The longest token taken.
 pub const MAX_JWT_BYTES: usize = 16 * 1024;
 const MAX_JWKS_BYTES: usize = 256 * 1024;
+/// The largest pinned JWKS (stored with the identity).
+pub const MAX_PINNED_BYTES: usize = 64 * 1024;
 const MAX_DISCOVERY_BYTES: usize = 64 * 1024;
 const MAX_KEYS: usize = 100;
 const TTL: Duration = Duration::from_secs(3600);
@@ -236,8 +242,9 @@ impl Keys {
         }
     }
 
-    /// Verify `jwt`'s signature, issuer, audience and times at `now_s` (Unix seconds).
-    pub fn verify(&self, get: &dyn crate::Deliver, jwt: &Jwt<'_>, issuer: &str, audience: &str, now_s: i64) -> Result<()> {
+    /// Verify `jwt`'s signature, issuer, audience and times at `now_s` (Unix seconds), with the
+    /// issuer's published keys, or with `pinned` (a JWKS) when the identity carries its own.
+    pub fn verify(&self, get: Option<&dyn crate::Deliver>, pinned: Option<&str>, jwt: &Jwt<'_>, issuer: &str, audience: &str, now_s: i64) -> Result<()> {
         if jwt.str("iss") != Some(issuer) {
             return Err(invalid("the identity token is from another issuer"));
         }
@@ -249,9 +256,16 @@ impl Keys {
                 })
                 .any(|k| k.verify(jwt.alg, jwt.signed.as_bytes(), &jwt.signature))
         };
-        let keys = self.keys(get, issuer, false)?;
-        let known_kid = jwt.kid.as_ref().is_none_or(|want| keys.iter().any(|k| k.kid() == Some(want)));
-        if !(matching(&keys) || (!known_kid && matching(&self.keys(get, issuer, true)?))) {
+        let verified = match (pinned, get) {
+            (Some(doc), _) => matching(&parse_jwks(doc.as_bytes()).map_err(|_| invalid("the identity's keys don't parse"))?),
+            (None, Some(get)) => {
+                let keys = self.keys(get, issuer, false)?;
+                let known_kid = jwt.kid.as_ref().is_none_or(|want| keys.iter().any(|k| k.kid() == Some(want)));
+                matching(&keys) || (!known_kid && matching(&self.keys(get, issuer, true)?))
+            }
+            (None, None) => return Err(Error::NotFound("workload identities aren't on this server".into())),
+        };
+        if !verified {
             return Err(invalid("the identity token's signature doesn't verify"));
         }
         let exp = jwt.time("exp")?.ok_or_else(|| invalid("the identity token has no exp"))?;
@@ -270,6 +284,18 @@ impl Keys {
         }
         Ok(())
     }
+}
+
+/// A JWKS an identity pins, checked when it's given: how many signing keys roll can use in it.
+pub(crate) fn pinned_keys(doc: &str) -> std::result::Result<usize, String> {
+    if doc.len() > MAX_PINNED_BYTES {
+        return Err(format!("jwks is at most {} KiB", MAX_PINNED_BYTES / 1024));
+    }
+    let n = parse_jwks(doc.as_bytes())?.len();
+    if n == 0 {
+        return Err("jwks has no RS256 or ES256 (P-256) signing key".into());
+    }
+    Ok(n)
 }
 
 /// Attempts per key in a sliding minute (in memory, per node: a cap on work, not an audit).

@@ -3,7 +3,13 @@ import { useState } from "react";
 import { FOLDER_PATH, SECRET_KEY, type NewSync, type Sync, type SyncKind, type SyncPreview } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, label, primary, Section, Teach, useLoad } from "./ui";
+import { Cas } from "./cas";
+import { SshCas } from "./ssh-cas";
+import { CloudAccounts } from "./cloud-accounts";
+import { OutsideDatabases } from "./outside-databases";
+import { AwsRoles } from "./aws-roles";
 import { Rotators } from "./rotators";
+import { TransitKeys } from "./transit-keys";
 
 /** Syncs (docs/secrets.md, "Syncs"): one-way pushes of an environment's values to GitHub, a webhook or a deploy hook. */
 export function SyncsView() {
@@ -65,7 +71,13 @@ export function SyncsView() {
           )
         )}
       </Section>
+      <OutsideDatabases />
       <Rotators />
+      <TransitKeys />
+      <Cas />
+      <SshCas />
+      <CloudAccounts />
+      <AwsRoles />
     </div>
   );
 }

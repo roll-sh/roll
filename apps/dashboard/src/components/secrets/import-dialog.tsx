@@ -91,12 +91,13 @@ function Form({ env, path, current, onClose, onImported }: { env: Environment; p
       {parsed.error && <p className="text-[11.5px] text-danger">{parsed.error}</p>}
       {!text && (
         <details className="text-[11.5px] text-subtle">
-          <summary className="cursor-pointer text-muted hover:text-fg">Moving from Doppler, Vault or Infisical?</summary>
+          <summary className="cursor-pointer text-muted hover:text-fg">Moving from Doppler, Vault, Infisical or AWS?</summary>
           <p className="mt-1.5">From a terminal, with your own token (read on your machine, never through roll's server), one change per environment:</p>
           <pre className="mt-1.5 overflow-x-auto rounded-md border border-line-2 bg-panel-2 px-2 py-1.5 font-mono text-[11px] text-fg">
             {`roll secrets import --from doppler --source <project> --map dev=development,prd=production
-roll secrets import --from vault --source secret/<app> -e ${env.slug}
-roll secrets import --from infisical --source <workspace id>/<env> -e ${env.slug}`}
+roll secrets import --from vault --source secret/<app> --recursive -e ${env.slug}
+roll secrets import --from infisical --source <workspace id>/<env> -e ${env.slug}
+roll secrets import --from aws --source <prefix>/ -e ${env.slug}`}
           </pre>
         </details>
       )}

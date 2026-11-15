@@ -161,17 +161,23 @@ pub enum Secrets {
         #[arg(required_unless_present = "from")]
         file: Option<String>,
         /// Read it from another manager's API, with your own token from its usual variable:
-        /// doppler (`DOPPLER_TOKEN`), vault (`VAULT_ADDR`, `VAULT_TOKEN`), infisical (`INFISICAL_TOKEN`).
+        /// doppler (`DOPPLER_TOKEN`), vault (`VAULT_ADDR`, `VAULT_TOKEN`), infisical (`INFISICAL_TOKEN`),
+        /// aws (Secrets Manager through your `aws` CLI: its profiles and SSO).
         #[arg(long, conflicts_with = "file", requires = "source")]
         from: Option<String>,
         /// What to read there: doppler `project/config`, vault `mount/path` (KV v2), infisical
-        /// `workspace-id/environment[/path]`. With `--map`, the part before the mapped name.
+        /// `workspace-id/environment[/path]`, aws a name prefix (`prod/app/`). With `--map`, the
+        /// part before the mapped name.
         #[arg(long)]
         source: Option<String>,
         /// Several environments at once: `dev=development,prd=production` reads `<source>/dev`
         /// into development, and so on (one change each).
         #[arg(long, value_delimiter = ',', requires = "from")]
         map: Vec<String>,
+        /// Vault: every secret under the path, each into its own folder (`app/db` → `/db`), one
+        /// change per folder.
+        #[arg(long, requires = "from")]
+        recursive: bool,
         /// Replace keys that exist (default: only add new ones).
         #[arg(long)]
         overwrite: bool,
@@ -195,7 +201,7 @@ pub enum Secrets {
         exec: Option<String>,
     },
     /// Every finding in every environment, worst first: expired, missing, exposed, weak,
-    /// expiring, stale, unread. Fails when there's an expired, missing or exposed one.
+    /// expiring, stale, unread. Fails when there's an expired, missing, exposed or in-the-browser one.
     Health {
         /// Every project you can read, not only this one.
         #[arg(long, conflicts_with = "code")]
@@ -203,6 +209,15 @@ pub enum Secrets {
         /// Also the keys no repository on the project's canvas mentions (roll code's search).
         #[arg(long)]
         code: bool,
+    },
+    /// Every managed credential roll issues and rotates: its environment, keys, resource,
+    /// schedule, next due date, and why its last scheduled rotation failed. Fails when one is
+    /// failing.
+    Rotations {
+        /// Rotate, in this run, every one due within this many days or failing (an operator's
+        /// maintenance window); reports each, and fails if one does.
+        #[arg(long, value_name = "DAYS")]
+        rotate_due: Option<u64>,
     },
     /// Check this machine's setup: the token and who it is, this directory's project and
     /// environment, the folder's keys against `.env.example`, staged files for values. Fails if a
@@ -224,6 +239,27 @@ pub enum Secrets {
         #[arg(long, conflicts_with = "paths")]
         staged: bool,
     },
+    /// Pull the environment's folder into Kubernetes with External Secrets Operator: makes a token
+    /// for it and prints the token's Secret, a SecretStore and an ExternalSecret (`| kubectl apply -f -`).
+    Kubernetes {
+        /// The Secret ESO writes, and the prefix of the others (default: the environment's).
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        namespace: Option<String>,
+        /// How often ESO reads again (each read is audited).
+        #[arg(long, default_value = "1h")]
+        refresh: String,
+        /// roll's URL as the cluster reaches it (default: this CLI's).
+        #[arg(long)]
+        url: Option<String>,
+        /// Days until the token expires.
+        #[arg(long)]
+        ttl_days: Option<i64>,
+    },
+    /// Who and what can read this folder's values (or one key's): tokens and identities that reach
+    /// it, untrusted code, syncs, shares and imports, and who read it in 30 days. A project admin's.
+    Reach { key: Option<String> },
     /// Print the resolved values: dotenv, json, shell, yaml, docker (`--env-file`) or kubernetes (a Secret manifest).
     Export {
         #[arg(long, default_value = "dotenv")]
@@ -282,6 +318,36 @@ pub enum Secrets {
     Tokens(Tokens),
     /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
     Find { key: String },
+    /// Encryption keys (encryption as a service): encrypt stdin, decrypt stdin, rotate, list.
+    #[command(subcommand)]
+    Transit(TransitCmd),
+    /// The project's certificate authorities: list, add, print one's certificate, remove.
+    #[command(subcommand)]
+    Cas(CasCmd),
+    /// The project's SSH CAs: list, add, print one's public key (for TrustedUserCAKeys), remove.
+    #[command(subcommand, name = "ssh-cas")]
+    SshCas(SshCasCmd),
+    /// GCP and Azure accounts that trust roll's token for this project: list (with the issuer and
+    /// subject to trust), add, remove.
+    #[command(subcommand)]
+    Clouds(CloudsCmd),
+    /// Postgres, MySQL, Redis and MongoDB servers outside roll whose logins roll rotates or issues per lease:
+    /// list, add, remove.
+    #[command(subcommand)]
+    Databases(DatabasesCmd),
+    /// AWS roles for dynamic AWS credentials: list, add (roll assumes it to check), remove.
+    #[command(subcommand, name = "aws-roles")]
+    AwsRoles(AwsRolesCmd),
+    /// IAM users whose access keys roll rotates as an AWS role: list, add (roll lists its keys as
+    /// the role to check), remove.
+    #[command(subcommand, name = "aws-users")]
+    AwsUsers(AwsUsersCmd),
+    /// The customer-managed key wrapping the project's data key: show it, `set` a KMS key's ARN,
+    /// or `rm` it (roll's deployment key alone again).
+    Kms {
+        #[command(subcommand)]
+        cmd: Option<KmsCmd>,
+    },
     /// A key pair for backups: the secret key written to a file only you can read, the public key
     /// printed (give it to `backup --to`).
     Keygen {
@@ -461,13 +527,25 @@ pub enum Envs {
     },
     /// Put the standard environments in this order.
     Order { slugs: Vec<String> },
-    /// Writes need a change request with this many approvals.
+    /// Writes need a change request with this many approvals: to the whole environment, or with
+    /// --folder to that folder and the ones under it.
     Protect {
         slug: String,
         #[arg(long, default_value_t = 1)]
         approvals: i64,
+        /// Only this folder (a change policy of its own; the rest of the environment as before).
+        #[arg(long)]
+        folder: Option<String>,
+        /// Who may approve (repeatable; default anyone who may, other than the author).
+        #[arg(long = "approver")]
+        approvers: Vec<String>,
     },
-    Unprotect { slug: String },
+    Unprotect {
+        slug: String,
+        /// Only this folder's change policy.
+        #[arg(long)]
+        folder: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -494,6 +572,216 @@ pub enum Requests {
         bypass: bool,
     },
     Close { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum KmsCmd {
+    /// Wrap the project's data key with this KMS key (roll checks it can use it first).
+    Set { key: String },
+    /// Back to roll's deployment key alone (the KMS key must still answer).
+    Rm,
+}
+
+#[derive(Subcommand)]
+pub enum AwsUsersCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register an IAM user: roll manages its keys as `--role` (an AWS role's id or name), whose
+    /// policy allows iam:ListAccessKeys, CreateAccessKey and DeleteAccessKey on it.
+    Add {
+        name: String,
+        user: String,
+        #[arg(long)]
+        role: String,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum AwsRolesCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register a role: its trust policy lets roll's role assume it with
+    /// `sts:ExternalId = roll-secrets:<project>`.
+    Add { name: String, role_arn: String },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum DatabasesCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register a database: its admin URL (postgres://admin:…@host:5432/db, mysql://…, sqlserver://…, clickhouse://…, rabbitmq://…, rediss://… or mongodb+srv://…) on stdin; two login
+    /// roles that take turns (managed links), a group dynamic logins join, or both.
+    Add {
+        name: String,
+        #[arg(long = "role", num_args = 1)]
+        roles: Vec<String>,
+        /// The role each dynamic lease's login joins (its grants).
+        #[arg(long)]
+        group: Option<String>,
+        /// The server's CA certificates (PEM file), when the system's don't cover it (Amazon RDS).
+        #[arg(long)]
+        ca: Option<std::path::PathBuf>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum CloudsCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// A GCP service account behind a workload identity pool provider for roll's issuer.
+    AddGcp {
+        name: String,
+        /// The provider: //iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
+        #[arg(long)]
+        audience: String,
+        #[arg(long)]
+        service_account: String,
+    },
+    /// An Entra app with a federated credential for roll's issuer.
+    AddAzure {
+        name: String,
+        #[arg(long)]
+        tenant: String,
+        #[arg(long)]
+        client_id: String,
+        /// What its tokens are for (https://management.azure.com/.default by default).
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum SshCasCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Make an SSH CA that signs for these logins (user certificates) and/or the hosts under
+    /// these domains (host certificates).
+    Add {
+        name: String,
+        #[arg(long = "principal", required_unless_present = "host_domains")]
+        principals: Vec<String>,
+        /// The longest a certificate lives (hours, 168 at most; 24 by default).
+        #[arg(long)]
+        max_hours: Option<u32>,
+        /// A DNS domain whose hosts it signs host keys for (repeatable).
+        #[arg(long = "host-domain")]
+        host_domains: Vec<String>,
+        /// The longest a host certificate lives (days, 397 at most; 90 by default).
+        #[arg(long)]
+        max_host_days: Option<u32>,
+    },
+    /// Print an SSH CA's public key, for servers' TrustedUserCAKeys.
+    Key { id: String },
+    /// Sign a server's host key (its .pub file, or stdin) for its names; prints the certificate
+    /// for sshd's HostCertificate.
+    SignHost {
+        id: String,
+        #[arg(default_value = "-")]
+        public_key: String,
+        #[arg(long = "host", required = true)]
+        hosts: Vec<String>,
+        #[arg(long)]
+        days: Option<u32>,
+    },
+    /// Print the known_hosts line that trusts the hosts an SSH CA signs.
+    KnownHosts { id: String },
+    /// Certify your own key (its .pub file) for logins; prints the certificate (save it as
+    /// <key>-cert.pub next to the key, and ssh uses it). `roll ssh --key` does this per session.
+    SignUser {
+        id: String,
+        public_key: String,
+        #[arg(long = "principal", required = true)]
+        principals: Vec<String>,
+        #[arg(long)]
+        ttl_minutes: Option<u64>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum CasCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Make a CA that signs for these domains (and every name under them).
+    Add {
+        name: String,
+        #[arg(long = "domain", required = true)]
+        domains: Vec<String>,
+        /// IP addresses too.
+        #[arg(long)]
+        allow_ip: bool,
+        /// The longest a certificate lives (days, 397 at most; 90 by default).
+        #[arg(long)]
+        max_days: Option<u32>,
+    },
+    /// Print a CA's certificate (PEM), for clients to trust.
+    Cert { id: String },
+    /// Sign a CSR (PEM, from a file or stdin) for names the CA allows; prints the certificate. The
+    /// private key never leaves where the CSR was made.
+    Sign {
+        id: String,
+        #[arg(default_value = "-")]
+        csr: String,
+        #[arg(long, conflicts_with = "ttl_minutes")]
+        days: Option<u32>,
+        #[arg(long)]
+        ttl_minutes: Option<u64>,
+        /// Also print the CA's certificate after it (a chain file).
+        #[arg(long)]
+        chain: bool,
+    },
+    /// The certificates a CA signed that haven't expired.
+    Certs { id: String },
+    /// Revoke a certificate (on the CA's CRL until it expires).
+    Revoke { id: String, serial: String },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum TransitCmd {
+    #[command(alias = "list")]
+    Ls,
+    Add { name: String },
+    /// A new version that encryptions use from now on.
+    Rotate { name: String },
+    /// Encrypt stdin (any bytes); prints the ciphertext.
+    Encrypt {
+        name: String,
+        #[arg(long)]
+        context: Option<String>,
+    },
+    /// Decrypt the ciphertext on stdin; writes the plaintext's bytes to stdout.
+    Decrypt {
+        name: String,
+        #[arg(long)]
+        context: Option<String>,
+    },
+    /// Bring a key from outside: 32 bytes, base64, on stdin (from Vault: `vault read
+    /// transit/export/encryption-key/NAME/<n>`, with --vault-version <n>, so Vault's own
+    /// ciphertexts decrypt and rewrap). Makes the key, or adds it as its newest version.
+    Import {
+        name: String,
+        #[arg(long)]
+        vault_version: Option<u32>,
+    },
+    /// Sign stdin (any bytes) with the key's newest version (Ed25519); prints the signature.
+    Sign { name: String },
+    /// Check a signature of stdin; fails when it doesn't match.
+    Verify { name: String, signature: String },
+    /// HMAC-SHA256 of stdin; the same input always gives the same HMAC (a blind index).
+    Hmac { name: String },
+    /// The key's public signing keys, one per version (PEM; --json: raw, PEM and JWK).
+    Public { name: String },
+    /// Delete a key for good (what it encrypted can't be decrypted again).
+    Rm {
+        name: String,
+        #[arg(long)]
+        confirm: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -623,6 +911,17 @@ pub enum Identities {
         /// Only log in (and use the token) from this address or CIDR (repeatable).
         #[arg(long = "allow-ip")]
         allow_ips: Vec<String>,
+        /// The issuer's keys (a JWKS file, `-` for stdin), for an issuer roll can't reach: a
+        /// cluster's own (`kubectl get --raw /openid/v1/jwks`). Then the issuer is never fetched.
+        #[arg(long, value_name = "FILE")]
+        jwks: Option<String>,
+    },
+    /// Replace an identity's pinned keys (the cluster rotated its signing key); its id stays.
+    Keys {
+        id: String,
+        /// The JWKS file (`-` for stdin): `kubectl get --raw /openid/v1/jwks`.
+        #[arg(long, value_name = "FILE")]
+        jwks: String,
     },
     /// Delete an identity; the tokens it gave out stop working.
     Rm { id: String },
@@ -644,9 +943,56 @@ pub struct Run {
     pub watch: bool,
     #[arg(long, default_value_t = 5, requires = "watch")]
     pub interval: u64,
+    /// Mask values in both of the command's streams, wherever they go (also `ROLL_MASK=1`, for a
+    /// pod, a unit or Jenkins, whose step log is a file). By default: stderr when it isn't a
+    /// terminal, and stdout only in CI and never into a file, since stdout is often data
+    /// (`pg_dump > dump.sql`).
+    #[arg(long, conflicts_with = "no_mask")]
+    pub mask: bool,
+    /// Never mask values in what the command prints.
+    #[arg(long)]
+    pub no_mask: bool,
+    /// A dotenv file whose entries join the environment's (and win over them): plain values as
+    /// written, `roll://ENV/KEY` references resolved (repeatable; docs/secrets.md, "References
+    /// in files").
+    #[arg(long = "env-file", value_name = "FILE")]
+    pub env_files: Vec<String>,
+    /// Keep the values in this file too, encrypted (with the token, or ROLL_FALLBACK_KEY), and
+    /// start from it when rolld can't be reached (never when it refuses).
+    #[arg(long, env = "ROLL_FALLBACK")]
+    pub fallback: Option<std::path::PathBuf>,
+    /// How old a fallback may be and still be used: 72h, 30m, 7d.
+    #[arg(long, default_value = "7d", requires = "fallback")]
+    pub fallback_max_age: String,
     /// The command and its arguments.
     #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
+}
+
+/// `roll ssh`: `ssh` with the environment's certificate and key.
+#[derive(Args)]
+pub struct Ssh {
+    #[command(flatten)]
+    pub at: AtArgs,
+    /// The key holding the certificate.
+    #[arg(long, default_value = "SSH_CERT")]
+    pub cert: String,
+    /// The key holding the private key.
+    #[arg(long = "identity", default_value = "SSH_KEY")]
+    pub identity: String,
+    /// Your own key instead (its .pub file; the private half stays in your agent or on disk):
+    /// an SSH CA certifies it for this session, for --principal.
+    #[arg(long, requires_all = ["ca", "principals"])]
+    pub key: Option<String>,
+    /// With --key: the SSH CA that certifies it.
+    #[arg(long, requires = "key")]
+    pub ca: Option<String>,
+    /// With --key: the logins to certify it for.
+    #[arg(long = "principal", requires = "key")]
+    pub principals: Vec<String>,
+    /// ssh's own arguments: the destination, a command, options.
+    #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
+    pub args: Vec<String>,
 }
 
 fn enc(s: &str) -> String {
@@ -684,12 +1030,13 @@ async fn project(api: &Api, given: Option<&str>) -> anyhow::Result<String> {
         Some(p) if p.starts_with("prj_") => Ok(p.to_string()),
         Some(name) => {
             let list = api.get("/v1/workspace/projects").await.context("finding the project by name (pass its prj_… id with a scoped token)")?;
-            list.as_array()
-                .into_iter()
-                .flatten()
-                .find(|p| p["name"] == name)
-                .and_then(|p| p["id"].as_str().map(String::from))
-                .with_context(|| format!("no project named {name}"))
+            // Names are unique per owner, not across them: one that could be two is refused.
+            let found: Vec<String> = list.as_array().into_iter().flatten().filter(|p| p["name"] == name).filter_map(|p| p["id"].as_str().map(String::from)).collect();
+            match found.as_slice() {
+                [one] => Ok(one.clone()),
+                [] => bail!("no project named {name}"),
+                _ => bail!("{} projects are named {name}: give its prj_… id", found.len()),
+            }
         }
         None => {
             let who = api.get("/v1/secrets/whoami").await?;
@@ -913,7 +1260,24 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             write(&c, &env, ops, None, request, json_out).await?;
         }
         Secrets::Edit { request } => edit(&c, &env, request, json_out).await?,
-        Secrets::Import { file, from, source, map, overwrite, request } => {
+        Secrets::Import { file, from, source, map, recursive, overwrite, request } => {
+            if recursive {
+                anyhow::ensure!(from.as_deref() == Some("vault") && map.is_empty(), "--recursive reads a Vault KV v2 tree: --from vault --source mount/path");
+                let tree = vault_tree(source.as_deref().unwrap_or_default()).await?;
+                anyhow::ensure!(!tree.is_empty(), "nothing to import under {}", source.as_deref().unwrap_or_default());
+                for (folder, values) in &tree {
+                    let path = format!("{}/{}", c.at.path.trim_end_matches('/'), folder).replace("//", "/");
+                    let path = if path.len() > 1 { path.trim_end_matches('/').to_string() } else { path };
+                    let body = import_body(&serde_json::to_string(values)?, &path, overwrite, request)?;
+                    let v = c.call(Method::POST, &format!("{env}/import"), Some(body)).await.map_err(approval_hint).with_context(|| format!("importing into {path}"))?;
+                    let skipped = v["skipped"].as_array().map_or(0, Vec::len);
+                    match v.get("request").filter(|r| r.is_object()) {
+                        Some(r) => println!("{path}: change request {} ({} values)", s(&r["id"]), values.len()),
+                        None => println!("{path}: {} value{}{}", values.len(), if values.len() == 1 { "" } else { "s" }, if skipped > 0 { format!(", {skipped} existing skipped (use --overwrite)") } else { String::new() }),
+                    }
+                }
+                return Ok(());
+            }
             if let (Some(from), false) = (&from, map.is_empty()) {
                 let base = source.as_deref().unwrap_or_default().trim_end_matches('/');
                 for pair in &map {
@@ -963,14 +1327,14 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             } else {
                 std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?
             };
-            let (text, leases) = render_env(&c, &env, &file, &tpl).await?;
+            let (text, leases, follow) = render_env(&c, &env, &file, &tpl, watch && out.is_some()).await?;
             let Some(out) = out else {
                 print!("{text}");
                 return Ok(());
             };
             replace_private(&out, &text)?;
             if watch {
-                render_watch(&c, &env, &file, &tpl, &out, text, leases, interval, exec.as_deref()).await?;
+                render_watch(&c, &env, &file, &tpl, &out, text, leases, follow, interval, exec.as_deref()).await?;
             }
         }
         Secrets::Health { all: false, code } => {
@@ -979,6 +1343,73 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 return print(&v);
             }
             report_health(&v.as_array().cloned().unwrap_or_default(), false)?;
+        }
+        Secrets::Rotations { rotate_due } => {
+            let v = c.call(Method::GET, &format!("{}/rotations", c.base()), None).await?;
+            if json_out && rotate_due.is_none() {
+                return print(&v);
+            }
+            let list = v.as_array().cloned().unwrap_or_default();
+            if list.is_empty() && !json_out {
+                eprintln!("no managed credentials in this project");
+            }
+            let mut failing = 0;
+            for r in list.iter().filter(|_| !json_out) {
+                let keys: Vec<&str> = r["keys"].as_array().into_iter().flatten().filter_map(|k| k.as_str()).collect();
+                let path = r["path"].as_str().unwrap_or("/");
+                let at = if path == "/" { String::new() } else { format!(" {path}") };
+                let when = match (r["rotate_days"].as_u64(), r["next_due"].as_i64()) {
+                    (Some(d), Some(n)) => format!("every {d} days, next {}", day(n)),
+                    _ => "by hand".into(),
+                };
+                println!("{:<12} {}{at}  {} ({})  {when}", r["environment"].as_str().unwrap_or(""), keys.join(","), r["name"].as_str().unwrap_or(""), r["kind"].as_str().unwrap_or(""));
+                if let Some(e) = r["last_error"].as_str() {
+                    failing += 1;
+                    println!("             failing since {}: {e}", r["failed_at"].as_i64().map(day).unwrap_or_default());
+                }
+            }
+            if let Some(days) = rotate_due {
+                let horizon = chrono::Utc::now().timestamp_millis() + days as i64 * 86_400_000;
+                let (mut done, mut failed) = (0, 0);
+                let mut results = vec![];
+                for r in &list {
+                    let due = r["next_due"].as_i64().is_some_and(|n| n <= horizon) || r["last_error"].is_string();
+                    let Some(key) = r["keys"].get(0).and_then(Value::as_str) else { continue };
+                    if !due {
+                        continue;
+                    }
+                    let (env, path) = (s(&r["environment"]).to_string(), r["path"].as_str().unwrap_or("/").to_string());
+                    // One key rotates its credential: every key it fills changes in one change.
+                    match c.call(Method::POST, &format!("{}/secrets/{}/rotate?path={}", c.env(&env), enc(key), enc(&path)), None).await {
+                        Ok(_) => {
+                            done += 1;
+                            results.push(json!({ "environment": env, "path": path, "key": key, "rotated": true }));
+                            if !json_out {
+                                eprintln!("rotated  {env} {key}");
+                            }
+                        }
+                        Err(e) => {
+                            failed += 1;
+                            results.push(json!({ "environment": env, "path": path, "key": key, "rotated": false, "error": e.to_string() }));
+                            if !json_out {
+                                eprintln!("failed   {env} {key}: {e}");
+                            }
+                        }
+                    }
+                }
+                if json_out {
+                    print(&json!(results))?;
+                } else {
+                    eprintln!("{done} rotated, {failed} failed (due within {days} days, or failing)");
+                }
+                if failed > 0 {
+                    bail!("{failed} rotations failed");
+                }
+                return Ok(());
+            }
+            if failing > 0 {
+                bail!("{failing} scheduled {} failing", if failing == 1 { "rotation is" } else { "rotations are" });
+            }
         }
         Secrets::Check { template, strict } => {
             let text = std::fs::read_to_string(&template).with_context(|| format!("reading {template}"))?;
@@ -1043,6 +1474,90 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             eprintln!("No values of this project in {} {}", files.len(), if files.len() == 1 { "file" } else { "files" });
         }
+        Secrets::Kubernetes { name, namespace, refresh, url, ttl_days } => {
+            let name = name.unwrap_or_else(|| c.at.env.to_ascii_lowercase().replace('_', "-"));
+            let dns = |v: &str, max: usize| v.len() <= max && !v.is_empty() && v.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') && !v.starts_with('-') && !v.ends_with('-');
+            if !dns(&name, 63 - "-roll-token".len()) || namespace.as_deref().is_some_and(|n| !dns(n, 63)) {
+                bail!("--name and --namespace are lowercase letters, digits and '-' (pass --name when the environment's slug isn't one)");
+            }
+            if !refresh.chars().last().is_some_and(|u| "smh".contains(u)) || refresh[..refresh.len() - 1].parse::<u32>().is_err() {
+                bail!("--refresh is a number of s, m or h (1h)");
+            }
+            let server = url.unwrap_or_else(|| c.api.base.clone());
+            let server = server.trim_end_matches('/');
+            if let Ok(u) = reqwest::Url::parse(server)
+                && u.host_str().is_some_and(|h| h == "localhost" || h.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()))
+            {
+                eprintln!("note: {server} is this machine's own address; pass --url with one the cluster reaches");
+            }
+            let mut body = json!({ "name": format!("k8s-{name}"), "actions": ["read", "reveal"], "environments": [c.at.env] });
+            if c.at.path != "/" {
+                body["paths"] = json!([c.at.path]);
+            }
+            if let Some(d) = ttl_days {
+                body["ttl_days"] = json!(d);
+            }
+            let token = c.call(Method::POST, &format!("{}/tokens", c.base()), Some(body)).await?;
+            let mut query = "dynamic=false&strict=1".to_string();
+            if c.at.path != "/" {
+                query.push_str(&format!("&path={}", enc(&c.at.path)));
+            }
+            let q = |v: &str| serde_json::to_string(v).expect("a string");
+            let ns = namespace.map(|n| format!("\n  namespace: {n}")).unwrap_or_default();
+            // `urlquery`: a key can't add its own query (`staging/values?dynamic=true&x=`).
+            let store = format!("{server}{}/environments/{{{{ .remoteRef.key | urlquery }}}}/values?{query}", c.base());
+            println!(
+                "# roll secrets {}:{} ({}), pulled by External Secrets Operator (docs/secrets.md).\n\
+                 apiVersion: v1\nkind: Secret\nmetadata:\n  name: {name}-roll-token{ns}\n  labels:\n    external-secrets.io/type: webhook\n\
+                 stringData:\n  token: {}\n---\n\
+                 apiVersion: external-secrets.io/v1\nkind: SecretStore\nmetadata:\n  name: {name}-roll{ns}\nspec:\n  provider:\n    webhook:\n\
+                 \x20     url: {}\n      headers:\n        Authorization: \"Bearer {{{{ .auth.token }}}}\"\n\
+                 \x20     result:\n        jsonPath: \"$.values{{{{ with .remoteRef.property }}}}.{{{{ . }}}}{{{{ end }}}}\"\n\
+                 \x20     secrets:\n        - name: auth\n          secretRef:\n            name: {name}-roll-token\n---\n\
+                 apiVersion: external-secrets.io/v1\nkind: ExternalSecret\nmetadata:\n  name: {name}{ns}\nspec:\n  refreshInterval: {refresh}\n\
+                 \x20 secretStoreRef:\n    name: {name}-roll\n    kind: SecretStore\n  target:\n    name: {name}\n  dataFrom:\n    - extract:\n        key: {}",
+                c.at.env,
+                c.at.path,
+                c.project,
+                q(&s(&token["token"])),
+                q(&store),
+                q(&c.at.env),
+            );
+            eprintln!("Made token {} for {}:{}; it's only in the output above. Apply it with: | kubectl apply -f -", s(&token["id"]), c.at.env, c.at.path);
+        }
+        Secrets::Reach { key } => {
+            let mut url = format!("{}/reach?{}", c.env(&c.at.env), c.q());
+            if let Some(k) = &key {
+                url.push_str(&format!("&key={}", enc(k)));
+            }
+            let v = c.call(Method::GET, &url, None).await?;
+            if json_out {
+                return print(&v);
+            }
+            let what = key.as_deref().map(|k| format!("{k} in ")).unwrap_or_default();
+            println!("{what}{}:{}", c.at.env, c.at.path);
+            println!("  {}", if v["untrusted"] == true { "untrusted code (checks, sandboxes, previews) can read it: the environment isn't protected" } else { "protected: untrusted code never reads it" });
+            for (title, list) in [("tokens", &v["tokens"]), ("identities", &v["identities"])] {
+                for h in list.as_array().into_iter().flatten() {
+                    let actions = h["actions"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_default();
+                    let used = h["last_used_at"].as_i64().map(|t| format!("used {}", ago(t))).unwrap_or_else(|| "never used".into());
+                    println!("  {:<10} {:<32} {actions:<22} {used}", &title[..title.len() - 1], s(&h["name"]));
+                }
+            }
+            for sy in v["syncs"].as_array().into_iter().flatten() {
+                println!("  sync       {} {}", s(&sy["kind"]), sy["target"]);
+            }
+            for p in v["projects"].as_array().into_iter().flatten() {
+                println!("  shared     with project {}", s(p));
+            }
+            for f in v["imported_by"].as_array().into_iter().flatten() {
+                println!("  imported   by {}", s(f));
+            }
+            for r in v["readers"].as_array().into_iter().flatten() {
+                println!("  read       by {:<32} {} reads, last {}", s(&r["actor"]), r["reads"], ago(r["last_at"].as_i64().unwrap_or_default()));
+            }
+            eprintln!("Not counted: {}.", s(&v["uncounted"]));
+        }
         Secrets::Export { format, name, namespace, change, at } => {
             let at = at.as_deref().map(when).transpose()?;
             let mut url = format!("{}{env}/values?{}&format={}", c.api.base, c.q(), enc(&format));
@@ -1052,7 +1567,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
             }
             let mut req = c.api.http.get(url);
-            if let Some(k) = &c.api.key {
+            if let Some(k) = &c.api.bearer().await? {
                 req = req.bearer_auth(k);
             }
             let res = req.send().await?;
@@ -1165,6 +1680,347 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             println!("{} is {}", s(&v["id"]), s(&v["state"]));
         }
+        Secrets::Databases(d) => match d {
+            DatabasesCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/outside-databases", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for d in v.as_array().into_iter().flatten() {
+                    let roles: Vec<&str> = d["roles"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    let group = d["group"].as_str().map(|g| format!("  dynamic in {g}")).unwrap_or_default();
+                    println!("{}  {:<16} {:<32} {}{group}", s(&d["id"]), s(&d["name"]), s(&d["host"]), roles.join(" "));
+                }
+            }
+            DatabasesCmd::Add { name, roles, group, ca } => {
+                // The admin URL holds a password: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("Admin URL (postgres://admin:…@host:5432/db, mysql://…, sqlserver://…, clickhouse://…, rabbitmq://…, rediss://… or mongodb+srv://…), then Enter and Ctrl-D: ");
+                }
+                let mut url = String::new();
+                std::io::stdin().read_to_string(&mut url).context("reading the admin URL from stdin")?;
+                let ca = ca.map(|p| std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))).transpose()?;
+                let v = c.call(Method::POST, &format!("{}/outside-databases", c.base()), Some(json!({ "name": name, "url": url.trim(), "roles": roles, "group": group, "ca": ca }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link DB_USER and DB_PASSWORD to it, managed (the roles take turns) or dynamic (a login per lease).", s(&v["name"]), s(&v["id"]));
+            }
+            DatabasesCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/outside-databases/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::Kms { cmd } => {
+            let v = match cmd {
+                None => c.call(Method::GET, &format!("{}/kms", c.base()), None).await?,
+                Some(KmsCmd::Set { key }) => c.call(Method::PUT, &format!("{}/kms", c.base()), Some(json!({ "key": key }))).await?,
+                Some(KmsCmd::Rm) => c.call(Method::DELETE, &format!("{}/kms", c.base()), None).await?,
+            };
+            if json_out {
+                return print(&v);
+            }
+            match v["key"].as_str() {
+                Some(k) => println!("the data key is wrapped by {k}: revoking roll's use of it locks roll out of this project"),
+                None => println!("no customer-managed key: roll's deployment key seals the data key"),
+            }
+        }
+        Secrets::AwsRoles(a) => match a {
+            AwsRolesCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/aws-roles", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for r in v.as_array().into_iter().flatten() {
+                    println!("{}  {:<16} {}", s(&r["id"]), s(&r["name"]), s(&r["role_arn"]));
+                }
+                eprintln!("Trust policies need sts:ExternalId = roll-secrets:{}", c.project);
+            }
+            AwsRolesCmd::Add { name, role_arn } => {
+                let v = c.call(Method::POST, &format!("{}/aws-roles", c.base()), Some(json!({ "name": name, "role_arn": role_arn }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN to it, dynamic.", s(&v["name"]), s(&v["id"]));
+            }
+            AwsRolesCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/aws-roles/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::AwsUsers(a) => match a {
+            AwsUsersCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/aws-users", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for u in v.as_array().into_iter().flatten() {
+                    println!("{}  {:<16} {:<24} as {}", s(&u["id"]), s(&u["name"]), s(&u["user"]), s(&u["role"]));
+                }
+            }
+            AwsUsersCmd::Add { name, user, role } => {
+                // A role by name too: the API takes its id.
+                let roles = c.call(Method::GET, &format!("{}/aws-roles", c.base()), None).await?;
+                let role = roles.as_array().into_iter().flatten().find(|r| r["name"] == role.as_str()).and_then(|r| r["id"].as_str()).map_or(role.clone(), str::to_string);
+                let v = c.call(Method::POST, &format!("{}/aws-users", c.base()), Some(json!({ "name": name, "role": role, "user": user }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to it, managed.", s(&v["name"]), s(&v["id"]));
+            }
+            AwsUsersCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/aws-users/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::Clouds(cmd) => {
+            let cr = &c;
+            let add = |body: Value| async move {
+                let v = cr.call(Method::POST, &format!("{}/cloud-accounts", cr.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link a key to it (access_token, dynamic) and each resolve gets a token of its own.", s(&v["name"]), s(&v["id"]));
+                Ok(())
+            };
+            match cmd {
+                CloudsCmd::Ls => {
+                    let v = c.call(Method::GET, &format!("{}/cloud-accounts", c.base()), None).await?;
+                    if json_out {
+                        return print(&v);
+                    }
+                    for a in v.as_array().into_iter().flatten() {
+                        let what = if a["cloud"] == "gcp" { s(&a["service_account"]).to_string() } else { format!("{} in {}", s(&a["client_id"]), s(&a["tenant"])) };
+                        println!("{}  {:<6} {:<16} {what}", s(&a["id"]), s(&a["cloud"]), s(&a["name"]));
+                    }
+                    let issuer = c.call(Method::GET, "/v1/secrets/oidc/.well-known/openid-configuration", None).await.ok();
+                    if let Some(i) = issuer {
+                        eprintln!("Trust issuer {} with subject roll-secrets:{} (Azure's audience: api://AzureADTokenExchange)", s(&i["issuer"]), c.project);
+                    }
+                }
+                CloudsCmd::AddGcp { name, audience, service_account } => add(json!({ "name": name, "cloud": "gcp", "audience": audience, "service_account": service_account })).await?,
+                CloudsCmd::AddAzure { name, tenant, client_id, scope } => {
+                    let mut body = json!({ "name": name, "cloud": "azure", "tenant": tenant, "client_id": client_id });
+                    if let Some(scope) = scope {
+                        body["scope"] = json!(scope);
+                    }
+                    add(body).await?
+                }
+                CloudsCmd::Rm { id } => {
+                    c.call(Method::DELETE, &format!("{}/cloud-accounts/{}", c.base(), enc(&id)), None).await?;
+                    println!("Removed {id}");
+                }
+            }
+        }
+        Secrets::SshCas(cmd) => match cmd {
+            SshCasCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/ssh-cas", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for a in v.as_array().into_iter().flatten() {
+                    let p: Vec<&str> = a["principals"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    println!("{}  {:<16} {}  up to {} h", s(&a["id"]), s(&a["name"]), p.join(","), a["max_hours"]);
+                }
+            }
+            SshCasCmd::Add { name, principals, max_hours, host_domains, max_host_days } => {
+                let mut body = json!({ "name": name, "principals": principals, "host_domains": host_domains });
+                if let Some(h) = max_hours {
+                    body["max_hours"] = json!(h);
+                }
+                if let Some(d) = max_host_days {
+                    body["max_host_days"] = json!(d);
+                }
+                let v = c.call(Method::POST, &format!("{}/ssh-cas", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Made {} ({}): servers trust `roll secrets ssh-cas key {}`; link SSH_CERT and SSH_KEY to it with options.principals.", s(&v["name"]), s(&v["id"]), s(&v["name"]));
+            }
+            SshCasCmd::Key { id } => {
+                let v = c.call(Method::GET, &format!("{}/ssh-cas", c.base()), None).await?;
+                let ca = v.as_array().into_iter().flatten().find(|a| a["id"] == id.as_str() || a["name"] == id.as_str()).ok_or_else(|| anyhow::anyhow!("no SSH CA {id}"))?;
+                println!("{}", s(&ca["public_key"]));
+            }
+            SshCasCmd::SignHost { id, public_key, hosts, days } => {
+                let line = if public_key == "-" {
+                    let mut t = String::new();
+                    std::io::stdin().read_to_string(&mut t).context("reading the host key from stdin")?;
+                    public_line(&t, "stdin")?
+                } else {
+                    read_public_key(&public_key)?.0
+                };
+                let list = c.call(Method::GET, &format!("{}/ssh-cas", c.base()), None).await?;
+                let ca = list.as_array().into_iter().flatten().find(|a| a["id"] == id.as_str() || a["name"] == id.as_str()).ok_or_else(|| anyhow::anyhow!("no SSH CA {id}"))?;
+                let v = c.call(Method::POST, &format!("{}/ssh-cas/{}/sign-host", c.base(), enc(&s(&ca["id"]).to_string())), Some(json!({ "public_key": line.trim(), "hosts": hosts, "days": days }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("{}", s(&v["certificate"]));
+                eprintln!("sshd: HostCertificate <this file>; clients: {}", s(&v["known_hosts"]));
+            }
+            SshCasCmd::SignUser { id, public_key, principals, ttl_minutes } => {
+                let line = read_public_key(&public_key)?.0;
+                let ca = ca_named(&c, &id, "ssh-cas").await?;
+                let v = c.call(Method::POST, &format!("{}/ssh-cas/{}/sign-user", c.base(), enc(&ca)), Some(json!({ "public_key": line.trim(), "principals": principals, "ttl_minutes": ttl_minutes }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("{}", s(&v["certificate"]));
+                eprintln!("for {} until {} (serial {})", principals.join(", "), day(v["valid_before"].as_i64().unwrap_or_default()), s(&v["serial"]));
+            }
+            SshCasCmd::KnownHosts { id } => {
+                let v = c.call(Method::GET, &format!("{}/ssh-cas", c.base()), None).await?;
+                let ca = v.as_array().into_iter().flatten().find(|a| a["id"] == id.as_str() || a["name"] == id.as_str()).ok_or_else(|| anyhow::anyhow!("no SSH CA {id}"))?;
+                println!("{}", ca["known_hosts"].as_str().ok_or_else(|| anyhow::anyhow!("{id} signs no hosts: make one with --host-domain"))?);
+            }
+            SshCasCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/ssh-cas/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::Cas(cmd) => match cmd {
+            CasCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for a in v.as_array().into_iter().flatten() {
+                    let domains: Vec<&str> = a["domains"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    println!("{}  {:<16} {}{}  up to {} days", s(&a["id"]), s(&a["name"]), domains.join(","), if a["allow_ip"] == true { " +IPs" } else { "" }, a["max_days"]);
+                }
+            }
+            CasCmd::Add { name, domains, allow_ip, max_days } => {
+                let mut body = json!({ "name": name, "domains": domains, "allow_ip": allow_ip });
+                if let Some(d) = max_days {
+                    body["max_days"] = json!(d);
+                }
+                let v = c.call(Method::POST, &format!("{}/cas", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Made {} ({}): link TLS_CERT, TLS_KEY and TLS_CA to it with options.names; `roll secrets cas cert {}` prints what clients trust.", s(&v["name"]), s(&v["id"]), s(&v["id"]));
+            }
+            CasCmd::Cert { id } => {
+                let v = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;
+                let ca = v.as_array().into_iter().flatten().find(|a| a["id"] == id.as_str() || a["name"] == id.as_str()).ok_or_else(|| anyhow::anyhow!("no CA {id}"))?;
+                print!("{}", s(&ca["certificate"]));
+            }
+            CasCmd::Sign { id, csr, days, ttl_minutes, chain } => {
+                let pem = if csr == "-" {
+                    let mut t = String::new();
+                    std::io::stdin().read_to_string(&mut t).context("reading the CSR from stdin")?;
+                    t
+                } else {
+                    std::fs::read_to_string(&csr).with_context(|| format!("reading {csr}"))?
+                };
+                let v = c.call(Method::POST, &format!("{}/cas/{}/sign", c.base(), enc(&ca_id(&c, &id).await?)), Some(json!({ "csr": pem, "days": days, "ttl_minutes": ttl_minutes }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                print!("{}", s(&v["certificate"]));
+                if chain {
+                    print!("{}", s(&v["ca"]));
+                }
+                eprintln!("signed for {} until {} (serial {})", v["names"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", "), day(v["not_after"].as_i64().unwrap_or_default()), s(&v["serial"]));
+            }
+            CasCmd::Certs { id } => {
+                let v = c.call(Method::GET, &format!("{}/cas/{}/certificates", c.base(), enc(&ca_id(&c, &id).await?)), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for x in v.as_array().into_iter().flatten() {
+                    let names: Vec<&str> = x["names"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    let state = x["revoked_at"].as_i64().map_or_else(|| format!("until {}", day(x["not_after"].as_i64().unwrap_or_default())), |t| format!("revoked {}", day(t)));
+                    println!("{}  {:<4} {}  {}", s(&x["serial"]), s(&x["source"]), names.join(","), state);
+                }
+            }
+            CasCmd::Revoke { id, serial } => {
+                c.call(Method::POST, &format!("{}/cas/{}/revoke", c.base(), enc(&ca_id(&c, &id).await?)), Some(json!({ "serial": serial }))).await?;
+                println!("Revoked {serial}: on the CA's CRL until it expires");
+            }
+            CasCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/cas/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::Transit(t) => match t {
+            TransitCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/transit", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for k in v.as_array().into_iter().flatten() {
+                    println!("{:<20} v{}  decrypts from v{}", s(&k["name"]), k["latest_version"], k["min_decrypt_version"]);
+                }
+            }
+            TransitCmd::Add { name } => {
+                let v = c.call(Method::POST, &format!("{}/transit", c.base()), Some(json!({ "name": name }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Made encryption key {}: `roll secrets transit encrypt {}` encrypts stdin.", s(&v["name"]), s(&v["name"]));
+            }
+            TransitCmd::Rotate { name } => {
+                let v = c.call(Method::POST, &format!("{}/transit/{}/rotate", c.base(), enc(&name)), None).await?;
+                println!("{} is at version {}", s(&v["name"]), v["latest_version"]);
+            }
+            TransitCmd::Encrypt { name, context } => {
+                use base64::Engine;
+                let mut plain = Vec::new();
+                std::io::stdin().read_to_end(&mut plain).context("reading stdin")?;
+                let v = c.call(Method::POST, &format!("{}/transit/{}/encrypt", c.base(), enc(&name)), Some(json!({ "plaintext": base64::engine::general_purpose::STANDARD.encode(&plain), "context": context }))).await?;
+                println!("{}", s(&v["ciphertext"]));
+            }
+            TransitCmd::Decrypt { name, context } => {
+                use base64::Engine;
+                use std::io::Write;
+                let mut ct = String::new();
+                std::io::stdin().read_to_string(&mut ct).context("reading stdin")?;
+                let v = c.call(Method::POST, &format!("{}/transit/{}/decrypt", c.base(), enc(&name)), Some(json!({ "ciphertext": ct.trim(), "context": context }))).await?;
+                let plain = base64::engine::general_purpose::STANDARD.decode(s(&v["plaintext"])).context("the plaintext isn't base64")?;
+                std::io::stdout().write_all(&plain)?;
+            }
+            TransitCmd::Import { name, vault_version } => {
+                let mut key = String::new();
+                std::io::stdin().read_to_string(&mut key).context("reading the key from stdin")?;
+                let body = json!({ "key": key.trim(), "vault_version": vault_version });
+                let list = c.call(Method::GET, &format!("{}/transit", c.base()), None).await?;
+                let v = if list.as_array().into_iter().flatten().any(|k| k["name"] == name.as_str()) {
+                    c.call(Method::POST, &format!("{}/transit/{}/rotate", c.base(), enc(&name)), Some(body)).await?
+                } else {
+                    let mut body = body;
+                    body["name"] = json!(name);
+                    c.call(Method::POST, &format!("{}/transit", c.base()), Some(body)).await?
+                };
+                println!("{} is at version {} (brought{})", s(&v["name"]), v["latest_version"], vault_version.map(|n| format!(", Vault's version {n}")).unwrap_or_default());
+            }
+            TransitCmd::Sign { name } => println!("{}", transit_stdin(&c, &name, "sign", "signature").await?),
+            TransitCmd::Hmac { name } => println!("{}", transit_stdin(&c, &name, "hmac", "hmac").await?),
+            TransitCmd::Verify { name, signature } => {
+                use base64::Engine;
+                let mut input = Vec::new();
+                std::io::stdin().read_to_end(&mut input).context("reading stdin")?;
+                let v = c.call(Method::POST, &format!("{}/transit/{}/verify", c.base(), enc(&name)), Some(json!({ "input": base64::engine::general_purpose::STANDARD.encode(&input), "signature": signature }))).await?;
+                if v["valid"] != true {
+                    bail!("the signature doesn't match");
+                }
+                eprintln!("the signature matches");
+            }
+            TransitCmd::Public { name } => {
+                let v = c.call(Method::GET, &format!("{}/transit/{}/public", c.base(), enc(&name)), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for k in v.as_array().into_iter().flatten() {
+                    println!("# {name} v{}\n{}", k["version"], s(&k["pem"]).trim_end());
+                }
+            }
+            TransitCmd::Rm { name, confirm } => {
+                c.call(Method::DELETE, &format!("{}/transit/{}?confirm={}", c.base(), enc(&name), enc(&confirm)), None).await?;
+                println!("Deleted {name}");
+            }
+        },
         Secrets::Tokens(t) => match t {
             Tokens::Ls => {
                 let v = c.call(Method::GET, &format!("{}/tokens", c.base()), None).await?;
@@ -1349,10 +2205,11 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 for i in v.as_array().into_iter().flatten() {
                     let list = |x: &Value| x.as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_else(|| "all".into());
                     let used = i["last_used_at"].as_i64().map(|at| format!("{} by {}", ago(at), s(&i["last_subject"]))).unwrap_or_else(|| "never".into());
-                    println!("{}  {:<16} {}  {}  envs {}  {}  {} min  used {used}", s(&i["id"]), s(&i["name"]), s(&i["issuer"]), s(&i["subject"]), list(&i["environments"]), list(&i["actions"]), i["ttl_minutes"]);
+                    let keys = i["pinned_keys"].as_u64().map(|n| format!(" ({n} pinned key{})", if n == 1 { "" } else { "s" })).unwrap_or_default();
+                    println!("{}  {:<16} {}{keys}  {}  envs {}  {}  {} min  used {used}", s(&i["id"]), s(&i["name"]), s(&i["issuer"]), s(&i["subject"]), list(&i["environments"]), list(&i["actions"]), i["ttl_minutes"]);
                 }
             }
-            Identities::Add { name, github, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips } => {
+            Identities::Add { name, github, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks } => {
                 let (issuer, subject) = match (github, issuer, subject) {
                     (Some(repo), _, _) => ("https://token.actions.githubusercontent.com".to_string(), format!("repo:{repo}:*")),
                     (None, Some(i), Some(s)) => (i, s),
@@ -1377,12 +2234,24 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 if !allow_ips.is_empty() {
                     body["allowed_ips"] = json!(allow_ips);
                 }
+                if let Some(f) = jwks {
+                    let doc = if f == "-" { std::io::read_to_string(std::io::stdin().take(1 << 20))? } else { std::fs::read_to_string(&f).with_context(|| format!("reading {f}"))? };
+                    body["jwks"] = json!(doc);
+                }
                 let v = c.call(Method::POST, &format!("{}/identities", c.base()), Some(body)).await?;
                 if json_out {
                     return print(&v);
                 }
                 println!("{}", s(&v["id"]));
                 eprintln!("Created {}. In the workload: ROLL_IDENTITY={} (and ROLL_API_URL), then `roll run …` logs in by itself.", s(&v["name"]), s(&v["id"]));
+            }
+            Identities::Keys { id, jwks } => {
+                let doc = if jwks == "-" { std::io::read_to_string(std::io::stdin().take(1 << 20))? } else { std::fs::read_to_string(&jwks).with_context(|| format!("reading {jwks}"))? };
+                let v = c.call(Method::PUT, &format!("{}/identities/{}/jwks", c.base(), enc(&id)), Some(json!({ "jwks": doc }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("{} now pins {} key(s)", s(&v["name"]), v["pinned_keys"]);
             }
             Identities::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/identities/{}", c.base(), enc(&id)), None).await?;
@@ -1630,8 +2499,24 @@ async fn envs(c: &Client<'_>, e: Envs, json_out: bool) -> anyhow::Result<()> {
             (None, None) => bail!("envs rm <slug> or --label key=value"),
         },
         Envs::Order { slugs } => c.call(Method::PUT, &format!("{base}/environments/order"), Some(json!({ "order": slugs }))).await?,
-        Envs::Protect { slug, approvals } => c.call(Method::PUT, &format!("{}/policy", c.env(&slug)), Some(json!({ "protected": true, "approvals": approvals }))).await?,
-        Envs::Unprotect { slug } => c.call(Method::PUT, &format!("{}/policy", c.env(&slug)), Some(json!({ "protected": false }))).await?,
+        Envs::Protect { slug, approvals, folder: Some(folder), approvers } => {
+            let p = c.call(Method::PUT, &format!("{}/folder-policies?path={}", c.env(&slug), enc(&folder)), Some(json!({ "approvals": approvals, "approvers": approvers }))).await?;
+            if !json_out {
+                println!("Changes to {} in {slug} need {} approval{}", s(&p["path"]), p["approvals"], if p["approvals"] == 1 { "" } else { "s" });
+                return Ok(());
+            }
+            p
+        }
+        Envs::Protect { slug, approvals, folder: None, approvers } => c.call(Method::PUT, &format!("{}/policy", c.env(&slug)), Some(json!({ "protected": true, "approvals": approvals, "approvers": approvers }))).await?,
+        Envs::Unprotect { slug, folder: Some(folder) } => {
+            c.call(Method::DELETE, &format!("{}/folder-policies?path={}", c.env(&slug), enc(&folder)), None).await?;
+            if !json_out {
+                println!("Changes to {folder} in {slug} no longer need approval");
+                return Ok(());
+            }
+            json!({ "deleted": [folder] })
+        }
+        Envs::Unprotect { slug, folder: None } => c.call(Method::PUT, &format!("{}/policy", c.env(&slug)), Some(json!({ "protected": false }))).await?,
     };
     if json_out {
         println!("{}", serde_json::to_string_pretty(&v)?);
@@ -1705,7 +2590,29 @@ async fn import_from(from: &str, source: &str) -> anyhow::Result<serde_json::Map
                 }
             }
         }
-        other => bail!("{other}: --from is doppler, vault or infisical"),
+        "aws" => {
+            // The user's own `aws` CLI (profiles, SSO, roles); values come back on its stdout,
+            // never on a command line.
+            let list = aws(&["secretsmanager", "list-secrets", "--filters", &format!("Key=name,Values={source}"), "--output", "json"]).await?;
+            let names: Vec<String> = list["SecretList"].as_array().into_iter().flatten().filter_map(|x| x["Name"].as_str().map(String::from)).filter(|n| n.starts_with(source)).collect();
+            anyhow::ensure!(names.len() <= 500, "{} secrets start with {source}: 500 at most at once; import a narrower prefix", names.len());
+            // Where each key came from: two secrets that give one key stop it, naming both.
+            let mut from: std::collections::BTreeMap<String, String> = Default::default();
+            for name in names {
+                let v = aws(&["secretsmanager", "get-secret-value", &format!("--secret-id={name}"), "--output", "json"]).await?;
+                let Some(text) = v["SecretString"].as_str() else {
+                    eprintln!("{name}: binary, left out");
+                    continue;
+                };
+                for (k, val) in aws_entries(&name, source, text) {
+                    if let Some(other) = from.insert(k.clone(), name.clone()) {
+                        bail!("{other} and {name} both give {k}: import them into different folders (a narrower --source each)");
+                    }
+                    put(&k, &Value::String(val));
+                }
+            }
+        }
+        other => bail!("{other}: --from is doppler, vault, infisical or aws"),
     }
     anyhow::ensure!(!out.is_empty(), "{from} {source} has no values to import");
     Ok(out)
@@ -1723,7 +2630,7 @@ fn import_body(text: &str, path: &str, overwrite: bool, request: bool) -> anyhow
 /// A route's answer as text (exports), with the API's error on failure.
 async fn text_of(api: &Api, path: &str) -> anyhow::Result<String> {
     let mut req = api.http.get(format!("{}{path}", api.base));
-    if let Some(k) = &api.key {
+    if let Some(k) = &api.bearer().await? {
         req = req.bearer_auth(k);
     }
     let res = req.send().await?;
@@ -1868,8 +2775,8 @@ fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
 /// A workload identity's login (`ROLL_IDENTITY`): the workload's own OIDC token, from
 /// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes projected token) or GitHub Actions
 /// (`permissions: id-token: write`; audience `ROLL_OIDC_AUDIENCE`, default `roll`), for a
-/// short-lived secrets token.
-pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<String> {
+/// short-lived secrets token and when it ends (ms).
+pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
     let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
     let oidc = if let Some(t) = env("ROLL_OIDC_TOKEN") {
         t
@@ -1886,9 +2793,148 @@ pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<String>
     } else {
         anyhow::bail!("ROLL_IDENTITY is set but there's no OIDC token: set ROLL_OIDC_TOKEN or ROLL_OIDC_TOKEN_FILE, or run in GitHub Actions with `permissions: id-token: write`");
     };
-    let anon = Api { base: api.base.clone(), http: api.http.clone(), key: None, headers: api.headers.clone() };
-    let v = anon.post("/v1/secrets/login", json!({ "identity": identity, "token": oidc.trim() })).await.context("logging in with the workload identity")?;
-    v["token"].as_str().map(str::to_string).context("the login answered no token")
+    // A request of its own, without a token (never through `Api::call`, which renews logins).
+    let mut req = api.http.post(format!("{}/v1/secrets/login", api.base)).json(&json!({ "identity": identity, "token": oidc.trim() }));
+    for (k, v) in &api.headers {
+        req = req.header(k, v);
+    }
+    let res = req.send().await.with_context(|| format!("can't reach {} to log in", api.base))?;
+    let status = res.status();
+    let v: Value = res.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        // Kept as a status: a failing server (5xx) is no answer to `--fallback`, a refusal isn't.
+        let message = format!("logging in with the workload identity: {}", v["error"].as_str().map(String::from).unwrap_or_else(|| status.to_string()));
+        return Err(anyhow::Error::new(crate::ApiStatus { status, message }));
+    }
+    let token = v["token"].as_str().map(str::to_string).context("the login answered no token")?;
+    // Without it every request would log in again: an answer that isn't roll's.
+    let ends = v["expires_at"].as_i64().context("the login answered no expiry")?;
+    Ok((token, ends))
+}
+
+/// A workload identity's login that renews itself: a login lasts minutes, and `roll run --watch`
+/// in a pod runs for days. A quarter of the way before it ends (at least 30 s), it logs in again in
+/// the background, reading the OIDC token again (Kubernetes rotates a projected token's file),
+/// while requests go on with the current token. A login that fails or takes over [`LOGIN_TIMEOUT`]
+/// leaves the current token in use while it lasts (tried again every [`RETRY`]); a token that has
+/// ended, or that the server refused (401), logs in again before the next request.
+pub struct Relogin {
+    identity: String,
+    /// The first login's token.
+    pub first: String,
+    held: tokio::sync::Mutex<Held>,
+}
+
+/// The token in use and its times, on this process's monotonic clock: the server's expiry is
+/// read once, as a lifetime, so a wall clock that's off or jumps changes nothing after.
+struct Held {
+    token: String,
+    renew: std::time::Instant,
+    ends: std::time::Instant,
+    /// After a failed login: not before then.
+    retry: Option<std::time::Instant>,
+    /// A login running in the background.
+    renewing: Option<tokio::task::JoinHandle<()>>,
+    /// Counts the logins stored: a background login that finishes after a newer one doesn't
+    /// overwrite it.
+    generation: u64,
+}
+
+const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const RETRY: std::time::Duration = std::time::Duration::from_secs(15);
+
+impl Held {
+    fn new(token: String, expires_at: i64) -> Held {
+        // A login lasts 5 to 60 minutes; a clock that's off by more can't make it zero or days.
+        let life = std::time::Duration::from_millis((expires_at - now_ms()).clamp(60_000, 3_660_000) as u64);
+        let now = std::time::Instant::now();
+        let ends = now + life;
+        Held { token, renew: ends - (life / 4).max(std::time::Duration::from_secs(30)), ends, retry: None, renewing: None, generation: 0 }
+    }
+
+    /// A new login in place of this one.
+    fn store(&mut self, token: String, expires_at: i64) {
+        let generation = self.generation + 1;
+        *self = Held::new(token, expires_at);
+        self.generation = generation;
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// A login with a deadline.
+async fn login_within(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
+    match tokio::time::timeout(LOGIN_TIMEOUT, identity_login(api, identity)).await {
+        Ok(r) => r,
+        Err(elapsed) => Err(anyhow::Error::new(elapsed).context(format!("no answer in {} s", LOGIN_TIMEOUT.as_secs()))),
+    }
+}
+
+impl Relogin {
+    pub async fn new(api: &Api, identity: &str) -> anyhow::Result<Relogin> {
+        let (token, expires_at) = identity_login(api, identity).await?;
+        Ok(Relogin { identity: identity.to_string(), first: token.clone(), held: tokio::sync::Mutex::new(Held::new(token, expires_at)) })
+    }
+
+    /// No login yet (`roll run --fallback` started through an outage): the first request logs in,
+    /// and each one after a failure tries again.
+    pub fn pending(identity: &str) -> Relogin {
+        let now = std::time::Instant::now();
+        let held = Held { token: String::new(), renew: now, ends: now, retry: None, renewing: None, generation: 0 };
+        Relogin { identity: identity.to_string(), first: String::new(), held: tokio::sync::Mutex::new(held) }
+    }
+
+    pub async fn token(self: &std::sync::Arc<Self>, api: &Api) -> anyhow::Result<String> {
+        let mut held = self.held.lock().await;
+        let now = std::time::Instant::now();
+        if now >= held.ends {
+            // Ended (or refused): nothing to go on with. Log in now.
+            // The cause is kept: `--fallback` tells no answer from a refusal by it.
+            let (token, expires_at) = login_within(api, &self.identity).await.with_context(|| format!("logging in again as {} failed", self.identity))?;
+            held.store(token, expires_at);
+        } else if now >= held.renew && held.retry.is_none_or(|r| now >= r) && held.renewing.as_ref().is_none_or(|h| h.is_finished()) {
+            let (me, anon) = (self.clone(), Api { base: api.base.clone(), http: api.http.clone(), key: None, headers: api.headers.clone(), login: None });
+            let started = held.generation;
+            held.renewing = Some(tokio::spawn(async move {
+                let got = login_within(&anon, &me.identity).await;
+                let mut held = me.held.lock().await;
+                if held.generation != started {
+                    // A newer login was stored meanwhile (one in the foreground): it stays.
+                    return;
+                }
+                match got {
+                    Ok((token, expires_at)) => held.store(token, expires_at),
+                    Err(e) => {
+                        eprintln!("roll: logging in again as {} failed ({e:#}); the current login lasts a while yet", me.identity);
+                        held.retry = Some(std::time::Instant::now() + RETRY);
+                    }
+                }
+            }));
+        }
+        Ok(held.token.clone())
+    }
+
+    /// The server refused `token` (401): log in again before the next request, unless a newer
+    /// login has replaced it already (a late answer to a request sent with the old one).
+    pub async fn refused(&self, token: &str) {
+        let mut held = self.held.lock().await;
+        if held.token == token {
+            held.ends = std::time::Instant::now();
+            // A background login started before this may bring a token revoked with this one.
+            held.generation += 1;
+        }
+    }
+
+    /// Waits for a background login (tests).
+    #[cfg(test)]
+    async fn settle(&self) {
+        let h = self.held.lock().await.renewing.take();
+        if let Some(h) = h {
+            let _ = h.await;
+        }
+    }
 }
 
 /// `roll secrets edit`: the folder's own keys as a `.env` in `$EDITOR` (a 0600 file under
@@ -2044,15 +3090,33 @@ async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool) -> anyhow:
 }
 
 /// The template filled from the environment, and the leases of the dynamic credentials in it.
-async fn render_env(c: &Client<'_>, env: &str, file: &str, tpl: &str) -> anyhow::Result<(String, Vec<String>)> {
-    let v = c.call(Method::GET, &format!("{env}/values?{}", c.q()), None).await?;
+/// `watch`: the answers carry their digests (`digest=1`), for a watch to compare from.
+async fn render_env(c: &Client<'_>, env: &str, file: &str, tpl: &str, watch: bool) -> anyhow::Result<(String, Vec<String>, Digests)> {
+    let v = c.call(Method::GET, &format!("{env}/values?{}{}", c.q(), if watch { "&digest=1" } else { "" }), None).await?;
     let unresolved: std::collections::BTreeMap<String, String> = v["problems"].as_array().into_iter().flatten().map(|p| (s(&p["key"]), s(&p["problem"]))).collect();
-    let text = render(tpl, |k| v["values"][k].as_str().map(String::from)).map_err(|missing| {
-        let why: Vec<String> = missing.iter().map(|k| unresolved.get(k).map_or_else(|| format!("{k} isn't set in {}:{}", c.at.env, c.at.path), |p| format!("{k}: {p}"))).collect();
-        anyhow::anyhow!("{file} names keys that have no value:\n  {}", why.join("\n  "))
-    })?;
-    let leases = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)).collect();
-    Ok((text, leases))
+    // `roll://…` references are resolved where they stand; `${KEY}` is filled only around them,
+    // so neither kind of value is read again as a template.
+    let spans = crate::secret_refs::find_in_text(tpl);
+    let refs: Vec<crate::secret_refs::Ref> = spans.iter().map(|(a, b)| crate::secret_refs::Ref::parse(&tpl[*a..*b])).filter_map(Result::transpose).collect::<anyhow::Result<_>>()?;
+    let (resolved, mut leases, mut follow) = resolve_refs(c, &refs, watch).await?;
+    let fill = |part: &str| {
+        render(part, |k| v["values"][k].as_str().map(String::from)).map_err(|missing| {
+            let why: Vec<String> = missing.iter().map(|k| unresolved.get(k).map_or_else(|| format!("{k} isn't set in {}:{}", c.at.env, c.at.path), |p| format!("{k}: {p}"))).collect();
+            anyhow::anyhow!("{file} names keys that have no value:\n  {}", why.join("\n  "))
+        })
+    };
+    let mut text = String::with_capacity(tpl.len());
+    let mut at = 0;
+    for (a, b) in &spans {
+        text.push_str(&fill(&tpl[at..*a])?);
+        let rf = crate::secret_refs::Ref::parse(&tpl[*a..*b])?.expect("a found reference parses");
+        text.push_str(&resolved[&rf]);
+        at = *b;
+    }
+    text.push_str(&fill(&tpl[at..])?);
+    leases.extend(v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(|l| format!("{}/leases/{}", c.base(), enc(l)))));
+    follow.insert(format!("{env}/digest?{}", c.q()), answered(&v));
+    Ok((text, leases, follow))
 }
 
 /// Replace `path` whole (a file beside it, then a rename), readable only by its owner: a reader
@@ -2077,23 +3141,26 @@ fn replace_private(path: &str, text: &str) -> anyhow::Result<()> {
 /// `roll secrets render --watch`: write the file again when the environment's digest changes and
 /// the text with it, then run `exec`; renew dynamic credentials' leases every 10 minutes.
 #[allow(clippy::too_many_arguments)]
-async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &str, mut text: String, mut leases: Vec<String>, interval: u64, exec: Option<&str>) -> anyhow::Result<()> {
-    let digest_path = format!("{env}/digest?{}", c.q());
-    let mut last = c.call(Method::GET, &digest_path, None).await?["digest"].clone();
+async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &str, mut text: String, mut leases: Vec<String>, follow: Digests, interval: u64, exec: Option<&str>) -> anyhow::Result<()> {
+    // The environment's digest, and every one its references read, as the first render's answers
+    // gave them (a second render would read and issue everything again).
+    let mut last = digests_since(c, &Digests::new(), &follow).await;
+    let mut follow: Vec<String> = follow.into_keys().collect();
     let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => return Ok(()),
             _ = renew.tick(), if !leases.is_empty() => {
+                // Each lease at its own project (a reference may read another one's).
                 for l in &leases {
-                    if let Err(e) = c.call(Method::POST, &format!("{}/leases/{}/renew", c.base(), enc(l)), None).await {
+                    if let Err(e) = c.call(Method::POST, &format!("{l}/renew"), None).await {
                         eprintln!("roll secrets render: couldn't renew lease {l} ({e})");
                     }
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))) => {
-                let now = match c.call(Method::GET, &digest_path, None).await {
-                    Ok(v) => v["digest"].clone(),
+                let now = match digests(c, &follow).await {
+                    Ok(d) => d,
                     Err(e) => {
                         eprintln!("roll secrets render: couldn't check {} ({e}); {out} stays as it is", c.at.env);
                         continue;
@@ -2102,21 +3169,25 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
                 if now == last {
                     continue;
                 }
-                last = now;
-                let (next, next_leases) = match render_env(c, env, file, tpl).await {
+                let which = moved(c, &last, &now);
+                last = now.clone();
+                let (next, next_leases, next_follow) = match render_env(c, env, file, tpl, true).await {
                     Ok(r) => r,
                     Err(e) => {
-                        eprintln!("roll secrets render: {} changed, but {e}; {out} stays as it is", c.at.env);
+                        eprintln!("roll secrets render: {which} changed, but {e}; {out} stays as it is");
                         continue;
                     }
                 };
                 leases = next_leases;
+                // As this read's answers gave them; references may have changed.
+                last = digests_since(c, &now, &next_follow).await;
+                follow = next_follow.into_keys().collect();
                 if next == text {
                     continue;
                 }
                 replace_private(out, &next)?;
                 text = next;
-                eprintln!("roll secrets render: {}:{} changed, wrote {out}", c.at.env, c.at.path);
+                eprintln!("roll secrets render: {which} changed, wrote {out}");
                 if let Some(cmd) = exec {
                     match tokio::process::Command::new("sh").arg("-c").arg(cmd).status().await {
                         Ok(st) if st.success() => {}
@@ -2189,7 +3260,7 @@ async fn doctor(api: &Api, args: &AtArgs) -> anyhow::Result<()> {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter(|f| f["environment"] == at.env.as_str() && ["expired", "missing", "exposed"].contains(&f["issue"].as_str().unwrap_or_default()))
+                    .filter(|f| f["environment"] == at.env.as_str() && ["expired", "missing", "exposed", "public"].contains(&f["issue"].as_str().unwrap_or_default()))
                     .map(|f| format!("{} {} ({})", s(&f["issue"]), s(&f["key"]), s(&f["detail"])))
                     .collect();
                 checks.push(if serious.is_empty() { (true, format!("nothing in {} needs fixing now", at.env)) } else { (false, format!("{} needs fixing: {}", at.env, serious.join("; "))) });
@@ -2230,12 +3301,12 @@ fn report_health(found: &[Value], projects: bool) -> anyhow::Result<()> {
         let project = if projects { format!("{:<16} ", s(&f["project_name"])) } else { String::new() };
         println!("{:<9} {project}{:<14} {:<28} {}{}", s(&f["issue"]).to_uppercase(), s(&f["environment"]), s(&f["key"]), s(&f["detail"]), if f["path"] == "/" { String::new() } else { format!("  ({})", s(&f["path"])) });
     }
-    let serious = found.iter().filter(|f| ["expired", "missing", "exposed"].contains(&f["issue"].as_str().unwrap_or_default())).count();
+    let serious = found.iter().filter(|f| ["expired", "missing", "exposed", "public"].contains(&f["issue"].as_str().unwrap_or_default())).count();
     if found.is_empty() {
         eprintln!("Nothing to fix");
     }
     if serious > 0 {
-        bail!("{serious} to fix now (expired, missing or exposed)");
+        bail!("{serious} to fix now (expired, missing, exposed or in the browser)");
     }
     Ok(())
 }
@@ -2355,35 +3426,226 @@ fn render(tpl: &str, get: impl Fn(&str) -> Option<String>) -> Result<String, Vec
 
 /// The variables `roll run` adds: the environment's resolved values, minus the ones the shell
 /// already sets (unless `--override`). Fails on a problem unless `--allow-unresolved`.
-async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
-    let v = c.call(Method::GET, &format!("{}/values?{}", c.env(&at.env), c.q()), None).await?;
+async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<Var>, Vec<String>, Digests)> {
+    let digest = if r.watch { "&digest=1" } else { "" };
+    let path = format!("{}/values?{}{digest}", c.env(&at.env), c.q());
+    let digest_path = format!("{}/digest?{}", c.env(&at.env), c.q());
+    let header = |fetched_at| crate::fallback::Header { v: 1, asked: at.project.clone().unwrap_or_default(), project: c.project.clone(), environment: at.env.clone(), path: at.path.clone(), fetched_at };
+    // Env files, read first: their entries win over the environment's.
+    let mut files = vec![];
+    for file in &r.env_files {
+        let text = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
+        files.push(crate::secret_refs::parse_env_file(&text, file)?);
+    }
+    let refs: Vec<crate::secret_refs::Ref> = files.iter().flatten().filter_map(|(_, v)| crate::secret_refs::Ref::parse(v).transpose()).collect::<anyhow::Result<_>>()?;
+    let v = match (c.api.answer(Method::GET, &path, None).await, &r.fallback) {
+        (Ok(Ok(v)), _) => v,
+        // Refused (a revoked token, no such environment): never the fallback.
+        (Ok(Err((status, message))), _) if !status.is_server_error() => bail!("{message}"),
+        (Ok(Err((_, message))), None) => bail!("{message}"),
+        (Err(e), None) => return Err(e),
+        (Err(e), Some(_)) if !no_answer(&e) => return Err(e),
+        // No answer, or rolld failing: start from the last values fetched, saying so.
+        (failed, Some(file)) => {
+            let why = match failed {
+                Err(e) => e.to_string(),
+                Ok(Err((_, m))) => m,
+                Ok(Ok(_)) => unreachable!(),
+            };
+            return from_fallback(c, r, file, &header(0), &why, &files, &refs, digest_path);
+        }
+    };
     let problems: Vec<String> = v["problems"].as_array().into_iter().flatten().map(|p| format!("{}: {}", s(&p["key"]), s(&p["problem"]))).collect();
     if !problems.is_empty() && !r.allow_unresolved {
         bail!("{} of {}:{} didn't resolve (pass --allow-unresolved to run anyway):\n  {}", problems.len(), at.env, at.path, problems.join("\n  "));
     }
-    let env = v["values"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter(|(k, _)| r.override_env || std::env::var_os(k).is_none())
-        .map(|(k, val)| (k.clone(), val.as_str().unwrap_or_default().to_string()))
-        .collect();
-    let leases = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)).collect();
-    Ok((env, leases))
+    let values: Vec<(String, String)> = v["values"].as_object().into_iter().flatten().map(|(k, val)| (k.clone(), val.as_str().unwrap_or_default().to_string())).collect();
+    let mut leases: Vec<String> = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(|l| format!("{}/leases/{}", c.base(), enc(l)))).collect();
+    let mut follow = Digests::from([(digest_path.clone(), answered(&v))]);
+    let withheld: Vec<&str> = v["withheld"].as_array().into_iter().flatten().filter_map(|k| k.as_str()).collect();
+    if !withheld.is_empty() {
+        eprintln!("roll run: left out {} (sensitive: only roll's runtimes read them)", withheld.join(", "));
+    }
+    let (resolved, more_leases, more_follow) = match (resolve_refs(c, &refs, r.watch).await, &r.fallback) {
+        (Ok(x), _) => x,
+        // A referenced folder's read got no answer: the whole run starts from the file, as one
+        // consistent fetch (this read's leases end with their time).
+        (Err(e), Some(file)) if no_answer(&e) => return from_fallback(c, r, file, &header(0), &format!("{e:#}"), &files, &refs, digest_path),
+        (Err(e), _) => return Err(e),
+    };
+    leases.extend(more_leases);
+    follow.extend(more_follow);
+    // Only what resolved cleanly is kept for an outage: the values, and the env files' references
+    // under their `roll://…` text.
+    if let (Some(file), true) = (&r.fallback, problems.is_empty()) {
+        let mut kept: serde_json::Map<String, Value> = values.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
+        kept.extend(resolved.iter().map(|(rf, v)| (rf.text(), Value::String(v.clone()))));
+        let written = crate::fallback::secret(c.api.key.as_deref()).and_then(|secret| {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+            crate::fallback::write(file, &secret, header(now), &kept)
+        });
+        if let Err(e) = written {
+            eprintln!("roll run: couldn't keep the fallback ({e:#})");
+        }
+    }
+    Ok((with_env_files(values, &files, &resolved, r)?, leases, follow))
+}
+
+/// `roll run` started from the fallback file (`why`: what rolld didn't answer): the values kept
+/// for `want`, and the env files' references as they resolved then.
+#[allow(clippy::too_many_arguments)]
+fn from_fallback(c: &Client<'_>, r: &Run, file: &std::path::Path, want: &crate::fallback::Header, why: &str, files: &[Vec<(String, String)>], refs: &[crate::secret_refs::Ref], digest_path: String) -> anyhow::Result<(Vec<Var>, Vec<String>, Digests)> {
+    let secret = crate::fallback::secret(c.api.key.as_deref())?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    let (values, h) = crate::fallback::read(file, &secret, want, now, crate::fallback::duration_ms(&r.fallback_max_age)?).with_context(|| format!("{why}; and the fallback didn't do"))?;
+    eprintln!("roll run: {why}; starting from {} (fetched {} minutes ago)", file.display(), (now - h.fetched_at) / 60_000);
+    // The file keeps the env files' references as they resolved, under their `roll://…` text (no
+    // variable's name has `://`).
+    let (kept, values): (Vec<_>, Vec<_>) = values.into_iter().map(|(k, v)| (k, v.as_str().unwrap_or_default().to_string())).partition(|(k, _)| k.starts_with("roll://"));
+    let kept: std::collections::HashMap<String, String> = kept.into_iter().collect();
+    let resolved = refs.iter().map(|rf| kept.get(&rf.text()).map(|v| (rf.clone(), v.clone())).ok_or_else(|| anyhow::anyhow!("{why}; and {} isn't in the fallback (added after its last fetch)", rf.text()))).collect::<anyhow::Result<_>>()?;
+    // A digest no folder has: the first one rolld answers reloads the command (`--watch`).
+    Ok((with_env_files(values, files, &resolved, r)?, Vec::new(), Digests::from([(digest_path, "fallback".into())])))
+}
+
+/// The variables to set: the environment's values, then the env files' entries over them (plain
+/// values as written, references as `resolved` has them); the shell's own win unless `--override`.
+/// Each says whether its value came from roll (what masking conceals) or is an env file's own.
+fn with_env_files(env: Vec<(String, String)>, files: &[Vec<(String, String)>], resolved: &std::collections::HashMap<crate::secret_refs::Ref, String>, r: &Run) -> anyhow::Result<Vec<Var>> {
+    let mut env: Vec<Var> = env.into_iter().map(|(name, value)| Var { name, value, from_roll: true }).collect();
+    for (k, raw) in files.iter().flatten() {
+        let (value, from_roll) = match crate::secret_refs::Ref::parse(raw)? {
+            Some(rf) => (resolved[&rf].clone(), true),
+            None => (raw.clone(), false),
+        };
+        env.retain(|v| &v.name != k);
+        env.push(Var { name: k.clone(), value, from_roll });
+    }
+    env.retain(|v| r.override_env || std::env::var_os(&v.name).is_none());
+    Ok(env)
+}
+
+/// A variable `roll run` sets.
+#[derive(Clone)]
+pub(crate) struct Var {
+    pub name: String,
+    pub value: String,
+    /// From the environment or a `roll://` reference, not an env file's plain value.
+    pub from_roll: bool,
+}
+
+/// Resolve `roll://` references: one read per project, environment and folder. Their values,
+/// the leases those hold (each as its renew route, at its own project), and the digests to follow
+/// (`--watch`).
+async fn resolve_refs(c: &Client<'_>, refs: &[crate::secret_refs::Ref], watch: bool) -> anyhow::Result<(std::collections::HashMap<crate::secret_refs::Ref, String>, Vec<String>, Digests)> {
+    let mut groups: std::collections::BTreeMap<(Option<String>, String, String), Vec<&crate::secret_refs::Ref>> = Default::default();
+    for rf in refs {
+        groups.entry((rf.project.clone(), rf.env.clone(), rf.path.clone())).or_default().push(rf);
+    }
+    let (mut values, mut leases, mut follow) = (std::collections::HashMap::new(), vec![], Digests::new());
+    for ((named, env, path), group) in groups {
+        let id = match &named {
+            None => c.project.clone(),
+            Some(p) => project(c.api, Some(p)).await?,
+        };
+        let base = format!("/v1/secrets/projects/{}/environments/{}", enc(&id), enc(&env));
+        let v = c.call(Method::GET, &format!("{base}/values?path={}{}", enc(&path), if watch { "&digest=1" } else { "" }), None).await.with_context(|| format!("reading roll://{}{env}{}", named.as_ref().map(|p| format!("{p}@")).unwrap_or_default(), if path == "/" { String::new() } else { path.clone() }))?;
+        for rf in group {
+            let value = v["values"][&rf.key].as_str().ok_or_else(|| {
+                let problem = v["problems"].as_array().into_iter().flatten().find(|p| p["key"] == rf.key.as_str()).map(|p| s(&p["problem"]).to_string());
+                let withheld = v["withheld"].as_array().is_some_and(|w| w.iter().any(|k| k == rf.key.as_str()));
+                let why = match problem {
+                    Some(p) => p,
+                    None if withheld => "sensitive: only roll's runtimes read it".into(),
+                    None => "not set there".into(),
+                };
+                anyhow::anyhow!("{}: {why}", rf.text())
+            })?;
+            values.insert(rf.clone(), value.to_string());
+        }
+        // A lease is renewed where it was issued: its project's own route.
+        leases.extend(v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(|l| format!("/v1/secrets/projects/{}/leases/{}", enc(&id), enc(l)))));
+        follow.insert(format!("{base}/digest?path={}", enc(&path)), answered(&v));
+    }
+    Ok((values, leases, follow))
+}
+
+/// The digest at each of `follow`'s paths.
+async fn digests(c: &Client<'_>, follow: &[String]) -> anyhow::Result<Digests> {
+    let mut all = Digests::new();
+    for p in follow {
+        all.insert(p.clone(), s(&c.call(Method::GET, p, None).await?["digest"]));
+    }
+    Ok(all)
+}
+
+type Digests = std::collections::BTreeMap<String, String>;
+
+/// Which followed folders moved between two polls, as `env:/path` (another project's as
+/// `prj_…@env:/path`), for a watch's message.
+fn moved(c: &Client<'_>, last: &Digests, now: &Digests) -> String {
+    let label = |p: &str| -> String {
+        let (Some(rest), Some(q)) = (p.strip_prefix("/v1/secrets/projects/"), p.split_once("/digest?path=").map(|(_, q)| q)) else { return p.to_string() };
+        let mut parts = rest.split('/');
+        let (project, env) = (parts.next().unwrap_or_default(), parts.nth(1).unwrap_or_default());
+        let path = urlencoding::decode(q).map(|p| p.into_owned()).unwrap_or_else(|_| q.to_string());
+        let env = urlencoding::decode(env).map(|e| e.into_owned()).unwrap_or_else(|_| env.to_string());
+        if urlencoding::decode(project).is_ok_and(|p| p == c.project) { format!("{env}:{path}") } else { format!("{project}@{env}:{path}") }
+    };
+    let list: Vec<String> = now.iter().filter(|(p, d)| last.get(*p) != Some(*d)).map(|(p, _)| label(p)).collect();
+    if list.is_empty() { "the environment".into() } else { list.join(", ") }
+}
+
+/// A values answer's digest: the folder's, taken by the server just before it read them.
+fn answered(v: &Value) -> String {
+    v["digest"].as_str().unwrap_or_default().to_string()
+}
+
+/// What a watch compares from now on, after a read whose answers gave `follow` (each followed
+/// path's digest, taken just before it was read: a write after that is a change). A server that
+/// doesn't send one: the digest polled before the read (`before`), else polled now; one that
+/// can't be is left empty, which the next poll sees as a change.
+async fn digests_since(c: &Client<'_>, before: &Digests, follow: &Digests) -> Digests {
+    let mut out = Digests::new();
+    for (p, answered) in follow {
+        let d = match (answered.is_empty(), before.get(p)) {
+            (false, _) => answered.clone(),
+            (true, Some(d)) => d.clone(),
+            (true, None) => c.call(Method::GET, p, None).await.map(|v| s(&v["digest"])).unwrap_or_default(),
+        };
+        out.insert(p.clone(), d);
+    }
+    out
+}
+
+/// No answer from rolld, or a failing one (a 5xx): what `--fallback` starts through. A refusal
+/// (a 4xx: a revoked token, a customer's key that refused, 423) never is.
+pub(crate) fn no_answer(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<reqwest::Error>().is_some() || c.downcast_ref::<tokio::time::error::Elapsed>().is_some() || c.downcast_ref::<crate::ApiStatus>().is_some_and(|s| s.status.is_server_error()))
 }
 
 /// `roll run`: resolve, then exec the command with the values in its environment; with
 /// `--watch`, run it as a child and restart it when the environment's digest changes.
 pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     let at = r.at.resolve();
-    let project = project(api, at.project.as_deref()).await?;
+    // Finding the project may ask rolld (a name, or the token's own): in an outage, the fallback
+    // file's own (checked again when it's opened) for the environment and folder asked.
+    let project = match (project(api, at.project.as_deref()).await, &r.fallback) {
+        (Ok(p), _) => p,
+        (Err(e), Some(file)) if no_answer(&e) => crate::fallback::header(file).map(|h| h.project).map_err(|_| e)?,
+        (Err(e), _) => return Err(e),
+    };
     let c = Client { project, api, at: at.clone() };
-    let (env, leases) = run_env(&c, &at, &r).await?;
+    let (env, leases, follow) = run_env(&c, &at, &r).await?;
+    let streams = crate::mask::Streams::choose(r.mask, r.no_mask);
     if r.watch {
-        return watch(&c, &at, &r, env, leases).await;
+        return watch(&c, &at, &r, env, leases, follow, streams).await;
+    }
+    if streams.any() {
+        return run_masked(&r, &env, streams).await;
     }
     let mut cmd = std::process::Command::new(&r.command[0]);
-    cmd.args(&r.command[1..]).envs(env);
+    cmd.args(&r.command[1..]).envs(env.into_iter().map(|v| (v.name, v.value)));
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -2397,34 +3659,148 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     }
 }
 
+/// `roll ssh`: resolve the certificate and key (a dynamic link gets a new pair, for this session),
+/// write them to a private temporary directory, run `ssh` with them, and delete both when it exits.
+pub async fn ssh_command(api: &Api, a: Ssh) -> anyhow::Result<()> {
+    let at = a.at.resolve();
+    let project = project(api, at.project.as_deref()).await?;
+    let c = Client { project, api, at: at.clone() };
+    // The directory is the user's alone (0700) and goes when this returns, key and all.
+    let dir = tempfile::Builder::new().prefix("roll-ssh-").tempdir().context("making a private directory for the key")?;
+    let cert_path = dir.path().join("id-cert.pub");
+    // The identity ssh uses: the session's own key, or the user's (whose private half roll never reads).
+    let id = if let Some(public) = &a.key {
+        let (line, public) = read_public_key(public)?;
+        let public = public.to_string_lossy().into_owned();
+        let ca = ca_named(&c, a.ca.as_deref().unwrap_or_default(), "ssh-cas").await?;
+        let v = c.call(Method::POST, &format!("{}/ssh-cas/{}/sign-user", c.base(), enc(&ca)), Some(json!({ "public_key": line.trim(), "principals": a.principals }))).await?;
+        std::fs::write(&cert_path, format!("{}\n", s(&v["certificate"]).trim())).context("writing the certificate")?;
+        // The private file when it's there; else the public one, which tells ssh to use the
+        // agent's key (a hardware token's) that matches it.
+        let private = std::path::PathBuf::from(public.strip_suffix(".pub").unwrap_or(&public));
+        if private.exists() && private.as_os_str() != public.as_str() { private } else { std::path::PathBuf::from(&public) }
+    } else {
+        let v = c.call(Method::GET, &format!("{}/values?{}", c.env(&at.env), c.q()), None).await?;
+        let get = |k: &str| -> anyhow::Result<String> {
+            v["values"][k].as_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("{}:{} doesn't set {k}: link it to an SSH CA (roll secrets ssh-cas), or pass --key", at.env, at.path))
+        };
+        let (cert, key) = (get(&a.cert)?, get(&a.identity)?);
+        let id = dir.path().join("id");
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new();
+        f.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut f, 0o600);
+        f.open(&id).and_then(|mut file| file.write_all(key.as_bytes())).context("writing the key")?;
+        std::fs::write(&cert_path, format!("{}\n", cert.trim())).context("writing the certificate")?;
+        id
+    };
+    // Hosts the project's SSH CAs sign are trusted by their CA, not on first use: their
+    // @cert-authority lines go first, then the user's own known_hosts.
+    let trusted: Vec<String> = match c.call(Method::GET, &format!("{}/ssh-cas", c.base()), None).await {
+        Ok(cas) => cas.as_array().into_iter().flatten().filter_map(|ca| ca["known_hosts"].as_str().map(str::to_string)).collect(),
+        Err(_) => vec![],
+    };
+    let mut cmd = std::process::Command::new("ssh");
+    cmd.arg("-i").arg(&id).arg("-o").arg(format!("CertificateFile={}", cert_path.display())).arg("-o").arg("IdentitiesOnly=yes");
+    if !trusted.is_empty() {
+        let known = dir.path().join("known_hosts");
+        std::fs::write(&known, trusted.join("\n") + "\n").context("writing the CA's known_hosts")?;
+        // The user's own file first: ssh records a newly accepted host there, not in this one
+        // (which goes); it checks every file listed either way.
+        cmd.arg("-o").arg(format!("UserKnownHostsFile=~/.ssh/known_hosts \"{}\"", known.display()));
+    }
+    let status = cmd
+        .args(&a.args)
+        .status()
+        .context("running ssh")?;
+    drop(dir);
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+/// `roll run` with masked output: the command as a child (roll can't exec it and still read its
+/// output), exiting as it did. Signals are passed on ([`crate::mask::Signals`]).
+async fn run_masked(r: &Run, env: &[Var], streams: crate::mask::Streams) -> anyhow::Result<()> {
+    let mut run = spawn_masked(r, env, streams)?;
+    #[cfg(unix)]
+    {
+        let mut signals = crate::mask::Signals::new()?;
+        loop {
+            tokio::select! {
+                status = run.child.wait() => {
+                    let status = status?;
+                    run.drain().await;
+                    crate::mask::exit_as(status);
+                }
+                sig = signals.next() => crate::mask::Signals::pass(&run.child, sig),
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let status = run.child.wait().await?;
+        run.drain().await;
+        crate::mask::exit_as(status);
+    }
+}
+
 /// `roll run --watch`: the command as a child, restarted (SIGTERM, then SIGKILL after 10 s) when
-/// the environment changes. A change that doesn't resolve keeps the running command. Exits with
-/// the command's own code when it exits by itself.
-async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>, mut leases: Vec<String>) -> anyhow::Result<()> {
-    let digest_path = format!("{}/digest?{}", c.env(&at.env), c.q());
-    let mut last = c.call(Method::GET, &digest_path, None).await?["digest"].clone();
+/// the environment changes. A change that doesn't resolve keeps the running command. Signals are
+/// passed on as `roll run`'s are, and it exits as the command did.
+/// The command with `env`, its output masked for the values from roll ([`crate::mask::spawn`]).
+fn spawn_masked(r: &Run, env: &[Var], streams: crate::mask::Streams) -> anyhow::Result<crate::mask::Running> {
+    let pairs: Vec<(String, String)> = env.iter().map(|v| (v.name.clone(), v.value.clone())).collect();
+    let conceal: Vec<&str> = env.iter().filter(|v| v.from_roll).map(|v| v.value.as_str()).collect();
+    crate::mask::spawn(&r.command, &pairs, &conceal, streams).with_context(|| format!("running {}", r.command[0]))
+}
+
+async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: Vec<String>, follow: Digests, streams: crate::mask::Streams) -> anyhow::Result<()> {
+    // The environment's digest, and every referenced one's (an env file's `roll://…`), as the
+    // first read's answers gave them (started from a fallback: one that reloads at the first
+    // answer).
+    let mut last = digests_since(c, &Digests::new(), &follow).await;
+    let mut follow: Vec<String> = follow.into_keys().collect();
     let every = std::time::Duration::from_secs(r.interval.max(1));
     // Dynamic credentials outlive their first lease: renewed every 10 minutes while it runs.
     let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
+    #[cfg(unix)]
+    let mut signals = crate::mask::Signals::new()?;
     loop {
-        let mut child = tokio::process::Command::new(&r.command[0]).args(&r.command[1..]).envs(env.iter().cloned()).spawn().with_context(|| format!("running {}", r.command[0]))?;
+        let mut run = spawn_masked(r, &env, streams)?;
         loop {
+            #[cfg(unix)]
+            let signal = signals.next();
+            #[cfg(not(unix))]
+            let signal = async {
+                let _ = tokio::signal::ctrl_c().await;
+                0
+            };
             tokio::select! {
-                status = child.wait() => std::process::exit(status?.code().unwrap_or(1)),
-                _ = tokio::signal::ctrl_c() => {
-                    stop(&mut child).await;
-                    std::process::exit(130);
+                status = run.child.wait() => {
+                    let status = status?;
+                    run.drain().await;
+                    crate::mask::exit_as(status);
+                }
+                // Passed on: the command's exit ends roll.
+                sig = signal => {
+                    #[cfg(unix)]
+                    crate::mask::Signals::pass(&run.child, sig);
+                    #[cfg(not(unix))]
+                    {
+                        let _ = sig;
+                        stop(&mut run.child).await;
+                    }
                 }
                 _ = renew.tick(), if !leases.is_empty() => {
                     for l in &leases {
-                        if let Err(e) = c.call(Method::POST, &format!("{}/leases/{}/renew", c.base(), enc(l)), None).await {
+                        if let Err(e) = c.call(Method::POST, &format!("{l}/renew"), None).await {
                             eprintln!("roll run: couldn't renew lease {l} ({e})");
                         }
                     }
                 }
                 _ = tokio::time::sleep(every) => {
-                    let now = match c.call(Method::GET, &digest_path, None).await {
-                        Ok(v) => v["digest"].clone(),
+                    let now = match digests(c, &follow).await {
+                        Ok(d) => d,
                         Err(e) => {
                             eprintln!("roll run: couldn't check {} ({e}); still running", at.env);
                             continue;
@@ -2433,16 +3809,21 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>,
                     if now == last {
                         continue;
                     }
-                    last = now;
+                    let which = moved(c, &last, &now);
+                    last = now.clone();
                     match run_env(c, at, r).await {
-                        Ok((next, next_leases)) => {
-                            eprintln!("roll run: {}:{} changed, restarting {}", at.env, at.path, r.command[0]);
+                        Ok((next, next_leases, next_follow)) => {
+                            eprintln!("roll run: {which} changed, restarting {}", r.command[0]);
                             env = next;
                             leases = next_leases;
-                            stop(&mut child).await;
+                            // As this read's answers gave them; references may have changed.
+                            last = digests_since(c, &now, &next_follow).await;
+                            follow = next_follow.into_keys().collect();
+                            stop(&mut run.child).await;
+                            run.drain().await;
                             break;
                         }
-                        Err(e) => eprintln!("roll run: {} changed, but {e}; keeping the running command", at.env),
+                        Err(e) => eprintln!("roll run: {which} changed, but {e}; keeping the running command"),
                     }
                 }
             }
@@ -2464,4 +3845,264 @@ async fn stop(child: &mut tokio::process::Child) {
         }
     }
     let _ = child.kill().await;
+}
+
+/// A CA's id from its id or its name.
+async fn ca_id(c: &Client<'_>, id: &str) -> anyhow::Result<String> {
+    let list = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;
+    let ca = list.as_array().into_iter().flatten().find(|a| a["id"] == id || a["name"] == id).ok_or_else(|| anyhow::anyhow!("no CA {id}"))?;
+    Ok(s(&ca["id"]).to_string())
+}
+
+/// An SSH CA's or CA's id from its id or its name (`kind`: `ssh-cas` or `cas`).
+async fn ca_named(c: &Client<'_>, id: &str, kind: &str) -> anyhow::Result<String> {
+    let list = c.call(Method::GET, &format!("{}/{kind}", c.base()), None).await?;
+    let ca = list.as_array().into_iter().flatten().find(|a| a["id"] == id || a["name"] == id).ok_or_else(|| anyhow::anyhow!("no CA {id}"))?;
+    Ok(s(&ca["id"]).to_string())
+}
+
+/// A public key line from `path` (or `<path>.pub` when given a private key's path), and the file
+/// it came from. Anything that isn't one public key line is refused before it can leave the
+/// machine: a private key never goes to roll.
+fn read_public_key(path: &str) -> anyhow::Result<(String, std::path::PathBuf)> {
+    let mut file = std::path::PathBuf::from(path);
+    if !path.ends_with(".pub") {
+        let public = std::path::PathBuf::from(format!("{path}.pub"));
+        if public.exists() {
+            file = public;
+        }
+    }
+    let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+    Ok((public_line(&text, &file.display().to_string())?, file))
+}
+
+fn public_line(text: &str, from: &str) -> anyhow::Result<String> {
+    let line = text.trim();
+    let kind = line.split_whitespace().next().unwrap_or_default();
+    let known = ["ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521"].contains(&kind);
+    if line.contains("PRIVATE KEY") || !known || line.lines().count() != 1 {
+        bail!("{from} isn't a public key line (ssh-ed25519 AAAA…): give the .pub file; a private key never goes to roll");
+    }
+    Ok(line.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_private_key_never_leaves_the_machine() {
+        let private = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n";
+        assert!(super::public_line(private, "id_ed25519").is_err());
+        assert!(super::public_line("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA me@laptop\n", "id_ed25519.pub").is_ok());
+    }
+}
+
+/// Sign or HMAC stdin's bytes with a transit key; the answer's `field`.
+async fn transit_stdin(c: &Client<'_>, name: &str, route: &str, field: &str) -> anyhow::Result<String> {
+    use base64::Engine;
+    use std::io::Read;
+    let mut input = Vec::new();
+    std::io::stdin().read_to_end(&mut input).context("reading stdin")?;
+    let v = c.call(Method::POST, &format!("{}/transit/{}/{route}", c.base(), enc(name)), Some(json!({ "input": base64::engine::general_purpose::STANDARD.encode(&input) }))).await?;
+    Ok(s(&v[field]).to_string())
+}
+
+/// Run the user's `aws` CLI with `args` and read its JSON (errors name the command, never output).
+async fn aws(args: &[&str]) -> anyhow::Result<Value> {
+    let out = tokio::process::Command::new(std::env::var("ROLL_AWS_CLI").unwrap_or_else(|_| "aws".into()))
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .context("running the aws CLI (install it, or set ROLL_AWS_CLI)")?;
+    anyhow::ensure!(out.status.success(), "aws {}: {}", args[..2].join(" "), String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or_default().chars().take(200).collect::<String>());
+    serde_json::from_slice(&out.stdout).context("the aws CLI's answer isn't JSON")
+}
+
+/// A Secrets Manager secret as keys: a JSON object's fields as they are; anything else one key
+/// named after the secret's last segment (`prod/app/db-url` → `DB_URL`).
+fn aws_entries(name: &str, prefix: &str, text: &str) -> Vec<(String, String)> {
+    if let Ok(Value::Object(fields)) = serde_json::from_str::<Value>(text) {
+        return fields.into_iter().filter(|(_, v)| !v.is_null()).map(|(k, v)| (k, v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))).collect();
+    }
+    let last = name.strip_prefix(prefix).unwrap_or(name).rsplit('/').next().unwrap_or(name);
+    let mut key: String = last.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' }).collect();
+    if key.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        key.insert(0, '_');
+    }
+    vec![(key, text.to_string())]
+}
+
+/// Vault answered with this status (matched by the status, never by an error's text).
+#[derive(Debug)]
+struct VaultRefused(reqwest::StatusCode);
+
+impl std::fmt::Display for VaultRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Vault answered {}", self.0)
+    }
+}
+
+impl std::error::Error for VaultRefused {}
+
+/// Every secret of a Vault KV v2 tree under `mount/path`, by the folder it goes to (its path
+/// under `path`; the secret at `path` itself goes to `""`). At most 500 secrets, 8 levels.
+async fn vault_tree(source: &str) -> anyhow::Result<Vec<(String, serde_json::Map<String, Value>)>> {
+    let (mount, base) = source.split_once('/').map(|(m, p)| (m.to_string(), p.trim_matches('/').to_string())).unwrap_or((source.to_string(), String::new()));
+    let addr = std::env::var("VAULT_ADDR").context("set VAULT_ADDR")?;
+    let token = std::env::var("VAULT_TOKEN").context("set VAULT_TOKEN")?;
+    let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
+    let url = |kind: &str, p: &str| format!("{}/v1/{mount}/{kind}/{}", addr.trim_end_matches('/'), p.trim_matches('/'));
+    let segment = |s: &str| !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    // An answer read whole, up to 4 MiB; `None` for a 404 (nothing there). Anything else stops
+    // it: a secret the token can't read must not be left out unsaid.
+    let fetch = |req: reqwest::RequestBuilder, what: String| async move {
+        let mut res = req.send().await.with_context(|| what.clone())?;
+        if res.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok::<_, anyhow::Error>(None);
+        }
+        if !res.status().is_success() {
+            return Err(anyhow::Error::new(VaultRefused(res.status())).context(format!("{what}: {} (the token needs read and list on it)", res.status())));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = res.chunk().await.with_context(|| what.clone())? {
+            anyhow::ensure!(body.len() + chunk.len() <= 4 << 20, "{what}: the answer is over 4 MiB");
+            body.extend_from_slice(&chunk);
+        }
+        Ok(Some(serde_json::from_slice::<Value>(&body).with_context(|| format!("{what}: not JSON"))?))
+    };
+    let mut out = vec![];
+    let mut visits = 0usize;
+    // (path under the mount, folder under the source, depth, a secret to read, a folder to list).
+    // Vault lists a secret as `name` and a folder as `name/`: each is read only as what it is,
+    // so a token with read on `app/*` but not on `app` itself still imports `app/…`.
+    let mut queue = vec![(base.clone(), String::new(), 0usize, true, true)];
+    while let Some((at, folder, depth, secret, listed)) = queue.pop() {
+        visits += 1;
+        anyhow::ensure!(visits <= 2_000, "vault {mount}/{base}: more than 2,000 paths; import it in parts");
+        if secret {
+            let read = fetch(http.get(url("data", &at)).header("x-vault-token", &token), format!("vault {mount}/{at}")).await;
+            // The source itself may be only a folder the token can't read as a secret.
+            let read = match read {
+                Err(e) if at == base && e.downcast_ref::<VaultRefused>().is_some_and(|r| r.0 == reqwest::StatusCode::FORBIDDEN) => {
+                    eprintln!("vault {mount}/{at}: not readable as a secret itself, its folders only");
+                    None
+                }
+                other => other?,
+            };
+            if let Some(v) = read {
+                let fields: serde_json::Map<String, Value> = v["data"]["data"].as_object().into_iter().flatten().filter(|(_, x)| !x.is_null()).map(|(k, x)| (k.clone(), Value::String(x.as_str().map(String::from).unwrap_or_else(|| x.to_string())))).collect();
+                if !fields.is_empty() {
+                    out.push((folder.clone(), fields));
+                }
+            }
+        }
+        if !listed {
+            continue;
+        }
+        let Some(v) = fetch(http.request(reqwest::Method::from_bytes(b"LIST").expect("LIST"), url("metadata", &at)).header("x-vault-token", &token), format!("vault {mount}/{at} (list)")).await? else {
+            continue;
+        };
+        for k in v["data"]["keys"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            let name = k.trim_end_matches('/');
+            anyhow::ensure!(segment(name), "vault {mount}/{at}/{name}: a roll folder is letters, digits, _ and - (rename it, or import it alone)");
+            anyhow::ensure!(depth < 8 && out.len() + queue.len() < 500, "vault {mount}/{base}: more than 500 secrets or 8 levels; import it in parts");
+            let child_at = if at.is_empty() { name.to_string() } else { format!("{at}/{name}") };
+            let child_folder = if folder.is_empty() { name.to_string() } else { format!("{folder}/{name}") };
+            let is_folder = k.ends_with('/');
+            queue.push((child_at, child_folder, depth + 1, !is_folder, is_folder));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.dedup_by(|a, b| a.0 == b.0);
+    Ok(out)
+}
+
+#[cfg(test)]
+mod migrate_tests {
+    #[test]
+    fn an_aws_secret_becomes_keys() {
+        assert_eq!(super::aws_entries("prod/app/db", "prod/app/", "{\"DB_USER\":\"app\",\"DB_PORT\":5432}"), [("DB_PORT".to_string(), "5432".to_string()), ("DB_USER".to_string(), "app".to_string())]);
+        assert_eq!(super::aws_entries("prod/app/stripe-key", "prod/app/", "sk_live_x"), [("STRIPE_KEY".to_string(), "sk_live_x".to_string())]);
+    }
+}
+
+#[cfg(test)]
+mod relogin_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// A long-running workload's login renews itself before it ends, with the OIDC token as the
+    /// file holds it then (Kubernetes rotates it); a failed login keeps the current token while it
+    /// lasts; a 401 logs in again at once.
+    #[tokio::test]
+    async fn an_identity_login_renews_itself_and_survives_a_failed_login() {
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (down, refuse) = (Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(String::new())));
+        let (s, d, f) = (seen.clone(), down.clone(), refuse.clone());
+        let router = axum::Router::new()
+            .route(
+                "/v1/secrets/login",
+                axum::routing::post(move |axum::Json(b): axum::Json<Value>| async move {
+                    if d.load(Ordering::SeqCst) {
+                        return (axum::http::StatusCode::BAD_GATEWAY, axum::Json(json!({ "error": "down" })));
+                    }
+                    let mut s = s.lock().unwrap();
+                    s.push(b["token"].as_str().unwrap_or_default().to_string());
+                    (axum::http::StatusCode::OK, axum::Json(json!({ "token": format!("rlst_{}", s.len()), "expires_at": now_ms() + 3_600_000 })))
+                }),
+            )
+            .route(
+                "/v1/echo",
+                axum::routing::get(move |h: axum::http::HeaderMap| async move {
+                    let auth = h["authorization"].to_str().unwrap().to_string();
+                    if *f.lock().unwrap() == auth {
+                        return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": "unknown token" })));
+                    }
+                    (axum::http::StatusCode::OK, axum::Json(json!({ "auth": auth })))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("token");
+        std::fs::write(&file, "jwt-1\n").unwrap();
+        // SAFETY: only this test reads ROLL_OIDC_TOKEN_FILE.
+        unsafe { std::env::set_var("ROLL_OIDC_TOKEN_FILE", &file) };
+        let anon = Api { base, http: reqwest::Client::new(), key: None, headers: vec![], login: None };
+        let login = Arc::new(Relogin::new(&anon, "idn_1").await.unwrap());
+        let api = Api { key: Some(login.first.clone()), login: Some(login.clone()), ..anon };
+        let auth = |v: Value| v["auth"].as_str().unwrap().to_string();
+        let due = || async { login.held.lock().await.renew = std::time::Instant::now() };
+
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_1");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_1", "not yet");
+        std::fs::write(&file, "jwt-2\n").unwrap();
+        due().await;
+        // Renewed in the background: this request goes on with the current token, the next has the new one.
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_1");
+        login.settle().await;
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_2");
+        // roll is down when it's time to renew: the current token goes on.
+        down.store(true, Ordering::SeqCst);
+        due().await;
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_2");
+        login.settle().await;
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_2");
+        // A 401 (its clock ran ahead): logs in again and the request goes through.
+        down.store(false, Ordering::SeqCst);
+        *refuse.lock().unwrap() = "Bearer rlst_2".into();
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_3");
+        assert_eq!(*seen.lock().unwrap(), ["jwt-1", "jwt-2", "jwt-2"]);
+        // Started through an outage (`roll run --fallback`): no login yet. While roll is down a
+        // request is no answer (so the fallback is used), and the first one it answers logs in.
+        let later = Arc::new(Relogin::pending("idn_1"));
+        let api = Api { base: api.base.clone(), http: reqwest::Client::new(), key: None, headers: vec![], login: Some(later) };
+        down.store(true, Ordering::SeqCst);
+        assert!(no_answer(&api.get("/v1/echo").await.unwrap_err()));
+        down.store(false, Ordering::SeqCst);
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_4");
+    }
 }
