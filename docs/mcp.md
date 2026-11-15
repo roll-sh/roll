@@ -56,8 +56,33 @@ adds up a choice (`GET /v1/mcp/toolsets`: each product's tools, read-only tools 
 to a caller) and warns past the picked client's limit.
 
 The whole list stays the default. A smaller default would quietly drop tools from connections
-that use them. A search-then-call pair of meta-tools (GitHub's dynamic toolsets) would hide each
-tool's read-only and destructive hints, which clients use to decide what to run without asking.
+that use them.
+
+### Search mode
+
+With every product on, a node lists about 240 tools (~25k tokens), past VS Code's limit and far
+past Cursor's. `/v1/mcp?tools=search` (or `X-MCP-Tools: search`) lists the access tools plus three
+tools instead, about 1k tokens whatever runs. This is the pattern of Cloudflare's code mode and
+GitHub's dynamic toolsets, applied to a stateless server:
+
+| Tool | What it does |
+| --- | --- |
+| `roll_find_tools` | Searches the tools this connection may use by what the agent wants to do (`query`, optional `product`, `limit` up to 25) and answers each match's name, description, input schema and which run tool takes it. With no query, it answers every tool's name and title. Words count by how rare they are among the tools, and more in a name than in a description. |
+| `roll_run_read` | Runs a read-only tool: `{"tool": …, "arguments": {…}}`. It refuses one that changes things. |
+| `roll_run` | Runs any tool the connection has. |
+
+There are two run tools because clients decide what to run without asking from `readOnlyHint` and
+`destructiveHint`. A single generic call tool would hide them; `roll_run_read` is read-only and
+`roll_run` is destructive. A run tool appears only when there is something for it to run: a reader
+or a read-only connection has no `roll_run`.
+
+A run is the tool it names from the first check on: it reaches only a tool `tools/list` would
+have listed, then the read-only check, the gate, approvals (`approval` goes in `arguments`) and
+the audit log see that tool as if the client had called it by name. Search mode only changes what
+`tools/list` answers. Toolsets and read-only narrow what it searches. Prompts and the instructions
+stay the same, and the instructions say to run named tools through the run tools. Any value other
+than `search` or `all` is a 400. `GET /v1/mcp/toolsets` reports search mode's cost (`search`), and
+the connect panel has a checkbox for it and suggests it past a client's limit.
 
 ### Read-only
 
@@ -562,12 +587,12 @@ waits on a sibling PR reaching main is last.
 5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
-Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset, or search-then-call meta-tools (see Toolsets: clients handle long lists or have a picker, and meta-tools would hide each tool's hints); a connection narrowed to one project (Supabase's `project_ref`): their
+Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset (see Toolsets: it would drop tools from connections that use them; search mode is opt-in); a connection narrowed to one project (Supabase's `project_ref`): their
 tokens are account-wide; a roll token's rules already name projects, and the builder's presets
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: a token's "last day" counts only its own requests (its change history and roll's
+Done lately: search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
 revocations were counted as asks: "1 asked" on a token that never made a request; seen in the review
 pack) (#25); ended OAuth connections and their kept clients are forgotten after the audit log's days
 (each `roll login` made one of each, kept forever) (#25); `roll login` checked live against a rolld

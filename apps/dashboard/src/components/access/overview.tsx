@@ -19,7 +19,7 @@ import {
   KEEP_OLD,
   startsLater,
   toolsetCost,
-  type ToolsetCost,
+  type ToolsetCosts,
   mcpUrl,
   reach,
   statusOf,
@@ -82,7 +82,8 @@ export function ConnectPanel({ token }: { token?: string }) {
   const [products, setProducts] = useState<string[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
   const [readonly, setReadonly] = useState(false);
-  const [costs, setCosts] = useState<ToolsetCost[]>([]);
+  const [search, setSearch] = useState(false);
+  const [costs, setCosts] = useState<ToolsetCosts>({ products: [] });
   useEffect(() => {
     accessApi
       .catalog()
@@ -93,10 +94,10 @@ export function ConnectPanel({ token }: { token?: string }) {
       .then(setCosts)
       .catch(() => {});
   }, []);
-  const cost = toolsetCost(costs, picked, readonly);
+  const cost = toolsetCost(costs.products, picked, readonly, search ? costs.search : undefined);
   const limit = CLIENT_TOOL_LIMIT[client];
   const over = limit && cost.tools > limit.tools;
-  const url = withToolsets(mcpUrl(), picked, readonly);
+  const url = withToolsets(mcpUrl(), picked, readonly, search);
   const cfg = mcpConfig(client, url, token);
   return (
     <Panel
@@ -152,11 +153,17 @@ export function ConnectPanel({ token }: { token?: string }) {
             </div>
           </div>
         )}
-        {costs.length > 0 && (
+        {costs.products.length > 0 && (
           <p className={`text-[12px] ${over ? "text-danger" : "text-subtle"}`} role={over ? "alert" : undefined}>
             {cost.tools} tools · ~{cost.tokens.toLocaleString("en")} tokens of the agent's context before it does anything
-            {over && limit ? `. ${limit.note}: pick the products it needs.` : ""}
+            {over && limit ? `. ${limit.note}: pick the products it needs${costs.search && !search ? ", or turn on search" : ""}.` : ""}
           </p>
+        )}
+        {costs.search && (
+          <label className="flex items-center gap-2 text-[12px] text-muted">
+            <input type="checkbox" checked={search} onChange={(e) => setSearch(e.target.checked)} className="accent-accent" />
+            Search: the client gets a tool that finds the others and tools that run them, instead of every tool
+          </label>
         )}
         <label className="flex items-center gap-2 text-[12px] text-muted">
           <input type="checkbox" checked={readonly} onChange={(e) => setReadonly(e.target.checked)} className="accent-accent" />

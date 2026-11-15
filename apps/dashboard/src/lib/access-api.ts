@@ -428,7 +428,7 @@ export const accessApi = {
   denyDevice: (code: string) => call<null>("DELETE", device(code)),
   /** A search cluster's indices by name (search's own route; it wakes the cluster), for the builder. */
   /** Each product's tool count and context cost, for the connect panel (counts only). */
-  toolsetCosts: () => call<{ products: ToolsetCost[] }>("GET", "/v1/mcp/toolsets").then((r) => r.products),
+  toolsetCosts: () => call<ToolsetCosts>("GET", "/v1/mcp/toolsets"),
   searchIndices: (cluster: string) => call<{ index: string }[]>("GET", `/v1/search/clusters/${encodeURIComponent(cluster)}/indices`),
   /** A secrets project's encryption keys by name (secrets' own route), for the builder. */
   encryptionKeys: (project: string) => call<{ name: string }[]>("GET", `/v1/secrets/projects/${encodeURIComponent(project)}/transit`),
@@ -590,6 +590,8 @@ export const CLIENT_NAMES: Record<McpClient, string> = {
 
 /** One product's tools as `GET /v1/mcp/toolsets` counts them (the whole list, no narrowing). */
 export type ToolsetCost = { product: string; tools: number; read_only: number; context_tokens: number };
+/** Every product's costs, and search mode's own tools (`?tools=search`: find, run read-only, run). */
+export type ToolsetCosts = { products: ToolsetCost[]; search?: Omit<ToolsetCost, "product"> };
 
 /**
  * Tools a client can take in one request. VS Code: 128, its own built-in tools included (its
@@ -600,9 +602,15 @@ export const CLIENT_TOOL_LIMIT: Partial<Record<McpClient, { tools: number; note:
   cursor: { tools: 40, note: "Cursor is reported to drop tools past about 40" },
 };
 
-/** What a choice of toolsets lists (none picked: every product; the access tools always). */
-export function toolsetCost(costs: ToolsetCost[], picked: string[], readonly: boolean): { tools: number; tokens: number } {
-  const listed = costs.filter((c) => c.product === "access" || picked.length === 0 || picked.includes(c.product));
+/**
+ * What a choice of toolsets lists (none picked: every product; the access tools always). In search
+ * mode (`search` given) the products' tools are behind search mode's own instead.
+ */
+export function toolsetCost(costs: ToolsetCost[], picked: string[], readonly: boolean, search?: Omit<ToolsetCost, "product">): { tools: number; tokens: number } {
+  const listed = [
+    ...costs.filter((c) => c.product === "access" || (!search && (picked.length === 0 || picked.includes(c.product)))),
+    ...(search ? [{ product: "search mode", ...search }] : []),
+  ];
   const tools = listed.reduce((n, c) => n + (readonly ? c.read_only : c.tools), 0);
   // Read-only lists fewer tools: their share of the product's cost, near enough.
   const tokens = listed.reduce((n, c) => n + (readonly && c.tools ? Math.round((c.context_tokens * c.read_only) / c.tools) : c.context_tokens), 0);
@@ -613,13 +621,17 @@ export function toolsetCost(costs: ToolsetCost[], picked: string[], readonly: bo
 export const mcpUrl = (api: string = ROLL_API) => `${api.replace(/\/+$/, "")}/v1/mcp`;
 
 /** How to connect a client: OAuth by default (no secret in the config), a bearer token with one. */
-/** The MCP URL listing only these products' tools (`?toolsets=`); none: every product's. */
-export function withToolsets(url: string, products: string[], readonly = false): string {
-  if (products.length === 0 && !readonly) return url;
+/**
+ * The MCP URL listing only these products' tools (`?toolsets=`; none: every product's), read-only
+ * or not, and in search mode (`?tools=search`: a search tool and two run tools instead of the list).
+ */
+export function withToolsets(url: string, products: string[], readonly = false, search = false): string {
+  if (products.length === 0 && !readonly && !search) return url;
   const u = new URL(url);
   if (products.length > 0) u.searchParams.set("toolsets", [...products].sort().join(","));
   // Read-only: the server lists and runs only read-only tools (the token's rules still decide).
   if (readonly) u.searchParams.set("readonly", "1");
+  if (search) u.searchParams.set("tools", "search");
   return u.toString().replace(/%2C/g, ",");
 }
 
