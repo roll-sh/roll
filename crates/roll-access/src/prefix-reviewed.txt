@@ -30,6 +30,7 @@ POST /v1/apps/services/{id}/environments/{env}/promote
 POST /v1/apps/services/{id}/environments/{env}/redeploy
 POST /v1/apps/services/{id}/environments/{env}/restart
 POST /v1/apps/services/{id}/environments/{env}/rollback
+GET /v1/apps/services/{id}/environments/{env}/routes
 GET /v1/apps/services/{id}/environments/{env}/runs
 POST /v1/apps/services/{id}/environments/{env}/runs
 POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize
