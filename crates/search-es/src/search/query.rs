@@ -77,6 +77,9 @@ pub struct InnerHitsDef {
     /// Inner hits of `nested` queries inside this one's query: rendered under each of this
     /// definition's hits (`InnerHitsContext` tree).
     pub children: Vec<InnerHitsDef>,
+    /// `query`'s weight, built on the first hit and shared by the rest: a definition belongs
+    /// to the shard whose query built it, and its hits are fetched from that shard's searcher.
+    pub weight: Arc<std::sync::OnceLock<Box<dyn search_index::Weight>>>,
 }
 
 pub fn arc<Q: search_index::Query + 'static>(q: Q) -> QueryRef {
@@ -1138,7 +1141,7 @@ impl<'a> QueryCtx<'a> {
                 all.extend(keep);
                 nested
             };
-            self.inner_hits.borrow_mut().push(InnerHitsDef { name, spec: ih.clone(), nested_path: Some(n.path.clone()), query: ih_child, join: None, children });
+            self.inner_hits.borrow_mut().push(InnerHitsDef { name, spec: ih.clone(), nested_path: Some(n.path.clone()), query: ih_child, join: None, children, weight: Default::default() });
         } else {
             // `NestedQueryBuilder.extractInnerHitBuilders` only looks inside a query that has
             // inner hits of its own: those of deeper queries are dropped.
