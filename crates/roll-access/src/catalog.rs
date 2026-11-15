@@ -611,6 +611,17 @@ fn sql_action(b: &Value) -> Action {
     }
 }
 
+/// A NoSQL database's settings: `admin` when they loosen what keeps its data safe, a masking
+/// policy (applied at read time for every role: dropping it shows a reader the raw values) or a
+/// read-only flag turned off; the rest (name, idle timeout, durability, history, expiry) `write`.
+fn nosql_patch_action(b: &Value) -> Action {
+    if b.get("masking").is_some() || b.get("read_only") == Some(&Value::Bool(false)) {
+        Action::Admin
+    } else {
+        Action::Write
+    }
+}
+
 /// Redis: commands that only read are `read`, flushes `delete`, the rest `write`.
 fn redis_action(b: &Value) -> Action {
     // `{"command": ["SET", "k", "v"]}` (the route's shape), or one string.
@@ -1022,7 +1033,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/nosql/databases", "nosql", R, list("id")).reveals(NOSQL_SECRETS),
     row("POST", "/v1/nosql/databases", "nosql", W, create("nosql", "id")).reveals(NOSQL_SECRETS),
     row("GET", "/v1/nosql/databases/{id}", "nosql", R, one(PG, "nosql-database")).reveals(NOSQL_SECRETS),
-    row("PATCH", "/v1/nosql/databases/{id}", "nosql", W, one(PG, "nosql-database")).reveals(NOSQL_SECRETS),
+    row("PATCH", "/v1/nosql/databases/{id}", "nosql", Act::Body(nosql_patch_action), one(PG, "nosql-database")).reveals(NOSQL_SECRETS),
     row("DELETE", "/v1/nosql/databases/{id}", "nosql", D, one(PG, "nosql-database")),
     row("POST", "/v1/nosql/databases/{id}/branches", "nosql", W, one(PG, "nosql-database")).reveals(NOSQL_SECRETS),
     row("POST", "/v1/nosql/databases/{id}/reset", "nosql", D, one(PG, "nosql-database")).reveals(NOSQL_SECRETS),
@@ -1533,6 +1544,10 @@ mod tests {
         assert_eq!(apps_repo(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/api" } })), repo("acme/api"));
         assert!(apps_repo(&serde_json::json!({ "source": { "kind": "image", "image": "nginx" } })).is_empty());
         assert_eq!(link_target("repo"), Some(("code", "repo")));
+        // Loosening a NoSQL database's masking or read-only flag is admin; its other settings write.
+        assert_eq!(nosql_patch_action(&serde_json::json!({ "masking": {} })), Action::Admin);
+        assert_eq!(nosql_patch_action(&serde_json::json!({ "read_only": false })), Action::Admin);
+        assert_eq!(nosql_patch_action(&serde_json::json!({ "read_only": true, "idle_timeout": 300 })), Action::Write);
         assert_eq!(redis_action(&serde_json::json!({ "command": ["get", "k"] })), Action::Read);
         assert_eq!(redis_action(&serde_json::json!({ "command": ["FLUSHALL"] })), Action::Delete);
         assert_eq!(redis_action(&serde_json::json!({ "command": ["set", "k", "v"] })), Action::Write);

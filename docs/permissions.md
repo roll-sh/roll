@@ -192,6 +192,9 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   category (`ACL`, `CONFIG`, `MONITOR` and `SYNC`, which stream everyone's commands and data,
   `CLIENT`, `SLOWLOG`, `BGSAVE`, `CLUSTER`, `RESTORE` and the like), are `admin`; the rest `write`.
 - NoSQL CQL: `SELECT` is `read`, `DROP` and `TRUNCATE` are `delete`, the rest `write`.
+- NoSQL settings (`PATCH /v1/nosql/databases/{id}`): changing the masking policy (applied at read
+  time for every role, so dropping it shows a reader raw values) or turning `read_only` off is
+  `admin`, as roll previews' project settings are; its other settings are `write`.
 - Storage IAM: `Get…`, `List…`, `Simulate…` are `read`, the rest `admin`.
 - git pushes (`POST /git/{owner}/{repo}/git-receive-pack`): from the ref updates at the start
   of the body (read without buffering the pack). Each update is one action: moving the repo's
