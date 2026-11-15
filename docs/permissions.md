@@ -206,13 +206,15 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 - An apps shell (its WebSocket, and all of a session: opening, keys, screen, resizing, closing) runs
   any command where the service runs, with its variables: `admin` in every environment, as an
   agent's shell is. Waking a sleeping environment starts compute someone pays for: `write`.
-- A service's settings (`PATCH …/services/{id}`) are `deploy` when they change what production
-  runs or who reaches it: `source` and `build` (the next landing deploys them), `run.start`,
-  `run.pre_deploy` (it runs with production's variables), `run.schedule`, `run.schedules` (commands
-  run as jobs of the live deployment on a timer: a production job is deploy, so one on a timer is),
-  `run.kind`, `run.port`,
-  `run.volume`, and `run.public` (a web service on the internet or off it, at once). Its size,
-  scale, health checks, alerts and rollout are `write`. Rolling back to a deployment puts back the variables it went live with
+- A service's settings (`PATCH …/services/{id}`) are `write` only for how much of it runs and how
+  it's watched: its size, scale, health checks, suspend and sleep timers, alerts, rollout,
+  restarts, affinity and a job's timeout (`APPS_WRITE_RUN`). Everything else is `deploy`: `source`
+  and `build` (the next landing deploys them), `run.start`, `run.pre_deploy` (it runs with
+  production's variables), `run.schedule` and `run.schedules` with their `timezone` and `retries`
+  (commands run as jobs of the live deployment: a production job is deploy, so one on a timer
+  is), `run.kind`, `run.port`, `run.volume`, `run.public` and `run.tcp` (on the internet or off
+  it, at once), and any run key apps adds later until it's listed, so a new setting is never a
+  quiet way into production. Rolling back to a deployment puts back the variables it went live with
   (unless `keep_variables`); it's the environment's act as writing its variables is (`deploy` in
   production, `write` elsewhere), and the answer names them without values.
 - A route whose product filters its answer per environment and path itself, asking the caller's

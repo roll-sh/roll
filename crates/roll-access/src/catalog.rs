@@ -689,18 +689,37 @@ fn apps_create_action(b: &Value) -> Action {
     if b["source"]["kind"] == "upload" { Action::Write } else { Action::Deploy }
 }
 
-/// A service's settings that decide what production runs or who reaches it: its source and build
-/// (the next landing deploys them), its start and pre-deploy commands (the pre-deploy runs with
-/// production's variables), its schedule and `schedules` (commands run as jobs of the live
-/// deployment, production's too: a production job is deploy, so one on a timer is), kind, port
-/// and volume, and `run.public` (on the internet or off it, at once).
-const APPS_DEPLOY_RUN: [&str; 8] = ["public", "start", "pre_deploy", "schedule", "schedules", "kind", "port", "volume"];
+/// A service's run settings that change only how much of it runs and how it's watched: its size,
+/// scale, health checks, timers, alerts, rollout and restarts. Every other run key decides what
+/// production runs, when, or who reaches it (start, pre-deploy, schedule, schedules and their
+/// timezone and retries, kind, port, volume, public, tcp), and so does any key apps adds later
+/// until it's listed here: a new setting is never a quiet way into production.
+const APPS_WRITE_RUN: [&str; 19] = [
+    "min_instances",
+    "max_instances",
+    "concurrency",
+    "cpu",
+    "memory_mb",
+    "health_path",
+    "health_timeout_s",
+    "suspend_after_s",
+    "sleep_after_s",
+    "alerts",
+    "rollout",
+    "scale",
+    "drain_s",
+    "cpu_target",
+    "restart",
+    "restart_tries",
+    "affinity",
+    "rollback_on_crash",
+    "timeout_s",
+];
 
-/// A service's settings: `deploy` when they change what runs or who reaches it
-/// ([`APPS_DEPLOY_RUN`], `source`, `build`); `write` for its size, scale, health checks, alerts and
-/// rollout.
+/// A service's settings: `deploy` when they change what runs or who reaches it (`source`, `build`,
+/// any run key not in [`APPS_WRITE_RUN`]); `write` for the rest of `run`.
 fn apps_patch_action(b: &Value) -> Action {
-    let runs = b.get("source").is_some() || b.get("build").is_some() || APPS_DEPLOY_RUN.iter().any(|k| b["run"].get(*k).is_some());
+    let runs = b.get("source").is_some() || b.get("build").is_some() || b["run"].as_object().is_some_and(|r| r.keys().any(|k| !APPS_WRITE_RUN.contains(&k.as_str())));
     if runs { Action::Deploy } else { Action::Write }
 }
 
@@ -1404,6 +1423,10 @@ mod tests {
         assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "min_instances": 2, "memory_mb": 512 } })), Action::Write);
         assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "pre_deploy": "./migrate" } })), Action::Deploy);
         assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "schedules": [{ "name": "nightly", "schedule": "@daily", "command": "./export" }] } })), Action::Deploy);
+        // A port on the internet is who reaches it, as public is; a key apps adds later is deploy until listed.
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "tcp": [5432] } })), Action::Deploy);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "a_setting_from_next_week": true } })), Action::Deploy);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "memory_mb": 1024, "max_instances": 4, "alerts": { "memory_pct": 90 } } })), Action::Write);
         assert_eq!(apps_patch_action(&serde_json::json!({ "source": { "kind": "image", "image": "x" } })), Action::Deploy);
         assert_eq!(bulk_action(b"{\"index\":{\"_id\":\"1\"}}\n{\"title\":\"a\"}\n"), Action::Write);
         assert_eq!(bulk_action(b"{\"index\":{}}\n{\"t\":1}\n{\"delete\":{\"_id\":\"2\"}}\n"), Action::Delete);
