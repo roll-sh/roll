@@ -225,8 +225,15 @@ class _Relogin:
             margin = max(60.0, (self.expires - self.issued) / 5)
             # An answer without an expiry is renewed only when the server refuses it.
             ending = self.expires > 0 and time.time() > self.expires - margin
-            if stale == c.token or ending:
-                r = Client(c.api, "", timeout=c.timeout)._send("", "POST", "/v1/secrets/login", {"identity": self.identity, "token": self.source().strip()})
+            refused = stale == c.token
+            if refused or ending:
+                try:
+                    r = Client(c.api, "", timeout=c.timeout)._send("", "POST", "/v1/secrets/login", {"identity": self.identity, "token": self.source().strip()})
+                except Exception:
+                    # Renewing early that fails keeps the token it has until it really ends.
+                    if refused or time.time() >= self.expires:
+                        raise
+                    return c.token
                 if not r or not r.get("token"):
                     raise SecretsError("the login answered no token", 502)
                 c.token, self.issued, self.expires = r["token"], time.time(), (r.get("expires_at") or 0) / 1000

@@ -5,7 +5,7 @@ import type { Environment, Service } from "@/lib/apps-api";
 import { accessLink, EnvironmentPanel } from "./environment";
 import type { Runner } from "./shared";
 
-const api = vi.hoisted(() => ({ putEnvironment: vi.fn(), promote: vi.fn(), removeEnvironment: vi.fn() }));
+const api = vi.hoisted(() => ({ putEnvironment: vi.fn(), promote: vi.fn(), removeEnvironment: vi.fn(), variables: vi.fn() }));
 vi.mock("@/lib/apps-api", async (orig) => ({ ...(await orig<typeof import("@/lib/apps-api")>()), appsApi: api }));
 
 const T0 = 1_760_000_000_000;
@@ -29,7 +29,7 @@ const service = {
 } as unknown as Service;
 const env = (over: Partial<Environment> = {}) =>
   ({ ...summary("staging", true), service: "svc_1", branch: null, ephemeral: false, instances: [], domains: [], port: null, needs_deploy: false, private: false, next_run_at: null, crash_loop: null, created_at: T0, ...over }) as Environment;
-const runner: Runner = { busy: null, error: null, setError: () => {}, run: async (_k, fn) => fn() } as Runner;
+const runner: Runner = { busy: null, error: null, failed: null, setError: () => {}, run: async (_k, fn) => fn() } as Runner;
 
 describe("EnvironmentPanel", () => {
   it("making it private sends a fresh token and shows its link once", async () => {
@@ -41,10 +41,17 @@ describe("EnvironmentPanel", () => {
     expect(await screen.findByText(accessLink("https://web-staging.roll.test", token))).toBeInTheDocument();
   });
 
-  it("promotes another environment's live deployment", async () => {
+  it("promotes the live deployment it showed, naming the variables this environment lacks", async () => {
     api.promote.mockResolvedValue({});
+    api.variables.mockImplementation(async (_id: string, e: string) => ({
+      vars: e === "production" ? [{ name: "STRIPE_KEY", masked: "••", source: "service" }, { name: "MODE", masked: "••", source: "service" }] : [{ name: "MODE", masked: "••", source: "service" }],
+    }));
     render(<EnvironmentPanel service={service} env={env()} runner={runner} onDeleted={() => {}} />);
     await userEvent.click(screen.getByRole("button", { name: /promote production/i }));
-    await waitFor(() => expect(api.promote).toHaveBeenCalledWith("svc_1", "staging", "production"));
+    expect(await screen.findByText("dep_production")).toBeInTheDocument();
+    expect(screen.getByText("STRIPE_KEY")).toBeInTheDocument();
+    expect(api.promote).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: /^promote$/i }));
+    await waitFor(() => expect(api.promote).toHaveBeenCalledWith("svc_1", "staging", "production", "dep_production"));
   });
 });

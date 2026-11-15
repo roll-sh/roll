@@ -290,7 +290,7 @@ impl Apps {
             Some(c) => c,
             None => {
                 let (sid, e) = (service.to_string(), env.to_string());
-                let deps = self.db(move |s| s.deployments(&sid, &e, 20)).await.ok()?;
+                let deps = self.db(move |s| s.deployments(&sid, &e, 20, None)).await.ok()?;
                 let active = deps.iter().find(|d| d.status == crate::model::DeployStatus::Active);
                 let until = active.and_then(|a| a.finished_at).map_or(0, |at| at + SKEW_WINDOW_MS);
                 let mut keys: Vec<String> = Vec::new();
