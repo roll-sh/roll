@@ -655,6 +655,9 @@ impl Apps {
         if e.paused {
             attention.push("paused");
         }
+        if e.held_by.is_some() {
+            attention.push("held");
+        }
         if e.maintenance.is_some() {
             attention.push("maintenance");
         }
@@ -938,6 +941,7 @@ impl Apps {
             feedback: r.feedback,
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             paused: r.paused,
+            held_after: r.held_by.clone(),
             pages: r.pages.clone(),
             allow_ips: r.allow_ips.clone(),
             rate_limit: r.rate_limit,
@@ -955,11 +959,21 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused", "held"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
         // The new settings are checked before anything is written: a 400 changes nothing.
+        // Resume deploys held after a rollback (`false`); a hold is only ever a rollback's.
+        match o.get("held") {
+            None => {}
+            Some(Value::Bool(false)) => {
+                let (sid, e) = (service.to_string(), env.to_string());
+                self.db(move |s| s.set_hold(&sid, &e, None)).await?;
+                self.changed(service);
+            }
+            Some(_) => return Err(Error::BadRequest("held is false (deploys resume); a rollback holds them".into())),
+        }
         let paused = match o.get("paused") {
             None => None,
             Some(Value::Bool(b)) => Some(*b),

@@ -346,8 +346,28 @@ impl Apps {
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
+        // Held from here: the next push mustn't put back what was just rolled away from.
+        let (sid, e, rid) = (service.to_string(), env.to_string(), dep.id.clone());
+        if self.db(move |s| s.set_hold(&sid, &e, Some(&rid))).await.unwrap_or(false) {
+            self.logs.sink(format!("env:{service}/{env}"), Stream::System).line("deploys held after the rollback: pushes, hooks and tag moves aren't put live until you deploy or resume them");
+        }
         self.kick(service, env);
         Ok(dep)
+    }
+
+    /// A person deployed (a deploy, a redeploy, a promotion): a hold after a rollback is lifted.
+    pub async fn lift_hold(self: &Arc<Self>, service: &str, env: &str) {
+        let (sid, e) = (service.to_string(), env.to_string());
+        if self.db(move |s| s.set_hold(&sid, &e, None)).await.unwrap_or(false) {
+            self.logs.sink(format!("env:{service}/{env}"), Stream::System).line("deploys resumed");
+            self.changed(service);
+        }
+    }
+
+    /// The rollback the environment's deploys are held after, if they are.
+    pub(crate) async fn held(self: &Arc<Self>, service: &str, env: &str) -> Option<String> {
+        let (sid, e) = (service.to_string(), env.to_string());
+        self.db(move |s| s.environment(&sid, &e)).await.ok().and_then(|r| r.held_by)
     }
 
     /// `POST …/rollback` with no deployment: back to the one live before what runs, walking back
@@ -1754,6 +1774,10 @@ impl Apps {
                     log.line(format!("push {sha} not deployed: its check {which} failed"));
                     true
                 }
+                Ok(_) if self.held(&w.service, &w.env).await.is_some() => {
+                    log.line(format!("push {sha} not deployed: its checks passed while deploys are held after a rollback"));
+                    true
+                }
                 Ok(_) if self.refuse_paused(&w.service, &w.env).await.is_err() => {
                     log.line(format!("push {sha} not deployed: its checks passed while the environment is paused"));
                     true
@@ -1813,6 +1837,10 @@ impl Apps {
             for e in envs.iter().filter(|e| e.service == svc.id && !e.ephemeral && e.branch.as_deref() == Some(l.branch.as_str())) {
                 if e.paused {
                     self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} not deployed: the environment is paused", &l.revision.sha[..l.revision.sha.len().min(12)]));
+                    continue;
+                }
+                if let Some(r) = &e.held_by {
+                    self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} not deployed: deploys are held after the rollback {r}", &l.revision.sha[..l.revision.sha.len().min(12)]));
                     continue;
                 }
                 let watch = file.as_ref().and_then(|f| f.watch_for(&e.name)).or_else(|| svc.build.watch.clone()).filter(|w| !w.is_empty());

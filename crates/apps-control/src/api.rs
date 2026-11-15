@@ -519,6 +519,7 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
     } else {
         apps.deploy(&id, &env, body(&b)?, By { trigger: Trigger::Manual, actor }, None, key).await?
     };
+    apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
@@ -766,6 +767,7 @@ async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: 
         None => None,
     };
     let d = apps.redeploy(&id, &env, if b.is_empty() { Value::Null } else { body(&b)? }, actor(&ext), key).await?;
+    apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
@@ -835,6 +837,7 @@ async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, 
 
 async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let d = apps.promote(&id, &env, body(&b)?, actor(&ext)).await?;
+    apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 

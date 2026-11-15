@@ -399,6 +399,8 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     let rb = settled(&w, &id, "production", rb["id"].as_str().unwrap()).await;
     assert_eq!((rb["status"].as_str(), rb["rollback_of"].as_str(), rb["image"].clone()), (Some("active"), Some(first.as_str()), d1["image"].clone()));
     assert_eq!(Fake::count(&w.fake.counts.builds), builds);
+    // The rollback holds pushes (a_rollback_holds_the_next_push_until_deploys_resume): resumed.
+    assert_eq!(call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/production"), Some(json!({"held": false}))).await.0, StatusCode::OK);
     // Watching web/: a push elsewhere in the monorepo isn't deployed, one into web/ is.
     assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"build": {"target": "--no-cache"}}))).await.0, StatusCode::BAD_REQUEST, "a stage's name, never a flag");
     let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"build": {"watch": ["web/**"]}}))).await;
@@ -3384,4 +3386,35 @@ async fn a_rollback_keeps_the_services_volume() {
     assert!(st.is_success(), "{back}");
     let row = w.apps.store.deployment(back["id"].as_str().unwrap()).unwrap();
     assert_eq!(row.run.volume.as_ref().map(|v| v.mount.as_str()), Some("/data"), "the volume stays mounted");
+}
+
+/// After a rollback (Vercel's Instant Rollback) a push isn't put live: deploys are held until a
+/// person deploys or resumes them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rollback_holds_the_next_push_until_deploys_resume() {
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let first = svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &id, "production", &first).await["status"], "active");
+    w.code.push("b2b2b2b2b2b2", "second", &[("server.js", "// v2")]);
+    let second = get_until(&w.api, &format!("{base}/deploys"), |d| d.as_array().is_some_and(|a| a.len() == 2)).await[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &id, "production", &second).await["status"], "active");
+    let (_, back) = call(&w.api, "POST", &format!("{base}/deploys/{first}/rollback"), Some(json!({}))).await;
+    assert_eq!(settled(&w, &id, "production", back["id"].as_str().unwrap()).await["status"], "active");
+    let (_, env) = call(&w.api, "GET", &base, None).await;
+    assert_eq!(env["held_after"], back["id"], "{env}");
+    // A push while held: logged, not deployed.
+    w.code.push("c3c3c3c3c3c3", "third", &[("server.js", "// v3")]);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (_, all) = call(&w.api, "GET", &format!("{base}/deploys"), None).await;
+    assert!(!all.as_array().unwrap().iter().any(|d| d["revision"] == "c3c3c3c3c3c3"), "held: {all}");
+    // Resumed: the hold is gone (the next push deploys).
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({ "held": false }))).await;
+    assert_eq!(st, StatusCode::OK, "{env}");
+    assert!(env.get("held_after").is_none(), "{env}");
+    w.code.push("d4d4d4d4d4d4", "fourth", &[("server.js", "// v4")]);
+    get_until(&w.api, &format!("{base}/deploys"), |d| d.as_array().is_some_and(|a| a.iter().any(|x| x["revision"] == "d4d4d4d4d4d4"))).await;
 }

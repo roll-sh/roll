@@ -63,7 +63,14 @@ every deployment is immutable with instant rollback.
   rollback deploys an older deployment's image and settings again, without building: it is a
   new deployment whose `rollback_of` names the old one, so history only grows. The volume is
   the exception: it's the service's as it is now (its data lives there), so rolling back past the
-  volume's addition keeps it mounted (`a_rollback_keeps_the_services_volume`).
+  volume's addition keeps it mounted (`a_rollback_keeps_the_services_volume`). A rollback holds
+  the environment's deploys (Vercel's Instant Rollback; `Environment.held_after`): a push, a CI
+  wait whose checks pass, a deploy hook (409) and a moved tag aren't put live, each said in the
+  environment's log, so the next merge doesn't put back what was just rolled away from. A person's
+  deploy, redeploy or promotion lifts it, as does Resume deploys (`PUT …/environments/{env}
+  {held: false}`, `roll apps env --resume-deploys`, the service page). A secrets redeploy still
+  runs: it's the live image again, with new values. A crash loop's rollback holds too.
+  `a_rollback_holds_the_next_push_until_deploys_resume`.
 
 ### Builds
 
@@ -1836,60 +1843,57 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (a second product review of the experience, a product review of what one engineer can close here now, bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **A rollback holds the next push** (Vercel's Instant Rollback): after a rollback (by hand or a
-   crash loop's), pushes, tag moves and secrets changes don't put a deployment live until it's
-   lifted (a deploy, a promotion, Resume deploys); said on the service page and `roll apps env`.
-2. **Volumes' safety rails**: a service's deletion removes its volume (today it's left, unlabelled),
+1. **Volumes' safety rails**: a service's deletion removes its volume (today it's left, unlabelled),
    an environment's deletion and a restore take a backup first, a failed backup is a
    `volume.backup_failed` event (notified by default), and orphaned backups expire.
-3. **The dashboard's Promote confirms** with the deployment, its commit and the variable names the
+2. **The dashboard's Promote confirms** with the deployment, its commit and the variable names the
    target lacks (names only), and sends `expect`.
-4. **Apps know their commit and instance** (Railway's `RAILWAY_GIT_COMMIT_SHA`, Render's
+3. **Apps know their commit and instance** (Railway's `RAILWAY_GIT_COMMIT_SHA`, Render's
    `RENDER_GIT_COMMIT`, Heroku's `DYNO`): `ROLL_GIT_COMMIT`, `ROLL_GIT_BRANCH`, `ROLL_INSTANCE`,
    kept out of the change fingerprint and the build-environment hash.
-5. **Deploys marked on the metrics charts**: each deployment's switch as a tick, its status and
+4. **Deploys marked on the metrics charts**: each deployment's switch as a tick, its status and
    who.
-6. **The CLI and dashboard reach the same things again**: editing a drain in the dashboard;
+5. **The CLI and dashboard reach the same things again**: editing a drain in the dashboard;
    `roll apps pending`, a deploy's commits and a target's deliveries in the CLI; `roll open`.
-7. **roll.toml checked before a push**: `[app]`'s parser in apps-build so `roll apps plan DIR`
+6. **roll.toml checked before a push**: `[app]`'s parser in apps-build so `roll apps plan DIR`
    applies and checks it, and a JSON schema for editors from the same structs.
-8. **Errors and latency by route** (Vercel's Observability): the access log's last minutes grouped
+7. **Errors and latency by route** (Vercel's Observability): the access log's last minutes grouped
    by method and path (id-like segments folded), top paths by 5xx and p95 in Metrics.
-9. **Tests for flows people rely on**: billing end to end (requests and CPU through the proxy to
+8. **Tests for flows people rely on**: billing end to end (requests and CPU through the proxy to
    `/usage` and the spend limit), what a deletion leaves (volume, backups, network), and apps'
    rows in docs/code/test-coverage.md.
-10. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+9. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-11. **Region**: the region shown on the overview and each environment, defaulting to the project's
+10. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-12. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+11. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-13. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+12. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-14. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+13. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-15. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+14. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-16. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-17. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+15. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+16. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-18. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+17. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-19. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+18. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-20. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+19. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-21. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+20. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

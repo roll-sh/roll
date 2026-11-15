@@ -794,6 +794,9 @@ pub enum AppsCmd {
         pause: bool,
         #[arg(long)]
         resume: bool,
+        /// Resume deploys held after a rollback (pushes, hooks and tag moves put live again).
+        #[arg(long)]
+        resume_deploys: bool,
         /// Only this network gets in through its public URLs (`a.b.c.d/n`, an IPv6 `/n`, an
         /// address). Repeatable; the list replaces the one it has.
         #[arg(long = "allow-ip", value_name = "CIDR", conflicts_with = "allow_any")]
@@ -2889,7 +2892,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, private, open, maintenance, serve, pause, resume, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, error_page, maintenance_page, roll_pages } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, private, open, maintenance, serve, pause, resume, resume_deploys, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, error_page, maintenance_page, roll_pages } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -2912,6 +2915,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if pause || resume {
                 body.insert("paused".into(), json!(pause));
+            }
+            if resume_deploys {
+                body.insert("held".into(), json!(false));
             }
             if let Some(note) = maintenance {
                 body.insert("maintenance".into(), json!({ "message": Some(note).filter(|n| !n.is_empty()) }));

@@ -895,6 +895,10 @@ pub struct Environment {
     /// Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until it's resumed.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub paused: bool,
+    /// Deploys are held after this rollback: pushes, hooks and tag moves aren't put live until a
+    /// person deploys, redeploys or promotes, or resumes them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held_after: Option<String>,
     /// Its own pages for what roll would otherwise answer (Heroku's error and maintenance pages).
     #[serde(skip_serializing_if = "Pages::is_empty")]
     pub pages: Pages,

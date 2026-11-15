@@ -105,7 +105,7 @@ export interface EnvironmentSummary {
   active: { id: string; revision: string | null; created_at: number } | null;
   latest: { id: string; status: DeployStatus } | null;
   /** What wants its owner's eye: a crash loop, the project capped by its spend limit, paused, maintenance, its latest deploy failed. */
-  attention?: ("crash_loop" | "capped" | "paused" | "maintenance" | "deploy_failed")[];
+  attention?: ("crash_loop" | "capped" | "paused" | "held" | "maintenance" | "deploy_failed")[];
 }
 
 export interface Service {
@@ -344,6 +344,8 @@ export interface EnvironmentPut {
   redeploy_on_secrets?: boolean;
   /** Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until false. */
   paused?: boolean;
+  /** `false` resumes deploys held after a rollback. */
+  held?: false;
   /** Maintenance: its public names answer roll's page with the message; false ends it. */
   maintenance?: boolean | { message?: string | null };
   /** Its own HTML (at most 64 KiB) instead of roll's pages; null goes back to roll's, an absent field stays. */
@@ -424,6 +426,8 @@ export interface Environment extends EnvironmentSummary {
   waiting_for_ci?: string | null;
   /** Paused: nothing runs, wakes, deploys or is scheduled. Absent: not paused. */
   paused?: boolean;
+  /** Deploys are held after this rollback: pushes, hooks and tag moves aren't put live until a person deploys or resumes them. */
+  held_after?: string;
   /** In maintenance: what visitors read (null: roll's words). Null: serving. */
   maintenance?: { message: string | null } | null;
   /** Its own pages (Heroku's): `error` for the 502/503/504 while the app can't answer or wake, `maintenance` while in maintenance. Absent: roll's. */

@@ -73,7 +73,8 @@ impl Apps {
             }
             let sid = svc.id.clone();
             let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
-            for env in envs.into_iter().filter(|e| e.follow_tag && !e.paused) {
+            // Held after a rollback: a moved tag waits for a person, as a push does.
+            for env in envs.into_iter().filter(|e| e.follow_tag && !e.paused && e.held_by.is_none()) {
                 match self.check_tag(&svc.id, &env.name, image, env.active.as_deref(), env.tag_seen.as_deref()).await {
                     Ok(Some(d)) => started.push(d),
                     Ok(None) => {}

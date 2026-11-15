@@ -252,7 +252,7 @@ type EnvironmentSummary = {
   url: string | null;
   active: { id: string; revision: string | null; created_at: number } | null;
   latest: { id: string; status: DeployStatus } | null;
-  attention?: ("crash_loop" | "capped" | "paused" | "maintenance" | "deploy_failed")[]; // what wants its owner's eye (absent: nothing)
+  attention?: ("crash_loop" | "capped" | "paused" | "held" | "maintenance" | "deploy_failed")[]; // what wants its owner's eye (absent: nothing)
 };
 
 type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
@@ -295,6 +295,8 @@ type EnvironmentPut = {
    *  503 "Paused" page), deploys (409), is scheduled (a cron run is skipped, not made up) or takes
    *  a job (409) until `false`. A push to its branch is logged, not deployed. */
   paused?: boolean;
+  /** `false`: deploys held after a rollback resume (only a rollback holds them). */
+  held?: false;
   /** Its own HTML instead of roll's pages, each at most 64 KiB (400 past it or empty); null goes back
    *  to roll's, a field left out stays. */
   pages?: { error?: string | null; maintenance?: string | null };
@@ -339,6 +341,7 @@ type Environment = EnvironmentSummary & {
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
   maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
   paused?: true;              // paused (absent: not)
+  held_after?: string;        // deploys held after this rollback: pushes, CI waits, deploy hooks (409) and tag moves aren't put live until a person deploys, redeploys or promotes, or PUTs held: false; a secrets redeploy (the live image again) still runs
   pages?: { error?: string; maintenance?: string }; // its own pages (absent: roll's): error for the 502/503/504 while it can't answer or wake, maintenance while in maintenance
   allow_ips: { cidr: string; description?: string }[]; // only these networks get in through its public names ([]: anyone)
   tcp: string | null; // a TCP service's address, host:port (null until it has its port)
