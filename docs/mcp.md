@@ -253,7 +253,7 @@ is `-32602`.
 | `try_migration_on_branch` | `project` | A schema change tried on a branch first (create, migrate, compare), then on main only when it worked and you say so. | `postgres_get_project`, `postgres_create_branch`, `postgres_describe_schema`, `postgres_execute`, `postgres_delete_branch` |
 | `compare_branch_schemas` | `project`, `branch` | What a branch changed in the schema against main (Neon's schema compare), and the advisors' findings there; changes nothing. | `postgres_get_project`, `postgres_describe_schema`, `postgres_advisors` |
 | `tune_slow_query` | `project` | A slow query made faster on a branch first (Neon's query tuning): its plan, an index tried on a copy, both plans compared, main only when you say so. | `postgres_get_project`, `postgres_slow_queries`, `postgres_explain`, `postgres_create_branch`, `postgres_execute`, `postgres_delete_branch` |
-| `debug_failing_service` | `service`, `env` | Why an environment is failing (what roll already flags in its `attention`, the whole timeline, deploys, deploy logs, failing requests, metrics), then a fix or a rollback it asks about first. | `apps_get_environment`, `apps_activity`, `apps_list_deploys`, `apps_deploy_logs`, `apps_logs`, `apps_metrics` |
+| `debug_failing_service` | `service`, `env` | Why an environment is failing (what roll already flags in its `attention`, the whole timeline, deploys, deploy logs, failing requests and routes, metrics), then a fix or a rollback it asks about first. | `apps_get_environment`, `apps_activity`, `apps_route_stats`, `apps_list_deploys`, `apps_deploy_logs`, `apps_logs`, `apps_metrics` |
 
 ## Tools
 
@@ -455,6 +455,7 @@ previews are listed once those products are on.
 | `apps_set_variables` | Set or unset an environment's variables (production is a "deploy" action). | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_plan` | How roll would build and run a repo, before making a service (a dry run). | `POST /v1/apps/plan` |
+| `apps_route_stats` | An environment's routes over the last minutes: requests, errors, p50/p95/max latency (apps-next). | `GET /v1/apps/services/{id}/environments/{env}/routes` |
 | `apps_import` | What a roll.toml or compose file would make, making nothing (apps-next). | `POST /v1/apps/import` |
 | `apps_export_project` | A project as a roll.toml, variables by name only (apps #26). | `POST /v1/apps/projects/{project}/export` |
 | `apps_get_environment` | One environment: URL, state, live deploy, branch, size. | `GET /v1/apps/services/{id}/environments/{env}` |
