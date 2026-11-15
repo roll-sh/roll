@@ -309,6 +309,18 @@ pub struct CheckRunRequest {
     pub completed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<CheckOutput>,
+    /// Buttons on the check run (at most 3); a click is a `check_run` `requested_action` event.
+    /// `Some(vec![])` takes them away.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<CheckAction>>,
+}
+
+/// A button on a check run: its label (20 characters), description (40) and identifier (20).
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct CheckAction {
+    pub label: String,
+    pub description: String,
+    pub identifier: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

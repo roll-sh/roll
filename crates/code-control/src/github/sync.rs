@@ -735,6 +735,7 @@ async fn handle_repo(code: &Arc<Code>, hub: &Hub, r: &RepoRow, link: &Link, even
             }
             upsert_issue(code, r, &mapping::issue_draft(&e.issue))
         }
+        Event::CheckRun(e) if e.requested_action.is_some() => super::notify::visual_action(code, hub, r, link, e).await,
         Event::CheckRun(_) | Event::Status(_) => Ok(()),
         Event::Ping { .. } | Event::Ignored { .. } | Event::Installation { .. } | Event::InstallationRepositories { .. } => Ok(()),
     }
