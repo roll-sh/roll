@@ -4,6 +4,8 @@ import { appsApi, describePending, parseEnv, toEnv, VARIABLE_NAME, type Environm
 import { KIND_LABEL, resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { btn, input, panel, primary } from "../ui";
+import type { RefCatalog } from "@/lib/var-refs";
+import { RefInput } from "./ref-input";
 import { message, SureButton, type Runner } from "./shared";
 
 const SOURCE_LABEL: Record<VariableSource, string> = { service: "service", secret: "secret", link: "link", roll: "roll", reference: "reference" };
@@ -42,6 +44,23 @@ export function VariablesTab({
   onRedeploy: () => void;
 }) {
   const [vars, setVars] = useState<Variables | null>(null);
+  // What a reference can name, read the first time one is typed.
+  const [catalog, setCatalog] = useState<RefCatalog | null>(null);
+  const [wanted, setWanted] = useState(false);
+  useEffect(() => {
+    if (!wanted) return;
+    let live = true;
+    void (async () => {
+      const others = (await appsApi.services(project).catch(() => [])).filter((s) => s.id !== service);
+      const services = await Promise.all(
+        others.map(async (s) => ({ name: s.name, vars: await appsApi.variables(s.id, env.name).then((v) => v.vars.map((x) => x.name), () => [] as string[]) })),
+      );
+      if (live) setCatalog({ own: (vars?.vars ?? []).map((v) => v.name), services });
+    })();
+    return () => {
+      live = false;
+    };
+  }, [wanted, project, service, env.name]); // eslint-disable-line react-hooks/exhaustive-deps
   const [values, setValues] = useState<Record<string, string> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [edits, setEdits] = useState<Record<string, string>>({});
@@ -261,13 +280,13 @@ export function VariablesTab({
                     </span>
                   )}
                   {editing ? (
-                    <input
+                    <RefInput
                       autoFocus
-                      placeholder={v.sealed ? "new value (stays sealed)" : "new value"}
-                      value={edits[v.name]}
-                      onChange={(e) => setEdits((x) => ({ ...x, [v.name]: e.target.value }))}
-                      className={`${input} min-w-0 flex-1 font-mono text-[12px]`}
-                      spellCheck={false}
+                      placeholder={v.sealed ? "new value (stays sealed)" : "new value, or ${{ service.NAME }}"}
+                      value={edits[v.name] ?? ""}
+                      onChange={(val) => setEdits((x) => ({ ...x, [v.name]: val }))}
+                      catalog={catalog}
+                      onWantCatalog={() => setWanted(true)}
                     />
                   ) : (
                     <button
@@ -316,12 +335,11 @@ export function VariablesTab({
                   className={`${input} w-56 max-w-full font-mono text-[12px] ${a.name && !VARIABLE_NAME.test(a.name) ? "border-danger/60" : ""}`}
                   spellCheck={false}
                 />
-                <input
+                <RefInput
                   value={a.value}
-                  placeholder="value"
-                  onChange={(e) => setAdded((l) => l.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)))}
-                  className={`${input} min-w-0 flex-1 font-mono text-[12px]`}
-                  spellCheck={false}
+                  onChange={(val) => setAdded((l) => l.map((x, j) => (j === i ? { ...x, value: val } : x)))}
+                  catalog={catalog}
+                  onWantCatalog={() => setWanted(true)}
                 />
                 <button
                   onClick={() => setAdded((l) => l.map((x, j) => (j === i ? { ...x, seal: !x.seal } : x)))}
