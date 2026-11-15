@@ -105,6 +105,30 @@ fn small_numeric_digits(n: &crate::types::numeric::Numeric) -> Option<usize> {
         return None;
     }
     let v = int.to_i128()?.unsigned_abs();
+    // (In u64 when the value and its fraction's digits fit: u128 divisions are calls.)
+    if let Ok(v) = u64::try_from(v)
+        && *scale + pad <= 19
+    {
+        let p = 10u64.pow(*scale);
+        let (mut ip, mut f) = (v / p, (v % p) * 10u64.pow(pad));
+        let mut groups = [0u16; 12];
+        let mut n = 0;
+        for _ in 0..(*scale + pad) / 4 {
+            groups[n] = (f % 10_000) as u16;
+            f /= 10_000;
+            n += 1;
+        }
+        while ip > 0 {
+            groups[n] = (ip % 10_000) as u16;
+            ip /= 10_000;
+            n += 1;
+        }
+        let g = &groups[..n];
+        return match (g.iter().position(|&x| x != 0), g.iter().rposition(|&x| x != 0)) {
+            (Some(lo), Some(hi)) => Some(hi - lo + 1),
+            _ => Some(0),
+        };
+    }
     let p = 10u128.pow(*scale);
     let (mut ip, fp) = (v / p, (v % p) * 10u128.pow(pad));
     // Groups, least significant first: the fraction's, then the integer part's.
@@ -410,8 +434,11 @@ fn varlena_payload(v: &Value, ty: &DataType, text: &dyn Fn(&Value, &DataType) ->
             _ => text(v, ty).len(),
         },
         Value::Text(s) | Value::Json(s) => {
-            // (Its bytes in the database's encoding.)
-            let len = if s.is_ascii() {
+            // (Its bytes in the database's encoding; an ASCII value's characters are its bytes,
+            // not counted again for a char(n)'s padding: a hash join's every inner row is sized
+            // so.)
+            let ascii = s.is_ascii();
+            let len = if ascii {
                 s.len()
             } else {
                 crate::types::mbconv::server::octet_len(crate::types::collation::database_encoding(), s)
@@ -419,7 +446,7 @@ fn varlena_payload(v: &Value, ty: &DataType, text: &dyn Fn(&Value, &DataType) ->
             match ty {
                 DataType::Bpchar(m) if *m > 4 => {
                     let want = (*m - 4) as usize;
-                    let chars = s.chars().count();
+                    let chars = if ascii { s.len() } else { s.chars().count() };
                     len + want.saturating_sub(chars)
                 }
                 _ => len,
