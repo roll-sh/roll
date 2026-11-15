@@ -59,10 +59,7 @@ fn revision_of(code: &Code, r: &RepoRow, c: &Change, commit: Option<&str>) -> Re
     Ok((rev.map(|r| r as u64).unwrap_or(0), Some(id)))
 }
 
-/// Does GitHub's `author_association` mean the reviewer can push to the repo? Missing: no.
-fn can_push(association: Option<&str>) -> bool {
-    matches!(association.map(str::to_ascii_uppercase).as_deref(), Some("OWNER" | "MEMBER" | "COLLABORATOR"))
-}
+use code_github::mapping::can_push;
 
 fn verdict(state: &str) -> Option<Verdict> {
     match state.to_ascii_lowercase().as_str() {

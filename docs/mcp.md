@@ -96,6 +96,31 @@ anything but `1`, `true`, `0` or `false`, or the key spelled another way (`read_
 so a typo never means "not read-only". The connect panel has a checkbox
 for it, and it goes with toolsets (`?toolsets=postgres&readonly=1`).
 
+### Lockdown
+
+`/v1/mcp?lockdown=1` (or `X-MCP-Lockdown: true`) works like GitHub's MCP server's lockdown mode:
+text written by someone who can't push to the repo never reaches the model.
+
+The risk it covers: anyone can open an issue on a public GitHub repo, and roll code makes the
+issue a work item that an agent claims and reads. An instruction hidden in the issue would be read
+by a model that holds write tools.
+
+How it works:
+- Products mark records from outside `"outside": true`:
+  - roll code's work items from GitHub issues whose author isn't `OWNER`, `MEMBER` or
+    `COLLABORATOR` (a missing association counts as outside);
+  - its changes from forks (`!trusted`).
+- In lockdown, every result has the `title`, `body`, `description`, `message` and `text` of those
+  records replaced with a notice, wherever they sit in the answer.
+- A tool's text block is then rebuilt from what's left, because a tool set may have written its
+  own text block.
+- Ids and states stay, so the agent can still say what's there. The instructions tell it not to
+  act on what it can't read.
+- The flag parses like `?readonly=`: a typo is a 400, never "off".
+- The connect panel has a checkbox for it.
+
+Review comments from people outside the repo aren't marked yet (`## Next`).
+
 ### With OAuth (Claude Code, Claude.ai, Cursor, VS Code, …)
 
 Add the server by its URL. The client finds roll's authorization server, registers itself, and
@@ -595,11 +620,11 @@ waits on a sibling PR reaching main is last.
    group's offsets), storage (change a bucket, its rules, usage) and queues (health, connections,
    policies). Leave out what only an operator does by hand (keys, accounts, IAM, roles, CDN,
    migrations, rotations): a tool for it is one more thing an agent can be talked into.
-2. **Lockdown for third-party text** (GitHub's MCP lockdown mode): `?lockdown=1` withholds the
-   text of results written by people outside the owner (a GitHub mirror's comments from
-   non-collaborators, a fork's pull request body, chat messages) and says it did, so an injected
-   instruction never reaches a model that can act. roll code knows each author's association;
-   the other products' payloads (queue messages, task bodies, objects) are the owner's own.
+2. **Lockdown, the rest of roll code's outside text:** GitHub reviews and review comments
+   from people who can't push (store each one's `outside`, as work items do; the review import
+   already reads `author_association`), comments on a fork's change, and chat messages that
+   reach an agent. Then make lockdown the default for roll code's own agents and automations
+   that act on issues (the agents thread's call; tell it).
 3. **MCP tasks, as the 2026-07-28 extension** (`io.modelcontextprotocol/tasks`, SEP-2663: the
    server answers a task handle when a call will take long, `tasks/get` polls with the result in
    it, `tasks/update` carries input, no `tasks/result` or `tasks/list`; 2025-11-25's experimental
@@ -631,7 +656,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
+Done lately: lockdown (`?lockdown=1`: work items from GitHub issues whose author can't push, and changes from forks, are `outside`, and their text is withheld from the model); search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
 revocations were counted as asks: "1 asked" on a token that never made a request; seen in the review
 pack) (#25); ended OAuth connections and their kept clients are forgotten after the audit log's days
 (each `roll login` made one of each, kept forever) (#25); `roll login` checked live against a rolld

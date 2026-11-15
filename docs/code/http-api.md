@@ -158,6 +158,7 @@ Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, tit
            github_pr: number | null, github_url: string | null,
            trusted: bool /* false for a pull request from a fork: no automatic checks or preview */,
            run_approved: bool /* a writer approved running this untrusted change's current head */,
+           outside: bool /* !trusted: written by someone outside the repo; MCP's lockdown withholds its text */,
            draft: bool,
            labels: string[] /* a GitHub pull request's, or set with PATCH; roll previews reads "preview" and "no-preview" */,
            checks: Check[], preview: Preview | null,
@@ -453,6 +454,7 @@ GET   /v1/code/owners/{owner}/usage?month=YYYY-MM → {owner, month,
 WorkItem = {id, repo_id, repo, number /* shares the per-repo counter with changes */, title, body, labels: string[],
             priority /* 0 = P0 … 3 */, state: "open" | "claimed" | "review" | "done" | "closed",
             source: "native" | "github#123", github_url: string | null,
+            outside: bool /* a GitHub issue whose author can't push (anyone could open it); MCP's lockdown withholds its text */,
             claimed_by: string | null, lease_until: number | null, changes: string[], created_at, updated_at}
 
 GET   /v1/code/repos/{owner}/{repo}/work?state=&label= → WorkItem[]

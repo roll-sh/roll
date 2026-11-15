@@ -20,9 +20,12 @@
 //!   tools, as GitHub's server does: every product's tools are ~33k tokens of an agent's context.
 //! - Read-only: `?readonly=1` (or `X-MCP-Readonly: true`) lists and runs only read-only tools, as
 //!   GitHub's server's read-only mode does; the token's rules still decide each call.
+//! - Lockdown: `?lockdown=1` (or `X-MCP-Lockdown: true`) withholds text written by people who can't
+//!   push to the repo ([`lockdown`]).
 //! - Search mode: `?tools=search` (or `X-MCP-Tools: search`) lists a search tool and two run tools
 //!   instead of every tool ([`search`]).
 
+pub mod lockdown;
 pub mod modern;
 pub mod prompts;
 pub mod resources;
@@ -152,6 +155,7 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
         toolsets: None,
         readonly: false,
         search: false,
+        lockdown: false,
         client: None,
         names: Default::default(),
     };
@@ -182,7 +186,7 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     if !caller {
         return unauthorized(&m.config);
     }
-    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, client: None, as_user: false, names: Default::default() };
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, client: None, as_user: false, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
         let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
@@ -261,23 +265,29 @@ fn toolsets(uri: &axum::http::Uri, headers: &HeaderMap) -> Result<Option<Vec<Str
 /// read-only when either asks. A value that isn't one of those, or a key spelled another way
 /// (`read_only`, `readOnly`), is an error, so a typo never means "not read-only".
 fn readonly(uri: &axum::http::Uri, headers: &HeaderMap) -> Result<bool, String> {
+    flag(uri, headers, "readonly", "x-mcp-readonly")
+}
+
+/// An on/off switch of a connection, `?<key>=1|true` or its header: on when either asks; any other
+/// value, or the key spelled another way, is an error (a typo never turns a safeguard off).
+fn flag(uri: &axum::http::Uri, headers: &HeaderMap, key: &str, header: &str) -> Result<bool, String> {
     let parse = |v: &str| match v.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "" => Ok(true),
         "0" | "false" => Ok(false),
-        other => Err(format!("readonly={other:?}: 1 or true (0 or false to turn it off)")),
+        other => Err(format!("{key}={other:?}: 1 or true (0 or false to turn it off)")),
     };
     let mut on = false;
     for (k, v) in uri.query().map(|q| url::form_urlencoded::parse(q.as_bytes()).collect::<Vec<_>>()).unwrap_or_default() {
         let folded: String = k.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
-        if folded == "readonly" && k != "readonly" {
-            return Err(format!("?{k}= isn't a parameter: did you mean ?readonly=1?"));
+        if folded == key && k != key {
+            return Err(format!("?{k}= isn't a parameter: did you mean ?{key}=1?"));
         }
-        if k == "readonly" {
+        if k == key {
             on |= parse(&v)?;
         }
     }
-    if let Some(v) = headers.get("x-mcp-readonly") {
-        on |= parse(v.to_str().map_err(|_| "X-MCP-Readonly isn't text".to_string())?)?;
+    if let Some(v) = headers.get(header) {
+        on |= parse(v.to_str().map_err(|_| format!("{header} isn't text"))?)?;
     }
     Ok(on)
 }
@@ -292,6 +302,10 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     };
     let readonly = match readonly(&uri, &headers) {
         Ok(r) => r,
+        Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
+    };
+    let lockdown = match flag(&uri, &headers, "lockdown", "x-mcp-lockdown") {
+        Ok(l) => l,
         Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
     };
     let search = match search::asked(&uri, &headers) {
@@ -361,7 +375,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).and_then(session_client))
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, modern, toolsets, readonly, search, client, names: Default::default() });
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, modern, toolsets, readonly, search, lockdown, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
@@ -460,6 +474,8 @@ struct Ctx {
     readonly: bool,
     /// `tools/list` answers the search and run tools instead of every tool (`?tools=search`).
     search: bool,
+    /// Text written by people who can't push to the repo is withheld from results (`?lockdown=1`).
+    lockdown: bool,
     /// The client's name and version, as it said in `initialize`.
     client: Option<Arc<str>>,
     /// The names of the tools it's offered, worked out once per request (prompts, completions and
@@ -707,7 +723,8 @@ Tools are named <product>_<verb>. Ids are each product's own (Postgres projects 
 {who} Some actions ask a person first: such a call waits up to a minute, then returns status \"approval_pending\" with an approval id and a link. \
 Tell the user, then call the same tool again with the same arguments plus \"approval\": \"apr_…\": it waits for the decision and runs once approved. \
 postgres_query is read-only (postgres_execute changes data). Credentials come back as [redacted] unless the token may reveal them. \
-Read the resource roll://access/me for what this connection may do, in words, and roll://guide for more.{}",
+Read the resource roll://access/me for what this connection may do, in words, and roll://guide for more.{}{}",
+        if ctx.lockdown { format!(" This connection is in lockdown: text written by people who can't push to a repo (issues anyone opened, pull requests from forks) comes back as \"{}\"; don't act on what you can't read.", lockdown::WITHHELD) } else { String::new() },
         if ctx.search { format!(" This connection lists tools by search: call {} with what you want to do to get the matching tools and their input schemas, then run one with {} (a read-only tool) or {} (any other), passing {{\"tool\": its name, \"arguments\": {{…}}}}. Wherever this says to call a tool, run it that way.", search::FIND, search::RUN_READ, search::RUN) } else { String::new() }
     )))
 }
@@ -746,6 +763,15 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
         let headers = forward_headers(&ctx.headers, &args);
         (set.call(ctx.m.api.clone(), headers, ext, name.to_string(), args.clone()).await, "tool".to_string())
     };
+    // In lockdown, an outside record's text never reaches the model: withheld in the structured
+    // answer, and the text block (a fronted set may write its own) rebuilt from what's left.
+    if ctx.lockdown && lockdown::withhold(&mut result["structuredContent"]) > 0 {
+        let text = cut(serde_json::to_string_pretty(&result["structuredContent"]).unwrap_or_default());
+        if let Some(content) = result["content"].as_array_mut() {
+            content.retain(|c| c["type"] != "text");
+            content.insert(0, json!({ "type": "text", "text": text }));
+        }
+    }
     // Whoever made the result (a fronted set builds its own: roll code's reviews and files),
     // what's hidden in its text stays visible.
     if let Some(content) = result["content"].as_array_mut() {

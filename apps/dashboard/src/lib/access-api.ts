@@ -621,17 +621,24 @@ export function toolsetCost(costs: ToolsetCost[], picked: string[], readonly: bo
 export const mcpUrl = (api: string = ROLL_API) => `${api.replace(/\/+$/, "")}/v1/mcp`;
 
 /** How to connect a client: OAuth by default (no secret in the config), a bearer token with one. */
-/**
- * The MCP URL listing only these products' tools (`?toolsets=`; none: every product's), read-only
- * or not, and in search mode (`?tools=search`: a search tool and two run tools instead of the list).
- */
-export function withToolsets(url: string, products: string[], readonly = false, search = false): string {
-  if (products.length === 0 && !readonly && !search) return url;
+/** How a connection narrows what the server offers it (docs/mcp.md). */
+export type McpMode = {
+  /** Only tools that read are listed and run (the token's rules still decide). */
+  readonly?: boolean;
+  /** A search tool and two run tools instead of the whole list (`?tools=search`). */
+  search?: boolean;
+  /** Text written by people who can't push to a repo is withheld from the agent (`?lockdown=1`). */
+  lockdown?: boolean;
+};
+
+/** The MCP URL listing only these products' tools (`?toolsets=`; none: every product's), in a mode. */
+export function withToolsets(url: string, products: string[], mode: McpMode = {}): string {
+  if (products.length === 0 && !mode.readonly && !mode.search && !mode.lockdown) return url;
   const u = new URL(url);
   if (products.length > 0) u.searchParams.set("toolsets", [...products].sort().join(","));
-  // Read-only: the server lists and runs only read-only tools (the token's rules still decide).
-  if (readonly) u.searchParams.set("readonly", "1");
-  if (search) u.searchParams.set("tools", "search");
+  if (mode.readonly) u.searchParams.set("readonly", "1");
+  if (mode.search) u.searchParams.set("tools", "search");
+  if (mode.lockdown) u.searchParams.set("lockdown", "1");
   return u.toString().replace(/%2C/g, ",");
 }
 

@@ -83,6 +83,7 @@ export function ConnectPanel({ token }: { token?: string }) {
   const [picked, setPicked] = useState<string[]>([]);
   const [readonly, setReadonly] = useState(false);
   const [search, setSearch] = useState(false);
+  const [lockdown, setLockdown] = useState(false);
   const [costs, setCosts] = useState<ToolsetCosts>({ products: [] });
   useEffect(() => {
     accessApi
@@ -97,7 +98,7 @@ export function ConnectPanel({ token }: { token?: string }) {
   const cost = toolsetCost(costs.products, picked, readonly, search ? costs.search : undefined);
   const limit = CLIENT_TOOL_LIMIT[client];
   const over = limit && cost.tools > limit.tools;
-  const url = withToolsets(mcpUrl(), picked, readonly, search);
+  const url = withToolsets(mcpUrl(), picked, { readonly, search, lockdown });
   const cfg = mcpConfig(client, url, token);
   return (
     <Panel
@@ -169,6 +170,10 @@ export function ConnectPanel({ token }: { token?: string }) {
         <label className="flex items-center gap-2 text-[12px] text-muted">
           <input type="checkbox" checked={readonly} onChange={(e) => setReadonly(e.target.checked)} className="accent-accent" />
           Read-only: the client sees and runs only tools that read, whatever its token allows
+        </label>
+        <label className="flex items-center gap-2 text-[12px] text-muted">
+          <input type="checkbox" checked={lockdown} onChange={(e) => setLockdown(e.target.checked)} className="accent-accent" />
+          Lockdown: what people who can't push to a repo wrote (issues anyone opened, pull requests from forks) never reaches the agent
         </label>
         <p className="text-[13px] text-muted">{CLIENT_WHERE[client]}</p>
         <div className="relative rounded-lg border border-line bg-bg">
