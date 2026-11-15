@@ -2721,12 +2721,12 @@ Go and Python clients and Terraform resources for registrations (#66, #67, #72),
 issuer (#68), the operator's restarts (#69), SIEM and roll search audit sinks (#70, #71), GitHub
 App installation tokens (#73).
 
-1. **Products report their own credential changes** (building): a password reset or restore
-   through roll Postgres, Redis, NoSQL or search's own routes moves the live links' digest, so
-   watches, syncs, apps' redeploys and conditional reads see it (and #65's 304s come back for
-   live links). roll's advantage: no other secrets manager hosts the resources.
-2. **Rotating a registration's admin credential, and editing registrations in place** (databases
-   outside roll, AWS users, rotators), as Vault's `rotate-root`; Terraform then updates them instead
+1. **Live links' digests follow their values** (built, #74 on #65): the digest counts each live
+   value's keyed fingerprint (read at most every 10 s), and a product's own password, reset or
+   restore route moves it at once, so watches, syncs, apps' redeploys and conditional reads see a
+   credential however it changed (and #65's 304s come back for live links).
+2. **Rotating a registration's admin credential, and editing registrations in place** (building:
+   databases outside roll first), as Vault's `rotate-root`; Terraform then updates them instead
    of replacing.
 3. **Syncs driven by changes**, not digest polling: a write marks its environment's syncs due, so
    a change reaches Vercel or GitHub in seconds however many syncs there are (Doppler, Infisical).
