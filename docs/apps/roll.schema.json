@@ -252,12 +252,48 @@
           }
         },
         "previews": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/settings"
-            }
-          ],
-          "description": "Preview environments, the same settings again (before an environment's block)."
+          "$ref": "#/definitions/previews"
+        }
+      }
+    },
+    "previews": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Preview environments, the same settings again (before an environment's block), and roll previews' screenshots.",
+      "properties": {
+        "builder": {
+          "$ref": "#/definitions/settings/properties/builder"
+        },
+        "dockerfile": {
+          "$ref": "#/definitions/settings/properties/dockerfile"
+        },
+        "install": {
+          "$ref": "#/definitions/settings/properties/install"
+        },
+        "build": {
+          "$ref": "#/definitions/settings/properties/build"
+        },
+        "start": {
+          "$ref": "#/definitions/settings/properties/start"
+        },
+        "pre_deploy": {
+          "$ref": "#/definitions/settings/properties/pre_deploy"
+        },
+        "health_path": {
+          "$ref": "#/definitions/settings/properties/health_path"
+        },
+        "watch": {
+          "$ref": "#/definitions/settings/properties/watch"
+        },
+        "spa": {
+          "$ref": "#/definitions/settings/properties/spa"
+        },
+        "run": {
+          "$ref": "#/definitions/settings/properties/run"
+        },
+        "screenshots": {
+          "type": "object",
+          "description": "What roll previews' screenshots do, as roll.toml's [preview] takes them: pages, hide and [[states]] (name, page, steps). Checked by roll previews."
         }
       }
     }

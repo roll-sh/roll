@@ -94,7 +94,11 @@ every deployment is immutable with instant rollback.
   applies it (`-e` for an environment's block) and `roll up` refuses a malformed one before
   anything is made or uploaded; its values (a port, a size) are checked at the deploy, by the
   API's rules. Editors get its shape from `docs/apps/roll.schema.json` (JSON Schema: Taplo and
-  Even Better TOML take a `#:schema` line), whose keys and types tests hold to the structs. The
+  Even Better TOML take a `#:schema` line), whose keys and types tests hold to the structs.
+  `[app.previews.screenshots]` (only there) is roll previews' (`pages`, `hide`, `[[states]]` as
+  its `[preview]` takes them): opaque to roll apps and never read by a build; roll previews reads
+  it from the tree at the preview's own revision (`apps_build::app::screenshots`, the same
+  regular-file and 64 KiB rules) and checks it with code-preview's rules. The
   file's other sections are roll code's; code-preview allows `[app]` in it. `[app.run]` sets any
   run setting (`type`, `port`, `min_instances`, `concurrency`, `cpu`, `memory_mb`, `schedule`,
   timings) but the volume, and `[app.environments.<name>]` (with its own `.run`) goes on top in

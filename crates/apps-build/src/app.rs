@@ -72,6 +72,10 @@ pub struct AppConfig {
     pub environments: Option<std::collections::BTreeMap<String, AppConfig>>,
     /// Preview environments (ephemeral ones), the same keys again, before a named block.
     pub previews: Option<Box<AppConfig>>,
+    /// Only in `[app.previews]`: what roll previews' screenshots do (`pages`, `hide`,
+    /// `[[states]]`), as its `[preview]` takes them. Opaque here (roll previews checks it with
+    /// code-preview's rules); builds and deploys never read it. [`screenshots`].
+    pub screenshots: Option<toml::Table>,
 }
 
 /// The environment a build or a deployment is for.
@@ -136,12 +140,23 @@ pub fn parse(text: &str) -> Result<Option<AppConfig>, String> {
         }
         all.push((name, e));
     }
+    for (name, e) in &all {
+        if e.screenshots.is_some() && name != "app.previews" {
+            return Err(format!("roll.toml: screenshots go in [app.previews.screenshots], not [{name}]"));
+        }
+    }
     for (_, e) in all {
         if e.run.as_ref().is_some_and(|r| r.contains_key("volume")) {
             return Err("roll.toml: a volume is the service's setting, not the tree's (`roll apps set --volume`)".into());
         }
     }
     Ok(f.app)
+}
+
+/// `[app.previews.screenshots]` of `<root>/roll.toml` (roll previews, at the preview's own
+/// revision), read with [`read`]'s rules.
+pub fn screenshots(root: &Path) -> Result<Option<toml::Table>, ReadError> {
+    Ok(read(root)?.and_then(|a| a.previews).and_then(|p| p.screenshots))
 }
 
 impl AppConfig {
@@ -238,6 +253,13 @@ mod tests {
         assert_eq!(said, ["roll.toml sets build: pnpm build", "roll.toml sets run.concurrency: 20", "roll.toml sets start: node a.js (production)"]);
         let (staging, _) = app.overrides(&Overrides::default(), Some(EnvScope { name: "staging", ephemeral: false }));
         assert_eq!(staging.start, None, "another environment doesn't get production's block");
+        // roll previews' screenshots: in the previews block only, opaque to the build.
+        let shots = "[app.previews.screenshots]\npages = [\"/pricing\"]\n[[app.previews.screenshots.states]]\nname = \"cart\"\npage = \"/\"\nsteps = [{ click = \"#open-cart\" }]\n";
+        let app = parse(shots).unwrap().unwrap();
+        let s = app.previews.as_ref().unwrap().screenshots.as_ref().unwrap();
+        assert_eq!((s["pages"].as_array().map(Vec::len), s["states"].as_array().map(Vec::len)), (Some(1), Some(1)));
+        assert!(app.overrides(&Overrides::default(), Some(EnvScope { name: "pv-1", ephemeral: true })).1.is_empty(), "nothing a build says");
+        assert!(parse("[app.screenshots]\npages = [\"/\"]\n").is_err());
     }
 
     #[test]
@@ -259,9 +281,12 @@ mod tests {
             run: Some(toml::Table::new()),
             environments: Some(Default::default()),
             previews: Some(Box::default()),
+            screenshots: Some(toml::Table::new()),
         };
         let defs = &schema["definitions"];
-        assert_eq!(keys(&serde_json::to_value(&all).unwrap()), keys(&defs["app"]["properties"]));
+        let mut fields = keys(&serde_json::to_value(&all).unwrap());
+        assert!(fields.remove("screenshots") && defs["previews"]["properties"]["screenshots"].is_object(), "screenshots are the previews block's alone");
+        assert_eq!(fields, keys(&defs["app"]["properties"]));
         let mut settings = keys(&defs["app"]["properties"]);
         settings.remove("environments");
         settings.remove("previews");
