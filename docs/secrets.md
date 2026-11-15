@@ -761,8 +761,14 @@ The admin credential rotates too, as Vault's `rotate-root` does (`POST …/outsi
 nobody chose on the user the admin URL logs in as (`ALTER ROLE CURRENT_USER`, MySQL's
 `ALTER USER CURRENT_USER()`, SQL Server's `ALTER LOGIN`, Redis' `ACL SETUSER`, MongoDB's
 `updateUser`, ClickHouse's `ALTER USER`, RabbitMQ's user API) and keeps it sealed, so after it
-nobody knows the admin password but roll. The new URL is stored before the server changes, so a
-rotation interrupted between the two finishes on the next one instead of locking roll out. A
+nobody knows the admin password but roll. Whatever else uses that admin login breaks: give roll
+an admin of its own. Redis' `default` user is refused (its password is every client's
+`requirepass`), and so is a Redis server that can't keep an ACL change across a restart. The new
+URL is stored before the server changes; a rotation whose answer is lost keeps whichever password
+logs in, an interrupted one is finished on the next use, and an unfinished one is dropped only
+once the stored URL is shown to log in, so roll never forgets the only working password. A
+registration moves to another server (host or engine) only once no key links to it and no lease
+is live: its logins are on the old one. A
 registration is edited in place (`PATCH …/outside-databases/{id} {name?, url?, ca?}`, `roll
 secrets databases set ID --name … --url < new-url`): a new URL is connected to and checked as
 registering checks it before it's kept, and links, their roles and their leases carry on.

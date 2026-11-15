@@ -162,9 +162,7 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         }
         let user = url_user(url)?;
         if let Some(u) = self.redis(url)? {
-            // No user name: the server's `default` user (requirepass).
-            let user = if user.is_empty() { "default".to_string() } else { user };
-            return self.rd(u, ca, async move |c| redis::set_password(c, &user, password).await);
+            return self.rd(u, ca, async move |c| redis::set_own_password(c, &user, password).await);
         }
         if user.is_empty() {
             return Err("the admin URL names no user".into());
