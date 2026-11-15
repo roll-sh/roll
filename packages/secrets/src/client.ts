@@ -91,12 +91,18 @@ export function createClient(options: ClientOptions) {
   }
   const env = async (e: string) => `/v1/secrets/projects/${enc(await projectId())}/environments/${enc(e)}`;
 
-  function values(environment: string, o?: { path?: string; format?: undefined; resolve?: boolean }): Promise<Values>;
+  /** `fresh`: skip `cacheTtlMs` (a watch that saw the digest move reads anew). */
+  function values(environment: string, o?: { path?: string; format?: undefined; resolve?: boolean; fresh?: boolean }): Promise<Values>;
   function values(environment: string, o: { path?: string; format: ExportFormat; resolve?: boolean }): Promise<string>;
-  async function values(environment: string, o: { path?: string; format?: ExportFormat; resolve?: boolean } = {}): Promise<Values | string> {
+  async function values(environment: string, o: { path?: string; format?: ExportFormat; resolve?: boolean; fresh?: boolean } = {}): Promise<Values | string> {
     const url = `${await env(environment)}/values${qs({ path: o.path, format: o.format, resolve: o.resolve === false ? "false" : undefined })}`;
-    if (!options.cacheTtlMs || o.format) return (await call("GET", url, undefined, !!o.format)) as Values | string;
-    return cached(url, options.cacheTtlMs);
+    if (!options.cacheTtlMs || o.format || o.fresh) {
+      const v = (await call("GET", url, undefined, !!o.format)) as Values | string;
+      // A fresh read is the newest answer: a kept one for the same folder goes.
+      if (o.fresh) cache.delete(url);
+      return v;
+    }
+    return structuredClone(await cached(url, options.cacheTtlMs));
   }
 
   /** Values kept for `ttl` ms, then revalidated with their digest (a 304 keeps them). */
@@ -127,7 +133,9 @@ export function createClient(options: ClientOptions) {
     }
     const v = JSON.parse(text) as Values;
     const etag = res.headers.get("etag")?.replace(/^W\//, "").replace(/"/g, "") ?? null;
-    if (v.dynamic.length) cache.delete(url);
+    // Never kept: dynamic credentials (they end with their lease) or a key that didn't resolve
+    // (the digest may not move when the link recovers).
+    if (v.dynamic.length || v.problems.length) cache.delete(url);
     else cache.set(url, { values: v, etag, at: now() });
     return v;
   }
@@ -158,7 +166,8 @@ export function createClient(options: ClientOptions) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let leases: string[] = [];
     let last: string | null = null;
-    const load = () => (o.consumer ? resolve(environment, { consumer: o.consumer, path: o.path }) : values(environment, { path: o.path }));
+    // Always a fresh read: the digest moved, so a kept answer is the old one.
+    const load = () => (o.consumer ? resolve(environment, { consumer: o.consumer, path: o.path }) : values(environment, { path: o.path, fresh: true }));
     const take = async (v: Values) => {
       if (v.problems.length) throw new SecretsError(`${environment} doesn't resolve: ${v.problems.map((p) => `${p.key}: ${p.problem}`).join("; ")}`, 409, "unresolved");
       leases = v.leases;

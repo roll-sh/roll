@@ -200,10 +200,45 @@ func (c *Client) Values(ctx context.Context, env, path string) (*Values, error) 
 		return nil, err
 	}
 	if c.CacheTTL > 0 {
-		return c.cachedValues(ctx, e+"/values"+query(path))
+		v, err := c.cachedValues(ctx, e+"/values"+query(path))
+		if err != nil {
+			return nil, err
+		}
+		return v.clone(), nil
 	}
 	var v Values
 	return &v, c.call(ctx, http.MethodGet, e+"/values"+query(path), nil, &v)
+}
+
+// freshValues is Values without CacheTTL (a watch that saw the digest move reads anew); a kept
+// answer for the folder goes.
+func (c *Client) freshValues(ctx context.Context, env, path string) (*Values, error) {
+	e, err := c.env(ctx, env)
+	if err != nil {
+		return nil, err
+	}
+	var v Values
+	if err := c.call(ctx, http.MethodGet, e+"/values"+query(path), nil, &v); err != nil {
+		return nil, err
+	}
+	c.cacheMu.Lock()
+	delete(c.cache, e+"/values"+query(path))
+	c.cacheMu.Unlock()
+	return &v, nil
+}
+
+// clone is a copy the caller may change without changing what CacheTTL keeps.
+func (v *Values) clone() *Values {
+	out := *v
+	out.Values = make(map[string]string, len(v.Values))
+	for k, x := range v.Values {
+		out.Values[k] = x
+	}
+	out.Problems = append([]Problem(nil), v.Problems...)
+	out.Leases = append([]string(nil), v.Leases...)
+	out.Dynamic = append([]string(nil), v.Dynamic...)
+	out.Linked = append([]string(nil), v.Linked...)
+	return &out
 }
 
 // cachedValues answers from memory within CacheTTL, else revalidates with the digest (a 304
@@ -270,7 +305,9 @@ func (c *Client) cachedValues(ctx context.Context, path string) (*Values, error)
 	}
 	etag := strings.Trim(strings.TrimPrefix(res.Header.Get("ETag"), "W/"), `"`)
 	c.cacheMu.Lock()
-	if len(v.Dynamic) > 0 {
+	// Never kept: dynamic credentials (they end with their lease) or a key that didn't resolve (the
+	// digest may not move when the link recovers).
+	if len(v.Dynamic) > 0 || len(v.Problems) > 0 {
 		delete(c.cache, path)
 	} else {
 		if c.cache == nil {
@@ -393,7 +430,7 @@ func (c *Client) Watch(ctx context.Context, env string, w Watch) error {
 		if w.Consumer != "" {
 			v, err = c.Resolve(ctx, env, w.Path, w.Consumer)
 		} else {
-			v, err = c.Values(ctx, env, w.Path)
+			v, err = c.freshValues(ctx, env, w.Path)
 		}
 		if err != nil {
 			fail(err) // the next tick tries again

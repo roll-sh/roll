@@ -559,7 +559,27 @@ impl Secrets {
         let at = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &at))?;
         let (digest, has_dynamic) = self.digest_of(project, slug, &at, caller)?;
-        Ok((digest == etag && !(dynamic && has_dynamic)).then_some(digest))
+        if digest != etag || (dynamic && has_dynamic) {
+            return Ok(None);
+        }
+        // Still read, just not again: at most one row a day for each caller and folder, so a
+        // folder read only through revalidations doesn't look unused (health, insights, reach).
+        let keys: Vec<String> = self.view(project, slug, &at, caller, false, Action::Reveal)?.into_iter().map(|e| e.row.key).collect();
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            let seen: Option<i64> = c
+                .query_row(
+                    "SELECT id FROM audit WHERE project_id = ? AND actor = ? AND action = 'secrets.revalidate' AND env = ? AND path = ? AND at > ? LIMIT 1",
+                    code_sql::params![project, caller.principal, slug, at, now - 86_400_000],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if seen.is_none() {
+                crate::audit::record(c, project, caller, "secrets.revalidate", Some(slug), Some(&at), &keys, &format!("revalidated {} (unchanged since its last read)", crate::write::plural(keys.len(), "value")), now)?;
+            }
+            Ok::<_, Error>(())
+        })?;
+        Ok(Some(digest))
     }
 
     pub fn versions(&self, project: &str, slug: &str, path: &str, key: &str, kind: Option<SecretType>, caller: &Caller) -> Result<Vec<Version>> {

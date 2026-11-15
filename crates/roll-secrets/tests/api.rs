@@ -855,8 +855,8 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     api.ok(Method::DELETE, "/environments/tmp", None).await;
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
 
-    // A cache revalidates with the digest: unchanged is a 304 that reads, issues and audits
-    // nothing; a change reads again; and a folder with a dynamic key always reads again (a
+    // A cache revalidates with the digest: unchanged is a 304 that decrypts and issues nothing; a
+    // change reads again; and a folder with a dynamic key always reads again (a
     // credential's lease ends without moving the digest), unless dynamic keys are left out.
     let get = |env: &str, query: &str, tag: Option<String>| {
         let mut r = Request::get(format!("/v1/secrets/projects/{}/environments/{env}/values?{query}", api.project));
@@ -874,7 +874,10 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     assert!(s == StatusCode::OK && tag.is_some());
     let before = audited();
     assert_eq!(get("production", "", tag.clone()).await, (StatusCode::NOT_MODIFIED, tag.clone()));
-    assert_eq!(audited(), before, "a 304 isn't a read");
+    // A revalidation is still a read for health and insights: one row a day per caller and folder.
+    assert_eq!(audited(), before + 1);
+    assert_eq!(get("production", "", tag.clone()).await.0, StatusCode::NOT_MODIFIED);
+    assert_eq!(audited(), before + 1, "not again the same day");
     api.set("production", "NEW_FLAG", "on").await;
     let (s, moved) = get("production", "", tag.clone()).await;
     assert!(s == StatusCode::OK && moved.is_some() && moved != tag);

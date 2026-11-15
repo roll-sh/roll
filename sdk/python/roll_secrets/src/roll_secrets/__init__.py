@@ -13,6 +13,7 @@ token, or the short-lived token a workload identity's login gives (``login``, ``
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import os
 import threading
@@ -115,12 +116,17 @@ class Client:
     def _env(self, env: str) -> str:
         return f"/v1/secrets/projects/{urllib.parse.quote(self.project_id(), safe='')}/environments/{urllib.parse.quote(env, safe='')}"
 
-    def values(self, env: str, path: str = "") -> Values:
-        """``env``'s values under ``path`` (the root by default), references resolved."""
+    def values(self, env: str, path: str = "", fresh: bool = False) -> Values:
+        """``env``'s values under ``path`` (the root by default), references resolved. ``fresh``
+        skips ``cache_ttl`` (a watch that saw the digest move reads anew)."""
         url = self._env(env) + "/values" + _q(path)
-        if self.cache_ttl <= 0:
-            return Values._of(self._call("GET", url))
-        return self._cached(url)
+        if self.cache_ttl <= 0 or fresh:
+            v = Values._of(self._call("GET", url))
+            if fresh:
+                with self._lock:
+                    self._cache.pop(url, None)
+            return v
+        return copy.deepcopy(self._cached(url))
 
     def _cached(self, url: str) -> Values:
         """Kept for ``cache_ttl``, then revalidated with the digest (a 304 keeps them)."""
@@ -148,7 +154,9 @@ class Client:
             raise SecretsError(err.get("error") or f"{e.code} {e.reason}", e.code, err.get("code")) from None
         v = Values._of(json.loads(text))
         with self._lock:
-            if v.dynamic:
+            # Never kept: dynamic credentials (they end with their lease) or a key that didn't
+            # resolve (the digest may not move when the link recovers).
+            if v.dynamic or v.problems:
                 self._cache.pop(url, None)
             else:
                 self._cache[url] = (v, etag.removeprefix("W/").strip('"'), self._clock())
@@ -200,7 +208,7 @@ class Client:
             try:
                 now = self.digest(env, path)
                 if now != last:
-                    v = self.resolve(env, consumer, path) if consumer else self.values(env, path)
+                    v = self.resolve(env, consumer, path) if consumer else self.values(env, path, fresh=True)
                     before, last = last, now
                     if v.problems:
                         if before is None:
