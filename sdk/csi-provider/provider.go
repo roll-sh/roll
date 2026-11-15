@@ -7,6 +7,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/roll-sh/roll/sdk/go/secrets"
@@ -31,7 +34,67 @@ type provider struct {
 	// allowHTTP lets them be plain http:// (-allow-http, for a cluster-local rolld only): a pod's
 	// token otherwise goes only over TLS.
 	allowHTTP bool
+	// logins are pods' recent logins, by their service account token (hashed): a pod's rotation
+	// polls and its siblings' mounts don't each log in (an identity takes 120 logins a minute).
+	logins loginCache
 }
+
+// loginCache keeps a login's roll token for loginReuse after it was made, at most loginsMax of
+// them. A token the server refuses (revoked, ended early) is dropped and the pod logs in again.
+type loginCache struct {
+	mu sync.Mutex
+	m  map[string]cachedLogin
+}
+
+type cachedLogin struct {
+	token, project string
+	at             time.Time
+}
+
+const (
+	loginReuse = 5 * time.Minute
+	loginsMax  = 4096
+)
+
+func loginKey(api, identity, saToken string) string {
+	h := sha256.Sum256([]byte(api + "\x00" + identity + "\x00" + saToken))
+	return hex.EncodeToString(h[:])
+}
+
+func (l *loginCache) get(key string, now time.Time) (cachedLogin, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	c, ok := l.m[key]
+	return c, ok && now.Sub(c.at) < loginReuse
+}
+
+func (l *loginCache) put(key string, c cachedLogin) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.m == nil {
+		l.m = map[string]cachedLogin{}
+	}
+	if len(l.m) >= loginsMax {
+		for k, v := range l.m {
+			if c.at.Sub(v.at) >= loginReuse {
+				delete(l.m, k)
+			}
+		}
+		if len(l.m) >= loginsMax {
+			l.m = map[string]cachedLogin{}
+		}
+	}
+	l.m[key] = c
+}
+
+func (l *loginCache) forget(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.m, key)
+}
+
+// errRefused is the server refusing a mount's roll token.
+var errRefused = errors.New("roll refused the token")
 
 // params are a SecretProviderClass's `parameters` (docs/secrets.md, "Kubernetes").
 type params struct {
@@ -166,19 +229,28 @@ func (s *provider) Mount(ctx context.Context, req *mountRequest) (*mountResponse
 	// The login and the read together, bounded (the driver's own deadline may be longer).
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	c, err := s.client(ctx, p, attrs, secretsRef)
-	if err != nil {
-		return nil, err
-	}
-	project := p.project
-	if project == "" {
-		if project, err = c.ProjectID(ctx); err != nil {
-			return nil, fmt.Errorf("finding the project: %w", err)
+	var a *answer
+	for attempt := 0; ; attempt++ {
+		c, key, err := s.client(ctx, p, attrs, secretsRef, attempt > 0)
+		if err != nil {
+			return nil, err
 		}
-	}
-	a, err := s.values(ctx, c, project, p)
-	if err != nil {
-		return nil, err
+		project := p.project
+		if project == "" {
+			if project, err = c.ProjectID(ctx); err != nil {
+				return nil, fmt.Errorf("finding the project: %w", err)
+			}
+		}
+		a, err = s.values(ctx, c, project, p)
+		// A remembered login the server refuses: log in again, once.
+		if errors.Is(err, errRefused) && key != "" && attempt == 0 {
+			s.logins.forget(key)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		break
 	}
 	files, err := render(p, a, mode)
 	if err != nil {
@@ -191,9 +263,10 @@ func (s *provider) Mount(ctx context.Context, req *mountRequest) (*mountResponse
 	return out, nil
 }
 
-// client logs the pod in: its own service account token through a workload identity, else a
-// roll token from nodePublishSecretRef (`token`).
-func (s *provider) client(ctx context.Context, p params, attrs, ref map[string]string) (*secrets.Client, error) {
+// client logs the pod in: its own service account token through a workload identity (a recent
+// login with the same token is reused unless `fresh`; its cache key), else a roll token from
+// nodePublishSecretRef (`token`).
+func (s *provider) client(ctx context.Context, p params, attrs, ref map[string]string, fresh bool) (*secrets.Client, string, error) {
 	if p.identity != "" {
 		var tokens map[string]struct {
 			Token string `json:"token"`
@@ -201,21 +274,26 @@ func (s *provider) client(ctx context.Context, p params, attrs, ref map[string]s
 		_ = json.Unmarshal([]byte(attrs["csi.storage.k8s.io/serviceAccount.tokens"]), &tokens)
 		t := tokens[p.audience].Token
 		if t == "" {
-			return nil, fmt.Errorf("the driver passed no service account token for audience %q: add it to the CSIDriver's tokenRequests (the driver chart's tokenRequests[0].audience=%s)", p.audience, p.audience)
+			return nil, "", fmt.Errorf("the driver passed no service account token for audience %q: add it to the CSIDriver's tokenRequests (the driver chart's tokenRequests[0].audience=%s)", p.audience, p.audience)
+		}
+		key := loginKey(p.api, p.identity, t)
+		if l, ok := s.logins.get(key, time.Now()); ok && !fresh {
+			return &secrets.Client{API: p.api, Token: l.token, Project: l.project, HTTP: s.http}, key, nil
 		}
 		c, err := secrets.Login(ctx, p.api, p.identity, t)
 		if err != nil {
-			return nil, fmt.Errorf("logging in as %s: %w", p.identity, err)
+			return nil, "", fmt.Errorf("logging in as %s: %w", p.identity, err)
 		}
+		s.logins.put(key, cachedLogin{token: c.Token, project: c.Project, at: time.Now()})
 		c.HTTP = s.http
-		return c, nil
+		return c, key, nil
 	}
 	if t := strings.TrimSpace(ref["token"]); t != "" {
 		c := secrets.New(p.api, t)
 		c.HTTP = s.http
-		return c, nil
+		return c, "", nil
 	}
-	return nil, errors.New("set parameters.identity (the pod's service account logs in) or nodePublishSecretRef with a `token`")
+	return nil, "", errors.New("set parameters.identity (the pod's service account logs in) or nodePublishSecretRef with a `token`")
 }
 
 // values reads the folder strictly: a key that doesn't resolve fails the mount (the pod keeps
@@ -236,6 +314,9 @@ func (s *provider) values(ctx context.Context, c *secrets.Client, project string
 	body, err := io.ReadAll(io.LimitReader(res.Body, 16<<20))
 	if err != nil {
 		return nil, err
+	}
+	if res.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("reading %s:%s: %w", p.environment, p.path, errRefused)
 	}
 	if res.StatusCode != http.StatusOK {
 		// roll's errors name keys, never values.

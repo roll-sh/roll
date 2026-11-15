@@ -1,7 +1,10 @@
 # roll secrets' provider for the Secrets Store CSI Driver
 
 A pod's volume gets a roll secrets environment's values as files, with no Kubernetes Secret
-in etcd. Each pod logs in with its own service account token through a workload identity.
+in etcd. Each pod logs in with its own service account token through a workload identity. A
+login is reused for 5 minutes by mounts with the same token (rotation polls, a pod's other
+volumes), so a scale-up stays within an identity's 120 logins a minute; a token roll refuses is
+dropped and the pod logs in again.
 See docs/secrets.md, "Kubernetes".
 Standard library only: the driver's gRPC is served over Go 1.24's unencrypted HTTP/2, with the
 protocol's seven messages encoded in `wire.go`.

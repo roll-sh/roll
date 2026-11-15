@@ -13,12 +13,28 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
+// rollState is what fakeRoll counts and takes: its logins, and the pods' current roll token.
+type rollState struct {
+	mu     sync.Mutex
+	logins int
+	pod    string
+}
+
 // fakeRoll answers a workload identity's login and the values route as rolld does.
 func fakeRoll(t *testing.T) *httptest.Server {
+	srv, _ := fakeRollState(t)
+	return srv
+}
+
+func fakeRollState(t *testing.T) (*httptest.Server, *rollState) {
+	st := &rollState{pod: "rlst_pod"}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		st.mu.Lock()
+		defer st.mu.Unlock()
 		answer := func(status int, v any) {
 			w.WriteHeader(status)
 			_ = json.NewEncoder(w).Encode(v)
@@ -31,9 +47,10 @@ func fakeRoll(t *testing.T) *httptest.Server {
 				answer(401, map[string]string{"error": "the token isn't the identity's"})
 				return
 			}
-			answer(200, map[string]string{"token": "rlst_pod", "project": "prj_1"})
+			st.logins++
+			answer(200, map[string]string{"token": st.pod, "project": "prj_1"})
 		case r.URL.Path == "/v1/secrets/projects/prj_1/environments/production/values":
-			if a := r.Header.Get("Authorization"); a != "Bearer rlst_pod" && a != "Bearer rlt_node" {
+			if a := r.Header.Get("Authorization"); a != "Bearer "+st.pod && a != "Bearer rlt_node" {
 				answer(401, map[string]string{"error": "unknown token"})
 				return
 			}
@@ -57,7 +74,7 @@ func fakeRoll(t *testing.T) *httptest.Server {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	return srv
+	return srv, st
 }
 
 // invoke is a gRPC call as the driver makes it: HTTP/2 with prior knowledge on the socket, one
@@ -132,7 +149,7 @@ func attributes(api string, extra map[string]string) string {
 // A pod's volume gets the environment's values as files (each key's own, a dotenv file or JSON),
 // logged in with its own service account token, versioned by the folder's digest.
 func TestAMountGetsTheEnvironmentAsFiles(t *testing.T) {
-	roll := fakeRoll(t)
+	roll, st := fakeRollState(t)
 	call, mount := driver(t)
 	ctx := context.Background()
 	v := &versionResponse{}
@@ -178,6 +195,19 @@ func TestAMountGetsTheEnvironmentAsFiles(t *testing.T) {
 	r, err = mount(ctx, &mountRequest{Attributes: attributes(roll.URL, map[string]string{"identity": "", "project": "prj_1"}), Secrets: `{"token":"rlt_node"}`})
 	if err != nil || len(r.Files) != 2 {
 		t.Fatalf("node token: %+v %v", r, err)
+	}
+
+	// The pod logged in once for its three mounts (a rotation poll, a sibling with the same
+	// token); once its roll token is refused, the next mount logs in again and still works.
+	st.mu.Lock()
+	logins := st.logins
+	st.pod = "rlst_pod2"
+	st.mu.Unlock()
+	if logins != 1 {
+		t.Fatalf("%d logins for one service account token", logins)
+	}
+	if r, err = mount(ctx, &mountRequest{Attributes: attributes(roll.URL, nil)}); err != nil || len(r.Files) != 2 || st.logins != 2 {
+		t.Fatalf("after the token was refused: %+v %v (%d logins)", r, err, st.logins)
 	}
 }
 
