@@ -1616,6 +1616,12 @@ impl Binder<'_, '_> {
         Self::record_to_composite(&e, &ty).map_err(|x| with_pos(x, if tc.location >= 0 { tc.location } else { ast::location(arg) }))?;
         let out = self.cast_explicit(e, &ty).map_err(|e| {
             if e.code == code::CANNOT_COERCE {
+                // (No cast between the types: transformTypeCast's error.)
+                let e = if e.message.starts_with("cannot cast type ") && e.objects.as_ref().is_none_or(|o| o.routine.is_none()) {
+                    e.routine_at("transformTypeCast", 2782)
+                } else {
+                    e
+                };
                 with_pos(
                     e,
                     if tc.location >= 0 {

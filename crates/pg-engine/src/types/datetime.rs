@@ -3858,9 +3858,23 @@ fn ts_overflow() -> Error {
     err!(DATETIME_FIELD_OVERFLOW, "timestamp out of range")
 }
 
+/// "timestamp out of range" raised at `line` of PostgreSQL's `routine`.
+#[cold]
+#[inline(never)]
+fn ts_overflow_at(routine: &'static str, line: u32) -> Error {
+    ts_overflow().routine_at(routine, line)
+}
+
+/// "interval out of range" raised at `line` of PostgreSQL's `routine`.
+#[cold]
+#[inline(never)]
+pub fn interval_overflow_at(routine: &'static str, line: u32) -> Error {
+    interval_overflow().routine_at(routine, line)
+}
+
 /// Month arithmetic on broken-down time (shared by the timestamp + interval paths).
-fn add_months(tm: &mut Tm, months: i32) -> Result<()> {
-    tm.mon = tm.mon.checked_add(months).ok_or_else(ts_overflow)?;
+fn add_months(tm: &mut Tm, months: i32, at: (&'static str, u32)) -> Result<()> {
+    tm.mon = tm.mon.checked_add(months).ok_or_else(|| ts_overflow_at(at.0, at.1))?;
     if tm.mon > 12 {
         tm.year += (tm.mon - 1) / 12;
         tm.mon = ((tm.mon - 1) % 12) + 1;
@@ -3879,13 +3893,13 @@ fn add_months(tm: &mut Tm, months: i32) -> Result<()> {
 pub fn ts_add_interval(ts: i64, iv: &Interval) -> Result<i64> {
     if iv.is_neg_inf() {
         if ts == TS_POS_INF {
-            return Err(ts_overflow());
+            return Err(ts_overflow_at("timestamp_pl_interval", 3127));
         }
         return Ok(TS_NEG_INF);
     }
     if iv.is_pos_inf() {
         if ts == TS_NEG_INF {
-            return Err(ts_overflow());
+            return Err(ts_overflow_at("timestamp_pl_interval", 3136));
         }
         return Ok(TS_POS_INF);
     }
@@ -3894,34 +3908,37 @@ pub fn ts_add_interval(ts: i64, iv: &Interval) -> Result<i64> {
     }
     let mut ts = ts;
     if iv.months != 0 {
-        let (mut tm, fsec) = timestamp2tm(ts, None).ok_or_else(ts_overflow)?;
-        add_months(&mut tm, iv.months)?;
-        ts = tm2timestamp(&tm, fsec, None).ok_or_else(ts_overflow)?;
+        let (mut tm, fsec) = timestamp2tm(ts, None).ok_or_else(|| ts_overflow_at("timestamp_pl_interval", 3153))?;
+        add_months(&mut tm, iv.months, ("timestamp_pl_interval", 3158))?;
+        ts = tm2timestamp(&tm, fsec, None).ok_or_else(|| ts_overflow_at("timestamp_pl_interval", 3177))?;
     }
     if iv.days != 0 {
-        let (mut tm, fsec) = timestamp2tm(ts, None).ok_or_else(ts_overflow)?;
+        let (mut tm, fsec) = timestamp2tm(ts, None).ok_or_else(|| ts_overflow_at("timestamp_pl_interval", 3190))?;
         let julian = date2j(tm.year, tm.mon, tm.mday)
             .checked_add(iv.days)
             .filter(|j| *j >= 0)
-            .ok_or_else(ts_overflow)?;
+            .ok_or_else(|| ts_overflow_at("timestamp_pl_interval", 3201))?;
         (tm.year, tm.mon, tm.mday) = j2date(julian);
-        ts = tm2timestamp(&tm, fsec, None).ok_or_else(ts_overflow)?;
+        ts = tm2timestamp(&tm, fsec, None).ok_or_else(|| ts_overflow_at("timestamp_pl_interval", 3207))?;
     }
-    ts = ts.checked_add(iv.micros).ok_or_else(ts_overflow)?;
-    ts_range_check(ts)
+    ts = ts.checked_add(iv.micros).ok_or_else(|| ts_overflow_at("timestamp_pl_interval", 3213))?;
+    if !ts_is_valid(ts) {
+        return Err(ts_overflow_at("timestamp_pl_interval", 3218));
+    }
+    Ok(ts)
 }
 
 /// timestamptz_pl_interval_internal: months and days move in local time in `tz`.
 pub fn tstz_add_interval(ts: i64, iv: &Interval, tz: &TimeZone) -> Result<i64> {
     if iv.is_neg_inf() {
         if ts == TS_POS_INF {
-            return Err(ts_overflow());
+            return Err(ts_overflow_at("timestamptz_pl_interval_internal", 3271));
         }
         return Ok(TS_NEG_INF);
     }
     if iv.is_pos_inf() {
         if ts == TS_NEG_INF {
-            return Err(ts_overflow());
+            return Err(ts_overflow_at("timestamptz_pl_interval_internal", 3280));
         }
         return Ok(TS_POS_INF);
     }
@@ -3930,23 +3947,26 @@ pub fn tstz_add_interval(ts: i64, iv: &Interval, tz: &TimeZone) -> Result<i64> {
     }
     let mut ts = ts;
     if iv.months != 0 {
-        let (mut tm, fsec) = timestamp2tm(ts, Some(tz)).ok_or_else(ts_overflow)?;
-        add_months(&mut tm, iv.months)?;
+        let (mut tm, fsec) = timestamp2tm(ts, Some(tz)).ok_or_else(|| ts_overflow_at("timestamptz_pl_interval_internal", 3301))?;
+        add_months(&mut tm, iv.months, ("timestamptz_pl_interval_internal", 3306))?;
         let (off, _) = determine_tz_offset(&tm, tz);
-        ts = tm2timestamp(&tm, fsec, Some(off)).ok_or_else(ts_overflow)?;
+        ts = tm2timestamp(&tm, fsec, Some(off)).ok_or_else(|| ts_overflow_at("timestamptz_pl_interval_internal", 3327))?;
     }
     if iv.days != 0 {
-        let (mut tm, fsec) = timestamp2tm(ts, Some(tz)).ok_or_else(ts_overflow)?;
+        let (mut tm, fsec) = timestamp2tm(ts, Some(tz)).ok_or_else(|| ts_overflow_at("timestamptz_pl_interval_internal", 3340))?;
         let julian = date2j(tm.year, tm.mon, tm.mday)
             .checked_add(iv.days)
             .filter(|j| *j >= -1)
-            .ok_or_else(ts_overflow)?;
+            .ok_or_else(|| ts_overflow_at("timestamptz_pl_interval_internal", 3354))?;
         (tm.year, tm.mon, tm.mday) = j2date(julian);
         let (off, _) = determine_tz_offset(&tm, tz);
-        ts = tm2timestamp(&tm, fsec, Some(off)).ok_or_else(ts_overflow)?;
+        ts = tm2timestamp(&tm, fsec, Some(off)).ok_or_else(|| ts_overflow_at("timestamptz_pl_interval_internal", 3362))?;
     }
-    ts = ts.checked_add(iv.micros).ok_or_else(ts_overflow)?;
-    ts_range_check(ts)
+    ts = ts.checked_add(iv.micros).ok_or_else(|| ts_overflow_at("timestamptz_pl_interval_internal", 3368))?;
+    if !ts_is_valid(ts) {
+        return Err(ts_overflow_at("timestamptz_pl_interval_internal", 3373));
+    }
+    Ok(ts)
 }
 
 /// interval_um.
@@ -3958,12 +3978,12 @@ pub fn interval_neg(iv: &Interval) -> Result<Interval> {
         return Ok(Interval::NEG_INF);
     }
     let r = Interval::new(
-        iv.months.checked_neg().ok_or_else(interval_overflow)?,
-        iv.days.checked_neg().ok_or_else(interval_overflow)?,
-        iv.micros.checked_neg().ok_or_else(interval_overflow)?,
+        iv.months.checked_neg().ok_or_else(|| interval_overflow_at("interval_um_internal", 3461))?,
+        iv.days.checked_neg().ok_or_else(|| interval_overflow_at("interval_um_internal", 3461))?,
+        iv.micros.checked_neg().ok_or_else(|| interval_overflow_at("interval_um_internal", 3461))?,
     );
     if r.is_infinite() {
-        return Err(interval_overflow());
+        return Err(interval_overflow_at("interval_um_internal", 3461));
     }
     Ok(r)
 }
@@ -3972,13 +3992,13 @@ pub fn interval_neg(iv: &Interval) -> Result<Interval> {
 pub fn interval_add(a: &Interval, b: &Interval) -> Result<Interval> {
     if a.is_neg_inf() {
         if b.is_pos_inf() {
-            return Err(interval_overflow());
+            return Err(interval_overflow_at("interval_pl", 3542));
         }
         return Ok(Interval::NEG_INF);
     }
     if a.is_pos_inf() {
         if b.is_neg_inf() {
-            return Err(interval_overflow());
+            return Err(interval_overflow_at("interval_pl", 3551));
         }
         return Ok(Interval::POS_INF);
     }
@@ -3986,12 +4006,12 @@ pub fn interval_add(a: &Interval, b: &Interval) -> Result<Interval> {
         return Ok(*b);
     }
     let r = Interval::new(
-        a.months.checked_add(b.months).ok_or_else(interval_overflow)?,
-        a.days.checked_add(b.days).ok_or_else(interval_overflow)?,
-        a.micros.checked_add(b.micros).ok_or_else(interval_overflow)?,
+        a.months.checked_add(b.months).ok_or_else(|| interval_overflow_at("finite_interval_pl", 3519))?,
+        a.days.checked_add(b.days).ok_or_else(|| interval_overflow_at("finite_interval_pl", 3519))?,
+        a.micros.checked_add(b.micros).ok_or_else(|| interval_overflow_at("finite_interval_pl", 3519))?,
     );
     if r.is_infinite() {
-        return Err(interval_overflow());
+        return Err(interval_overflow_at("finite_interval_pl", 3519));
     }
     Ok(r)
 }
@@ -4000,13 +4020,13 @@ pub fn interval_add(a: &Interval, b: &Interval) -> Result<Interval> {
 pub fn interval_sub(a: &Interval, b: &Interval) -> Result<Interval> {
     if a.is_neg_inf() {
         if b.is_neg_inf() {
-            return Err(interval_overflow());
+            return Err(interval_overflow_at("interval_mi", 3598));
         }
         return Ok(Interval::NEG_INF);
     }
     if a.is_pos_inf() {
         if b.is_pos_inf() {
-            return Err(interval_overflow());
+            return Err(interval_overflow_at("interval_mi", 3607));
         }
         return Ok(Interval::POS_INF);
     }
@@ -4017,12 +4037,12 @@ pub fn interval_sub(a: &Interval, b: &Interval) -> Result<Interval> {
         return Ok(Interval::NEG_INF);
     }
     let r = Interval::new(
-        a.months.checked_sub(b.months).ok_or_else(interval_overflow)?,
-        a.days.checked_sub(b.days).ok_or_else(interval_overflow)?,
-        a.micros.checked_sub(b.micros).ok_or_else(interval_overflow)?,
+        a.months.checked_sub(b.months).ok_or_else(|| interval_overflow_at("finite_interval_mi", 3575))?,
+        a.days.checked_sub(b.days).ok_or_else(|| interval_overflow_at("finite_interval_mi", 3575))?,
+        a.micros.checked_sub(b.micros).ok_or_else(|| interval_overflow_at("finite_interval_mi", 3575))?,
     );
     if r.is_infinite() {
-        return Err(interval_overflow());
+        return Err(interval_overflow_at("finite_interval_mi", 3575));
     }
     Ok(r)
 }

@@ -1961,7 +1961,8 @@ impl Settings {
                 None => Err(err!(
                     UNDEFINED_OBJECT,
                     "unrecognized configuration parameter \"{name}\""
-                )),
+                )
+                .routine_at("find_option", 1276)),
             },
         }
     }
@@ -2568,7 +2569,8 @@ impl Settings {
                 };
                 let setting = match d.kind {
                     Kind::Real(_) => format_g(raw.parse().unwrap_or(0.0)),
-                    _ if d.name == "archive_command" => self.show_value(d.name),
+                    // (Their show hooks': show_archive_command, show_tcp_keepalives_*.)
+                    _ if d.name == "archive_command" || d.name.starts_with("tcp_keepalives_") => self.show_value(d.name),
                     Kind::Int(_) if d.name.ends_with("_mode") || d.name == "unix_socket_permissions" => {
                         Self::shown(d, &raw)
                     }

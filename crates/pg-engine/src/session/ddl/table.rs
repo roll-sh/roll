@@ -832,6 +832,22 @@ impl Ddl<'_, '_> {
         for c in t.columns.iter_mut().filter(|c| c.def_oid == LIKE_DEF) {
             c.def_oid = self.cat.alloc_oid();
         }
+        // (Each of its constraints' indexes is built by a scan of the new, empty table:
+        // index_build's, which seq_scan counts.)
+        if t.partkey.is_none() && t.foreign.is_none() {
+            for _ in t.indexes.iter().chain(&t.pkey_index) {
+                crate::exec::pgstat::count_seqscan(self.ctx, t.oid);
+            }
+        }
+        // (The table, its TOAST table and index, then its constraints' indexes.)
+        self.lock_new_relation(t.oid)?;
+        if t.toast != 0 {
+            self.lock_new_relation(t.toast)?;
+            self.lock_new_relation(t.toast + 1)?;
+        }
+        for &ix in t.indexes.iter().chain(&t.pkey_index) {
+            self.lock_new_relation(ix)?;
+        }
         self.cat.put_table(t);
         self.save()?;
         Ok("CREATE TABLE".into())
@@ -4913,7 +4929,8 @@ impl Ddl<'_, '_> {
                             "column \"{}\" of relation \"{}\" does not exist",
                             cmd.name, t.name
                         ),
-                    ));
+                    )
+                    .routine_at("ATExecDropColumn", 9326));
                 };
                 let cascade = cmd.behavior == pb::DropBehavior::DropCascade as i32;
                 let before = Arc::new(self.cat.clone());
@@ -7847,6 +7864,13 @@ impl Ddl<'_, '_> {
             }
             crate::exec::dml::truncate(t, self.ctx)?;
             crate::exec::pgstat::count_truncate(self.ctx, t.oid);
+            // (Its indexes are built again, each by a scan of the emptied table:
+            // RelationTruncateIndexes' or reindex_relation's index_build.)
+            if t.partkey.is_none() {
+                for _ in t.indexes.iter().chain(&t.pkey_index) {
+                    crate::exec::pgstat::count_seqscan(self.ctx, t.oid);
+                }
+            }
             if t.partkey.is_none() {
                 // ON COMMIT DELETE ROWS, or a table given its files in this subtransaction:
                 // emptied in place (heap_truncate_one_rel), its statistics as the index
@@ -8064,6 +8088,18 @@ impl Ddl<'_, '_> {
 
     /// Lock relation `oid` in `mode` (a lockdefs.h number) until the transaction ends;
     /// pg_locks shows it.
+    /// The AccessExclusiveLock a new relation's creator holds on it (heap_create_with_catalog's
+    /// and index_create's LockRelationOid): no one else can see it to wait for it.
+    pub(super) fn lock_new_relation(&self, oid: u32) -> Result<()> {
+        self.ctx.txn.borrow_mut().lock_relation(
+            oid,
+            crate::txn::locks::LockMode::AccessExclusive,
+            crate::txn::locks::WaitPolicy::Block,
+            &|| oid.to_string(),
+        )?;
+        Ok(())
+    }
+
     pub(super) fn note_lock(&self, oid: u32, mode: i32) -> Result<()> {
         const MODES: [&str; 9] = [
             "",

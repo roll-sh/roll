@@ -2402,6 +2402,9 @@ pub struct Target {
 pub struct Required {
     pub obj: Addr,
     pub owner: Addr,
+    /// Where PostgreSQL raises it: findDependentObjects (an owning object) or
+    /// reportDependentObjects (a partition's dependency).
+    pub at: (&'static str, u32),
 }
 
 struct Walk<'d> {
@@ -2548,6 +2551,7 @@ impl Walk<'_> {
             return Err(Required {
                 obj,
                 owner: partition.unwrap_or(owner),
+                at: ("findDependentObjects", 787),
             });
         }
         // Its dependents, newest first.
@@ -2672,6 +2676,7 @@ pub fn report(cat: &Catalog, sp: &[String], targets: &[Target], cascade: bool) -
             return Report::Required(Required {
                 obj: t.obj,
                 owner: t.dependee.unwrap_or((0, 0, 0)),
+                at: ("reportDependentObjects", 1014),
             });
         }
     }

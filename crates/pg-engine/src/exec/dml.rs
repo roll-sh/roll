@@ -3473,9 +3473,20 @@ pub fn insert_prepared(
                 continue;
             };
             check_without_overlaps(t, bix, &vals)?;
+            // (check_exclusion_or_unique_constraint scans the index for the key, unless a
+            // NULL in it passes the check at once: idx_scan, and the row it finds read and
+            // fetched through it.)
+            let counted = super::pgstat::scan_counts(ctx)
+                && (bix.index.nulls_not_distinct || !vals.iter().any(Value::is_null));
+            if counted {
+                super::pgstat::count_index_scan(ctx, bix.index.oid);
+            }
             if let Some((existing, _)) =
                 index_conflict(t, bix, &vals, None, None, Dirty::Wait, true, ctx)?
             {
+                if counted {
+                    super::pgstat::count_index_tuple(ctx, bix.index.oid);
+                }
                 return Ok(Inserted::Conflict(
                     p.row.clone(),
                     Conflict {

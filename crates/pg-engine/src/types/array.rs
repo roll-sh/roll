@@ -234,12 +234,16 @@ fn write_dim(
     out.push('}');
 }
 
-fn malformed(s: &str, detail: &str) -> Error {
+/// array_in's "malformed array literal", raised at `line` of PostgreSQL's `routine`.
+#[cold]
+#[inline(never)]
+fn malformed(s: &str, detail: &str, routine: &'static str, line: u32) -> Error {
     Error::new(
         code::INVALID_TEXT_REPRESENTATION,
         format!("malformed array literal: \"{s}\""),
     )
     .detail(detail.to_string())
+    .routine_at(routine, line)
 }
 
 /// Parse `{1,2,3}`, `{{1,2},{3,4}}`, `[0:1]={a,b}`, `{"a b",NULL,"\"q\""}`.
@@ -288,20 +292,22 @@ pub fn parse_array(s: &str, elem: &DataType, ctx: &FormatCtx) -> Result<ArrayVal
                 return Err(malformed(
                     input,
                     "\"[\" must introduce explicitly-specified array dimensions.",
+                    "ReadArrayDimensions",
+                    438,
                 ));
             };
             let (lo, hi) = if let Some(rest) = s.strip_prefix(':') {
                 s = rest;
                 match dim_int(&mut s)? {
                     Some(h) => (first, h),
-                    None => return Err(malformed(input, "Missing array dimension value.")),
+                    None => return Err(malformed(input, "Missing array dimension value.", "ReadArrayDimensions", 452)),
                 }
             } else {
                 (1, first)
             };
             s = s
                 .strip_prefix(']')
-                .ok_or_else(|| malformed(input, "Missing \"]\" after array dimensions."))?;
+                .ok_or_else(|| malformed(input, "Missing \"]\" after array dimensions.", "ReadArrayDimensions", 464))?;
             if hi < lo {
                 return Err(Error::new(
                     code::ARRAY_SUBSCRIPT_ERROR,
@@ -325,18 +331,15 @@ pub fn parse_array(s: &str, elem: &DataType, ctx: &FormatCtx) -> Result<ArrayVal
         }
         s = s
             .strip_prefix('=')
-            .ok_or_else(|| malformed(input, "Missing \"=\" after array dimensions."))?
+            .ok_or_else(|| malformed(input, "Missing \"=\" after array dimensions.", "array_in", 271))?
             .trim_start();
     }
     if !s.starts_with('{') {
-        return Err(malformed(
-            input,
-            if explicit_bounds.is_empty() {
-                "Array value must start with \"{\" or dimension information."
-            } else {
-                "Array contents must start with \"{\"."
-            },
-        ));
+        return Err(if explicit_bounds.is_empty() {
+            malformed(input, "Array value must start with \"{\" or dimension information.", "array_in", 262)
+        } else {
+            malformed(input, "Array contents must start with \"{\".", "array_in", 282)
+        });
     }
     let delim = typdelim(elem);
     let chars: Vec<char> = s.chars().collect();
@@ -350,14 +353,11 @@ pub fn parse_array(s: &str, elem: &DataType, ctx: &FormatCtx) -> Result<ArrayVal
         dim[i] = (*hi as i64) - (*lo as i64) + 1;
     }
     let dimension_error = || {
-        malformed(
-            input,
-            if specified {
-                "Specified array dimensions do not match array contents."
-            } else {
-                "Multidimensional arrays must have sub-arrays with matching dimensions."
-            },
-        )
+        if specified {
+            malformed(input, "Specified array dimensions do not match array contents.", "ReadArrayStr", 775)
+        } else {
+            malformed(input, "Multidimensional arrays must have sub-arrays with matching dimensions.", "ReadArrayStr", 780)
+        }
     };
     let isspace = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}');
     enum Tok {
@@ -369,7 +369,7 @@ pub fn parse_array(s: &str, elem: &DataType, ctx: &FormatCtx) -> Result<ArrayVal
     }
     let mut p = 0usize;
     let read_token = |p: &mut usize| -> Result<Tok> {
-        let ending = || malformed(input, "Unexpected end of input.");
+        let ending = || malformed(input, "Unexpected end of input.", "ReadArrayToken", 939);
         loop {
             match chars.get(*p) {
                 None => return Err(ending()),
@@ -409,6 +409,8 @@ pub fn parse_array(s: &str, elem: &DataType, ctx: &FormatCtx) -> Result<ArrayVal
                                             return Err(malformed(
                                                 input,
                                                 "Incorrectly quoted array element.",
+                                                "ReadArrayToken",
+                                                868,
                                             ));
                                         }
                                     }
@@ -435,10 +437,10 @@ pub fn parse_array(s: &str, elem: &DataType, ctx: &FormatCtx) -> Result<ArrayVal
                         match chars.get(*p) {
                             None => return Err(ending()),
                             Some('{') => {
-                                return Err(malformed(input, "Unexpected \"{\" character."));
+                                return Err(malformed(input, "Unexpected \"{\" character.", "ReadArrayToken", 895));
                             }
                             Some('"') => {
-                                return Err(malformed(input, "Incorrectly quoted array element."));
+                                return Err(malformed(input, "Incorrectly quoted array element.", "ReadArrayToken", 902));
                             }
                             Some('\\') => {
                                 *p += 1;
@@ -479,7 +481,7 @@ pub fn parse_array(s: &str, elem: &DataType, ctx: &FormatCtx) -> Result<ArrayVal
         match read_token(&mut p)? {
             Tok::Start => {
                 if expect_delim {
-                    return Err(malformed(input, "Unexpected \"{\" character."));
+                    return Err(malformed(input, "Unexpected \"{\" character.", "ReadArrayStr", 634));
                 }
                 if nest >= MAXDIM {
                     return Err(Error::new(
@@ -500,7 +502,7 @@ pub fn parse_array(s: &str, elem: &DataType, ctx: &FormatCtx) -> Result<ArrayVal
             }
             Tok::End => {
                 if nelems[nest - 1] > 0 && !expect_delim {
-                    return Err(malformed(input, "Unexpected \"}\" character."));
+                    return Err(malformed(input, "Unexpected \"}\" character.", "ReadArrayStr", 666));
                 }
                 nest -= 1;
                 if nest > 0 {
@@ -515,13 +517,13 @@ pub fn parse_array(s: &str, elem: &DataType, ctx: &FormatCtx) -> Result<ArrayVal
             }
             Tok::Delim => {
                 if !expect_delim {
-                    return Err(malformed(input, &format!("Unexpected \"{delim}\" character.")));
+                    return Err(malformed(input, &format!("Unexpected \"{delim}\" character."), "ReadArrayStr", 701));
                 }
                 expect_delim = false;
             }
             t @ (Tok::Elem(_) | Tok::Null) => {
                 if expect_delim {
-                    return Err(malformed(input, "Unexpected array element."));
+                    return Err(malformed(input, "Unexpected array element.", "ReadArrayStr", 716));
                 }
                 values.push(match t {
                     Tok::Elem(v) => parse_value(&v, elem, ctx)?,
@@ -540,7 +542,7 @@ pub fn parse_array(s: &str, elem: &DataType, ctx: &FormatCtx) -> Result<ArrayVal
         }
     }
     if chars[p..].iter().any(|c| !isspace(*c)) {
-        return Err(malformed(input, "Junk after closing right brace."));
+        return Err(malformed(input, "Junk after closing right brace.", "array_in", 305));
     }
     if values.is_empty() {
         return Ok(ArrayValue::empty(elem.clone()));

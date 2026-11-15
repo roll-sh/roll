@@ -624,8 +624,10 @@ fn iv_of(v: &Value) -> Interval {
     }
 }
 
-fn date_out_of_range() -> crate::error::Error {
-    err!(DATETIME_FIELD_OVERFLOW, "date out of range")
+#[cold]
+#[inline(never)]
+fn date_out_of_range(routine: &'static str, line: u32) -> crate::error::Error {
+    err!(DATETIME_FIELD_OVERFLOW, "date out of range").routine_at(routine, line)
 }
 /// date_pli.
 fn date_pl_int(a: &[Value], _: &FnCtx) -> Result<Value> {
@@ -635,7 +637,7 @@ fn date_pl_int(a: &[Value], _: &FnCtx) -> Result<Value> {
     }
     let r = d as i64 + i(&a[1]) as i64;
     if r < i32::MIN as i64 || r > i32::MAX as i64 || !datetime::is_valid_date(r as i32) {
-        return Err(date_out_of_range());
+        return Err(date_out_of_range("date_pli", 583));
     }
     let r = r as i32;
     Ok(Value::Date(r))
@@ -651,7 +653,7 @@ fn date_mi_int(a: &[Value], _: &FnCtx) -> Result<Value> {
     }
     let r = d as i64 - i(&a[1]) as i64;
     if r < i32::MIN as i64 || r > i32::MAX as i64 || !datetime::is_valid_date(r as i32) {
-        return Err(date_out_of_range());
+        return Err(date_out_of_range("date_mii", 607));
     }
     Ok(Value::Date(r as i32))
 }
@@ -702,7 +704,7 @@ fn date_time(d: i32, t: i64) -> Result<Value> {
     if datetime::ts_is_finite(r) {
         r += t;
         if !datetime::ts_is_valid(r) {
-            return Err(err!(DATETIME_FIELD_OVERFLOW, "timestamp out of range"));
+            return Err(err!(DATETIME_FIELD_OVERFLOW, "timestamp out of range").routine_at("datetime_timestamp", 2042));
         }
     }
     Ok(Value::Timestamp(r))

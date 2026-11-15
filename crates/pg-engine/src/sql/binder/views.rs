@@ -724,6 +724,8 @@ pub fn view_updatability(
     include_triggers: bool,
 ) -> (i32, Vec<bool>) {
     let mut b = Binder::new(ctx, Vec::new());
+    // (Only analyzed, never planned: its PL/pgSQL calls don't run, view_query_is_auto_updatable.)
+    b.skip_procs = true;
     let mask = relation_events(&mut b, v.oid, &mut Vec::new(), include_triggers, None);
     let cols = (0..v.columns.len())
         .map(|k| {

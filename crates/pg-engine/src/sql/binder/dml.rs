@@ -990,7 +990,20 @@ impl Binder<'_, '_> {
                         _ => None,
                     }
                 }
-                let literal = |i: usize| unknown_output(&plan, i);
+                // (A plain SELECT is pulled up into the INSERT, pull_up_subqueries: a
+                // constant of its select list is then coerced as a constant, folded,
+                // `'0'::numeric`; not one under a grouping, ORDER BY, LIMIT, DISTINCT.)
+                fn pulled_up_const(plan: &Plan, i: usize) -> Option<Expr> {
+                    match plan {
+                        Plan::Project { exprs, input }
+                            if matches!(&**input, Plan::One | Plan::Scan(_) | Plan::Filter { .. } | Plan::Join { .. }) =>
+                        {
+                            exprs.get(i).filter(|e| matches!(e, Expr::Const(..))).cloned()
+                        }
+                        _ => None,
+                    }
+                }
+                let literal = |i: usize| unknown_output(&plan, i).or_else(|| pulled_up_const(&plan, i));
                 let vals = cols
                     .iter()
                     .enumerate()
@@ -1194,7 +1207,7 @@ impl Binder<'_, '_> {
                                     "column \"{}\" of relation \"{}\" does not exist",
                                     rt.name, v.view.name
                                 ),
-                            ),
+                            ).routine_at("checkInsertTargets", 1068),
                             rt.location,
                         ));
                     };
@@ -1241,7 +1254,7 @@ impl Binder<'_, '_> {
                                 "column \"{}\" of relation \"{}\" does not exist",
                                 rt.name, t.name
                             ),
-                        ),
+                        ).routine_at("checkInsertTargets", 1068),
                         rt.location,
                     ));
                 };
@@ -1748,7 +1761,7 @@ impl Binder<'_, '_> {
                                     "column \"{}\" of relation \"{}\" does not exist",
                                     rt.name, v.view.name
                                 ),
-                            ),
+                            ).routine_at("transformUpdateTargetList", 2589),
                             rt.location,
                         ));
                     }
@@ -1770,7 +1783,7 @@ impl Binder<'_, '_> {
                                     "column \"{}\" of relation \"{}\" does not exist",
                                     rt.name, t.name
                                 ),
-                            );
+                            ).routine_at("transformUpdateTargetList", 2589);
                             if !rt.indirection.is_empty()
                                 && self
                                     .scope()
@@ -2847,7 +2860,12 @@ impl Binder<'_, '_> {
             )?,
             _ => Expr::IsNull(Box::new(cond), true),
         };
-        let kind = match (by_target, by_source) {
+        // (transform_MERGE_to_join: by the actions there are, DO NOTHING ones aside.)
+        let acting = |m: MergeWhen| whens.iter().any(|w| merge_when(w) == m && merge_cmd(w) != pb::CmdType::CmdNothing);
+        let kind = match (
+            by_target && acting(MergeWhen::NotMatchedByTarget),
+            by_source && acting(MergeWhen::NotMatchedBySource),
+        ) {
             (false, false) => JoinKind::Inner,
             (true, false) => JoinKind::Left,
             (false, true) => JoinKind::Right,

@@ -517,6 +517,7 @@ impl Ddl<'_, '_> {
                 return Err(e);
             }
             if !s.concurrent {
+                self.lock_new_relation(ix.oid)?;
                 self.build_index(&t, &ix)?;
             } else {
                 // DefineIndex's later phases: after the build, the table's writers again
@@ -643,10 +644,10 @@ impl Ddl<'_, '_> {
         where_: Option<&pb::Node>,
         constraint: bool,
     ) -> Result<IndexParts> {
-        let missing = if constraint {
-            "named in key does not exist"
+        let (missing, missing_line) = if constraint {
+            ("named in key does not exist", 1970)
         } else {
-            "does not exist"
+            ("does not exist", 1975)
         };
         let ta = Arc::new(t.clone());
         let mut b = self.binder();
@@ -689,6 +690,7 @@ impl Ddl<'_, '_> {
                         code::UNDEFINED_COLUMN,
                         format!("column \"{}\" {missing}", e.name),
                     )
+                    .routine_at("ComputeIndexAttrs", missing_line)
                 })?;
                 name_parts.push(e.name.clone());
                 (IndexKey::Column(i), t.columns[i].ty.clone())
@@ -859,6 +861,7 @@ impl Ddl<'_, '_> {
                     code::UNDEFINED_COLUMN,
                     format!("column \"{name}\" {missing}"),
                 )
+                    .routine_at("ComputeIndexAttrs", missing_line)
             })?;
             if virtual_col(i) {
                 return Err(virtual_err(true));
@@ -4398,6 +4401,12 @@ impl Ddl<'_, '_> {
 
     /// The error for a `kind` routine `owa` names that doesn't exist (LookupFuncWithArgs).
     pub(super) fn no_routine(&self, owa: &pb::ObjectWithArgs, kind: pb::ObjectType) -> Error {
+        // (Its line in LookupFuncWithArgs: by kind, then which of the three messages.)
+        let (unspecified, star, sig) = match kind {
+            pb::ObjectType::ObjectProcedure => (2457, 2462, 2462),
+            pb::ObjectType::ObjectAggregate => (2471, 2476, 2481),
+            _ => (2491, 2496, 2496),
+        };
         let word = object_type_word(kind).to_lowercase();
         if owa.args_unspecified {
             let word = if kind == pb::ObjectType::ObjectRoutine {
@@ -4416,7 +4425,8 @@ impl Ddl<'_, '_> {
                     "could not find {article} {word} named \"{}\"",
                     names(&owa.objname).join(".")
                 ),
-            );
+            )
+            .routine_at("LookupFuncWithArgs", unspecified);
         }
         // An aggregate without arguments is aggregate(*).
         if kind == pb::ObjectType::ObjectAggregate && owa.objargs.is_empty() {
@@ -4426,12 +4436,14 @@ impl Ddl<'_, '_> {
                     "{word} {}(*) does not exist",
                     names(&owa.objname).join(".")
                 ),
-            );
+            )
+            .routine_at("LookupFuncWithArgs", star);
         }
         Error::new(
             code::UNDEFINED_FUNCTION,
             format!("{word} {} does not exist", self.function_sig(owa)),
         )
+        .routine_at("LookupFuncWithArgs", sig)
     }
 
     /// `find_function` for a statement on `kind` objects: a procedure also matches on all its
@@ -6246,6 +6258,7 @@ impl Ddl<'_, '_> {
                 ),
             )
             .hint(format!("You can drop {other} instead."))
+            .routine_at(r.at.0, r.at.1)
         };
         let targets = {
             // Only the dependencies of what may depend on the objects the walk reaches are

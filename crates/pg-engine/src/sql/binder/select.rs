@@ -427,9 +427,15 @@ impl Binder<'_, '_> {
                     ));
                 }
                 None if matches!(inner(q), Some(NodeEnum::SelectStmt(_))) && !self.deparse => {
-                    // (Its plan-time errors wait for a reference: `defer_plan`.)
+                    // (Its plan-time errors wait for a reference: `defer_plan`. A SELECT
+                    // nothing references is never planned, SS_process_ctes: its PL/pgSQL
+                    // calls aren't run.)
                     self.defer_plan.borrow_mut().push(None);
+                    let unread = refs.as_ref().is_some_and(|r| !r.contains_key(&cte.ctename));
+                    let skip = self.skip_procs;
+                    self.skip_procs |= unread;
                     let r = self.in_sibling(|b| b.bind_select_node(q));
+                    self.skip_procs = skip;
                     deferred = self.defer_plan.borrow_mut().pop().flatten();
                     r?
                 }
