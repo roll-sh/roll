@@ -42,6 +42,8 @@ type Client struct {
 
 	once    sync.Mutex
 	project string
+	// login renews the token of a client a workload identity's login made.
+	login *relogin
 
 	cacheMu sync.Mutex
 	cache   map[string]cached
@@ -100,6 +102,31 @@ func New(api, token string) *Client {
 }
 
 func (c *Client) call(ctx context.Context, method, path string, body, out any) error {
+	return c.authed(ctx, func(token string) error { return c.send(ctx, token, method, path, body, out) })
+}
+
+// authed runs do with the client's token. A logged-in client's is renewed first when it's ending,
+// and when the server refuses it (revoked, ended early): one new login, then once more.
+func (c *Client) authed(ctx context.Context, do func(token string) error) error {
+	if c.login == nil {
+		return do(c.Token)
+	}
+	token, err := c.login.token(ctx, c, "")
+	if err != nil {
+		return err
+	}
+	err = do(token)
+	var e *Error
+	if errors.As(err, &e) && e.Status == http.StatusUnauthorized {
+		if token, err = c.login.token(ctx, c, token); err != nil {
+			return err
+		}
+		return do(token)
+	}
+	return err
+}
+
+func (c *Client) send(ctx context.Context, token, method, path string, body, out any) error {
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -112,8 +139,8 @@ func (c *Client) call(ctx context.Context, method, path string, body, out any) e
 	if err != nil {
 		return err
 	}
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -254,6 +281,16 @@ func (c *Client) cachedValues(ctx context.Context, path string) (*Values, error)
 	if ok && now().Sub(hit.at) < c.CacheTTL {
 		return hit.values, nil
 	}
+	var out *Values
+	err := c.authed(ctx, func(token string) (err error) {
+		out, err = c.revalidate(ctx, token, path, hit, ok, now)
+		return err
+	})
+	return out, err
+}
+
+// revalidate is one conditional read of path with token: a 304 keeps hit's values.
+func (c *Client) revalidate(ctx context.Context, token, path string, hit cached, ok bool, now func() time.Time) (*Values, error) {
 	sep := "?"
 	if strings.Contains(path, "?") {
 		sep = "&"
@@ -262,8 +299,8 @@ func (c *Client) cachedValues(ctx context.Context, path string) (*Values, error)
 	if err != nil {
 		return nil, err
 	}
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	if ok && hit.etag != "" {
 		req.Header.Set("If-None-Match", `"`+hit.etag+`"`)
