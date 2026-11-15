@@ -217,10 +217,19 @@ impl Apps {
         if run.port.is_none() {
             run.port = old.run.port;
         }
+        // Without a message of its own: what it puts live, as `…/pending` names it (Heroku's
+        // "Set LOG_LEVEL config vars"), names only.
+        let message = match message {
+            Some(m) => m,
+            None => match self.pending(service, env).await.ok().as_ref().and_then(changes_said) {
+                Some(said) => format!("Redeploy: {said}"),
+                None => format!("Redeploy of {}", old.id),
+            },
+        };
         let d = NewDeployment {
             trigger: Trigger::Settings,
             revision: old.revision.clone(),
-            message: message.unwrap_or_else(|| format!("Redeploy of {}", old.id)),
+            message,
             image: Some(image),
             plan: old.plan.clone(),
             rollback_of: None,
@@ -2249,6 +2258,28 @@ ERROR: failed to solve: process \"/bin/sh -c npm ci\" did not complete successfu
     }
 }
 
+
+/// What `…/pending` says changed, as a line (`API_KEY added, LOG_LEVEL changed, run.memory_mb,
+/// the project's secrets`); none when it names nothing. At most 300 characters.
+pub(crate) fn changes_said(p: &Value) -> Option<String> {
+    let names = |k: &str| p["variables"][k].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
+    let mut parts = Vec::new();
+    for (k, word) in [("added", "added"), ("changed", "changed"), ("removed", "removed")] {
+        let n = names(k);
+        if !n.is_empty() {
+            parts.push(format!("{} {word}", n.join(", ")));
+        }
+    }
+    let run: Vec<String> = p["run"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|k| format!("run.{k}")).collect();
+    if !run.is_empty() {
+        parts.push(run.join(", "));
+    }
+    if p["secrets"] == true {
+        parts.push("the project's secrets".into());
+    }
+    let said = parts.join("; ");
+    (!said.is_empty()).then(|| said.chars().take(300).collect())
+}
 
 /// The last due time at or before `now`, from one that is (`due`): what a pass records, so the
 /// runs an outage missed aren't made up one by one.

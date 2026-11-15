@@ -215,6 +215,10 @@ every deployment is immutable with instant rollback.
   one, over the one live before it), newest first, at most 50, through roll code's first-parent
   history (`Sources::commits`); one not in its history (a rollback) says so. `roll apps
   deploys --commits DEP` prints them.
+- **A deploy says what changed** (Heroku's "Set LOG_LEVEL config vars"): a redeploy without a
+  message of its own records what `…/pending` named, as `Redeploy: API_KEY added; LOG_LEVEL
+  changed; run.memory_mb; the project's secrets` (names only, never a value), so the deployments
+  list reads as a history; `roll apps deploys` shows each one's age.
 - **A failed deploy says how to fix it** (Heroku's error codes, Render's pointers): a deployment's
   `fix` (read from its error and detail, never stored; `model::fix_for`) names the setting and its
   command for what roll knows: a pull the registry refused (a private image's login), memory
@@ -1985,65 +1989,62 @@ lines; the pre-deploy container had no `ROLL_INSTANCE`; another environment's ro
 the charts). A second product review the same day (with the review pack's screenshots of the real UI)
 put items 1–11 first.
 
-1. **A deploy says what changed** (Heroku's "Set LOG_LEVEL config vars"): a redeploy or a
-   settings deploy records the names `…/pending` worked out, shown instead of "No message", in the
-   dashboard and `roll apps deploys` (with ages).
-2. **Schedules show their next run and last result, with Run now** (Heroku Scheduler's "Next
+1. **Schedules show their next run and last result, with Run now** (Heroku Scheduler's "Next
    due", Vercel's Run): in the Jobs tab and `roll apps jobs`.
-3. **Secret-looking variables sealed by default** (Vercel's sensitive-by-default): a name like
+2. **Secret-looking variables sealed by default** (Vercel's sensitive-by-default): a name like
    `*_KEY`, `*SECRET*`, `*TOKEN*`, `*PASSWORD*` comes pre-checked to seal, in the dashboard and
    `roll apps vars`.
-4. **Deploy from a public Git URL** (Render, Railway, Cloud Run): `Source::Git { url, ref, root }`
+3. **Deploy from a public Git URL** (Render, Railway, Cloud Run): `Source::Git { url, ref, root }`
    fetched with `code-git`'s client over `roll_net::PublicOnly`, polled for new commits as tags
    are; a GitHub repo without the GitHub App.
-5. **Starter templates** (Railway's, Render's and Vercel's galleries): a few `roll.toml`s built on
+4. **Starter templates** (Railway's, Render's and Vercel's galleries): a few `roll.toml`s built on
    images (an app with Postgres, n8n, Umami…) offered on an empty project, through the import with
    `{ ask }` and `{ generate }`.
-6. **An editable roll domain** (Railway's): change a service's `<service>-<project>` name (a renamed
+5. **An editable roll domain** (Railway's): change a service's `<service>-<project>` name (a renamed
    service keeps its old one today), in Domains and `roll domains`.
-7. **Saturation**: requests waiting for an instance at `max_instances` in Metrics, and an
+6. **Saturation**: requests waiting for an instance at `max_instances` in Metrics, and an
    `alert.capacity` (Cloud Run's max-instances flag, Heroku's queue time).
-8. **An OpenAPI spec for `/v1/apps`** (Render's, Vercel's, Fly's): `docs/apps/openapi.json`,
+7. **An OpenAPI spec for `/v1/apps`** (Render's, Vercel's, Fly's): `docs/apps/openapi.json`,
    tested against the router.
-9. **The second product review's papercuts**: a never-deployed upload service's main button (a
+8. **The second product review's papercuts**: a never-deployed upload service's main button (a
    disabled "Redeploy"); the header's instance count while asleep; events without units, "someone"
    for an unknown actor; the CLI's raw words (`stopped`, `none`, URLs for workers), deploys
    without ages; `roll up`'s hint without an install line; Settings repeating the project's
    notifications, drains and limits.
-10. *Waiting on #25 (MCP's users' tokens, which adds `roll login`).* **`roll login`**: a browser sign-in
+9. *Waiting on #25 (MCP's users' tokens, which adds `roll login`).* **`roll login`**: a browser sign-in
    whose session the CLI keeps, as `railway login` and `fly auth login` do.
-11. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+10. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-12. **Region**: the region shown on the overview and each environment, defaulting to the project's
+11. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-13. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+12. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-14. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+13. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-15. *Waiting on #62 (roll secrets' landing, which carries what #31 was; #20 is on main).* **roll secrets as the env store**, as in "Secrets and environments", plus
+14. *Waiting on #62 (roll secrets' landing, which carries what #31 was; #20 is on main).* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-16. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+15. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-17. *Waiting on #62 (roll secrets' landing, which carries what #31 was; #20 is on main).* Links for buckets, streams, queues and NoSQL as roll secrets links.
-18. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+16. *Waiting on #62 (roll secrets' landing, which carries what #31 was; #20 is on main).* Links for buckets, streams, queues and NoSQL as roll secrets links.
+17. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-19. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+18. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-20. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+19. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-21. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+20. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-22. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+21. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

@@ -1537,10 +1537,10 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
     };
     let dir = std::fs::canonicalize(&dir).with_context(|| format!("{}", dir.display()))?;
     // A roll.toml the build would refuse is refused here, before anything is made or uploaded.
-    if !u.all {
-        if let Some(app) = apps_build::app::read(&dir).map_err(|e| anyhow::anyhow!("{e}"))? {
-            app.check_all().map_err(|e| anyhow::anyhow!("{e}"))?;
-        }
+    if !u.all
+        && let Some(app) = apps_build::app::read(&dir).map_err(|e| anyhow::anyhow!("{e}"))?
+    {
+        app.check_all().map_err(|e| anyhow::anyhow!("{e}"))?;
     }
     if u.all {
         return up_all(api, json_out, &dir, &u).await;
@@ -1702,6 +1702,17 @@ fn fill_vars(app: &str, vars: &std::collections::BTreeMap<String, apps_build::pr
         out.insert(k.clone(), json!(value));
     }
     Ok(out)
+}
+
+/// How long ago, as a person reads it (`12s ago`, `3m ago`, `5h ago`, `2d ago`).
+fn ago(ms: i64) -> String {
+    let s = ms.max(0) / 1000;
+    match s {
+        0..60 => format!("{s}s ago"),
+        60..3600 => format!("{}m ago", s / 60),
+        3600..86400 => format!("{}h ago", s / 3600),
+        _ => format!("{}d ago", s / 86400),
+    }
 }
 
 fn local_plan(dir: &Path, env: &str) -> anyhow::Result<apps_build::Plan> {
@@ -2582,7 +2593,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     let by = d["actor"].as_str().map(|a| format!("  ({})", a.strip_prefix("git:").unwrap_or(a))).unwrap_or_default();
                     // A pruned one is history only (its image is gone): nothing to roll back to.
                     let status = if d["pruned_at"].is_i64() { "pruned".to_string() } else { s(&d["status"]) };
-                    println!("{}  {status:<10} {:<8} {rev:<8} {}{by}", s(&d["id"]), s(&d["trigger"]), s(&d["message"]));
+                    let age = d["created_at"].as_i64().map(|t| ago(chrono::Utc::now().timestamp_millis() - t)).unwrap_or_default();
+                    println!("{}  {status:<10} {:<8} {rev:<8} {age:>8}  {}{by}", s(&d["id"]), s(&d["trigger"]), s(&d["message"]));
                     if let Some(f) = d["fix"].as_str() {
                         println!("    fix: {f}");
                     }

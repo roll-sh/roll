@@ -3110,6 +3110,9 @@ async fn pending_changes_say_what_the_next_deploy_does() {
     let (_, p) = call(&w.api, "GET", &format!("{base}/pending"), None).await;
     assert_eq!(p, json!({"variables": {"added": ["ADDED"], "removed": ["GONE"], "changed": ["MODE"]}, "run": ["memory_mb"], "secrets": null}));
     assert!(!p.to_string().contains("new-secret-value"), "names only");
+    // A redeploy says what it puts live (Heroku's "Set MODE config vars"), names only.
+    let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    assert_eq!(d["message"], "Redeploy: ADDED added; MODE changed; GONE removed; run.memory_mb", "{d}");
 }
 
 /// A log alert: its output saying the pattern often enough in five minutes is one event (roll's
