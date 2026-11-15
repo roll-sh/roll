@@ -4582,11 +4582,16 @@ fn protocol_cases() {
             "create or replace function pc_fi(int) returns int language plpgsql immutable as $$ begin raise notice 'fi %', $1; return 10 / $1; end $$",
             "create or replace function pc_fs(int) returns int language plpgsql stable as $$ begin raise notice 'fs %', $1; return 10 / $1; end $$",
             "create or replace function pc_fsql(int) returns int language sql immutable as $$ select pc_fi($1) + 1 $$",
+            // (Tables of their own, not temporary: a closing session's temporary tables go
+            // after it closed, a catalog change a later case's statement would be planned
+            // again for.)
+            "create table if not exists pf3 as select generate_series(1, 3) a",
+            "create table if not exists pf0(a int)",
         ], &[])),
-        c("plf_simple", |a| session(a, &["create temp table pf3 as select generate_series(1, 3) a"], &[query("select pc_fi(1) from pf3")])),
-        c("plf_simple_empty", |a| session(a, &["create temp table pf0(a int)"], &[query("select pc_fi(0) from pf0"), query("select a from pf0 where a = pc_fi(0)")])),
-        c("plf_stable", |a| session(a, &["create temp table pf3 as select generate_series(1, 2) a"], &[query("select pc_fs(1) from pf3")])),
-        c("plf_case", |a| session(a, &["create temp table pf3 as select generate_series(1, 3) a"], &[query("select case when a > 5 then pc_fi(0) end from pf3")])),
+        c("plf_simple", |a| session(a, &[], &[query("select pc_fi(1) from pf3")])),
+        c("plf_simple_empty", |a| session(a, &[], &[query("select pc_fi(0) from pf0"), query("select a from pf0 where a = pc_fi(0)")])),
+        c("plf_stable", |a| session(a, &[], &[query("select pc_fs(1) from pf3 where a < 3")])),
+        c("plf_case", |a| session(a, &[], &[query("select case when a > 5 then pc_fi(0) end from pf3")])),
         c("plf_bind", |a| ext(a, &[], &[parse("s", "select pc_fi(0)", &[]), describe(b'S', "s"), bind("", "s", &[], NONE, &[]), execute("", 0)])),
         c("plf_named_once", |a| session(a, &[], &[
             [parse("s", "select pc_fi(6)", &[]), sync()].concat(),
@@ -4604,7 +4609,7 @@ fn protocol_cases() {
         ])),
         c("plf_prepare", |a| session(a, &["prepare plf_p as select pc_fi(4)"], &[query("execute plf_p"), query("execute plf_p")])),
         c("plf_sql_body", |a| session(a, &[], &[query("select pc_fsql(1)")])),
-        c("plf_from_error", |a| session(a, &["create temp table pf0(a int)"], &[query("select * from pf0, pc_fi(0)")])),
+        c("plf_from_error", |a| session(a, &[], &[query("select * from pf0, pc_fi(0)")])),
         c("plf_check", |a| session(a, &[], &[query("create temp table pfc(a int check (a < pc_fi(2)))"), query("insert into pfc values (1), (2)")])),
         c("plf_explain", |a| session(a, &[], &[query("explain (costs off, verbose) select pc_fi(2)")])),
         // Parameters of type oids no type has: set operations, windows, columns of a
