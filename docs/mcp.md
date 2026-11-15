@@ -370,6 +370,9 @@ previews are listed once those products are on.
 | `postgres_typescript_types` | TypeScript interfaces for every table (Supabase's generated types). | `POST /v1/endpoints/{id}/query` (read-only) |
 | `postgres_start_endpoint` | Wake an endpoint's compute. | `POST /v1/endpoints/{endpoint}/start` |
 | `postgres_suspend_endpoint` | Suspend an endpoint's compute. | `POST /v1/endpoints/{endpoint}/suspend` |
+| `postgres_update_project` | How long a project keeps history for point-in-time restores and branches. | `PATCH /v1/projects/{project}` |
+| `postgres_backup_branch` | Take a base backup of a branch now (restores and new branches start from the newest). | `POST /v1/projects/{project}/branches/{branch}/backup` |
+| `postgres_delete_endpoint` | Delete an endpoint (a read replica, or a branch's compute; its data stays on the branch). | `DELETE /v1/endpoints/{endpoint}` |
 | `postgres_usage` | Compute and storage use of a project, with cost estimates. | `GET /v1/projects/{project}/usage` |
 | `redis_list_databases` | Serverless Redis databases. | `GET /v1/redis/databases` |
 | `redis_get_database` | A Redis database's settings and connection (credentials need reveal). | `GET /v1/redis/databases/{database}` |
@@ -379,6 +382,8 @@ previews are listed once those products are on.
 | `redis_command` | Run one command on a database, e.g. ["GET", "key"]. Read-only commands are reads; FLUSHDB and FLUSHALL delete. | `POST /v1/redis/databases/{database}/command` |
 | `redis_restore` | Rewind a database in place to a point in time. | `POST /v1/redis/databases/{id}/restore` |
 | `redis_usage` | A database's usage report. | `GET /v1/redis/databases/{database}/usage` |
+| `redis_update_database` | Change a database's name, memory limit, eviction policy, durability, idle timeout or history: what's left out stays. | `PATCH /v1/redis/databases/{database}` |
+| `redis_list_replicas` | A database's read replicas and their lag. | `GET /v1/redis/databases/{database}/replicas` |
 | `storage_list_buckets` | S3-compatible buckets. | `GET /v1/storage/buckets` |
 | `storage_get_bucket` | A bucket's settings. | `GET /v1/storage/buckets/{bucket}` |
 | `storage_create_bucket` | A new bucket. | `POST /v1/storage/buckets` |
@@ -425,6 +430,8 @@ previews are listed once those products are on.
 | `nosql_reset` | A branch back to its parent's state, in place. | `POST /v1/nosql/databases/{id}/reset` |
 | `nosql_restore` | Rewind a database in place to a point in time. | `POST /v1/nosql/databases/{id}/restore` |
 | `nosql_diff` | What a branch changed against its parent. | `GET /v1/nosql/databases/{id}/diff` |
+| `nosql_update_database` | Change a database's name, idle timeout, durability, history, expiry, read-only flag or masking policy: what's left out stays. Loosening masking or read-only needs admin. | `PATCH /v1/nosql/databases/{database}` |
+| `nosql_activity` | What a database is doing now: connected clients, slow queries, warnings and metrics. | `GET /v1/nosql/databases/{database}/activity` |
 | `queues_overview` | The broker's totals and listeners. | `GET /v1/queues/overview` |
 | `queues_list_vhosts` | RabbitMQ-compatible virtual hosts. | `GET /v1/queues/vhosts` |
 | `queues_create_vhost` | A new virtual host. | `POST /v1/queues/vhosts` |
@@ -669,7 +676,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: lockdown (`?lockdown=1`: work items from GitHub issues, reviews and review comments whose author can't push, and changes from forks, are `outside`, and their text is withheld from the model); search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
+Done lately: loosening a NoSQL database's masking policy or read-only flag is `admin` (it was `write`, so a token that could read and write could drop the masking and read raw values); postgres, Redis, storage, queues, streams and tasks tools for their everyday routes; lockdown (`?lockdown=1`: work items from GitHub issues, reviews and review comments whose author can't push, and changes from forks, are `outside`, and their text is withheld from the model); search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
 revocations were counted as asks: "1 asked" on a token that never made a request; seen in the review
 pack) (#25); ended OAuth connections and their kept clients are forgotten after the audit log's days
 (each `roll login` made one of each, kept forever) (#25); `roll login` checked live against a rolld
