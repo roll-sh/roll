@@ -281,6 +281,8 @@ struct FakeSts {
     pinned: Mutex<Option<String>>,
     /// The `sub` a role trusting roll's issuer pins (or, unpinned, any of roll's projects).
     web_pinned: Mutex<Option<String>>,
+    /// STS throttling every call (a failure to ask, not a refusal).
+    throttled: Mutex<bool>,
     sessions: Mutex<u32>,
     /// IAM user `legacy-ci`'s access key ids, and how many were ever made.
     keys: Mutex<(Vec<String>, u32)>,
@@ -288,6 +290,9 @@ struct FakeSts {
 
 impl roll_secrets::aws::Sts for FakeSts {
     fn assume(&self, role_arn: &str, external_id: &str, _session: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+        if *self.throttled.lock().unwrap() {
+            return Err("Throttling".into());
+        }
         if role_arn != "arn:aws:iam::123456789012:role/roll" || self.pinned.lock().unwrap().as_deref().is_some_and(|p| p != external_id) {
             return Err("AccessDenied".into());
         }
@@ -2007,6 +2012,11 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
 async fn an_aws_role_gives_each_lease_a_short_lived_session() {
     let api = Api::new().await;
     let role = json!({ "name": "deploy", "role_arn": "arn:aws:iam::123456789012:role/roll" });
+    // A probe STS fails to answer (throttled) proves nothing: nothing is registered.
+    *api.sts.throttled.lock().unwrap() = true;
+    let (s, e) = api.call(Method::POST, "/aws-roles", Some(role.clone())).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("couldn't check"), "{e}");
+    *api.sts.throttled.lock().unwrap() = false;
     // A role whose trust policy takes any ExternalId (another customer's that trusts roll, say)
     // is refused: it must pin this project's.
     let (s, e) = api.call(Method::POST, "/aws-roles", Some(role.clone())).await;

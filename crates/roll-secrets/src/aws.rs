@@ -76,6 +76,11 @@ pub fn external_id(project: &str) -> String {
     format!("roll-secrets:{project}")
 }
 
+/// Whether STS's error is a refusal of the caller (the trust policy said no), not a failure to ask.
+fn refused(why: &str) -> bool {
+    matches!(why, "AccessDenied" | "InvalidIdentityToken")
+}
+
 /// The audience of the token roll's issuer signs for AWS (IAM's OIDC provider names it).
 pub const AWS_AUDIENCE: &str = "sts.amazonaws.com";
 
@@ -235,8 +240,12 @@ impl Secrets {
             format!("roll's role with sts:ExternalId = {}", external_id(project))
         };
         let probe = format!("prj_probe_{}", names::new_id("p", 12));
-        if session(&*sts, &self.db, issuing.as_ref(), &probe, &n.role_arn, &trust, "roll-check", 900).is_ok() {
-            return Err(Error::BadRequest(format!("{}'s trust takes any of roll's projects: trust {pinned}, so roll assumes it for this project and nobody else's", n.role_arn)));
+        match session(&*sts, &self.db, issuing.as_ref(), &probe, &n.role_arn, &trust, "roll-check", 900) {
+            Ok(_) => return Err(Error::BadRequest(format!("{}'s trust takes any of roll's projects: trust {pinned}, so roll assumes it for this project and nobody else's", n.role_arn))),
+            // Only AWS refusing the made-up project shows the trust pins this one: any other error
+            // (throttling, AWS unable to fetch roll's keys) proves nothing, and nothing is registered.
+            Err(why) if !refused(&why) => return Err(Error::BadRequest(format!("roll couldn't check {}'s trust: {why}; try again", n.role_arn))),
+            Err(_) => {}
         }
         session(&*sts, &self.db, issuing.as_ref(), project, &n.role_arn, &trust, "roll-check", 900).map_err(|why| Error::BadRequest(format!("roll couldn't assume {}: {why} (its trust policy must trust {pinned})", n.role_arn)))?;
         let now = self.db.now_ms()?;
