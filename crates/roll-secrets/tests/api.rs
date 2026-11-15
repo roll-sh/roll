@@ -601,6 +601,8 @@ async fn ephemeral_environments_inherit_their_base_and_go_by_label_or_expiry() {
     assert_eq!((s, first["created"].as_bool()), (StatusCode::CREATED, Some(true)));
     let again = api.ok(Method::PUT, "/environments/pv-1", Some(want("postgres://pv-1", true))).await;
     assert_eq!((again["created"].as_bool(), again["change"].clone()), (Some(false), Value::Null), "ensuring what's there is no change");
+    let ensured = api.ok(Method::GET, "/audit?action=environment.ensure", None).await;
+    assert_eq!(ensured.as_array().map(Vec::len), Some(0), "nor an audit row, though \"an hour from now\" moved a little: {ensured}");
     let moved = api.ok(Method::PUT, "/environments/pv-1", Some(want("postgres://pv-1b", false))).await;
     assert_eq!(moved["change"]["keys"], 2, "one change: the new value, and EXTRA gone");
     assert_eq!(api.values("pv-1", "/").await["values"], json!({ "API": "https://staging-2", "DATABASE_URL": "postgres://pv-1b" }));
@@ -1703,6 +1705,13 @@ async fn a_sensitive_keys_value_reaches_only_roll_s_runtimes() {
     let (s, p) = (api.secrets.clone(), api.project.clone());
     let sandbox = tokio::task::spawn_blocking(move || s.values(&p, "production", "/", true, Some("sandbox:x"), &roll_secrets::Caller::consumer("sandbox:x").not_runtime()).unwrap()).await.unwrap();
     assert!(!sandbox.values.contains_key("PAYMENTS_KEY"));
+    // Nor is anyone's read of an untrusted preview: roll apps deploying a fork's preview doesn't
+    // get its unprotected base's sensitive key.
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY", Some(json!({ "value": "sk_test_sensitive", "tags": ["sensitive"] }))).await;
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pv-7", "base": "staging" }))).await;
+    let (s, p) = (api.secrets.clone(), api.project.clone());
+    let preview = tokio::task::spawn_blocking(move || s.values(&p, "pv-7", "/", true, Some("app:web"), &roll_secrets::Caller::consumer("app:web")).unwrap()).await.unwrap();
+    assert!(!preview.values.contains_key("STRIPE_KEY") && preview.withheld == ["STRIPE_KEY"], "{:?}", preview.withheld);
 
     // Tagging a key that already has a value: its older versions hold the value too, so none shows.
     api.ok(Method::PUT, "/environments/staging/secrets/OLD_KEY", Some(json!({ "value": "sk_live_old" }))).await;
