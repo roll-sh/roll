@@ -874,8 +874,6 @@ impl roll_workspace::Owners for People {
     }
 }
 
-/// roll secrets for roll apps' deploys (`apps_control::integrations::SecretSource`), set once the
-/// store is open (it opens after roll apps starts).
 /// After a product's own route changes a resource's credential (a password reset, a restore),
 /// tell roll secrets, so every folder linking it live moves its digest at once (watches, syncs,
 /// apps' redeploys and conditional reads see it). Without this they'd still see it within
@@ -906,6 +904,8 @@ fn changed_source(path: &str) -> Option<(&'static str, String)> {
     }
 }
 
+/// roll secrets for roll apps' deploys (`apps_control::integrations::SecretSource`), set once the
+/// store is open (it opens after roll apps starts).
 #[derive(Clone, Default)]
 pub struct ForApps(Arc<OnceLock<(Arc<Secrets>, Arc<roll_workspace::Workspace>)>>);
 

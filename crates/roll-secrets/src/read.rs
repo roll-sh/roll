@@ -293,14 +293,16 @@ const LIVE_FP_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 /// (never the value): a digest asks each product at most every [`LIVE_FP_TTL`], however many
 /// watches, syncs and caches poll it.
 #[derive(Default)]
-pub(crate) struct LiveFps(std::sync::Mutex<HashMap<String, (std::time::Instant, String)>>);
+pub(crate) struct LiveFps(std::sync::Mutex<HashMap<String, (Option<std::time::Instant>, String)>>);
 
 impl Secrets {
     /// A product changed `kind ref`'s credential itself (a password reset, a restore): every folder
     /// that links it live moves its digest now, on every node, instead of within [`LIVE_FP_TTL`].
     pub fn source_changed(&self, kind: &str, r#ref: &str) -> Result<()> {
         let prefix = format!("\0{kind}\0{ref}\0", ref = r#ref);
-        self.live_fps.0.lock().unwrap_or_else(|e| e.into_inner()).retain(|k, _| !k.contains(&prefix));
+        for (_, v) in self.live_fps.0.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().filter(|(k, _)| k.contains(&prefix)) {
+            v.0 = None;
+        }
         self.db.write(|c| {
             c.execute(
                 "INSERT INTO source_generations (kind, ref, generation) VALUES (?, ?, 1) ON CONFLICT (kind, ref) DO UPDATE SET generation = source_generations.generation + 1",
@@ -310,38 +312,46 @@ impl Secrets {
         Ok(())
     }
 
-    /// Forget every live link's fingerprint (tests: the next digest asks the products).
+    /// Expire every live link's fingerprint (tests: the next digest asks the products; their last
+    /// fingerprints stay for one that doesn't answer).
     #[doc(hidden)]
     pub fn forget_live_fingerprints(&self) {
-        self.live_fps.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        for v in self.live_fps.0.lock().unwrap_or_else(|e| e.into_inner()).values_mut() {
+            v.0 = None;
+        }
     }
 
     /// The fingerprint of a live link's value as its product answers now (or a marker when it's
     /// not this project's any more, or doesn't answer).
-    fn live_fp(&self, project: &str, dek: &Dek, l: &Link, members: &BTreeSet<(String, String)>) -> String {
-        if !members.contains(&(l.kind.clone(), l.r#ref.clone())) {
+    /// `members`: the project's linkable resources, `None` when they couldn't be read (then nothing
+    /// counts as gone: a passing error mustn't move every digest).
+    fn live_fp(&self, project: &str, dek: &Dek, l: &Link, members: Option<&BTreeSet<(String, String)>>) -> String {
+        if members.is_some_and(|m| !m.contains(&(l.kind.clone(), l.r#ref.clone()))) {
             return "gone".into();
         }
         let key = format!("{project}\0{}\0{}\0{}\0{}", l.kind, l.r#ref, l.field, json(&l.options));
         let now = std::time::Instant::now();
         let lock = || self.live_fps.0.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, fp)) = lock().get(&key)
+        if let Some((Some(at), fp)) = lock().get(&key)
             && now.duration_since(*at) < LIVE_FP_TTL
         {
             return fp.clone();
         }
         let fp = match self.links.get(&l.kind).and_then(|p| p.read(&l.r#ref, &l.field, l)) {
             Ok(v) => dek.fingerprint(v.expose()),
-            Err(_) => "unreadable".into(),
+            // A product that doesn't answer for a moment (an owner handing over, a timeout) leaves
+            // the digest as it was: flipping it would redeploy apps and push syncs twice. Its
+            // last fingerprint stays, however old, and the next digest asks again.
+            Err(_) => return lock().get(&key).map(|(_, fp)| fp.clone()).unwrap_or_else(|| "unreadable".into()),
         };
         let mut m = lock();
         if m.len() >= 10_000 {
-            m.retain(|_, (at, _)| now.duration_since(*at) < LIVE_FP_TTL);
+            m.retain(|_, (at, _)| at.is_some_and(|at| now.duration_since(at) < LIVE_FP_TTL));
             if m.len() >= 10_000 {
                 m.clear();
             }
         }
-        m.insert(key, (now, fp.clone()));
+        m.insert(key, (Some(now), fp.clone()));
         fp
     }
 }
@@ -587,7 +597,7 @@ impl Secrets {
             let generation = live.and_then(|l| generations.get(&(l.kind.clone(), l.r#ref.clone()))).copied().unwrap_or(0);
             // Only once rotated, so a digest taken before there were generations stays the same.
             let rotated = if generation > 0 { format!("\0{generation}") } else { String::new() };
-            let now = live.map(|l| format!("\0live:{}", self.live_fp(project, &dek, l, members.get_or_init(|| self.members(project).unwrap_or_default())))).unwrap_or_default();
+            let now = live.map(|l| format!("\0live:{}", self.live_fp(project, &dek, l, members.get_or_init(|| self.members(project).ok()).as_ref()))).unwrap_or_default();
             h.update(format!("{}\0{}\0{}\0{}\0{}{rotated}{now}\n", e.row.key, e.env, e.row.id, e.row.version, e.row.link.as_ref().map(json).unwrap_or_default()))
         };
         for e in &entries {

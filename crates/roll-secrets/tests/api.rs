@@ -19,6 +19,8 @@ struct Fake {
     password: Mutex<u32>,
     issued: Mutex<u32>,
     live_keys: Mutex<Vec<String>>,
+    /// The product doesn't answer.
+    down: std::sync::atomic::AtomicBool,
 }
 
 impl LinkProvider for Fake {
@@ -37,6 +39,9 @@ impl LinkProvider for Fake {
         &[("url", Mode::Live), ("access_key_id", Mode::Managed), ("secret_access_key", Mode::Managed)]
     }
     fn read(&self, r#ref: &str, _: &str, _: &Link) -> roll_secrets::Result<Secret> {
+        if self.down.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(roll_secrets::Error::Link("bucket: timed out".into()));
+        }
         Ok(Secret::new(format!("s3://{ref}?pw={}", self.password.lock().unwrap())))
     }
     fn issue(&self, _: &str, _: &str, _: &Link, _: &str, _: Option<u64>) -> roll_secrets::Result<Issued> {
@@ -889,6 +894,12 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     // (within seconds), and at once when the product says so.
     let (_, production) = get("production", "digest=1", None).await;
     assert_eq!(get("production", "", production.clone()).await.0, StatusCode::NOT_MODIFIED, "the live value is as it was");
+    // A product that doesn't answer for a moment leaves the digest as it was.
+    api.fake.down.store(true, std::sync::atomic::Ordering::Relaxed);
+    api.secrets.forget_live_fingerprints();
+    let held = api.ok(Method::GET, "/environments/production/digest", None).await;
+    api.fake.down.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(held["digest"].as_str(), production.as_deref(), "a passing error moves nothing");
     *api.fake.password.lock().unwrap() += 1;
     api.secrets.forget_live_fingerprints();
     let (s, reset) = get("production", "", production.clone()).await;
