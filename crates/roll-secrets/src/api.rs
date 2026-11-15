@@ -47,6 +47,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/shared"), get(shared_with))
         .route(&format!("{P}/suggestions"), get(suggestions))
         .route(&format!("{P}/backup"), post(backup))
+        .route(&format!("{P}/backup/schedule"), get(backup_schedule).put(set_backup_schedule).delete(delete_backup_schedule))
         .route(&format!("{P}/restore"), post(restore))
         .route(&format!("{E}/secrets"), get(secrets))
         .route(K, get(secret).put(set_secret).delete(delete_secret))
@@ -390,6 +391,20 @@ struct BackupBody {
 }
 
 /// Every value of the project, sealed to the caller's key (admin).
+async fn backup_schedule(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.backup_schedule(&project, &c)).await?))
+}
+
+async fn set_backup_schedule(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::backup_schedule::NewBackupSchedule = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.set_backup_schedule(&project, n, &c)).await?))
+}
+
+async fn delete_backup_schedule(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_backup_schedule(&project, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn backup(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let body: BackupBody = body(&b)?;
     let context = crate::backup::context(&project);

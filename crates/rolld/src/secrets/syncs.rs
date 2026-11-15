@@ -306,6 +306,24 @@ impl roll_secrets::Deliver for AuditDeliver {
         self.0.url(url).map(|_| ())
     }
 
+    // Scheduled backups: a roll bucket's objects, through roll storage's own routes in process.
+    fn put_object(&self, bucket: &str, key: &str, body: &Json) -> Result<()> {
+        self.1.call(axum::http::Method::PUT, &format!("/v1/storage/buckets/{}/upload?key={}", urlencoding::encode(bucket), urlencoding::encode(key)), Some(body.clone())).map(|_| ())
+    }
+
+    fn get_object(&self, bucket: &str, key: &str) -> Result<Json> {
+        self.1.call(axum::http::Method::GET, &format!("/v1/storage/buckets/{}/download?key={}", urlencoding::encode(bucket), urlencoding::encode(key)), None)
+    }
+
+    fn list_objects(&self, bucket: &str, prefix: &str) -> Result<Vec<String>> {
+        let v = self.1.call(axum::http::Method::GET, &format!("/v1/storage/buckets/{}/objects?prefix={}&limit=1000", urlencoding::encode(bucket), urlencoding::encode(prefix)), None)?;
+        Ok(v["objects"].as_array().into_iter().flatten().filter_map(|o| o["key"].as_str().map(str::to_string)).collect())
+    }
+
+    fn delete_object(&self, bucket: &str, key: &str) -> Result<()> {
+        self.1.call(axum::http::Method::DELETE, &format!("/v1/storage/buckets/{}/object?key={}", urlencoding::encode(bucket), urlencoding::encode(key)), None).map(|_| ())
+    }
+
     fn post(&self, url: &str, id: &str, secret: &Value, body: &Json) -> Result<()> {
         // A retried batch is the same delivery: the same object, written again.
         if let Some(bucket) = url.strip_prefix(roll_secrets::sinks::BUCKET) {

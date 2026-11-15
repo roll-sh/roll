@@ -96,7 +96,7 @@ impl SyncTarget for FakeSync {
 
 /// Audit deliveries, kept instead of sent; and an OIDC issuer's keys, served.
 #[derive(Default)]
-struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool);
+struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<BTreeMap<(String, String), Value>>);
 
 impl roll_secrets::Deliver for Sent {
     fn check(&self, url: &str) -> roll_secrets::Result<()> {
@@ -113,6 +113,21 @@ impl roll_secrets::Deliver for Sent {
             _ => return Err(roll_secrets::Error::Link(format!("{url}: 404"))),
         };
         Ok(doc.to_string().into_bytes())
+    }
+    /// A roll bucket's objects.
+    fn put_object(&self, bucket: &str, key: &str, body: &Value) -> roll_secrets::Result<()> {
+        self.3.lock().unwrap().insert((bucket.into(), key.into()), body.clone());
+        Ok(())
+    }
+    fn get_object(&self, bucket: &str, key: &str) -> roll_secrets::Result<Value> {
+        self.3.lock().unwrap().get(&(bucket.into(), key.into())).cloned().ok_or_else(|| roll_secrets::Error::Link("404".into()))
+    }
+    fn list_objects(&self, bucket: &str, prefix: &str) -> roll_secrets::Result<Vec<String>> {
+        Ok(self.3.lock().unwrap().keys().filter(|(b, k)| b == bucket && k.starts_with(prefix)).map(|(_, k)| k.clone()).collect())
+    }
+    fn delete_object(&self, bucket: &str, key: &str) -> roll_secrets::Result<()> {
+        self.3.lock().unwrap().remove(&(bucket.into(), key.into()));
+        Ok(())
     }
     /// A rotator outside roll: each issue is a new vendor key.
     fn call(&self, _: &str, _: &str, _: &Secret, body: &Value, _: usize) -> roll_secrets::Result<zeroize::Zeroizing<Vec<u8>>> {
@@ -2222,6 +2237,39 @@ async fn every_route_is_in_the_http_contract() {
     let missing: Vec<String> = routes.iter().map(|r| norm(r)).filter(|r| !documented.contains(r)).collect();
     assert!(routes.len() > 40, "the routes were read ({})", routes.len());
     assert!(missing.is_empty(), "routes missing from docs/secrets.md's HTTP table: {missing:?}");
+}
+
+#[tokio::test]
+async fn scheduled_backups_land_sealed_in_the_projects_bucket_and_keep_the_newest() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/production/secrets/STRIPE", Some(json!({ "value": "sk_live_nightly" }))).await;
+    let secret = [9u8; 32];
+    let schedule = json!({ "bucket": "assets", "recipient": roll_secrets::crypto::public_key(&secret), "every_hours": 24, "keep": 2 });
+    let (s, _) = api.call(Method::PUT, "/backup/schedule", Some(schedule.clone())).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "only a bucket of the project's own");
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/assets", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    api.ok(Method::PUT, "/backup/schedule", Some(schedule)).await;
+    // Two older ones there already: the run leaves the newest two.
+    let prefix = format!("roll-secrets/backups/{}/", api.project);
+    for old in ["20200101T000000.000Z", "20200102T000000.000Z"] {
+        api.sent.3.lock().unwrap().insert(("assets".into(), format!("{prefix}{old}.json")), json!({}));
+    }
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    let kept: Vec<String> = api.sent.3.lock().unwrap().keys().map(|(_, k)| k.clone()).collect();
+    assert!(kept.len() == 2 && kept[0].ends_with("20200102T000000.000Z.json"), "{kept:?}");
+    let schedule = api.ok(Method::GET, "/backup/schedule", None).await;
+    assert!(schedule["last_error"].is_null() && schedule["last_key"] == kept[1], "{schedule}");
+    // Sealed: only the recipient's secret key opens it, and it holds the project.
+    let backup = api.sent.3.lock().unwrap()[&("assets".to_string(), kept[1].clone())].clone();
+    assert!(!backup.to_string().contains("sk_live_nightly"));
+    let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(backup["sealed"].clone()).unwrap();
+    let plain = roll_secrets::crypto::open_sealed(&secret, backup["context"].as_str().unwrap(), &sealed).unwrap();
+    assert!(String::from_utf8_lossy(&plain).contains("sk_live_nightly"));
+    // Not due again for a day.
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    assert_eq!(api.sent.3.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
