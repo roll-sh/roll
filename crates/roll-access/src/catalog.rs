@@ -812,6 +812,9 @@ const PG_SECRETS: &[&str] = &["connection_uri", "app_connection_uri", "password"
 const REDIS_SECRETS: &[&str] = &["redis_url", "rest_token", "password"];
 const NOSQL_SECRETS: &[&str] = &["password", "http_token", "secret_access_key"];
 const STREAM_SECRETS: &[&str] = &["connect", "secret", "password"];
+/// Tasks: the headers a message, schedule or run forwards to its destination
+/// (`Roll-Forward-Authorization: Bearer …`, or `headers` in the body), stored as given.
+const TASKS_SECRETS: &[&str] = &["headers"];
 const STORAGE_SECRETS: &[&str] = &["webhook_secret", "secret_access_key", "session_token", "anon_key", "service_key"];
 const QUEUE_SECRETS: &[&str] = &["password", "urls", "password_hash"];
 const SEARCH_SECRETS: &[&str] = &["password"];
@@ -936,12 +939,12 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/tasks/publish", "tasks", W, Tgt::Product),
     row("POST", "/v1/tasks/publish/{*destination}", "tasks", W, Tgt::Product),
     row("POST", "/v1/tasks/batch", "tasks", W, Tgt::Product),
-    row("GET", "/v1/tasks/messages", "tasks", R, Tgt::Product),
+    row("GET", "/v1/tasks/messages", "tasks", R, Tgt::Product).reveals(TASKS_SECRETS),
     row("POST", "/v1/tasks/messages/cancel", "tasks", D, Tgt::Product),
-    row("GET", "/v1/tasks/messages/{id}", "tasks", R, Tgt::Product),
+    row("GET", "/v1/tasks/messages/{id}", "tasks", R, Tgt::Product).reveals(TASKS_SECRETS),
     row("DELETE", "/v1/tasks/messages/{id}", "tasks", D, Tgt::Product),
     row("POST", "/v1/tasks/messages/{id}/retry", "tasks", W, Tgt::Product),
-    row("GET", "/v1/tasks/dlq", "tasks", R, Tgt::Product),
+    row("GET", "/v1/tasks/dlq", "tasks", R, Tgt::Product).reveals(TASKS_SECRETS),
     row("POST", "/v1/tasks/dlq/retry", "tasks", W, Tgt::Product),
     row("DELETE", "/v1/tasks/dlq/{id}", "tasks", D, Tgt::Product),
     row("GET", "/v1/tasks/queues", "tasks", R, list_of("tasks-queue", "name")),
@@ -955,9 +958,9 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/tasks/topics/{name}", "tasks", D, one(&["name"], "tasks-topic")),
     row("POST", "/v1/tasks/topics/{name}/endpoints", "tasks", W, one(&["name"], "tasks-topic")),
     row("DELETE", "/v1/tasks/topics/{name}/endpoints", "tasks", W, one(&["name"], "tasks-topic")),
-    row("GET", "/v1/tasks/schedules", "tasks", R, list_of("tasks-schedule", "id")),
+    row("GET", "/v1/tasks/schedules", "tasks", R, list_of("tasks-schedule", "id")).reveals(TASKS_SECRETS),
     row("POST", "/v1/tasks/schedules", "tasks", W, Tgt::Product),
-    row("GET", "/v1/tasks/schedules/{id}", "tasks", R, one(&["id"], "tasks-schedule")),
+    row("GET", "/v1/tasks/schedules/{id}", "tasks", R, one(&["id"], "tasks-schedule")).reveals(TASKS_SECRETS),
     row("PATCH", "/v1/tasks/schedules/{id}", "tasks", W, one(&["id"], "tasks-schedule")),
     row("DELETE", "/v1/tasks/schedules/{id}", "tasks", D, one(&["id"], "tasks-schedule")),
     row("POST", "/v1/tasks/schedules/{id}/", "tasks", W, one(&["id"], "tasks-schedule")),
@@ -972,9 +975,9 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/tasks/functions/{id}", "tasks", R, one(&["id"], "tasks-function")),
     row("POST", "/v1/tasks/functions/{id}/", "tasks", W, one(&["id"], "tasks-function")),
     row("POST", "/v1/tasks/functions/{id}/cancel", "tasks", D, one(&["id"], "tasks-function")),
-    row("GET", "/v1/tasks/runs", "tasks", R, Tgt::Product),
-    row("GET", "/v1/tasks/runs/{id}", "tasks", R, Tgt::Product),
-    row("GET", "/v1/tasks/runs/{id}/wait", "tasks", R, Tgt::Product),
+    row("GET", "/v1/tasks/runs", "tasks", R, Tgt::Product).reveals(TASKS_SECRETS),
+    row("GET", "/v1/tasks/runs/{id}", "tasks", R, Tgt::Product).reveals(TASKS_SECRETS),
+    row("GET", "/v1/tasks/runs/{id}/wait", "tasks", R, Tgt::Product).reveals(TASKS_SECRETS),
     row("POST", "/v1/tasks/runs/{id}/cancel", "tasks", D, Tgt::Product),
     row("POST", "/v1/tasks/runs/{id}/rerun", "tasks", W, Tgt::Product),
     row("GET", "/v1/tasks/keys", "tasks", REVEAL, Tgt::Product),
@@ -1328,6 +1331,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/previews", "previews", W, Tgt::Create { project: None, place: None, id_field: "id" }).env(EnvFrom::Fixed("preview")),
     row("*", "/v1/previews/projects/{project}/", "previews", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/previews/projects/{project}/", "previews", R, one(&["project"], "project")),
+    // A project's preview settings carry the variable values every preview's services get
+    // (`env`, and per service `env_for`): API keys among them. A preview's own are reveal.
+    row("GET", "/v1/previews/projects/{project}/settings", "previews", R, one(&["project"], "project")).reveals(&["env", "env_for"]),
     // A project's CI bypass secret for private previews: made (and shown once) is reveal.
     row("POST", "/v1/previews/projects/{project}/bypass", "previews", REVEAL, one(&["project"], "project")),
     row("GET", "/v1/previews/projects/{project}/bypass", "previews", ADMIN, one(&["project"], "project")),
@@ -1412,6 +1418,8 @@ static ROWS: &[Row] = &[
     // A share is an anonymous link to a copy of the thread (prompts, code, tool output): how its
     // content leaves the owner, as previews' and secrets' shares are.
     row("POST", "/v1/code/agents/{owner}/threads/{thread}/shares", "agents", REVEAL, one(&["owner"], "owner")),
+    // The share list answers each share's id and link, and the id alone opens the copy: reveal.
+    row("GET", "/v1/code/agents/{owner}/shares", "agents", REVEAL, one(&["owner"], "owner")),
     row("POST", "/v1/code/agents/{owner}/login/deny", "agents", ADMIN, one(&["owner"], "owner")),
     row("*", "/v1/code/agents/{owner}/endpoints/{id}", "agents", ADMIN, one(&["owner"], "owner")),
     row("*", "/v1/code/agents/{owner}/gateway", "agents", ADMIN, one(&["owner"], "owner")),
@@ -1577,6 +1585,11 @@ mod tests {
         assert!(apps_repo(&serde_json::json!({ "source": { "kind": "image", "image": "nginx" } })).is_empty());
         assert_eq!(link_target("repo"), Some(("code", "repo")));
         // Loosening a NoSQL database's masking or read-only flag is admin; its other settings write.
+        // Credentials in read answers are hidden from tokens that may not reveal them.
+        let reveals = |m: &str, p: &str| by_path(m, p).unwrap().row.reveals;
+        assert!(reveals("GET", "/v1/previews/projects/prj_1/settings").contains(&"env"));
+        assert!(reveals("GET", "/v1/tasks/messages/msg_1").contains(&"headers") && reveals("GET", "/v1/tasks/schedules").contains(&"headers"));
+        assert_eq!(by_path("GET", "/v1/code/agents/acme/shares").unwrap().row.action("GET", &[], None), Action::Reveal);
         // Connecting a GitHub repository, landing over the rules, and dropping a stream's
         // records aren't the plain write or deploy their routes otherwise are.
         assert_eq!(code_repo_action(&serde_json::json!({ "name": "web", "source": { "github": { "repo": "a/b" } } })), Action::Admin);

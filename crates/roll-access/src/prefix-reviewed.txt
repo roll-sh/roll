@@ -86,7 +86,6 @@ DELETE /v1/code/agents/{owner}/sandboxes/{id}
 POST /v1/code/agents/{owner}/sandboxes/{id}/start
 POST /v1/code/agents/{owner}/sandboxes/{id}/stop
 GET /v1/code/agents/{owner}/settings
-GET /v1/code/agents/{owner}/shares
 DELETE /v1/code/agents/{owner}/shares/{id}
 GET /v1/code/agents/{owner}/state
 DELETE /v1/code/agents/{owner}/threads/{thread}/work
@@ -163,7 +162,6 @@ POST /v1/code/threads/{id}/unresolve
 POST /v1/code/work/{id}/complete
 POST /v1/code/work/{id}/heartbeat
 POST /v1/code/work/{id}/release
-GET /v1/previews/projects/{project}/settings
 PUT /v1/previews/projects/{project}/settings
 GET /v1/previews/projects/{project}/usage
 GET /v1/previews/{id}/activity
