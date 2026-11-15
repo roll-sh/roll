@@ -16,14 +16,42 @@ pub enum Token {
     ///   roll token create migrate --product postgres --resource prj_ab… --allow read,write --ask delete
     Create(Box<Create>),
     /// List tokens and OAuth connections, newest first.
+    ///   roll token list --product secrets --resource prj_x4k9…   (the ones made for it)
+    ///   roll token list --workloads                               (workloads' tokens for minutes)
+    ///   roll token list --pending                                 (people's, waiting for an admin)
     #[command(alias = "ls")]
-    List,
+    List {
+        /// Only tokens with a rule on this product by name.
+        #[arg(long)]
+        product: Option<String>,
+        /// With --product: only those whose rule names this resource (an id or project).
+        #[arg(long, requires = "product")]
+        resource: Option<String>,
+        /// Workload tokens instead (a CI job's, for minutes; the latest 500).
+        #[arg(long, conflicts_with_all = ["product", "resource"])]
+        workloads: bool,
+        /// Only people's tokens waiting for an admin's approval (the policy's approve_people).
+        #[arg(long, conflicts_with = "workloads")]
+        pending: bool,
+    },
     /// Show a token's rules, expiry and last use.
     Show { id: String },
+    /// What an agent connected with a token is offered over MCP: its tools (those that change
+    /// things marked), prompts, and what the list costs an agent's context.
+    Tools { id: String },
     /// Revoke a token or connection: every request with it fails from now on.
     Revoke { id: String },
+    /// Let a person's pending token work (an admin's; the person is mailed).
+    Approve { id: String },
+    /// Refuse a person's pending token: it's revoked, and they're mailed.
+    Deny { id: String },
     /// A new secret for a token, with the same rules; the old one stops working at once.
-    Rotate { id: String },
+    Rotate {
+        id: String,
+        /// The old secret keeps working this long (1h, 2d; at most 7d) while deployments switch.
+        #[arg(long)]
+        keep_old: Option<String>,
+    },
     /// Change a token: its name, expiry, addresses, or (with --preset/--allow/--ask) its rules.
     Edit(Box<Edit>),
     /// Its rules narrowed to the actions and resources its requests used (never wider); `--apply`
@@ -45,7 +73,8 @@ pub enum Token {
     /// Which tokens need attention and why (admin over everything, never expiring, unused,
     /// narrower than their rules, roaming), each with its fix.
     Checkup,
-    /// Who the token you're using is (`ROLL_TOKEN` or `ROLL_ADMIN_TOKEN`).
+    /// Which credential this CLI uses and where it came from (`ROLL_TOKEN`, `ROLL_ADMIN_TOKEN`,
+    /// `roll login`), what it may do, and any other credential set that loses to it.
     Whoami,
     /// The products, actions and presets the builder offers.
     Presets,
@@ -70,9 +99,12 @@ pub struct Create {
     name: String,
     #[command(flatten)]
     rules: RuleArgs,
-    /// Lifetime: 30d, 12h, 90m, or never (default 30d).
+    /// Lifetime: 30d, 12h, 90m, or never (default 30d); from its start with --starts.
     #[arg(long, default_value = "30d")]
     expires: String,
+    /// It works only from this far on (2h, 1d): refused until then.
+    #[arg(long)]
+    starts: Option<String>,
     /// Addresses it may be used from (CIDRs), repeatable.
     #[arg(long = "ip", value_delimiter = ',')]
     ip_allow: Vec<String>,
@@ -203,6 +235,9 @@ pub enum Mcp {
     },
     /// Every request made with a token and every MCP tool call, newest first.
     Audit {
+        /// csv or jsonl: the matching events as that, for a spreadsheet or a log tool.
+        #[arg(long)]
+        format: Option<String>,
         /// Only this token (tok_…).
         #[arg(long)]
         token: Option<String>,
@@ -234,20 +269,34 @@ pub enum Client {
 
 /// "30d" → milliseconds from now; "never" → none.
 fn expiry(s: &str) -> anyhow::Result<Option<i64>> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    Ok(span(s, "--expires")?.map(|ms| now + ms))
+}
+
+/// `--starts` and `--expires` as times: the expiry counts from the start.
+fn window(starts: Option<&str>, expires: &str) -> anyhow::Result<(Option<i64>, Option<i64>)> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    let from = match starts {
+        Some(s) => Some(now + span(s, "--starts")?.with_context(|| format!("--starts {s}: a number and d, h or m (2h)"))?),
+        None => None,
+    };
+    Ok((from, span(expires, "--expires")?.map(|ms| from.unwrap_or(now) + ms)))
+}
+
+/// "30d" → its milliseconds; "never" → none.
+fn span(s: &str, flag: &str) -> anyhow::Result<Option<i64>> {
     let s = s.trim();
     if s.eq_ignore_ascii_case("never") {
         return Ok(None);
     }
     let (n, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
-    let n: i64 = n.parse().with_context(|| format!("--expires {s}: a number and d, h or m (30d), or never"))?;
-    let ms = match unit {
+    let n: i64 = n.parse().with_context(|| format!("{flag} {s}: a number and d, h or m (30d), or never"))?;
+    Ok(Some(match unit {
         "d" => n * 86_400_000,
         "h" => n * 3_600_000,
         "m" => n * 60_000,
-        _ => bail!("--expires {s}: a number and d, h or m (30d), or never"),
-    };
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
-    Ok(Some(now + ms))
+        _ => bail!("{flag} {s}: a number and d, h or m (30d), or never"),
+    }))
 }
 
 /// The rules a `create` asks for: the preset's (its "project" filled in), then a rule of its own.
@@ -326,8 +375,15 @@ fn when(ms: &Value) -> String {
 }
 
 fn print_grant(g: &Value) {
-    let state = if !g["revoked_at"].is_null() { "revoked" } else { "active" };
-    println!("{}  {}  ({}, {state})", s(&g["id"]), s(&g["name"]), s(&g["kind"]));
+    let state = if !g["revoked_at"].is_null() {
+        "revoked"
+    } else if g["pending"] == true {
+        "waits for an admin"
+    } else {
+        "active"
+    };
+    let hint = g["hint"].as_str().map(|h| format!("  {h}")).unwrap_or_default();
+    println!("{}{hint}  {}  ({}, {state})", s(&g["id"]), s(&g["name"]), s(&g["kind"]));
     if let Some(c) = g["client"].as_object() {
         println!("  client: {}", s(&c["name"]).as_str());
     }
@@ -364,10 +420,31 @@ pub fn date(ms: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> {
+/// An admin's decision on a person's pending token.
+async fn decide(api: &Api, json_out: bool, id: &str, approve: bool) -> anyhow::Result<()> {
+    let verb = if approve { "approve" } else { "deny" };
+    let g = api.post(&format!("/v1/access/tokens/{id}/{verb}"), json!({})).await?;
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&g)?);
+    } else {
+        println!("{} {}: {}", s(&g["id"]), s(&g["name"]), if approve { "approved, it works now" } else { "denied and revoked" });
+    }
+    Ok(())
+}
+
+/// Which credential a run uses, and the ones set that lose to it (`gh auth status`'s answer).
+pub struct Credential {
+    /// What it is and where it came from: `ROLL_TOKEN`, `roll login (~/.config/roll/logins.json)`, …
+    pub source: Option<String>,
+    /// Credentials also set, which this run doesn't use.
+    pub unused: Vec<String>,
+}
+
+pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credential) -> anyhow::Result<()> {
     match cmd {
         Token::Create(c) => {
-            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow, "rate_per_minute": c.rate, "ask_otherwise": c.ask_otherwise });
+            let (not_before, expires_at) = window(c.starts.as_deref(), &c.expires)?;
+            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "not_before": not_before, "expires_at": expires_at, "ip_allow": c.ip_allow, "rate_per_minute": c.rate, "ask_otherwise": c.ask_otherwise });
             let made = api.post("/v1/access/tokens", body).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&made)?);
@@ -377,15 +454,32 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
             println!("\n{}\n", s(&made["token"]));
             eprintln!("Copy it now: it isn't shown again. Use it as ROLL_TOKEN, or as Authorization: Bearer for the API and MCP.");
         }
-        Token::List => {
-            let list = api.get("/v1/access/tokens").await?;
+        Token::Approve { id } => decide(api, json_out, &id, true).await?,
+        Token::Deny { id } => decide(api, json_out, &id, false).await?,
+        Token::List { product, resource, workloads, pending } => {
+            let mut query: Vec<String> = Vec::new();
+            if workloads {
+                query.push("kind=workload".into());
+            }
+            if let Some(p) = &product {
+                query.push(format!("product={}", urlencoding::encode(p)));
+            }
+            if let Some(r) = &resource {
+                query.push(format!("resource={}", urlencoding::encode(r)));
+            }
+            let path = if query.is_empty() { "/v1/access/tokens".to_string() } else { format!("/v1/access/tokens?{}", query.join("&")) };
+            let list = api.get(&path).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&list)?);
                 return Ok(());
             }
-            let list = list.as_array().cloned().unwrap_or_default();
+            let list: Vec<Value> = list.as_array().cloned().unwrap_or_default().into_iter().filter(|g| !pending || g["pending"] == true).collect();
             if list.is_empty() {
-                println!("no tokens yet: roll token create <name> --preset read-only");
+                if path.contains('?') || pending {
+                    println!("none");
+                } else {
+                    println!("no tokens yet: roll token create <name> --preset read-only");
+                }
             }
             for g in &list {
                 print_grant(g);
@@ -405,6 +499,24 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 println!("{}", serde_json::to_string_pretty(&g)?);
             } else {
                 println!("revoked {} ({})", s(&g["id"]), s(&g["name"]));
+            }
+        }
+        Token::Tools { id } => {
+            let seen = api.get(&format!("/v1/access/tokens/{}/tools", urlencoding::encode(&id))).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&seen)?);
+                return Ok(());
+            }
+            let tools = seen["tools"].as_array().cloned().unwrap_or_default();
+            let changes = tools.iter().filter(|t| t["read_only"] != true).count();
+            println!("{} tools ({changes} that change things), ~{} tokens of an agent's context", tools.len(), seen["context_tokens"].as_u64().unwrap_or(0));
+            for t in &tools {
+                let mark = if t["destructive"] == true { "!" } else if t["read_only"] == true { " " } else { "*" };
+                println!("  {mark} {}", s(&t["name"]));
+            }
+            let prompts: Vec<String> = seen["prompts"].as_array().into_iter().flatten().map(|p| s(&p["name"])).collect();
+            if !prompts.is_empty() {
+                println!("prompts: {}", prompts.join(", "));
             }
         }
         Token::Tighten { id, days, apply } => {
@@ -469,8 +581,9 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 print_grant(&g);
             }
         }
-        Token::Rotate { id } => {
-            let made = api.post(&format!("/v1/access/tokens/{id}/rotate"), json!({})).await?;
+        Token::Rotate { id, keep_old } => {
+            let keep = keep_old.as_deref().map(|k| span(k, "--keep-old")).transpose()?.flatten().map(|ms| ms / 1000);
+            let made = api.post(&format!("/v1/access/tokens/{id}/rotate"), json!({ "keep_old_for_s": keep })).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&made)?);
                 return Ok(());
@@ -514,13 +627,23 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
             }
         }
         Token::Whoami => {
-            let me = api.get("/v1/access").await?;
+            let Some(source) = &credential.source else {
+                bail!("no credential for {}: run `roll login`, or set ROLL_TOKEN", api.base);
+            };
+            let mut me = api.get("/v1/access").await?;
             if json_out {
+                me["credential"] = json!({ "source": source, "unused": credential.unused });
                 println!("{}", serde_json::to_string_pretty(&me)?);
-            } else if me["kind"] == "operator" {
+                return Ok(());
+            }
+            println!("Using {source} for {}.", api.base);
+            if me["kind"] == "operator" {
                 println!("the operator: everything");
             } else {
                 print_grant(&me["grant"]);
+            }
+            for u in &credential.unused {
+                println!("note: {u} is set too, and isn't used: {source} wins.");
             }
         }
         Token::Policy { max_days, require_expiry, no_limit, max_idle_days } => {
@@ -681,13 +804,17 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
                 println!("approvals are also posted to {} in {}; decided there by {}", s(&v["chat"]["channel"]), s(&v["chat"]["install"]), who.join(", "));
             }
         }
-        Mcp::Audit { token, product, decision, resource, action, limit } => {
+        Mcp::Audit { format, token, product, decision, resource, action, limit } => {
             let mut q = url::form_urlencoded::Serializer::new(String::new());
             q.append_pair("limit", &limit.to_string());
-            for (k, v) in [("grant", token), ("product", product), ("decision", decision), ("resource", resource), ("action", action)] {
+            for (k, v) in [("grant", token), ("product", product), ("decision", decision), ("resource", resource), ("action", action), ("format", format.clone())] {
                 if let Some(v) = v {
                     q.append_pair(k, &v);
                 }
+            }
+            if format.is_some() {
+                print!("{}", api.get_text(&format!("/v1/access/audit?{}", q.finish())).await?);
+                return Ok(());
             }
             let log = api.get(&format!("/v1/access/audit?{}", q.finish())).await?;
             if json_out {

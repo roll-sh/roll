@@ -8,13 +8,16 @@ FROM rust:1-trixie AS build
 # `dev` builds faster for tests; images you deploy use `release`.
 ARG PROFILE=release
 ARG CARGO_BUILD_JOBS=8
+# The cargo target cache's id. Checkouts on one machine that share it build each other's crates
+# (they all build at /src, so cargo sees the same units): code_cluster_e2e passes one per checkout.
+ARG TARGET_CACHE=roll-code-target
 # rolld also links roll tasks, whose SQLite session support runs bindgen (libclang) at build time.
 RUN apt-get update && apt-get install -y --no-install-recommends libclang-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
 # Dev builds use line tables only (a smaller build cache); the binary is stripped of debug info
 # either way to keep the image small (backtraces still name functions).
-RUN --mount=type=cache,id=roll-code-target,sharing=locked,target=/src/target \
+RUN --mount=type=cache,id=${TARGET_CACHE},sharing=locked,target=/src/target \
     --mount=type=cache,id=roll-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} \
     cargo build --profile "$PROFILE" -p rolld --bin rolld \
