@@ -3841,3 +3841,143 @@ async fn saturation_is_counted_and_alerted() {
     assert_eq!(alerts.len(), 1, "{ev}");
     assert_eq!((alerts[0]["data"]["value"].as_i64(), alerts[0]["data"]["threshold"].as_i64(), alerts[0]["data"]["max_instances"].as_i64()), (Some(30), Some(10), Some(1)), "{ev}");
 }
+
+/// The methods each route of `router` serves, from its `Debug` (as rolld's `route_methods`
+/// reads them: axum has no API for its routes).
+fn router_routes(router: &axum::Router) -> std::collections::BTreeSet<(String, String)> {
+    let text = format!("{router:?}");
+    let routes = text.split("fallback_router:").next().unwrap_or_default();
+    let (routes, paths) = routes.split_once("node: Node { paths:").unwrap_or((routes, ""));
+    let mut allow: Vec<(String, String)> = Vec::new();
+    let mut rest = routes;
+    while let Some(i) = rest.find("RouteId(") {
+        rest = &rest[i + "RouteId(".len()..];
+        let id: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let entry = rest.find("RouteId(").map_or(rest, |j| &rest[..j]);
+        let methods = entry.split_once("allow_header: Bytes(b\"").and_then(|(_, a)| a.split_once('"')).map(|(a, _)| a.to_string()).unwrap_or_default();
+        allow.push((id, methods));
+    }
+    let mut out = std::collections::BTreeSet::new();
+    let mut rest = paths;
+    while let Some(i) = rest.find("RouteId(") {
+        rest = &rest[i + "RouteId(".len()..];
+        let id: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let Some(after) = rest.trim_start_matches(|c: char| c.is_ascii_digit()).strip_prefix("): \"") else { continue };
+        let Some(end) = after.find('"') else { break };
+        let path = &after[..end];
+        if !path.starts_with('/') {
+            continue;
+        }
+        for m in allow.iter().find(|(a, _)| *a == id).map(|(_, m)| m.as_str()).unwrap_or("").split(',').filter(|m| !m.is_empty() && *m != "HEAD") {
+            out.insert((m.to_string(), path.to_string()));
+        }
+    }
+    out
+}
+
+/// An operation's summary from its method and path: `List deploys`, `Get deploy`, `Restart`.
+fn summary(method: &str, path: &str) -> String {
+    let segs: Vec<&str> = path.split('/').skip(3).collect();
+    let words = |s: &str| s.replace(['-', '_'], " ");
+    let one = |s: &str| words(s.strip_suffix("ies").map(|b| format!("{b}y")).as_deref().unwrap_or(s.strip_suffix('s').unwrap_or(s)));
+    let literal = |s: &&&str| !s.starts_with('{');
+    let item = segs.last().is_some_and(|l| l.starts_with('{'));
+    let last = segs.iter().rev().find(literal).copied().unwrap_or("apps");
+    // What an action acts on: the resource before it (`drains/{did}/test`: a drain).
+    let on = segs.iter().rev().skip(1).skip_while(|s| !s.starts_with('{')).find(literal).map(|s| one(s));
+    let plural = last.ends_with('s');
+    let verb = |v: &str, n: String| format!("{v} {n}");
+    match (method, item, plural) {
+        _ if segs.is_empty() => "Get the overview".into(),
+        // A deploy hook's own URL.
+        ("POST", true, _) => verb("Call", one(last)),
+        ("GET", true, _) => verb("Get", one(last)),
+        ("PATCH", true, _) => verb("Update", one(last)),
+        ("DELETE", true, _) => verb("Delete", one(last)),
+        ("PUT", true, _) => verb("Set", one(last)),
+        ("GET", false, true) => verb("List", words(last)),
+        ("GET", false, false) => verb("Get", words(last)),
+        ("POST", false, true) => verb("Create", one(last)),
+        ("PUT", false, _) => verb("Set", words(last)),
+        ("PATCH", false, _) => verb("Update", words(last)),
+        ("DELETE", false, _) => verb("Delete", words(last)),
+        // An action: its own verb (`restart`, `rollback`, `verify`), and what it acts on.
+        _ => {
+            let w = words(last);
+            let mut c = w.chars();
+            let v = c.next().map(|f| f.to_ascii_uppercase().to_string() + c.as_str()).unwrap_or_default();
+            on.map_or(v.clone(), |o| format!("{v} {o}"))
+        }
+    }
+}
+
+/// docs/apps/openapi.json is the contract's routes (docs/apps/http-api.md, "Routes and actions")
+/// as OpenAPI 3.1, and the contract lists exactly the routes the router serves: a route added
+/// to one and not the others fails here. `ROLL_OPENAPI=write` writes the spec again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_openapi_spec_is_the_contract_and_the_router() {
+    let w = world().await;
+    let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/apps");
+    let contract = std::fs::read_to_string(docs.join("http-api.md")).unwrap();
+    // `| \`METHOD /path?query\` | body | answer | action |`
+    let mut rows: Vec<(String, String, String, String, String)> = Vec::new();
+    for line in contract.lines().filter(|l| l.starts_with("| `")) {
+        // Cells split on `|`, never on an escaped `\|` inside one.
+        let mut cells: Vec<String> = vec![String::new()];
+        let mut chars = line.trim().trim_start_matches('|').trim_end_matches('|').chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' if chars.peek() == Some(&'|') => cells.last_mut().unwrap().push(chars.next().unwrap()),
+                '|' => cells.push(String::new()),
+                c => cells.last_mut().unwrap().push(c),
+            }
+        }
+        let cells: Vec<&str> = cells.iter().map(|c| c.trim()).collect();
+        let Some((method, path)) = cells[0].trim_matches('`').split_once(' ') else { continue };
+        if !["GET", "POST", "PUT", "PATCH", "DELETE"].contains(&method) || !path.starts_with("/v1/apps") {
+            continue;
+        }
+        let path = path.split('?').next().unwrap().to_string();
+        let cell = |i: usize| cells.get(i).map_or(String::new(), |c| c.to_string());
+        rows.push((method.to_string(), path, cell(1), cell(2), cell(3)));
+    }
+    let documented: std::collections::BTreeSet<(String, String)> = rows.iter().map(|(m, p, ..)| (m.clone(), p.clone())).collect();
+    let served: std::collections::BTreeSet<(String, String)> = router_routes(&w.api).into_iter().filter(|(_, p)| p.starts_with("/v1/apps")).collect();
+    let undocumented: Vec<_> = served.difference(&documented).collect();
+    let unserved: Vec<_> = documented.difference(&served).collect();
+    assert!(undocumented.is_empty() && unserved.is_empty(), "served but not in http-api.md: {undocumented:?}\nin http-api.md but not served: {unserved:?}");
+    // The spec: one operation per row, its parameters from the path, the contract's words as
+    // its description, the permission it needs as `x-roll-action`.
+    let mut paths = serde_json::Map::new();
+    for (method, path, body, answer, action) in &rows {
+        let params: Vec<Value> = path.split('/').filter_map(|s| s.strip_prefix('{').and_then(|s| s.strip_suffix('}'))).map(|p| json!({ "name": p, "in": "path", "required": true, "schema": { "type": "string" } })).collect();
+        let tag = path.trim_start_matches("/v1/apps").trim_start_matches('/').split('/').next().filter(|s| !s.is_empty()).unwrap_or("apps");
+        let status = if answer.starts_with("201") { "201" } else if answer.starts_with("202") { "202" } else if answer.starts_with("204") { "204" } else { "200" };
+        let id: String = format!("{}{}", method.to_lowercase(), path.split('/').skip(3).map(|s| s.trim_matches(|c| c == '{' || c == '}')).map(|s| s.split(['-', '_']).map(|w| { let mut c = w.chars(); c.next().map(|f| f.to_ascii_uppercase().to_string() + c.as_str()).unwrap_or_default() }).collect::<String>()).collect::<String>());
+        let mut op = json!({ "operationId": id, "tags": [tag], "summary": summary(method, path), "description": format!("Answers {answer}."), "x-roll-action": action, "responses": { status: { "description": answer }, "4XX": { "$ref": "#/components/responses/Error" } } });
+        if !params.is_empty() {
+            op["parameters"] = json!(params);
+        }
+        if !body.is_empty() {
+            op["requestBody"] = json!({ "description": body, "content": { "application/json": { "schema": { "type": "object" } } } });
+        }
+        paths.entry(path.clone()).or_insert_with(|| json!({}))[method.to_lowercase()] = op;
+    }
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "roll apps", "version": "1", "description": "Host your own code next to your roll databases. The shapes named here (Service, Environment, Deployment…) are defined in docs/apps/http-api.md, which this file is generated from." },
+        "servers": [{ "url": "http://127.0.0.1:7070", "description": "a local rolld" }],
+        "security": [{ "bearer": [] }],
+        "components": {
+            "securitySchemes": { "bearer": { "type": "http", "scheme": "bearer", "description": "A roll token (`rlt_…`, `rlo_…`, `usr_…`) or the operator's" } },
+            "responses": { "Error": { "description": "What's wrong: 400 a bad request, 401/403 not allowed, 404 not found, 409 a conflict, 413 too large, 429 too many", "content": { "application/json": { "schema": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } } } } } } },
+        },
+        "paths": paths,
+    });
+    let text = serde_json::to_string_pretty(&spec).unwrap() + "\n";
+    let file = docs.join("openapi.json");
+    if std::env::var("ROLL_OPENAPI").as_deref() == Ok("write") {
+        std::fs::write(&file, &text).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(&file).unwrap_or_default(), text, "docs/apps/openapi.json is stale: ROLL_OPENAPI=write cargo test -p apps-control --test api openapi");
+}

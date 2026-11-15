@@ -17,6 +17,12 @@ feature/roll-mcp. Change them together.
 
 ## Routes and actions
 
+`docs/apps/openapi.json` is this table as OpenAPI 3.1: one operation per row, with its path
+parameters, the words below, and the permission it needs as `x-roll-action`. The shapes stay
+here. `api.rs::the_openapi_spec_is_the_contract_and_the_router` fails when the router serves a
+route this table doesn't list (or the reverse), and when the spec is stale:
+`ROLL_OPENAPI=write cargo test -p apps-control --test api openapi` writes it again.
+
 `action` is what the permissions catalogue (feature/roll-mcp, product `apps`) classifies the
 route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 
