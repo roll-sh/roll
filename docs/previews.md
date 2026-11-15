@@ -32,8 +32,9 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   each one branches; search joins when it lands). A branch of a 100 GB project starts in
   seconds and stores only what the preview writes, except where the table below says
   otherwise.
-- **Put the whole preview to sleep, not just the app.** Services stop after `sleep_after`
-  without a request. Postgres computes, Redis, NoSQL, queues and search unload on their own
+- **Put the whole preview to sleep, not just the app.** Services freeze after `sleep_after`
+  without a request (paused, so the next visit is back in tens of milliseconds), and stop
+  for good half an hour later. Postgres computes, Redis, NoSQL, queues and search unload on their own
   after 5 minutes idle. A sleeping preview pays only for bytes. The first request to any of its
   URLs wakes it and waits for it.
 - **Use real data, safely.** Branches come from the resources in the project (production or
@@ -107,10 +108,19 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   doesn't wait for a cold start; they sleep again after `sleep_after` unused. Not a preview
   someone put to sleep, and only on the node that holds its lease. About $0.002 a push here;
   `warm: false` turns it off.
-- **Sleep**: a service with no requests for `sleep_after` (10 minutes by default) stops. A
-  request to any URL of the preview wakes it. The request is held for up to 60 s; after that the
-  visitor gets a "starting" page that refreshes. Data products sleep on their own and wake on
-  connect.
+- **Sleep**: a service with no requests for `sleep_after` (10 minutes by default) is frozen
+  first: its container is paused (`docker pause`), keeping its memory (12–22 MiB for the
+  measured service) and using no CPU, and it reads and costs as asleep. A visit in that window
+  thaws it: 48–72 ms to the first response on this machine, where a cold start is 3.3–3.9 s.
+  After `ROLL_PREVIEWS_WARM_MINUTES` (30; 0 stops at once, as before) it's stopped for good, and
+  a node keeps at most `ROLL_PREVIEWS_WARM_MAX` (32) frozen, stopping the oldest past it. A
+  request that lands just as a service freezes thaws it again at once. A frozen service keeps
+  its dynamic credentials renewed (its process comes back with them). Docker only: Fargate has
+  no pause, so services there stop. Sleep asked for (`roll preview sleep`, the sheet's Sleep)
+  stops at once. Otherwise a request to any URL of the preview wakes it. It's held for up to
+  60 s; after that the visitor gets a "starting" page that refreshes. Data products sleep on
+  their own and wake on connect. `scripts/preview-cost.sh` checks a frozen service thaws (the
+  same container, within 1.5 s).
 - **Reset**: `reset_every` (`0` off, or hours) re-branches every data resource from its parent's
   current state on a schedule. `POST /v1/previews/{id}/reset` does it now, for all resources or
   the ones named.
@@ -1291,6 +1301,8 @@ Ranked by what a person notices first. Done so far:
   renewed while it runs, revoked when it stops (a sleeping preview holds none);
 - alarms on previews' failures in the cloud stack (`preview-converge-failures`,
   `preview-screenshot-failures`: most of a quarter-hour's runs failing, never rolling a deploy back);
+- idle services frozen before they stop, so a visit in the next half hour is back in tens of
+  milliseconds instead of a 3–4 s cold start;
 - search masks on an index whose name has dots (`logs.2024`): split off at the longest index name
   the cluster has, for masking and for the check when set;
 - a tenth review (states, browsers, search masks) and its fixes: a dialog a state's step opens
@@ -1447,7 +1459,14 @@ Ranked by what a person notices first. Done so far:
    deployment as roll apps' `expect` (fc6fbf48c), so a newer push deployed since is a 409 from
    the same read the promotion is made of (live: a promote expecting another deployment refused).
    It merges into #28 with #26.
-2. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
+2. **A note shows what it's about** (Vercel's comments): a note from the page's Feedback button
+   names its element by a CSS selector and its page; a reviewer reading it in roll or on the
+   change sees text only. The note could carry a crop of the element as the visitor saw it: the
+   next screenshot run already loads the page in its own container, so it can crop the element by
+   its selector there (no capture code in the visitor's browser, nothing the page's code can
+   forge), store it with the note (bounded, like page shots) and show it in the sheet, the
+   change's review thread and the GitHub comment.
+3. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
    (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
@@ -1463,16 +1482,16 @@ Ranked by what a person notices first. Done so far:
    host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
    every product port (an image of its own, and roll code's runner changed); on the cloud fleet
    it's security groups, with the cloud thread.
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-5. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1485,12 +1504,12 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+7. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

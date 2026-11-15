@@ -404,6 +404,11 @@ pub trait Apps: Send + Sync {
     }
     /// What it's doing on this node (`None`: never started here).
     fn status(&self, preview: &str, service: &str) -> Option<ServiceState>;
+    /// Asleep but frozen, not stopped (the runtime's warm window): its process, and whatever
+    /// credentials it holds, come back on the next request.
+    fn warm(&self, _preview: &str, _service: &str) -> bool {
+        false
+    }
 }
 
 /// A project's secrets, per environment (roll secrets; docs/secrets.md).

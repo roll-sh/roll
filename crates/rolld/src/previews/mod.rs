@@ -83,6 +83,10 @@ pub fn start(
         roll_previews::runtime::RuntimeConfig {
             domain: domain.clone(),
             dashboard: Some(code.code.config.web_url.clone()).filter(|w| !w.trim().is_empty()),
+            // An idle service frozen this long before it's stopped (0: stopped at once), at most
+            // this many on the node.
+            warm_for: std::time::Duration::from_secs(60 * std::env::var("ROLL_PREVIEWS_WARM_MINUTES").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(30).min(24 * 60)),
+            warm_max: std::env::var("ROLL_PREVIEWS_WARM_MAX").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(32).min(1000),
             ..Default::default()
         },
         code.isolation.clone(),

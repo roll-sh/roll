@@ -675,6 +675,25 @@ for _ in $(seq 1 240); do
 done
 [ -n "$PV" ] || { echo "a new preview should come once the title stops skipping it"; exit 1; }
 
+say "idle past sleep_after, its service is frozen (paused), not stopped: the next visit thaws it"
+SHARE2=$(api GET "/v1/previews/$PV" | jq_ "[s['share_url'] for s in d['services'] if s['name']=='web'][0]")
+HOST2=$(echo "$SHARE2" | sed -E 's#^https?://##; s#/.*##; s#:.*##')
+JAR2="$HOME_DIR/cookies-frozen"
+curl -sS -o /dev/null -L -c "$JAR2" -b "$JAR2" -H "Host: $HOST2" "http://$API/?${SHARE2#*\?}" --max-time 120
+CONT2="roll-previews-$(echo "$HOST2" | cut -d. -f1)"
+for _ in $(seq 1 200); do
+  [ "$(docker inspect -f '{{.State.Paused}}' "$CONT2" 2>/dev/null)" = true ] && break
+  sleep 1
+done
+[ "$(docker inspect -f '{{.State.Paused}}' "$CONT2" 2>/dev/null)" = true ] || { echo "an idle service should be frozen (paused) after sleep_after"; docker ps -a --filter "name=$CONT2"; exit 1; }
+FROZEN_STATE=$(api GET "/v1/previews/$PV" | jq_ "[s['state'] for s in d['services'] if s['name']=='web'][0]")
+[ "$FROZEN_STATE" = sleeping ] || { echo "a frozen service should read as sleeping: $FROZEN_STATE"; exit 1; }
+ID_FROZEN=$(docker inspect -f '{{.Id}}' "$CONT2")
+T6=$(now_ms); BODY2=$(curl -sS -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60); T7=$(now_ms)
+echo "$BODY2" | grep -q "preview of change 1" || { echo "the thawed service should answer: $BODY2"; exit 1; }
+[ "$(docker inspect -f '{{.Id}} {{.State.Running}} {{.State.Paused}}' "$CONT2")" = "$ID_FROZEN true false" ] || { echo "the visit should thaw the same container, not start another"; exit 1; }
+[ $((T7 - T6)) -lt 1500 ] || { echo "a thaw should answer within 1.5 s, not $((T7 - T6)) ms"; exit 1; }
+
 if [ -n "${STOP_BEFORE_LAND:-}" ]; then
   echo "stopped before landing: project $PRJ, preview $PV (run with --keep to leave the daemon up)"
   exit 0
@@ -700,6 +719,7 @@ BRANCHES_LEFT=$(api GET /v1/redis/databases | jq_ "len([x for x in d if x['name'
 cat <<EOF
 | What | Measured |
 | --- | --- |
+| A visit to a service frozen after sleep_after (it read as sleeping), instead of a cold start | $((T7 - T6)) ms, the same container |
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
 | NoSQL branch's mask on app.users.email / masks on the parent | $MASKED / $PARENT_MASKED |

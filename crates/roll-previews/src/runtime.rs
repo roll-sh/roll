@@ -41,6 +41,11 @@ enum Phase {
     Stopped,
     Starting,
     Running { addr: SocketAddr },
+    /// Idle past `sleep_after`, its container paused (`docker pause`) since `since`: its memory
+    /// stays, it uses no CPU, and a request thaws it in tens of milliseconds where a start takes
+    /// seconds. Asleep to everyone else (status, cost); stopped for good after
+    /// [`RuntimeConfig::warm_for`].
+    Frozen { addr: SocketAddr, since: Instant },
     Failed(String),
 }
 
@@ -74,6 +79,12 @@ pub struct RuntimeConfig {
     /// PNG of `$URL` to `$OUT` (`chrome --headless --screenshot`).
     pub screenshot_image: String,
     pub screenshot_command: String,
+    /// How long an idle service stays frozen before it's stopped (zero: stopped at once, as
+    /// before). Docker only: Fargate has no pause.
+    pub warm_for: Duration,
+    /// The most services frozen on this node at once (their memory stays): the oldest are stopped
+    /// past it.
+    pub warm_max: usize,
 }
 
 /// Playwright's image has a headless Chromium shell (its path names its version).
@@ -137,6 +148,8 @@ impl Default for RuntimeConfig {
             dashboard: None,
             screenshot_image: SCREENSHOT_IMAGE.into(),
             screenshot_command: SCREENSHOT_COMMAND.into(),
+            warm_for: Duration::from_secs(30 * 60),
+            warm_max: 32,
         }
     }
 }
@@ -284,17 +297,96 @@ impl Runtime {
     }
 
     async fn reap(&self) {
-        let idle: Vec<((String, String), Arc<Live>)> = self
-            .live
-            .lock()
-            .iter()
-            .filter(|(_, l)| matches!(*l.phase.borrow(), Phase::Running { .. }) && l.last_request.lock().elapsed() > *l.sleep_after.lock())
-            .map(|(k, l)| (k.clone(), l.clone()))
-            .collect();
+        let warm = self.iso.name() == "docker" && !self.cfg.warm_for.is_zero() && self.cfg.warm_max > 0;
+        let all: Vec<((String, String), Arc<Live>)> = self.live.lock().iter().map(|(k, l)| (k.clone(), l.clone())).collect();
+        let (mut idle, mut frozen) = (Vec::new(), Vec::new());
+        for (key, live) in all {
+            let phase = live.phase.borrow().clone();
+            match phase {
+                Phase::Running { .. } if live.last_request.lock().elapsed() > *live.sleep_after.lock() => idle.push((key, live)),
+                Phase::Frozen { since, .. } => frozen.push((since, key, live)),
+                _ => {}
+            }
+        }
+        // Frozen long enough, or past the node's room (oldest first, leaving room for those
+        // about to freeze): stopped for good.
+        frozen.sort_by_key(|(since, ..)| *since);
+        let over = frozen.len().saturating_sub(self.cfg.warm_max.saturating_sub(if warm { idle.len() } else { 0 }));
+        for (i, (since, (p, s), live)) in frozen.into_iter().enumerate() {
+            if !warm || i < over || since.elapsed() > self.cfg.warm_for {
+                info!(preview = %p, service = %s, "preview service frozen long enough; stopping");
+                self.stop(&p, &s, &live, None).await;
+            }
+        }
         for ((p, s), live) in idle {
+            if warm && self.freeze(&p, &s, &live).await {
+                continue;
+            }
             info!(preview = %p, service = %s, "preview service idle; stopping");
             self.stop(&p, &s, &live, None).await;
         }
+    }
+
+    /// Freeze an idle service (`docker pause`) instead of stopping it: reported asleep, as a stop
+    /// is. `false`: it couldn't be (the caller stops it). A request that raced the pause (it saw
+    /// `Running` and went to the container) thaws it again at once.
+    async fn freeze(&self, preview: &str, service: &str, live: &Live) -> bool {
+        let turn = live.lifecycle.lock().await;
+        let phase = live.phase.borrow().clone();
+        let Phase::Running { addr } = phase else { return true };
+        let checked = Instant::now();
+        // A request since the reaper looked: not idle after all.
+        if live.last_request.lock().elapsed() <= *live.sleep_after.lock() {
+            return true;
+        }
+        let Some(name) = live.container.lock().clone() else { return false };
+        if code_preview::docker::docker(&["pause", &name]).await.is_err() {
+            return false;
+        }
+        live.phase.send_replace(Phase::Frozen { addr, since: Instant::now() });
+        let raced = *live.last_request.lock() >= checked;
+        if raced {
+            if code_preview::docker::docker(&["unpause", &name]).await.is_ok() {
+                live.phase.send_replace(Phase::Running { addr });
+                return true;
+            }
+            return false;
+        }
+        let ran = live.started.lock().take().map(|t| t.elapsed().as_millis() as i64).unwrap_or(0);
+        drop(turn);
+        info!(%preview, %service, "preview service idle; frozen");
+        if let Ok(e) = self.engine() {
+            e.observed(preview, service, ServiceState::Sleeping, None, ran).await;
+        }
+        true
+    }
+
+    /// Thaw a frozen service (`docker unpause`): where it answers, or `None` when it isn't frozen
+    /// any more or won't thaw (its container removed; the caller starts it as usual).
+    async fn thaw(&self, preview: &str, service: &str, live: &Live) -> Option<SocketAddr> {
+        let turn = live.lifecycle.lock().await;
+        let phase = live.phase.borrow().clone();
+        let Phase::Frozen { addr, .. } = phase else { return None };
+        let name = live.container.lock().clone();
+        let thawed = match &name {
+            Some(name) => code_preview::docker::docker(&["unpause", name]).await.is_ok(),
+            None => false,
+        };
+        if !thawed {
+            let name = live.container.lock().take();
+            if let Some(name) = name {
+                self.iso.release(&name).await;
+            }
+            live.phase.send_replace(Phase::Stopped);
+            return None;
+        }
+        *live.started.lock() = Some(Instant::now());
+        live.phase.send_replace(Phase::Running { addr });
+        drop(turn);
+        if let Ok(e) = self.engine() {
+            e.observed(preview, service, ServiceState::Running, None, 0).await;
+        }
+        Some(addr)
     }
 
     /// Where a service answers, starting it if needed; waits up to `wait`.
@@ -306,9 +398,15 @@ impl Runtime {
         }
         let mut rx = live.phase.subscribe();
         // Clone first: a borrow held through the match would deadlock `send_replace`.
-        let phase = rx.borrow_and_update().clone();
+        let mut phase = rx.borrow_and_update().clone();
+        if matches!(phase, Phase::Frozen { .. }) {
+            if let Some(addr) = self.thaw(preview, service, &live).await {
+                return Ok(addr);
+            }
+            phase = rx.borrow_and_update().clone();
+        }
         let start = match phase {
-            Phase::Running { addr } => return Ok(addr),
+            Phase::Running { addr } | Phase::Frozen { addr, .. } => return Ok(addr),
             Phase::Starting => false,
             Phase::Stopped | Phase::Failed(_) => {
                 live.phase.send_replace(Phase::Starting);
@@ -328,7 +426,7 @@ impl Runtime {
                     Phase::Running { addr } => return Ok(addr),
                     Phase::Failed(e) => return Err(Unavailable::Failed(e)),
                     Phase::Stopped => return Err(Unavailable::NotFound),
-                    Phase::Starting => {}
+                    Phase::Starting | Phase::Frozen { .. } => {}
                 }
             }
         });
@@ -945,6 +1043,10 @@ impl Apps for Runtime {
     fn status(&self, preview: &str, service: &str) -> Option<ServiceState> {
         self.service_status(preview, service)
     }
+
+    fn warm(&self, preview: &str, service: &str) -> bool {
+        self.live.lock().get(&(preview.to_string(), service.to_string())).is_some_and(|l| matches!(*l.phase.borrow(), Phase::Frozen { .. }))
+    }
 }
 
 impl Runtime {
@@ -1155,6 +1257,7 @@ impl Runtime {
             Phase::Stopped => ServiceState::Sleeping,
             Phase::Starting => ServiceState::Deploying,
             Phase::Running { .. } => ServiceState::Running,
+            Phase::Frozen { .. } => ServiceState::Sleeping,
             Phase::Failed(_) => ServiceState::Failed,
         })
     }
