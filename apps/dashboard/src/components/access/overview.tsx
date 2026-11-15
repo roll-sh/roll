@@ -420,7 +420,8 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
           </div>
           <p className="mt-1 truncate text-[12px] text-muted">{g.rules.map((x) => describeRule(x, projectName)).join("  ·  ")}</p>
           <p className="mt-1 font-mono text-[11px] text-subtle">
-            {g.id} · {startsLater(g) ? `starts ${relative(startsLater(g))} · ` : ""}used {relative(g.last_used_at)}
+            {g.id}
+            {g.hint ? ` · ${g.hint}` : ""} · {startsLater(g) ? `starts ${relative(startsLater(g))} · ` : ""}used {relative(g.last_used_at)}
             {g.last_used_ip ? ` from ${g.last_used_ip}` : ""} · {g.expires_at === null ? "never expires" : `expires ${relative(g.expires_at)}`}
             {g.ip_allow.length > 0 ? ` · only ${g.ip_allow.join(", ")}` : ""}
             {g.rate_per_minute ? ` · ${g.rate_per_minute.toLocaleString("en")}/min` : ""}

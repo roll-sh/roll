@@ -382,7 +382,8 @@ fn print_grant(g: &Value) {
     } else {
         "active"
     };
-    println!("{}  {}  ({}, {state})", s(&g["id"]), s(&g["name"]), s(&g["kind"]));
+    let hint = g["hint"].as_str().map(|h| format!("  {h}")).unwrap_or_default();
+    println!("{}{hint}  {}  ({}, {state})", s(&g["id"]), s(&g["name"]), s(&g["kind"]));
     if let Some(c) = g["client"].as_object() {
         println!("  client: {}", s(&c["name"]).as_str());
     }
