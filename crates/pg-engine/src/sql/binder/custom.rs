@@ -225,6 +225,7 @@ impl Analyzed {
             param_domains: Vec::new(),
             gathers: (plan.clone(), crate::exec::parallel_part::of_explain(&plan, Vec::new(), ctx).into()).into(),
             cost: (plan.clone(), total).into(),
+            procs: kept.procs,
             plan,
         })
     }
@@ -259,6 +260,7 @@ impl Analyzed {
             rls: self.rls.clone(),
             replannable: self.replannable,
             site: None,
+            procs: self.procs,
         })
     }
 }

@@ -350,6 +350,10 @@ impl Session {
     /// of its template for the queries that follow, when one fits every value (see above).
     pub(super) fn lit_learn(&mut self, p: &Prepared, stmt: &Node, planned: &BoundQuery) {
         let Some(l) = p.lit.as_deref() else { return };
+        // (Planning runs its PL/pgSQL calls each time: a kept plan wouldn't.)
+        if planned.procs.folded {
+            return;
+        }
         if self.state.settings.borrow().module_loaded("auto_explain") {
             return;
         }
@@ -829,7 +833,13 @@ impl Session {
     /// execution needs it, `PlanUses::uncosted`). `fresh`: the Bind right after a Parse that
     /// found the binding to be its custom plan (`PlanUses::fresh_generic`).
     pub(super) fn param_custom(&mut self, p: &Prepared, params: &[Value], fresh: bool) -> Option<(Arc<BoundQuery>, Option<f64>)> {
-        let unnamed = p.plans.lock().unnamed;
+        let (unnamed, procs) = {
+            let plans = p.plans.lock();
+            (plans.unnamed, plans.procs)
+        };
+        if procs {
+            return None;
+        }
         let oids = self.param_custom_key(p, params)?;
         if fresh
             && unnamed
@@ -907,7 +917,7 @@ impl Session {
     pub(super) fn values_custom(&mut self, p: &Prepared, stmt: &Node, params: &[Value], reuse: bool) -> Option<Arc<BoundQuery>> {
         let oids = {
             let plans = p.plans.lock();
-            if !plans.param_oids.is_empty() {
+            if plans.procs || !plans.param_oids.is_empty() {
                 return None;
             }
             plans.parse_oids.clone()?
