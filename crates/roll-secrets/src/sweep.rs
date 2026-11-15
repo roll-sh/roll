@@ -488,6 +488,8 @@ impl Secrets {
         out.failed += failed;
         let (_, failed) = self.sweep_sinks()?;
         out.failed += failed;
+        let (_, failed) = self.sweep_backups()?;
+        out.failed += failed;
         Ok(out)
     }
 }

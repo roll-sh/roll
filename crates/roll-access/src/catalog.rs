@@ -1151,6 +1151,9 @@ static ROWS: &[Row] = &[
     // A backup seals every environment's values to a key the caller chooses; a restore loads a
     // whole project. Both are admin in secrets too.
     row("POST", "/v1/secrets/projects/{project}/backup", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/backup/schedule", "secrets", ADMIN, one(&["project"], "project")),
+    row("PUT", "/v1/secrets/projects/{project}/backup/schedule", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/backup/schedule", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/restore", "secrets", ADMIN, one(&["project"], "project")),
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/policy", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/folder-policies", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")),

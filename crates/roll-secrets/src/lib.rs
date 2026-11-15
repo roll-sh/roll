@@ -40,6 +40,7 @@ pub mod clouds;
 pub mod issuer;
 mod oidc;
 mod read;
+pub mod backup_schedule;
 pub mod reach;
 pub mod refs;
 mod notices;
@@ -471,6 +472,7 @@ impl Secrets {
             links.register(Arc::new(ssh::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone() }));
         }
         db.ensure_schema(outside::SCHEMA)?;
+        db.ensure_schema(backup_schedule::SCHEMA)?;
         if let (Some(outside), Ok(keys)) = (&opts.outside, &opts.keyring) {
             links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), outside: outside.clone() }));
         }
@@ -616,7 +618,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "aws_users", "aws_roles", "cloud_accounts", "cas", "ca_certs", "ssh_cas"];
+const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "aws_users", "aws_roles", "cloud_accounts", "cas", "ca_certs", "ssh_cas", "backup_schedules"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked, and no
 /// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,

@@ -1525,6 +1525,17 @@ before any environment is protected, so a restore isn't a change request; what c
 (a link to a resource that project doesn't have, an import of another project's folder) comes back
 as a warning, by name. Disaster recovery, and moving a project between roll servers.
 
+**Scheduled backups** (Vault's automated snapshots, Akeyless' DR): `PUT …/backup/schedule
+{bucket, recipient, every_hours?, keep?}` (admin; default every 24 h, keeping 30) writes the same
+sealed file (`{sealed, context}`, as `POST …/backup` answers) into one of the project's own roll
+buckets, as `roll-secrets/backups/<project>/<time>.json`, the first one at once. Each is read back
+and compared before it counts, and the oldest beyond `keep` are deleted. roll never holds the key
+that opens them: the recipient's secret key restores one as above. One node runs each (a schedule
+is claimed by moving its next time on); what a person set up runs only while they can still reach
+the project, and only into a bucket the project still has. `GET …/backup/schedule` says when the
+last one landed, its key, and why the last attempt failed; `DELETE` stops it (what's in the bucket
+stays).
+
 ### Checking against a template
 
 `roll secrets check .env.example` compares the keys a `.env`-style template names (`KEY=…`,
@@ -2264,6 +2275,9 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}/imports?path=` | `Import[]` | `Import[]` |
 | `GET /environments/{env}/exports?path=` | | `Export[]` |
 | `POST /backup` | `{recipient}` | `{sealed, context}`: the whole project, sealed to `recipient` (admin) |
+| `GET /backup/schedule` | | `BackupSchedule` or null (admin): bucket, recipient, `every_hours`, `keep`, `next_at`, `last_at`, `last_key`, `last_error` |
+| `PUT /backup/schedule` | `{bucket, recipient, every_hours?, keep?}` | `BackupSchedule` (admin; one of the project's roll buckets; the first backup at once) |
+| `DELETE /backup/schedule` | | 204 (admin; the backups made stay) |
 | `POST /restore` | `Archive` (an opened backup) | `{environments, secrets, warnings}` (admin; an empty project) |
 | `GET /suggestions` | | `Suggestion[]`: canvas resources linked nowhere yet, with their usual keys and where they'd go |
 | `GET /shared` | | `Import[]`: the folders other projects share with this one |
