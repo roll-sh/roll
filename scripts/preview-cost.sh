@@ -72,7 +72,7 @@ RSS0=$(ps -o rss= -p "$PID")
 say "a repo with a service, and one of each data resource"
 api POST /v1/code/owners '{"name":"acme","kind":"org"}' >/dev/null
 api POST /v1/code/repos '{"owner":"acme","name":"web","source":"native"}' >/dev/null
-TOML='[preview]\nimage = \"'"$IMAGE"'\"\nrun = \"env > env.txt && python -m http.server $PORT\"\nport = 8000\nhealth = \"/\"\nmemory = 128\ncpus = 0.25\n'
+TOML='[preview]\nimage = \"'"$IMAGE"'\"\nrun = \"env > env.txt && python -m http.server $PORT\"\nport = 8000\nhealth = \"/\"\nmemory = 128\ncpus = 0.25\n[[preview.states]]\nname = \"repo-tab\"\npage = \"/\"\nsteps = [{ press = \"Tab\" }]\n'
 # The service's API, as an OpenAPI document (github.openapi): the change removes one operation and adds one.
 OPENAPI_MAIN='{\"paths\":{\"/users\":{\"get\":{\"parameters\":[{\"name\":\"limit\",\"in\":\"query\",\"schema\":{\"type\":\"integer\"}}]}},\"/users/{id}\":{\"delete\":{}}}}'
 OPENAPI_CHG='"openapi.json":{"content":"{\"paths\":{\"/users\":{\"get\":{\"parameters\":[{\"name\":\"limit\",\"in\":\"query\",\"required\":true,\"schema\":{\"type\":\"integer\"}}]}},\"/orders\":{\"post\":{}}}}"}'
@@ -606,6 +606,8 @@ PRICING=$(api GET "/v1/previews/$PV" | jq_ "(lambda p: 'a11y %s, seo %s; new: a1
 case "$PAGES" in *"wiki:/: 0 error(s), "*"% against main"*) ;; *) echo "the wiki service's page should be taken in its own run and compared: $PAGES"; exit 1;; esac
 # A page state (github.states: Tab pressed on /), taken after its step and compared with main's.
 case "$PAGES" in *"state:tab: "*"% against main"*) ;; *) echo "the page state should be taken after its steps and compared: $PAGES"; exit 1;; esac
+# And the repo's own, from its roll.toml ([[preview.states]], versioned with its selectors).
+case "$PAGES" in *"state:repo-tab: "*"% against main"*) ;; *) echo "the repo's own page state should be taken and compared: $PAGES"; exit 1;; esac
 # And in Firefox (github.browsers), compared with main's in Firefox.
 case "$PAGES" in *"browser:firefox: "*"% against main"*) ;; *) echo "the first page should be taken in Firefox and compared: $PAGES"; exit 1;; esac
 case "$PAGES" in *"browser:webkit-phone: "*"% against main"*) ;; *) echo "the first page should be taken in WebKit at a phone's size and compared: $PAGES"; exit 1;; esac

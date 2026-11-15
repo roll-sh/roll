@@ -77,6 +77,61 @@ pub struct PreviewSpec {
     pub memory_mb: u32,
     pub cpus: f64,
     pub env: BTreeMap<String, String>,
+    /// Page states its screenshots reach (`[[preview.states]]`), as roll previews' `github.states`.
+    pub states: Vec<StateRule>,
+}
+
+/// Whether `p` is a page path the screenshot may visit: absolute, on the service's own origin.
+pub fn page_path_ok(p: &str) -> bool {
+    p.starts_with('/') && !p.starts_with("//") && p.len() <= 200 && p.bytes().all(|b| b.is_ascii_graphic() && !b"\\#\"'<>`".contains(&b))
+}
+
+/// A page state (roll previews' `github.states`, or a repo's `[[preview.states]]`): `page` of the first service's, then its steps.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateRule {
+    pub name: String,
+    pub page: String,
+    pub steps: Vec<Step>,
+}
+
+/// One step towards a state, on the page's own elements: `{"click": selector}`, `{"type":
+/// [selector, text]}`, `{"press": key}`, `{"wait": ms}`.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Step {
+    Click(String),
+    Type(String, String),
+    Press(String),
+    Wait(u32),
+}
+
+/// The most states, and steps in each.
+pub const MAX_STATES: usize = 3;
+pub const MAX_STEPS: usize = 10;
+/// The keys a `press` step may name.
+pub const STEP_KEYS: [&str; 9] = ["Enter", "Escape", "Tab", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Space", "Backspace"];
+
+/// A state's name: 1–40 of a-z, 0-9 and `-`.
+pub fn state_name_ok(n: &str) -> bool {
+    (1..=40).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// A `state:<name>` page entry's name.
+pub fn state_entry(e: &str) -> Option<&str> {
+    e.strip_prefix("state:").filter(|n| state_name_ok(n))
+}
+
+/// Whether a step is one roll knows, bounded (checked when set, and again before a run).
+pub fn step_ok(s: &Step) -> bool {
+    let text = |t: &str| t.len() <= 200 && !t.chars().any(char::is_control);
+    let selector = |t: &str| !t.trim().is_empty() && text(t);
+    match s {
+        Step::Click(sel) => selector(sel),
+        Step::Type(sel, t) => selector(sel) && text(t),
+        Step::Press(k) => STEP_KEYS.contains(&k.as_str()),
+        Step::Wait(ms) => *ms <= 5000,
+    }
 }
 
 #[derive(Deserialize)]
@@ -119,6 +174,10 @@ struct RawPreview {
     cpus: Option<f64>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    /// Page states the preview's screenshots reach (roll previews): versioned with the code
+    /// whose selectors they name.
+    #[serde(default)]
+    states: Vec<StateRule>,
 }
 
 impl RollToml {
@@ -188,6 +247,15 @@ impl RollToml {
                 if p.name.as_deref().is_some_and(|n| !label(n)) {
                     return Err(format!("{FILE} {at}: name is 1-20 characters of a-z, 0-9 and -"));
                 }
+                let bad_state = p.states.iter().enumerate().any(|(i, s)| {
+                    !state_name_ok(&s.name) || p.states[..i].iter().any(|o| o.name == s.name) || !page_path_ok(&s.page) || s.steps.is_empty() || s.steps.len() > MAX_STEPS || !s.steps.iter().all(step_ok)
+                });
+                if p.states.len() > MAX_STATES || bad_state {
+                    return Err(format!(
+                        "{FILE} {at}: states are at most {MAX_STATES}, each a name (a-z, 0-9, -), a page (a path) and 1 to {MAX_STEPS} steps: click or type on a selector, press one of {}, or wait up to 5000 ms",
+                        STEP_KEYS.join(", ")
+                    ));
+                }
                 Some(PreviewSpec {
                     name: p.name,
                     image: image(at, p.image)?,
@@ -204,6 +272,7 @@ impl RollToml {
                     memory_mb: memory(at, p.memory)?,
                     cpus: cpus(at, p.cpus)?,
                     env: env(at, p.env)?,
+                    states: p.states,
                 })
             }
         };
@@ -288,7 +357,7 @@ mod tests {
     #[test]
     fn parses_the_documented_example() {
         let t = RollToml::parse(
-            r#"
+            r##"
             [checks.test]
             image = "rust:1"
             run = "cargo test"
@@ -307,7 +376,12 @@ mod tests {
             port = 3000
             postgres = "prj_abc123"
             redis = "rdb_def456"
-            "#,
+
+            [[preview.states]]
+            name = "cart"
+            page = "/"
+            steps = [{ click = "#open-cart" }, { type = ["#coupon", "SAVE10"] }, { press = "Enter" }, { wait = 300 }]
+            "##,
         )
         .unwrap();
         assert_eq!(t.checks.len(), 2);
@@ -317,6 +391,8 @@ mod tests {
         assert_eq!((lint.timeout.as_secs(), lint.memory_mb, lint.env["RUST_LOG"].as_str()), (120, 512, "debug"));
         let p = t.preview.unwrap();
         assert_eq!((p.port, p.postgres.as_deref(), p.redis.as_deref(), p.auto), (3000, Some("prj_abc123"), Some("rdb_def456"), true));
+        assert_eq!(p.states.len(), 1);
+        assert_eq!(p.states[0].steps, [Step::Click("#open-cart".into()), Step::Type("#coupon".into(), "SAVE10".into()), Step::Press("Enter".into()), Step::Wait(300)]);
     }
 
     #[test]
@@ -352,6 +428,7 @@ mod tests {
             ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\nhealth = \"healthz\"", "health"),
             ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\nredis = \"rdb_\"", "redis"),
             ("[preview]\nimage = \"a\"\nrun = \"x\"", "port"),
+            ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\n[[preview.states]]\nname = \"cart\"\npage = \"/\"\nsteps = [{ press = \"F12\" }]", "states"),
             ("[queue]\nbatch_size = 0", "batch_size"),
             ("[queue]\nbogus = 1", "bogus"),
             ("[queue]\nchecks = [\"nope\"]", "[checks.nope]"),

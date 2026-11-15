@@ -364,7 +364,7 @@ impl Engine {
                         },
                         None => String::new(),
                     };
-                    let spec = ServiceSpec { name: c.name.clone(), image: String::new(), run: String::new(), port: 0, memory_mb: c.memory_mb, cpus: 0.0, env: Vec::new(), health: None };
+                    let spec = ServiceSpec { name: c.name.clone(), image: String::new(), run: String::new(), port: 0, memory_mb: c.memory_mb, cpus: 0.0, env: Vec::new(), health: None, states: Vec::new() };
                     wanted.push((spec, c.repo.unwrap_or_default(), rev, true));
                 }
             }
@@ -552,11 +552,23 @@ impl Engine {
     /// backend that can't, a failure) is remembered for the head, and the last one taken stays.
     pub(super) async fn take_screenshot(&self, r: &Row) -> bool {
         let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return false };
-        let (entries, hide, widths, openapi, endpoints, states, browsers) = self
+        let (entries, hide, widths, openapi, endpoints, mut states, browsers) = self
             .store
             .settings(&r.project_id)
             .map(|s| (s.github.pages, s.github.hide, s.github.widths, s.github.openapi, s.github.endpoints, s.github.states, s.github.browsers))
             .unwrap_or_default();
+        // The first service's own states, from its `roll.toml` at the revision it runs (versioned
+        // with the selectors they name): after the project's, a name the project has kept.
+        if let Some(rev) = first.revision.as_deref()
+            && let Ok(specs) = self.source.services(&first.repo, rev).await
+            && let Some(spec) = specs.into_iter().find(|s| s.name == first.name)
+        {
+            for st in spec.states {
+                if !states.iter().any(|s| s.name == st.name) {
+                    states.push(st);
+                }
+            }
+        }
         // The first page at the project's other widths: entries of their own (`@768`).
         let width_keys: Vec<String> = widths.iter().map(|w| format!("@{w}")).collect();
         // The first service's own pages go in its run; another service's in a run of its own.

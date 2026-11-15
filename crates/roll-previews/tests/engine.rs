@@ -347,6 +347,8 @@ async fn page_states_and_other_browsers_are_taken_and_compared_like_pages() {
     let mut png = Vec::new();
     image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     *e.apps.shot.lock() = Some(png);
+    // And one from the repo's own roll.toml, versioned with the selectors it names.
+    *e.code.repo_states.lock() = vec![roll_previews::settings::StateRule { name: "menu".into(), page: "/".into(), steps: vec![roll_previews::settings::Step::Press("Tab".into())] }];
     e.code.open(change("chg_st", 6));
     e.engine.pass().await.unwrap();
     e.engine.pass().await.unwrap();
@@ -360,6 +362,7 @@ async fn page_states_and_other_browsers_are_taken_and_compared_like_pages() {
     }
     assert_eq!(state.map(|p| p.base_percent), Some(Some(0.0)), "taken, kept and compared with main's same state");
     assert!(e.apps.states.lock().iter().any(|n| n == "cart"), "the screenshot was asked to reach it");
+    assert!(e.apps.states.lock().iter().any(|n| n == "menu"), "and the repo's own state, from its roll.toml");
     // Another browser's first page the same way.
     let firefox = e.code.last_report("chg_st").pages.into_iter().find(|p| p.path == "browser:firefox").map(|p| p.base_percent);
     assert_eq!(firefox, Some(Some(0.0)), "Firefox's first page, compared with main's in Firefox");
