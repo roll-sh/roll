@@ -690,6 +690,38 @@ impl Runtime for Docker {
         out.split_whitespace().next()?.parse::<u64>().ok().map(|kib| kib * 1024)
     }
 
+    async fn copy_from(&self, name: &str, path: &str) -> anyhow::Result<super::VolumeStream> {
+        anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps instance");
+        let mut child = Command::new("docker")
+            .args(["cp", &format!("{name}:{path}"), "-"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("running docker cp")?;
+        let out = child.stdout.take().context("no stdout")?;
+        Ok(Box::new(ChildReader { child: Some(child), out, exited: None }))
+    }
+
+    async fn copy_to(&self, name: &str, dir: &str, mut tar: super::VolumeStream) -> anyhow::Result<()> {
+        anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps instance");
+        let mut child = Command::new("docker")
+            .args(["cp", "-", &format!("{name}:{dir}")])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("running docker cp")?;
+        let mut stdin = child.stdin.take().context("no stdin")?;
+        tokio::io::copy(&mut tar, &mut stdin).await?;
+        drop(stdin);
+        let out = child.wait_with_output().await?;
+        anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr).trim().chars().take(300).collect::<String>());
+        Ok(())
+    }
+
     async fn read_volume(&self, name: &str) -> anyhow::Result<super::VolumeStream> {
         anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps volume");
         let mount = format!("{name}:/data:ro");

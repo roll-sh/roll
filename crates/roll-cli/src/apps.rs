@@ -412,6 +412,18 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// Copy files to or from an instance (Fly's `sftp`): `roll apps cp ./seed.db :/data/` puts a
+    /// file (or a directory) under a directory there, `roll apps cp :/app/report.csv .` brings one
+    /// here. `:` marks the instance's side; the instance is the one a shell would get, or
+    /// `--instance`. Up to 100 MiB at a time.
+    Cp {
+        #[command(flatten)]
+        target: Target,
+        src: String,
+        dst: String,
+        #[arg(long)]
+        instance: Option<String>,
+    },
     /// Open the environment's address in a browser (and print it); `--print` only prints it.
     Open {
         #[command(flatten)]
@@ -2437,6 +2449,59 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             v
+        }
+        AppsCmd::Cp { target, src, dst, instance } => {
+            let svc = service(api, &target).await?;
+            let inst = instance.map(|i| format!("&instance={}", enc(&i))).unwrap_or_default();
+            let url = |path: &str| format!("{}{}/files?path={}{inst}", api.base, env_path(&svc, &target.env), enc(path));
+            let send = |req: reqwest::RequestBuilder| async {
+                let req = match &api.key {
+                    Some(k) => req.bearer_auth(k),
+                    None => req,
+                };
+                let res = req.send().await?;
+                if !res.status().is_success() {
+                    let code = res.status();
+                    let body: Value = res.json().await.unwrap_or(Value::Null);
+                    bail!("{}", body["error"].as_str().map(str::to_string).unwrap_or_else(|| code.to_string()));
+                }
+                Ok(res)
+            };
+            let (out, there) = match (src.strip_prefix(':'), dst.strip_prefix(':')) {
+                (Some(remote), None) => {
+                    let res = send(api.http.get(url(remote))).await?;
+                    let from = res.headers().get("x-roll-instance").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                    let bytes = res.bytes().await?;
+                    let here = PathBuf::from(&dst);
+                    std::fs::create_dir_all(&here)?;
+                    // `unpack` keeps every entry inside `here` (no `..`, no absolute paths).
+                    tar::Archive::new(std::io::Cursor::new(bytes.to_vec())).unpack(&here).with_context(|| format!("unpacking into {}", here.display()))?;
+                    (format!("{from}:{remote} → {}", here.display()), json!({ "instance": from, "from": remote, "to": here }))
+                }
+                (None, Some(remote)) => {
+                    let local = PathBuf::from(&src);
+                    let meta = std::fs::symlink_metadata(&local).with_context(|| local.display().to_string())?;
+                    let name = local.file_name().map(|n| n.to_owned()).ok_or_else(|| anyhow::anyhow!("{src}: name a file or a directory"))?;
+                    let mut b = tar::Builder::new(Vec::new());
+                    b.follow_symlinks(false);
+                    if meta.is_dir() {
+                        b.append_dir_all(&name, &local)?;
+                    } else {
+                        b.append_path_with_name(&local, &name)?;
+                    }
+                    let body = b.into_inner()?;
+                    anyhow::ensure!(body.len() <= 100 << 20, "{src} is more than 100 MiB as a tar");
+                    let res = send(api.http.put(url(remote)).header("content-type", "application/x-tar").body(body)).await?;
+                    let v: Value = res.json().await.unwrap_or(Value::Null);
+                    (format!("{} → {}:{remote}", local.display(), s(&v["instance"])), v)
+                }
+                _ => bail!("one side is the instance's, marked with `:` (roll apps cp ./file :/data/ or roll apps cp :/data/file .)"),
+            };
+            if !json_out {
+                println!("{out}");
+                return Ok(());
+            }
+            there
         }
         AppsCmd::Open { target, print } => {
             let svc = service(api, &target).await?;

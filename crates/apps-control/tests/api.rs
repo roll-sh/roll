@@ -3609,3 +3609,28 @@ async fn a_volume_filling_up_is_said_once() {
     w.apps.measure_volumes().await;
     assert_eq!(events().await, 2, "again after it had room");
 }
+
+/// Files to and from an instance (`roll apps cp`, Fly's sftp): a tar written under a path reads
+/// back as it was, from the instance a shell would get; a path must be absolute.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn files_go_to_and_from_an_instance() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let files = format!("/v1/apps/services/{id}/environments/production/files");
+    let raw = |method: &str, uri: String, body: Vec<u8>| {
+        let req = Request::builder().method(method).uri(uri).header("content-type", "application/x-tar").body(Body::from(body)).unwrap();
+        w.api.clone().oneshot(req)
+    };
+    let tar = b"a tar's bytes".to_vec();
+    let resp = raw("PUT", format!("{files}?path=/data"), tar.clone()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = raw("GET", format!("{files}?path=/data"), vec![]).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let inst = resp.headers()["x-roll-instance"].to_str().unwrap().to_string();
+    assert!(w.fake.instances(&id).iter().any(|(n, ..)| *n == inst), "{inst}");
+    assert_eq!(resp.into_body().collect().await.unwrap().to_bytes().to_vec(), tar);
+    assert_eq!(raw("GET", format!("{files}?path=data"), vec![]).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    let (_, trail) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
+    assert!(trail.to_string().contains("audit.files.written") && trail.to_string().contains("audit.files.read"), "{trail}");
+}

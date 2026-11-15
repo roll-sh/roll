@@ -266,6 +266,14 @@ every deployment is immutable with instant rollback.
   (`roll apps run --tasks N`, Cloud Run Jobs'), it's N containers, ten at a time, each with
   `ROLL_TASK_INDEX` (0…) and `ROLL_TASK_COUNT` to split the work by; their output is the job's one
   log, each task's end a line in it, and the job fails as its first failing task does.
+- **Files to and from an instance** (Fly's `sftp`, Render's `scp`): `GET …/files?path=` answers
+  what's at an absolute path in an instance as a tar, `PUT …/files?path=` (a tar, at most
+  100 MiB) writes its files under a directory there; Docker's `docker cp` both ways. The
+  instance is the one a shell would get (a web service woken and held for the copy), or
+  `?instance=`. `roll apps cp ./seed.db :/data/` and `roll apps cp :/app/report.csv .` (`:`
+  marks the instance's side; unpacked here with nothing outside the target). Admin, as a shell
+  is (files hold what the app keeps, its secrets too, and what's written runs next), behind roll
+  secrets' reveal rule, and each copy is `audit.files.read`/`audit.files.written`.
 - **A shell** (`GET …/shell`, a WebSocket; `roll apps ssh`), as `railway ssh` and
   `fly ssh console`: `bash` (else `sh`) in a running instance through a TTY exec over the Engine
   API, the terminal raw on the CLI's side and resized with the window. A web service asleep is
@@ -1937,10 +1945,9 @@ build; a drain naming a deleted service couldn't be edited; route groups filled 
 lines; the pre-deploy container had no `ROLL_INSTANCE`; another environment's routes stayed on
 the charts).
 
-1. **The CLI's rough edges, the rest** (`vars --deploy` and `roll up` naming the project it reuses,
-   never taking a 401 for "no project", are done): `roll apps cp` (files to and from an
-   instance, Fly's `sftp`), and shell completions (`roll completion`, the whole CLI's, so with
-   its other owners).
+1. **Shell completions** (`roll completion <shell>`, Fly's and Railway's): the whole CLI's, so
+   with its other owners (`roll-cli/src/main.rs`); `vars --deploy`, `roll up`'s project and
+   `roll apps cp` are done.
 2. **A "deploy to roll" link** with variables asked for or generated (Heroku's `app.json`
    `generator: secret`, Render's `generateValue`, Railway's templates).
 3. **Drag and drop a folder to deploy it** (Netlify Drop), for static sites first.

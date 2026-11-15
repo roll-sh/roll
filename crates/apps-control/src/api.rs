@@ -89,6 +89,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/volume/backups/{{bid}}/restore"), post(restore_volume))
         .route(&format!("{env}/restart"), post(restart))
         .route(&format!("{env}/instances/{{name}}/restart"), post(restart_instance))
+        .route(&format!("{env}/files"), get(read_files).put(write_files).layer(DefaultBodyLimit::max(crate::shell::FILES_MAX)))
         .route(&format!("{env}/sleep"), post(sleep))
         .route(&format!("{env}/wake"), post(wake))
         .route(&format!("{env}/variables"), get(variables).patch(change_variables))
@@ -962,6 +963,30 @@ async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q)
     // Keys and resizes are small: nothing near axum's 64 MiB default is held for a peer.
     let ws = ws.max_message_size(1 << 20).max_frame_size(1 << 20);
     Ok(ws.on_upgrade(move |socket| apps.bridge_shell(socket, target, slot, cols, rows)).into_response())
+}
+
+#[derive(Deserialize)]
+struct FilesQuery {
+    path: String,
+    instance: Option<String>,
+}
+
+/// `GET …/files?path=`: what's at a path in an instance, as a tar. Files can hold anything the
+/// app has (its secrets too): roll secrets' reveal rule, as a shell's.
+async fn read_files(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<FilesQuery>, ext: Extensions) -> R {
+    apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
+    let (name, tar) = apps.read_files(&id, &env, q.instance.as_deref().filter(|s| !s.is_empty()), &q.path).await?;
+    apps.audit("files.read", &id, &env, actor(&ext), json!({ "instance": name, "path": q.path })).await;
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(tar));
+    Ok(([(header::CONTENT_TYPE, "application/x-tar"), (header::HeaderName::from_static("x-roll-instance"), name.as_str())], body).into_response())
+}
+
+/// `PUT …/files?path=` (a tar): its files written under the path in an instance.
+async fn write_files(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<FilesQuery>, ext: Extensions, b: Bytes) -> R {
+    apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
+    let name = apps.write_files(&id, &env, q.instance.as_deref().filter(|s| !s.is_empty()), &q.path, b).await?;
+    apps.audit("files.written", &id, &env, actor(&ext), json!({ "instance": name, "path": q.path })).await;
+    ok(json!({ "instance": name, "path": q.path }))
 }
 
 /// `GET …/tunnel` (a WebSocket): one TCP connection to the service's port; see `crate::tunnel`.
