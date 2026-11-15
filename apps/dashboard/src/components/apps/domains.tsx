@@ -4,6 +4,9 @@ import { appsApi, type Domain, type Environment } from "@/lib/apps-api";
 import { btn, CopyButton, input, panel, primary, useCopy } from "../ui";
 import { SureButton, type Runner } from "./shared";
 
+/** Where a domain's TXT challenge goes: a wildcard's on the name under it (as the server checks). */
+const challengeName = (host: string) => `_roll-challenge.${host.replace(/^\*\./, "")}`;
+
 const STATUS: Record<Domain["status"], { label: string; dot: string }> = {
   pending: { label: "Waiting for DNS", dot: "bg-accent pulse-dot" },
   issuing: { label: "Issuing certificate", dot: "bg-accent pulse-dot" },
@@ -121,6 +124,15 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
                   </label>
                 )}
                 {d.error && <p className="text-[12px] text-danger">{d.error}</p>}
+                {d.kind === "custom" && d.status !== "active" && (
+                  <p className="text-[12px] text-subtle">
+                    {(() => {
+                      // Unverified custom domains are removed 7 days after they're added (the name is someone's to claim).
+                      const days = Math.ceil((d.created_at + 7 * 86_400_000 - Date.now()) / 86_400_000);
+                      return days > 1 ? `Removed in ${days} days unless its DNS checks out.` : "Removed within a day unless its DNS checks out.";
+                    })()}
+                  </p>
+                )}
                 {d.status === "active" && d.tls !== "issued" && d.tls_error && (
                   <p className={`text-[12px] ${d.tls === "failed" ? "text-danger" : "text-subtle"}`}>{d.tls_error}</p>
                 )}
@@ -139,7 +151,7 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
                       <tbody>
                         {d.record !== "txt" && <Record type="CNAME" name={d.hostname} value={d.target} copied={copied} copy={copy} />}
                         {d.record !== "cname" && d.token && (
-                          <Record type="TXT" name={`_roll-challenge.${d.hostname}`} value={d.token} copied={copied} copy={copy} />
+                          <Record type="TXT" name={challengeName(d.hostname)} value={d.token} copied={copied} copy={copy} />
                         )}
                       </tbody>
                     </table>
@@ -163,7 +175,7 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
             if (valid) void add();
           }}
         >
-          <input value={host} onChange={(e) => setHost(e.target.value.toLowerCase())} placeholder="www.example.com" className={`${input} min-w-0 flex-1 font-mono text-[12px]`} spellCheck={false} />
+          <input value={host} onChange={(e) => setHost(e.target.value.toLowerCase())} placeholder="www.example.com or *.example.com" className={`${input} min-w-0 flex-1 font-mono text-[12px]`} spellCheck={false} />
           <button type="submit" className={primary} disabled={!valid || runner.busy !== null}>
             Add domain
           </button>

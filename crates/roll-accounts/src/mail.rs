@@ -98,4 +98,22 @@ impl crate::Accounts {
     pub(crate) fn mail_on(&self) -> bool {
         self.mailer.on()
     }
+
+    /// Whether mail goes out at all (another product offering email: roll apps' notifications).
+    pub fn mail_available(&self) -> bool {
+        self.mailer.on()
+    }
+
+    /// Mail to `user`'s own address, awaited so the caller can retry (roll apps' notifications to
+    /// a project's owner). Never to an address a caller names: another product can only reach a
+    /// person through their account, so no tenant can make roll mail a stranger.
+    pub async fn mail_user(&self, user: &str, subject: &str, text: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(self.mailer.on(), "email isn't set up");
+        let u = self.user(user).map_err(|e| anyhow::anyhow!("{e}"))?;
+        anyhow::ensure!(!u.disabled, "the account is disabled");
+        anyhow::ensure!(!u.email.is_empty(), "the account has no email address");
+        // One line, as a header must be (a service's or a domain's name is in it).
+        let subject: String = subject.chars().map(|c| if c.is_control() { ' ' } else { c }).take(200).collect();
+        self.mailer.send(&Mail { to: u.email, subject, text: text.to_string() }).await
+    }
 }

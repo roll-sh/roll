@@ -81,13 +81,56 @@ pub struct Row {
     pub lends: Option<Lend>,
 }
 
-/// Where a request names the resources it links ([`Row::lends`]), as `(kind, ref)`.
+/// Where a request names other resources it hands to this one ([`Row::lends`]).
 #[derive(Clone, Copy, Debug)]
 pub enum Lend {
-    /// Two path parameters: the kind and the ref.
+    /// Two path parameters, the kind and the ref, of a link: `reveal` on it.
     Path(&'static str, &'static str),
-    /// A top-level JSON array of `{kind, ref}`.
-    Body(&'static str),
+    /// What the JSON body names, each with the action it needs there.
+    Each(fn(&Value) -> Vec<Lent>),
+}
+
+/// Another resource a request hands to this one, as an apps link kind names it, and the action
+/// that needs there.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lent {
+    pub kind: String,
+    pub r#ref: String,
+    pub action: Action,
+}
+
+/// Apps' `links: [{kind, ref}]`: each linked resource's credentials go to the service (reveal).
+/// An entry that isn't `{kind, ref}` names a kind roll doesn't know, so it's refused.
+fn apps_links(b: &Value) -> Vec<Lent> {
+    b.get("links").and_then(Value::as_array).into_iter().flatten().map(|l| Lent { kind: l["kind"].as_str().unwrap_or("").into(), r#ref: l["ref"].as_str().unwrap_or("").into(), action: Action::Reveal }).collect()
+}
+
+/// A worker's `run.scale.stream`: apps reads that stream group's lag for it (read on the stream).
+fn apps_scale(b: &Value) -> Vec<Lent> {
+    b.pointer("/run/scale/stream").and_then(Value::as_str).map(|s| Lent { kind: "stream".into(), r#ref: s.into(), action: Action::Read }).into_iter().collect()
+}
+
+/// A roll code repo the body names, which apps reads for the caller (`repo` for a plan or an import,
+/// `source.repo` for a service built from one): read on it, so a token can't learn a repo's stack,
+/// head or roll.toml, or build and run its code, without being allowed to read it.
+fn apps_repo(b: &Value) -> Vec<Lent> {
+    let from_source = (b.pointer("/source/kind").and_then(Value::as_str) == Some("repo")).then(|| b.pointer("/source/repo").and_then(Value::as_str)).flatten();
+    b.get("repo").and_then(Value::as_str).or(from_source).map(|r| Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }).into_iter().collect()
+}
+
+/// A new service: its links, its scaling stream and the repo it's built from.
+fn apps_create_lends(b: &Value) -> Vec<Lent> {
+    let mut out = apps_links(b);
+    out.extend(apps_scale(b));
+    out.extend(apps_repo(b));
+    out
+}
+
+/// A service's settings: its scaling stream and, when its source changes, the repo.
+fn apps_patch_lends(b: &Value) -> Vec<Lent> {
+    let mut out = apps_scale(b);
+    out.extend(apps_repo(b));
+    out
 }
 
 /// What an apps link's kind is, as a rule names it: its product and the resource kind its ids are.
@@ -99,6 +142,10 @@ pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
         "stream" => ("streams", "stream"),
         "queue" => ("queues", "vhost"),
         "nosql" => ("nosql", "nosql-database"),
+        // Another service's URLs: no credential, but held to the same `reveal` as the rest.
+        "service" => ("apps", "service"),
+        // Not a link: a repo apps reads (`apps_repo`).
+        "repo" => ("code", "repo"),
         _ => return None,
     })
 }
@@ -119,7 +166,7 @@ pub type Sources = Vec<(String, Option<String>)>;
 
 impl Row {
     pub fn needs_body(&self) -> bool {
-        matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Body(_)))
+        matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
     }
 
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
@@ -405,6 +452,21 @@ pub fn classified(route: &str) -> Option<&'static str> {
     None
 }
 
+/// Whether `method route` is decided by a prefix row: no row of the route's own names that method
+/// (a route with its own `GET` row can still have a `PUT` a prefix decides), and a prefix row
+/// covers it.
+pub fn method_by_prefix(method: &str, route: &str) -> bool {
+    let shape = shape(route);
+    let own = ROWS.iter().any(|r| self::shape(r.route) == shape && (r.method == "*" || r.method == method));
+    !own && !OPERATOR_ONLY.iter().any(|(r, _)| self::shape(r) == shape) && ROWS.iter().any(|r| r.route.ends_with('/') && shape.starts_with(&self::shape(r.route)))
+}
+
+/// Whether `method route`, decided by a prefix row, was looked at (`prefix-reviewed.txt`, one
+/// `METHOD route` a line).
+pub fn prefix_reviewed(method: &str, route: &str) -> bool {
+    include_str!("prefix-reviewed.txt").lines().map(str::trim).any(|l| l.split_once(' ').is_some_and(|(m, r)| m == method && r == route))
+}
+
 /// A route listed for a nest (`/v1/storage`, `/v1/storage/`): its rows are matched by path.
 fn is_nest(route: &str) -> bool {
     NESTS.iter().any(|n| route == *n || route.starts_with(&format!("{n}/")))
@@ -557,8 +619,13 @@ fn redis_action(b: &Value) -> Action {
     let first = cmd.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
     match first.as_str() {
         // A script can run anything, flushes included: the strongest a command can be.
-        "FLUSHDB" | "FLUSHALL" | "EVAL" | "EVALSHA" | "EVAL_RO" | "EVALSHA_RO" | "FCALL" | "FCALL_RO" | "FUNCTION" | "SCRIPT" => Action::Delete,
-        "ACL" | "CONFIG" | "AUTH" | "HELLO" | "MIGRATE" | "MODULE" | "DEBUG" | "SHUTDOWN" | "REPLICAOF" | "SLAVEOF" => Action::Admin,
+        "FLUSHDB" | "FLUSHALL" | "SWAPDB" | "EVAL" | "EVALSHA" | "EVAL_RO" | "EVALSHA_RO" | "FCALL" | "FCALL_RO" | "FUNCTION" | "SCRIPT" => Action::Delete,
+        // The server's, not the data's: Redis's own @dangerous category. MONITOR and SYNC stream
+        // everyone's commands and data, CLIENT sees and ends other connections, SLOWLOG shows other
+        // commands' arguments.
+        "ACL" | "CONFIG" | "AUTH" | "HELLO" | "MIGRATE" | "MODULE" | "DEBUG" | "SHUTDOWN" | "REPLICAOF" | "SLAVEOF" | "MONITOR" | "SYNC" | "PSYNC" | "REPLCONF"
+        | "CLIENT" | "SLOWLOG" | "LATENCY" | "CLUSTER" | "FAILOVER" | "ROLE" | "BGSAVE" | "SAVE" | "BGREWRITEAOF" | "LASTSAVE" | "RESTORE" | "RESTORE-ASKING"
+        | "PFDEBUG" | "PFSELFTEST" => Action::Admin,
         "GET" | "MGET" | "STRLEN" | "GETRANGE" | "EXISTS" | "TYPE" | "TTL" | "PTTL" | "EXPIRETIME" | "KEYS" | "SCAN" | "DBSIZE" | "HGET" | "HMGET" | "HGETALL"
         | "HKEYS" | "HVALS" | "HLEN" | "HEXISTS" | "HSCAN" | "HSTRLEN" | "LRANGE" | "LLEN" | "LINDEX" | "LPOS" | "SMEMBERS" | "SISMEMBER" | "SMISMEMBER"
         | "SCARD" | "SSCAN" | "SRANDMEMBER" | "SINTER" | "SUNION" | "SDIFF" | "ZRANGE" | "ZRANGEBYSCORE" | "ZREVRANGE" | "ZREVRANGEBYSCORE" | "ZSCORE"
@@ -631,10 +698,10 @@ fn secrets_import_sources(b: &Value) -> Sources {
 }
 
 /// A new apps notification: a webhook (the default) answers its signing secret once, so `reveal`;
-/// a Slack or Discord one answers none, so `write`.
+/// a Slack, Discord or email one (the project's owner) answers none, so `write`.
 fn apps_notification_action(b: &Value) -> Action {
     match b["kind"].as_str() {
-        Some("slack" | "discord") => Action::Write,
+        Some("slack" | "discord" | "email") => Action::Write,
         _ => Action::Reveal,
     }
 }
@@ -642,6 +709,40 @@ fn apps_notification_action(b: &Value) -> Action {
 /// A new apps service: `deploy` unless its source is an upload (which deploys only with `roll up`).
 fn apps_create_action(b: &Value) -> Action {
     if b["source"]["kind"] == "upload" { Action::Write } else { Action::Deploy }
+}
+
+/// A service's run settings that change only how much of it runs and how it's watched: its size,
+/// scale, health checks, timers, alerts, rollout and restarts. Every other run key decides what
+/// production runs, when, or who reaches it (start, pre-deploy, schedule, schedules and their
+/// timezone and retries, kind, port, volume, public, tcp, and `rollback_on_crash`, which has roll
+/// put an older deployment live by itself), and so does any key apps adds later until it's listed
+/// here: a new setting is never a quiet way into production.
+const APPS_WRITE_RUN: [&str; 18] = [
+    "min_instances",
+    "max_instances",
+    "concurrency",
+    "cpu",
+    "memory_mb",
+    "health_path",
+    "health_timeout_s",
+    "suspend_after_s",
+    "sleep_after_s",
+    "alerts",
+    "rollout",
+    "scale",
+    "drain_s",
+    "cpu_target",
+    "restart",
+    "restart_tries",
+    "affinity",
+    "timeout_s",
+];
+
+/// A service's settings: `deploy` when they change what runs or who reaches it (`source`, `build`,
+/// any run key not in [`APPS_WRITE_RUN`]); `write` for the rest of `run`.
+fn apps_patch_action(b: &Value) -> Action {
+    let runs = b.get("source").is_some() || b.get("build").is_some() || b["run"].as_object().is_some_and(|r| r.keys().any(|k| !APPS_WRITE_RUN.contains(&k.as_str())));
+    if runs { Action::Deploy } else { Action::Write }
 }
 
 fn agent_command_action(b: &Value) -> Action {
@@ -692,6 +793,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/access/tokens/{id}/rotate", "access", ADMIN, Tgt::Product),
     row("GET", "/v1/access/tokens/{id}/tighten", "access", R, Tgt::Product),
     row("GET", "/v1/access/tokens/{id}/networks", "access", R, Tgt::Product),
+    // What an agent with the token is offered over MCP (roll-mcp reads the token as the caller first).
+    row("GET", "/v1/access/tokens/{id}/tools", "access", R, Tgt::Product),
+    // How many tools each product has and their context cost: counts only, for the connect panel.
+    row("GET", "/v1/mcp/toolsets", "access", R, Tgt::AnyGrant),
     row("GET", "/v1/access/checkup", "access", R, Tgt::Product),
     row("POST", "/v1/access/tokens/{id}/tighten", "access", ADMIN, Tgt::Product),
     row("DELETE", "/v1/access/tokens/{id}/temporary/{approval}", "access", ADMIN, Tgt::Product),
@@ -948,6 +1053,8 @@ static ROWS: &[Row] = &[
     row("*", "/v1/search/clusters/{id}/indices/{index}", "search", M, one(PG, "cluster")).index("index"),
     row("*", "/v1/search/clusters/{id}/indices/{index}/", "search", M, one(PG, "cluster")).index("index"),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/search", "search", R, one(PG, "cluster")).index("index"),
+    // Analyzing text with an index's analyzers reads the index.
+    row("POST", "/v1/search/clusters/{id}/indices/{index}/analyze", "search", R, one(PG, "cluster")).index("index"),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/delete_by_query", "search", D, one(PG, "cluster")).index("index"),
     // A bulk can delete as well as index: its action lines decide.
     row("POST", "/v1/search/clusters/{id}/indices/{index}/bulk", "search", Act::Raw(bulk_action), one(PG, "cluster")).index("index"),
@@ -1030,10 +1137,10 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/services", "apps", R, list("id")),
     // A service from a repo or an image deploys production at once; an upload one waits for `roll up`.
     // Its `links` hand each linked resource's credentials to the service: reveal on each too.
-    row("POST", "/v1/apps/services", "apps", Act::Body(apps_create_action), Tgt::Product).env(EnvFrom::Fixed("production")).lends(Lend::Body("links")),
+    row("POST", "/v1/apps/services", "apps", Act::Body(apps_create_action), Tgt::Product).env(EnvFrom::Fixed("production")).lends(Lend::Each(apps_create_lends)),
     row("POST", "/v1/apps/projects/{project}/services", "apps", Act::Body(apps_create_action), Tgt::Create { project: Some("project"), place: None, id_field: "id" })
         .env(EnvFrom::Fixed("production"))
-        .lends(Lend::Body("links")),
+        .lends(Lend::Each(apps_create_lends)),
     row("GET", "/v1/apps/events", "apps", R, Tgt::Product),
     // A project's notifications: the URL is stored sealed and never answered; a webhook's signing
     // secret comes back once, so making one is reveal (Slack and Discord ones are write).
@@ -1043,14 +1150,21 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/projects/{project}/notifications", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications", "apps", Act::Body(apps_notification_action), one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/notifications/{nid}", "apps", W, one(&["project"], "project")),
+    // An edit can send a webhook more (events, environments, services): reveal, as a drain's edit is.
+    row("PATCH", "/v1/apps/projects/{project}/notifications/{nid}", "apps", REVEAL, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications/{nid}/test", "apps", W, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications/{nid}/deliveries", "apps", R, one(&["project"], "project")),
     // A project's log drains: every service's output POSTed out of roll, signed. Adding one sends
     // runtime output elsewhere and its signing secret comes back once: reveal. The URL is never
     // answered (only its host).
     row("GET", "/v1/apps/projects/{project}/drains", "apps", R, one(&["project"], "project")),
+    // Its services as roll.toml: settings and variables' names, never a value.
+    row("POST", "/v1/apps/projects/{project}/export", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/drains/{did}", "apps", W, one(&["project"], "project")),
+    // An edit can send more out (another source, every environment): reveal, as making one is.
+    row("PATCH", "/v1/apps/projects/{project}/drains/{did}", "apps", REVEAL, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/drains/{did}/test", "apps", W, one(&["project"], "project")),
     // A private registry's login (never answered back), and unlinking a database: settings.
     row("PUT", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
     row("DELETE", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
@@ -1059,6 +1173,8 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")).lends(Lend::Path("kind", "ref")),
     row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
+    // A worker scaled on a stream group's lag has apps read that stream for it: read there too.
+    row("PATCH", "/v1/apps/services/{id}", "apps", Act::Body(apps_patch_action), one(PG, "service")).lends(Lend::Each(apps_patch_lends)),
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
     // `variables_from` copies another environment's values into this one: reveal there too.
     row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("variables_from")),
@@ -1078,6 +1194,13 @@ static ROWS: &[Row] = &[
     // admin in every environment, as an agent's shell is: its WebSocket, and all of a session
     // (opening, keys, screen, resizing, closing: what may close an admin's shell is admin too).
     row("GET", "/v1/apps/services/{id}/environments/{env}/shell", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A tunnel reaches the service's port past its allow list, access token and maintenance
+    // (a private service's admin page, say): admin, as a shell is.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/tunnel", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    // Files in an instance (`roll apps cp`): read, anything the app keeps (its secrets too);
+    // written, anything it runs next: admin, as a shell is.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/files", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("PUT", "/v1/apps/services/{id}/environments/{env}/files", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/shell/sessions", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/keys", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1094,13 +1217,19 @@ static ROWS: &[Row] = &[
     // Checking a domain changes nothing a person sees.
     row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/verify", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps", "apps", R, Tgt::Product),
-    row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant),
+    // A plan or an import of a roll code repo reads it: read there too.
+    row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
+    row("POST", "/v1/apps/import", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
     row("GET", "/v1/apps/projects/{project}/services", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/variables/values", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // What the next deploy changes: names of variables and settings, never a value.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/pending", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // A job is a command run with the environment's variables: its output can be them.
     row("GET", "/v1/apps/services/{id}/environments/{env}/jobs/{job}/logs", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
     // ── previews (feature/roll-previews, docs/previews.md) ──
-    row("GET", "/v1/previews", "previews", R, list("id")),
+    // A preview's link carries its access token (`share_url`, also each service's and earlier
+    // ones'): the link is a credential, as its QR code is.
+    row("GET", "/v1/previews", "previews", R, list("id")).reveals(&["share_url"]),
     row("POST", "/v1/previews", "previews", W, Tgt::Create { project: None, place: None, id_field: "id" }).env(EnvFrom::Fixed("preview")),
     row("*", "/v1/previews/projects/{project}/", "previews", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/previews/projects/{project}/", "previews", R, one(&["project"], "project")),
@@ -1108,10 +1237,29 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/previews/projects/{project}/bypass", "previews", REVEAL, one(&["project"], "project")),
     row("GET", "/v1/previews/projects/{project}/bypass", "previews", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/previews/projects/{project}/bypass", "previews", ADMIN, one(&["project"], "project")),
-    row("GET", "/v1/previews/{id}", "previews", R, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("GET", "/v1/previews/{id}", "previews", R, one(PG, "preview")).env(EnvFrom::Fixed("preview")).reveals(&["share_url"]),
     row("DELETE", "/v1/previews/{id}", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("*", "/v1/previews/{id}/", "previews", M, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("POST", "/v1/previews/{id}/reset", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A share link lets someone outside the team in, its token only in the answer: reveal, as the
+    // bypass secret is. Listing (no tokens) is read and revoking one is delete, by the prefix.
+    row("POST", "/v1/previews/{id}/shares", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A preview's own variables come back with their values: reveal (setting them is write, by
+    // the prefix).
+    row("GET", "/v1/previews/{id}/env", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // The share link with its access token, as a QR code for a phone (previews-next): the token in
+    // another encoding, so reveal as the link itself is.
+    row("GET", "/v1/previews/{id}/qr.png", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Each data branch's connection as the preview's services get it (the branches' own
+    // credentials, never a parent's; previews-next): reveal, as the preview's env is.
+    row("GET", "/v1/previews/{id}/connect", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // The mail a preview's services sent, caught and never delivered (previews-next): it can hold
+    // copies of production's people, so reveal, as the preview's env is.
+    row("GET", "/v1/previews/{id}/mail", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("GET", "/v1/previews/{id}/mail/{mail}", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Accepting a visual change is a person's call (with `visual_review = "required"` previews
+    // refuses tokens anyway): admin, so a write token can't wave its own diff through.
+    row("POST", "/v1/previews/{id}/visual/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // ── roll code ──
     row("GET", "/v1/code", "code", R, Tgt::AnyGrant),
     row("GET", "/v1/code/health", "code", R, Tgt::AnyGrant),
@@ -1124,6 +1272,10 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/code/repos/{owner}/{repo}", "code", ADMIN, one(REPO, "repo")),
     row("DELETE", "/v1/code/repos/{owner}/{repo}", "code", D, one(REPO, "repo")),
     row("*", "/v1/code/repos/{owner}/{repo}/", "code", M, one(REPO, "repo")),
+    // Where a repo's committed secrets are (key, environment, path, line; never the value): it
+    // tells a reader which line holds production's key, so it's the repo's managers' (roll code
+    // checks manage too): admin.
+    row("*", "/v1/code/repos/{owner}/{repo}/leaks", "code", ADMIN, one(REPO, "repo")),
     row("POST", "/v1/code/repos/{owner}/{repo}/land", "code", DEPLOY, one(REPO, "repo")),
     row("POST", "/v1/code/repos/{owner}/{repo}/queue/pause", "code", ADMIN, one(REPO, "repo")),
     row("POST", "/v1/code/repos/{owner}/{repo}/queue/resume", "code", ADMIN, one(REPO, "repo")),
@@ -1298,6 +1450,16 @@ mod tests {
         assert_eq!(f.row.action("POST", &[], None), Action::Reveal);
         assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/site" } })), Action::Deploy);
         assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "upload" } })), Action::Write);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "public": false } })), Action::Deploy);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "min_instances": 2, "memory_mb": 512 } })), Action::Write);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "pre_deploy": "./migrate" } })), Action::Deploy);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "schedules": [{ "name": "nightly", "schedule": "@daily", "command": "./export" }] } })), Action::Deploy);
+        // A port on the internet is who reaches it, as public is; a key apps adds later is deploy until listed.
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "tcp": [5432] } })), Action::Deploy);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "rollback_on_crash": true } })), Action::Deploy);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "a_setting_from_next_week": true } })), Action::Deploy);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "memory_mb": 1024, "max_instances": 4, "alerts": { "memory_pct": 90 } } })), Action::Write);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "source": { "kind": "image", "image": "x" } })), Action::Deploy);
         assert_eq!(bulk_action(b"{\"index\":{\"_id\":\"1\"}}\n{\"title\":\"a\"}\n"), Action::Write);
         assert_eq!(bulk_action(b"{\"index\":{}}\n{\"t\":1}\n{\"delete\":{\"_id\":\"2\"}}\n"), Action::Delete);
         assert_eq!(bulk_action(b"{\"update\":{\"_id\":\"3\"}}\n{\"script\":{\"source\":\"ctx.op = 'delete'\"}}\n"), Action::Delete);
@@ -1308,9 +1470,19 @@ mod tests {
         assert_eq!(dep.row.action("POST", &[("env".into(), "staging".into())], None), Action::Write);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1", "read_only": true })), Action::Read);
         assert_eq!(sql_action(&serde_json::json!({ "sql": "select 1" })), Action::Write);
+        // A repo apps reads for the caller needs read on it: a plan's, an import's, a source's.
+        let repo = |r: &str| vec![Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }];
+        assert_eq!(apps_repo(&serde_json::json!({ "repo": "acme/web", "revision": "main" })), repo("acme/web"));
+        assert_eq!(apps_repo(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/api" } })), repo("acme/api"));
+        assert!(apps_repo(&serde_json::json!({ "source": { "kind": "image", "image": "nginx" } })).is_empty());
+        assert_eq!(link_target("repo"), Some(("code", "repo")));
         assert_eq!(redis_action(&serde_json::json!({ "command": ["get", "k"] })), Action::Read);
         assert_eq!(redis_action(&serde_json::json!({ "command": ["FLUSHALL"] })), Action::Delete);
         assert_eq!(redis_action(&serde_json::json!({ "command": ["set", "k", "v"] })), Action::Write);
+        // Reading everyone's traffic or the whole dataset is the server's, not a write.
+        assert_eq!(redis_action(&serde_json::json!({ "command": ["MONITOR"] })), Action::Admin);
+        assert_eq!(redis_action(&serde_json::json!({ "command": "client kill 10.0.0.1:5000" })), Action::Admin);
+        assert_eq!(redis_action(&serde_json::json!({ "command": ["SWAPDB", "0", "1"] })), Action::Delete);
         assert_eq!(cql_action(&serde_json::json!({ "query": "SELECT * FROM t; DROP TABLE t" })), Action::Delete);
         assert_eq!(cql_action(&serde_json::json!({ "query": "" })), Action::Write);
         // Comments can't hide what runs; scripts and credentials are the strongest.
@@ -1343,6 +1515,9 @@ mod tests {
         assert_eq!(git_push(b"0000", Some("main")), Push::Bad);
         assert_eq!(git_push(pkt(&format!("{z} {a}")).as_bytes(), Some("main")), Push::Bad);
         assert_eq!(action("POST", "/v1/previews/projects/{p}/bypass", "/v1/previews/projects/prj_a/bypass"), Some(Action::Reveal));
+        assert_eq!(action("GET", "/v1/previews/{id}/env", "/v1/previews/pv_1/env"), Some(Action::Reveal), "a preview's variables have their values");
+        assert_eq!(action("GET", "/v1/previews/{id}/qr.png", "/v1/previews/pv_1/qr.png"), Some(Action::Reveal), "a QR code is the share link's token");
+        assert_eq!(action("POST", "/v1/previews/{id}/visual/accept", "/v1/previews/pv_1/visual/accept"), Some(Action::Admin));
         // An apps shell runs any command with the environment's variables: admin, outside production
         // too, all of a session (closing one included). Waking an environment starts compute: write.
         for (m, p) in [("POST", "/v1/apps/services/{s}/environments/{e}/shell/sessions/{sh}/resize"), ("DELETE", "/v1/apps/services/{s}/environments/{e}/shell/sessions/{sh}")] {
