@@ -2495,6 +2495,27 @@ syncs(id PK, project_id, env_id, path, kind, target, keys, prefix, secret BLOB, 
 row with `op = 'delete'` in `versions` and is removed from `secrets`, so `(env, path, key, owner)` is
 free again and its history stays readable by key.
 
+## Metrics
+
+rolld's access metrics count roll secrets as its own product (`product: secrets`: `Latency`,
+`Requests`, `Http5xx`), and a line a minute (JSON logs, CloudWatch's Embedded Metric Format, beside
+the cluster's) carries what roll secrets did since the last one and how it stands, by `service`
+and `product`. Numbers only: never a value, a key's name or a project.
+
+| Metric | What |
+| --- | --- |
+| `SecretsReads` | Folders read or resolved (people, tokens, runtimes) |
+| `SecretsDynamicIssued` | Dynamic credentials issued (a lease each) |
+| `SecretsLeasesRevoked`, `SecretsRevokeFailures` | Leases ended, and revocations a product refused (retried) |
+| `SecretsSyncsPushed`, `SecretsSyncFailures` | Sync pushes that worked and that failed |
+| `SecretsRotations`, `SecretsRotationFailures` | Scheduled rotations that worked and that failed |
+| `SecretsKmsRefusals` | A customer's KMS refusing to open a project's data key |
+| `SecretsLeasesLive`, `SecretsSyncsFailing`, `SecretsRotationsFailing` | Gauges: leases not ended, syncs whose last push failed, credentials whose last rotation failed |
+
+Alarms worth setting: `SecretsKmsRefusals` above zero (a customer's key policy changed),
+`SecretsRevokeFailures` and `SecretsRotationsFailing` staying above zero (health names them),
+`SecretsSyncsFailing` rising.
+
 ## Performance
 
 `cargo run -p roll-secrets --release --example bench -- 9000` times the hot paths on one

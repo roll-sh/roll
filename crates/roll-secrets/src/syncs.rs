@@ -562,6 +562,7 @@ impl Secrets {
         let (project, id, env, path) = (r.project.as_str(), r.info.id.as_str(), r.info.environment.as_str(), r.info.path.as_str());
         let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None, runtime: false };
         let ok = outcome.is_ok();
+        crate::metrics::Counters::add(if ok { &self.counters.syncs_pushed } else { &self.counters.sync_failures }, 1);
         let res = self.db.write(|c| {
             match &outcome {
                 Ok(o) => c.execute(
