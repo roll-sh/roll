@@ -259,6 +259,10 @@ behind the `Apps` trait:
   project's repos whose `roll.toml` has a `[preview]` section, named after the repo
   (`[preview] name = "api"` overrides that). Each runs in the container `roll.toml` describes,
   through code-preview's `Isolation`: Docker here, a Fargate task on the fleet.
+  - With `[[preview.states]]` (a name, a page and steps, as `github.states`), the repo names page
+    states its screenshots reach, versioned with the selectors they name: read from its
+    `roll.toml` at the revision the first service runs, after the project's (a name the project
+    has wins), and refused with the rest of the file when they break the same rules.
   - With `health = "/healthz"` in `[preview]`, a service counts once it answers 2xx/3xx there
     (Render's and Railway's health checks), asked once per deploy (it wakes the service once). A
     service that answers 500 fails the preview with the status and the first line it said, so
@@ -1018,7 +1022,7 @@ type Settings = {
     first step that finds nothing ends the steps and is said (`step`, "its steps stopped at `click
     #open: nothing matched`"), the state taken as it was then (checked by hand in the screenshot
     image: a click opening a cart, typing reaching the page's handler, Escape closing it, a missing
-    element named; live: a Tab state compared with main's).
+    element named; live: a Tab state compared with main's, and one from the repo's `roll.toml`).
     Other browsers too (Percy's and Chromatic's browsers; `github.browsers`: `firefox`, `webkit`,
     and `webkit-phone`, WebKit at 390 × 844 at twice the density as a touch device, mobile
     Safari's engine; a picture past 2 MiB is left out so the others still fit):
@@ -1254,6 +1258,8 @@ Ranked by what a person notices first. Done so far:
 - a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
+- page states in the repo's own `roll.toml` (`[[preview.states]]`), versioned with the selectors
+  they name, after the project's;
 - search masks on an index whose name has dots (`logs.2024`): split off at the longest index name
   the cluster has, for masking and for the check when set;
 - a tenth review (states, browsers, search masks) and its fixes: a dialog a state's step opens

@@ -209,53 +209,7 @@ pub struct GithubRule {
 /// engine).
 pub const BROWSERS: [&str; 3] = ["firefox", "webkit", "webkit-phone"];
 
-/// A page state (`github.states`): `page` of the first service's, then its steps.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StateRule {
-    pub name: String,
-    pub page: String,
-    pub steps: Vec<Step>,
-}
-
-/// One step towards a state, on the page's own elements: `{"click": selector}`, `{"type":
-/// [selector, text]}`, `{"press": key}`, `{"wait": ms}`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Step {
-    Click(String),
-    Type(String, String),
-    Press(String),
-    Wait(u32),
-}
-
-/// The most states, and steps in each.
-pub const MAX_STATES: usize = 3;
-pub const MAX_STEPS: usize = 10;
-/// The keys a `press` step may name.
-pub const STEP_KEYS: [&str; 9] = ["Enter", "Escape", "Tab", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Space", "Backspace"];
-
-/// A state's name: 1–40 of a-z, 0-9 and `-`.
-pub fn state_name_ok(n: &str) -> bool {
-    (1..=40).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-
-/// A `state:<name>` page entry's name.
-pub fn state_entry(e: &str) -> Option<&str> {
-    e.strip_prefix("state:").filter(|n| state_name_ok(n))
-}
-
-/// Whether a step is one roll knows, bounded (checked when set, and again before a run).
-pub fn step_ok(s: &Step) -> bool {
-    let text = |t: &str| t.len() <= 200 && !t.chars().any(char::is_control);
-    let selector = |t: &str| !t.trim().is_empty() && text(t);
-    match s {
-        Step::Click(sel) => selector(sel),
-        Step::Type(sel, t) => selector(sel) && text(t),
-        Step::Press(k) => STEP_KEYS.contains(&k.as_str()),
-        Step::Wait(ms) => *ms <= 5000,
-    }
-}
+pub use code_preview::config::{MAX_STATES, MAX_STEPS, STEP_KEYS, StateRule, Step, state_entry, state_name_ok, step_ok};
 
 /// The most endpoints timed (`github.endpoints`).
 pub const MAX_ENDPOINTS: usize = 5;
@@ -325,10 +279,7 @@ pub fn page_entry(e: &str) -> Option<(Option<&str>, &str)> {
     page_path_ok(e).then_some((None, e))
 }
 
-/// Whether `p` is a page path the screenshot may visit: absolute, on the service's own origin.
-pub fn page_path_ok(p: &str) -> bool {
-    p.starts_with('/') && !p.starts_with("//") && p.len() <= 200 && p.bytes().all(|b| b.is_ascii_graphic() && !b"\\#\"'<>`".contains(&b))
-}
+pub use code_preview::config::page_path_ok;
 
 fn yes() -> bool {
     true

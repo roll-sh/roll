@@ -151,6 +151,8 @@ pub struct ServiceSpec {
     pub env: Vec<(String, String)>,
     /// A path that answers 2xx/3xx once the service works (`roll.toml` `health`).
     pub health: Option<String>,
+    /// Page states its screenshots reach, from its `roll.toml` (`[[preview.states]]`).
+    pub states: Vec<crate::settings::StateRule>,
 }
 
 /// A screenshot of a service's page, and how fast it loaded when the backend could time it.
