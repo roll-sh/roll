@@ -279,6 +279,15 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
     Ok(out)
 }
 
+/// What a folder's digest can't vouch for ([`Secrets::digest_of`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Unvouched {
+    /// A read would issue a dynamic credential.
+    pub dynamic: bool,
+    /// A read follows a live link.
+    pub live: bool,
+}
+
 impl Secrets {
     /// The effective entries of a folder; `shared` leaves out the caller's personal values.
     /// Imports and the base show through only where the caller may `action` them.
@@ -488,10 +497,12 @@ impl Secrets {
         Ok(self.digest_of(project, slug, path, caller)?.0)
     }
 
-    /// The digest, and whether reading the folder would issue a dynamic credential (one of its
-    /// keys, or a key a reference reaches, links dynamically): the digest doesn't move when such a
-    /// credential's lease ends, so a reader can't keep one because the digest held.
-    pub(crate) fn digest_of(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<(String, bool)> {
+    /// The digest, and what it can't vouch for: whether reading the folder would issue a dynamic
+    /// credential (one of its keys, or a key a reference reaches, links dynamically: the digest
+    /// doesn't move when its lease ends), and whether it reads a live link (the digest moves when
+    /// roll rotates the resource's credential, not when the product changes it itself, as a
+    /// password reset through roll Postgres does).
+    pub(crate) fn digest_of(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<(String, Unvouched)> {
         use sha2::{Digest, Sha256};
         let path = names::path(path)?;
         caller.need(Action::Read, &Scope::at(project, slug, &path))?;
@@ -504,12 +515,15 @@ impl Secrets {
         let dek = self.project(project)?;
         let mut h = Sha256::new();
         let dynamic = std::cell::Cell::new(false);
+        let live = std::cell::Cell::new(false);
         // A live link's value is the resource's credential as it is: it moves when roll rotates it.
         let generations: HashMap<(String, String), i64> = self.db.read(|c| c.query("SELECT kind, ref, generation FROM source_generations", (), |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?))))?.into_iter().collect();
         // No fingerprint: a digest is readable without reveal, and a version moves with every value.
         let stamp = |h: &mut Sha256, e: &Entry| {
-            if e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
-                dynamic.set(true);
+            match e.row.link.as_ref().map(|l| l.mode) {
+                Some(Mode::Dynamic) => dynamic.set(true),
+                Some(Mode::Live) => live.set(true),
+                _ => {}
             }
             let generation = e.row.link.as_ref().filter(|l| l.mode == Mode::Live).and_then(|l| generations.get(&(l.kind.clone(), l.r#ref.clone()))).copied().unwrap_or(0);
             // Only once rotated, so a digest taken before there were generations stays the same.
@@ -548,33 +562,40 @@ impl Secrets {
         for m in self.missing_required(project, &path, &have)? {
             h.update(format!("required\0{}\n", m.key));
         }
-        Ok((h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect(), dynamic.get()))
+        Ok((h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect(), Unvouched { dynamic: dynamic.get(), live: live.get() }))
     }
 
     /// A conditional read (`If-None-Match`): `Some(digest)` when the folder's values are as they
     /// were for `etag`, so nothing is read, issued or audited (a 304). Never when the read would
-    /// issue a dynamic credential: the cached one may have ended with its lease. Needs reveal, as
+    /// issue a dynamic credential (the cached one may have ended with its lease) or reads a live
+    /// link (the product may have changed its credential without roll knowing). Needs reveal, as
     /// the read does: whether values changed isn't told to whoever couldn't read them.
     pub fn unchanged(&self, project: &str, slug: &str, path: &str, etag: &str, dynamic: bool, caller: &Caller) -> Result<Option<String>> {
         let at = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &at))?;
-        let (digest, has_dynamic) = self.digest_of(project, slug, &at, caller)?;
-        if digest != etag || (dynamic && has_dynamic) {
+        let (digest, unvouched) = self.digest_of(project, slug, &at, caller)?;
+        if digest != etag || unvouched.live || (dynamic && unvouched.dynamic) {
             return Ok(None);
         }
         // Still read, just not again: at most one row a day for each caller and folder, so a
         // folder read only through revalidations doesn't look unused (health, insights, reach).
-        let keys: Vec<String> = self.view(project, slug, &at, caller, false, Action::Reveal)?.into_iter().map(|e| e.row.key).collect();
+        // Looked up in a read first: a 304 takes no write once today's row is there.
         let now = self.db.now_ms()?;
+        let seen = |c: &code_sql::Conn<'_>| -> Result<bool> {
+            Ok(c.query_row(
+                "SELECT id FROM audit WHERE project_id = ? AND actor = ? AND action = 'secrets.revalidate' AND env = ? AND path = ? AND at > ? LIMIT 1",
+                code_sql::params![project, caller.principal, slug, at, now - 86_400_000],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some())
+        };
+        if self.db.read(seen)? {
+            return Ok(Some(digest));
+        }
+        let keys: Vec<String> = self.view(project, slug, &at, caller, false, Action::Reveal)?.into_iter().map(|e| e.row.key).collect();
         self.db.write(|c| {
-            let seen: Option<i64> = c
-                .query_row(
-                    "SELECT id FROM audit WHERE project_id = ? AND actor = ? AND action = 'secrets.revalidate' AND env = ? AND path = ? AND at > ? LIMIT 1",
-                    code_sql::params![project, caller.principal, slug, at, now - 86_400_000],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if seen.is_none() {
+            if !seen(c)? {
                 crate::audit::record(c, project, caller, "secrets.revalidate", Some(slug), Some(&at), &keys, &format!("revalidated {} (unchanged since its last read)", crate::write::plural(keys.len(), "value")), now)?;
             }
             Ok::<_, Error>(())
