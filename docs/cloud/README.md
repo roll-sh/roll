@@ -558,7 +558,7 @@ counters come from `roll_cluster::Cluster::stats` (roll-cluster has no AWS code)
 
 Alarms (`deploy/cloud/README.md`, "Alarms"): `errors` on `Http5xx`; `latency` on the slowest
 p99 of code, postgres, redis, storage, nosql and tasks (streams and queues long-poll, and git
-pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on any.
+pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on any; `preview-converge-failures` and `preview-screenshot-failures` on most of a quarter-hour's runs failing (roll previews' `PreviewConvergeFailures`/`PreviewScreenshotFailures` over their runs), never rolling a deploy back.
 
 ## Redis on the fleet
 

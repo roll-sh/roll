@@ -1289,6 +1289,8 @@ Ranked by what a person notices first. Done so far:
   at a time whatever runs side by side;
 - dynamic credentials (roll secrets' leases) issued to each start of a service and each job,
   renewed while it runs, revoked when it stops (a sleeping preview holds none);
+- alarms on previews' failures in the cloud stack (`preview-converge-failures`,
+  `preview-screenshot-failures`: most of a quarter-hour's runs failing, never rolling a deploy back);
 - search masks on an index whose name has dots (`logs.2024`): split off at the longest index name
   the cluster has, for masking and for the check when set;
 - a tenth review (states, browsers, search masks) and its fixes: a dialog a state's step opens
@@ -1470,10 +1472,7 @@ Ranked by what a person notices first. Done so far:
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-5. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
-   `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
-   them (as `HandoffFailures` has) belongs with the stack's others.
-6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+5. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1486,12 +1485,12 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+6. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.
