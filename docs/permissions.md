@@ -144,11 +144,10 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 - A route whose product filters its answer per environment and path itself, asking the caller's
   `Grant` for each finding, can be matched by rules limited to some environments or paths too
   (`Row::filters_itself`): a token for staging would get staging's findings, never production's,
-  rather than a 403. No row has it yet: secrets' health and leak scan get it with secrets' `Grant`
-  swap, and until then secrets answers every request the gate lets through as the operator. For the
-  same reason secrets' cross-project routes (`GET /v1/secrets/search`, `GET /v1/secrets/findings`)
-  need a rule for all of secrets until the swap makes them any token's. An approval on such a route
-  is approved once (a rule from it would drop the token's environments).
+  rather than a 403. Secrets' health and leak scan have it; secrets' cross-project routes
+  (`GET /v1/secrets/search`, `GET /v1/secrets/findings`) take any grant and keep each project's
+  results only where it may read. An approval on such a route is approved once (a rule from it
+  would drop the token's environments).
 - Linking another resource to an apps service (`PUT …/services/{id}/links/{kind}/{ref}`, or
   `links` in a new service's body) puts its address and password in the service's variables, where
   the service's code reads them: it also needs `reveal` on each linked resource (a `postgres` link

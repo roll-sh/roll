@@ -24,6 +24,25 @@ made with the operator token.
 - Names are unique per owner, and a resource's place is per owner: two users can each put the same
   resource on their own canvas.
 
+### What a canvas stands for
+
+Anyone may put any resource on their own canvas, so being on a canvas proves nothing about who owns
+the resource. Before anything acts on a resource through a project, it asks
+`Workspace::trusts(project, kind, ref)`. Examples:
+- a secret linked to a database's credentials;
+- an audit sink writing to a bucket;
+- a repo's checks and previews getting the project's secrets.
+
+The answer:
+- **The operator's projects** stand for everything on their canvas.
+- **A person's projects** stand only for what `Owners` (set by rolld) says is theirs:
+  - everything, for an admin;
+  - a repo under the person's own roll code owner (`ada/…`);
+  - nothing else, until a product says who owns its resources.
+
+A failed lookup is a no. Never decide from canvas membership alone: roll secrets' links and sinks,
+roll code's secret lookups and roll previews all ask `trusts`.
+
 - On a single node, the data is SQLite at `<home>/workspace.db`.
 - With the system database (`ROLL_SYSTEM_DATABASE`), the data is Postgres, in the schema `workspace`.
   Nodes share it without leases, because every read-then-write is one `code_sql` write transaction.

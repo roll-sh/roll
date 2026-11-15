@@ -20,6 +20,7 @@ import { Route as DashboardDeployRouteImport } from './routes/dashboard/deploy'
 import { Route as DashboardStreamsRouteImport } from './routes/dashboard/streams'
 import { Route as DashboardTasksRouteImport } from './routes/dashboard/tasks'
 import { Route as OauthAuthorizeRouteImport } from './routes/oauth/authorize'
+import { Route as ShareIdRouteImport } from './routes/share/$id'
 import { Route as OwnerRepoIndexRouteImport } from './routes/$owner/$repo/index'
 import { Route as OwnerRepoGitReceivePackRouteImport } from './routes/$owner/$repo/git-receive-pack'
 import { Route as OwnerRepoGitUploadPackRouteImport } from './routes/$owner/$repo/git-upload-pack'
@@ -62,6 +63,7 @@ import { Route as DashboardAccessTokensIdRouteImport } from './routes/dashboard/
 import { Route as DashboardCodeOwnerIndexRouteImport } from './routes/dashboard/code/$owner/index'
 import { Route as DashboardProjectsIdLogsRouteImport } from './routes/dashboard/projects/$id/logs'
 import { Route as DashboardProjectsIdPreviewsRouteImport } from './routes/dashboard/projects/$id/previews'
+import { Route as DashboardProjectsIdSecretsRouteImport } from './routes/dashboard/projects/$id_/secrets'
 import { Route as DashboardQueuesQueuesIndexRouteImport } from './routes/dashboard/queues/queues/index'
 import { Route as DashboardStorageChar91Char93AccountsRouteImport } from './routes/dashboard/storage/[-]/accounts'
 import { Route as DashboardStorageChar91Char93ApiRouteImport } from './routes/dashboard/storage/[-]/api'
@@ -127,6 +129,11 @@ const DashboardTasksRoute = DashboardTasksRouteImport.update({
 const OauthAuthorizeRoute = OauthAuthorizeRouteImport.update({
   id: '/oauth/authorize',
   path: '/oauth/authorize',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ShareIdRoute = ShareIdRouteImport.update({
+  id: '/share/$id',
+  path: '/share/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
 const OwnerRepoIndexRoute = OwnerRepoIndexRouteImport.update({
@@ -343,6 +350,12 @@ const DashboardProjectsIdPreviewsRoute =
     path: '/previews',
     getParentRoute: () => DashboardProjectsIdRoute,
   } as any)
+const DashboardProjectsIdSecretsRoute =
+  DashboardProjectsIdSecretsRouteImport.update({
+    id: '/dashboard/projects/$id_/secrets',
+    path: '/dashboard/projects/$id/secrets',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const DashboardQueuesQueuesIndexRoute =
   DashboardQueuesQueuesIndexRouteImport.update({
     id: '/dashboard/queues/queues/',
@@ -418,6 +431,7 @@ export interface FileRoutesByFullPath {
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
+  '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
   '/$owner/$repo/git-receive-pack': typeof OwnerRepoGitReceivePackRoute
@@ -459,6 +473,7 @@ export interface FileRoutesByFullPath {
   '/dashboard/access/tokens/$id': typeof DashboardAccessTokensIdRoute
   '/dashboard/projects/$id/logs': typeof DashboardProjectsIdLogsRoute
   '/dashboard/projects/$id/previews': typeof DashboardProjectsIdPreviewsRoute
+  '/dashboard/projects/$id/secrets': typeof DashboardProjectsIdSecretsRoute
   '/dashboard/storage/-/accounts': typeof DashboardStorageChar91Char93AccountsRoute
   '/dashboard/storage/-/api': typeof DashboardStorageChar91Char93ApiRoute
   '/dashboard/storage/-/iam': typeof DashboardStorageChar91Char93IamRoute
@@ -483,6 +498,7 @@ export interface FileRoutesByTo {
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
+  '/share/$id': typeof ShareIdRoute
   '/$owner': typeof OwnerIndexRoute
   '/dashboard': typeof DashboardIndexRoute
   '/$owner/$repo/git-receive-pack': typeof OwnerRepoGitReceivePackRoute
@@ -524,6 +540,7 @@ export interface FileRoutesByTo {
   '/dashboard/access/tokens/$id': typeof DashboardAccessTokensIdRoute
   '/dashboard/projects/$id/logs': typeof DashboardProjectsIdLogsRoute
   '/dashboard/projects/$id/previews': typeof DashboardProjectsIdPreviewsRoute
+  '/dashboard/projects/$id/secrets': typeof DashboardProjectsIdSecretsRoute
   '/dashboard/storage/-/accounts': typeof DashboardStorageChar91Char93AccountsRoute
   '/dashboard/storage/-/api': typeof DashboardStorageChar91Char93ApiRoute
   '/dashboard/storage/-/iam': typeof DashboardStorageChar91Char93IamRoute
@@ -550,6 +567,7 @@ export interface FileRoutesById {
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
+  '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
   '/$owner/$repo/git-receive-pack': typeof OwnerRepoGitReceivePackRoute
@@ -591,6 +609,7 @@ export interface FileRoutesById {
   '/dashboard/access/tokens/$id': typeof DashboardAccessTokensIdRoute
   '/dashboard/projects/$id/logs': typeof DashboardProjectsIdLogsRoute
   '/dashboard/projects/$id/previews': typeof DashboardProjectsIdPreviewsRoute
+  '/dashboard/projects/$id_/secrets': typeof DashboardProjectsIdSecretsRoute
   '/dashboard/storage/-/accounts': typeof DashboardStorageChar91Char93AccountsRoute
   '/dashboard/storage/-/api': typeof DashboardStorageChar91Char93ApiRoute
   '/dashboard/storage/-/iam': typeof DashboardStorageChar91Char93IamRoute
@@ -618,6 +637,7 @@ export interface FileRouteTypes {
     | '/dashboard/streams'
     | '/dashboard/tasks'
     | '/oauth/authorize'
+    | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
     | '/$owner/$repo/git-receive-pack'
@@ -659,6 +679,7 @@ export interface FileRouteTypes {
     | '/dashboard/access/tokens/$id'
     | '/dashboard/projects/$id/logs'
     | '/dashboard/projects/$id/previews'
+    | '/dashboard/projects/$id/secrets'
     | '/dashboard/storage/-/accounts'
     | '/dashboard/storage/-/api'
     | '/dashboard/storage/-/iam'
@@ -683,6 +704,7 @@ export interface FileRouteTypes {
     | '/dashboard/streams'
     | '/dashboard/tasks'
     | '/oauth/authorize'
+    | '/share/$id'
     | '/$owner'
     | '/dashboard'
     | '/$owner/$repo/git-receive-pack'
@@ -724,6 +746,7 @@ export interface FileRouteTypes {
     | '/dashboard/access/tokens/$id'
     | '/dashboard/projects/$id/logs'
     | '/dashboard/projects/$id/previews'
+    | '/dashboard/projects/$id/secrets'
     | '/dashboard/storage/-/accounts'
     | '/dashboard/storage/-/api'
     | '/dashboard/storage/-/iam'
@@ -749,6 +772,7 @@ export interface FileRouteTypes {
     | '/dashboard/streams'
     | '/dashboard/tasks'
     | '/oauth/authorize'
+    | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
     | '/$owner/$repo/git-receive-pack'
@@ -790,6 +814,7 @@ export interface FileRouteTypes {
     | '/dashboard/access/tokens/$id'
     | '/dashboard/projects/$id/logs'
     | '/dashboard/projects/$id/previews'
+    | '/dashboard/projects/$id_/secrets'
     | '/dashboard/storage/-/accounts'
     | '/dashboard/storage/-/api'
     | '/dashboard/storage/-/iam'
@@ -816,6 +841,7 @@ export interface RootRouteChildren {
   DashboardStreamsRoute: typeof DashboardStreamsRoute
   DashboardTasksRoute: typeof DashboardTasksRoute
   OauthAuthorizeRoute: typeof OauthAuthorizeRoute
+  ShareIdRoute: typeof ShareIdRoute
   OwnerIndexRoute: typeof OwnerIndexRoute
   DashboardIndexRoute: typeof DashboardIndexRoute
   DashboardAccessApprovalsRoute: typeof DashboardAccessApprovalsRoute
@@ -846,6 +872,7 @@ export interface RootRouteChildren {
   DashboardStorageIndexRoute: typeof DashboardStorageIndexRoute
   AgentsSIdOpengraphImageRoute: typeof AgentsSIdOpengraphImageRoute
   DashboardAccessTokensIdRoute: typeof DashboardAccessTokensIdRoute
+  DashboardProjectsIdSecretsRoute: typeof DashboardProjectsIdSecretsRoute
   DashboardStorageChar91Char93AccountsRoute: typeof DashboardStorageChar91Char93AccountsRoute
   DashboardStorageChar91Char93ApiRoute: typeof DashboardStorageChar91Char93ApiRoute
   DashboardStorageChar91Char93IamRoute: typeof DashboardStorageChar91Char93IamRoute
@@ -936,6 +963,13 @@ declare module '@tanstack/react-router' {
       path: '/oauth/authorize'
       fullPath: '/oauth/authorize'
       preLoaderRoute: typeof OauthAuthorizeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/share/$id': {
+      id: '/share/$id'
+      path: '/share/$id'
+      fullPath: '/share/$id'
+      preLoaderRoute: typeof ShareIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/$owner/$repo/': {
@@ -1232,6 +1266,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DashboardProjectsIdPreviewsRouteImport
       parentRoute: typeof DashboardProjectsIdRoute
     }
+    '/dashboard/projects/$id_/secrets': {
+      id: '/dashboard/projects/$id_/secrets'
+      path: '/dashboard/projects/$id/secrets'
+      fullPath: '/dashboard/projects/$id/secrets'
+      preLoaderRoute: typeof DashboardProjectsIdSecretsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/dashboard/queues/queues/': {
       id: '/dashboard/queues/queues/'
       path: '/dashboard/queues/queues'
@@ -1369,6 +1410,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardStreamsRoute: DashboardStreamsRoute,
   DashboardTasksRoute: DashboardTasksRoute,
   OauthAuthorizeRoute: OauthAuthorizeRoute,
+  ShareIdRoute: ShareIdRoute,
   OwnerIndexRoute: OwnerIndexRoute,
   DashboardIndexRoute: DashboardIndexRoute,
   DashboardAccessApprovalsRoute: DashboardAccessApprovalsRoute,
@@ -1399,6 +1441,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardStorageIndexRoute: DashboardStorageIndexRoute,
   AgentsSIdOpengraphImageRoute: AgentsSIdOpengraphImageRoute,
   DashboardAccessTokensIdRoute: DashboardAccessTokensIdRoute,
+  DashboardProjectsIdSecretsRoute: DashboardProjectsIdSecretsRoute,
   DashboardStorageChar91Char93AccountsRoute:
     DashboardStorageChar91Char93AccountsRoute,
   DashboardStorageChar91Char93ApiRoute: DashboardStorageChar91Char93ApiRoute,

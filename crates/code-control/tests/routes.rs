@@ -187,6 +187,7 @@ fn manages() -> Vec<(&'static str, String)> {
     vec![
         repo("PATCH", ""),
         repo("DELETE", ""),
+        repo("GET", "/leaks"),
         repo("GET", "/webhooks"),
         repo("POST", "/webhooks"),
         repo("GET", "/webhooks/{hook}"),
