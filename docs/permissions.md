@@ -72,7 +72,16 @@ Infisical's and 1Password's CLIs do, rather than a token pasted into a shell pro
   screen with PKCE (S256), a fresh `state`, and `--scope` (default `development`) as the preset the
   screen starts from. The person chooses what it may do there, as for any MCP client; a person's
   login waits for an admin the same way (`approve_people`).
-- The answer's `state` and `iss` (RFC 9207) are checked before the code is exchanged.
+- **The server is the API it was pointed at** (RFC 8414 3.3): its metadata's `issuer` must be the
+  CLI's API URL, and the token, registration, revocation and device endpoints must be on that
+  origin; otherwise it refuses, saying the address the server gives. So a link that sets
+  `ROLL_API_URL=https://evil` can't have a real roll token kept under evil's address and sent
+  there afterwards. The issuer is rolld's own address: `ROLL_CODE_PUBLIC_URL`, else
+  `http://ROLL_PUBLIC_HOST:<API port>`; point the CLI at that one. OAuth's calls never follow a
+  redirect (a 307 would re-send a refresh token).
+- The answer's `state` and `iss` (RFC 9207) are checked before the code is exchanged. One whose
+  `state` isn't this login's (a stray tab, a page that found the port) is ignored and the login
+  keeps waiting; a connection to the port has 5 seconds to send its request line.
 - **With no browser here** (`--no-browser`, an SSH session, or a browser that didn't open) it signs in
   with a code instead, as `gh auth login` does (RFC 8628's device flow): it registers as a
   device-only client (no redirect), prints a link and a code (`BCDF-GHJK`: eight letters of RFC
@@ -81,8 +90,15 @@ Infisical's and 1Password's CLIs do, rather than a token pasted into a shell pro
   the code or follows the link, and chooses what it may do on the consent screen's own form; a
   person's device waits for an admin as any of their connections does. The page says what asks,
   the network it asked from and when, and that roll never sends anyone a code to enter (device-code
-  phishing, RFC 8628 5.4). A request lives ten minutes and is used once; the user code can't be
-  looked up by a token, and ten wrong codes in a minute answer 429 to that caller. On a roll
+  phishing, RFC 8628 5.4), and warns when it was asked from another network than the browser's.
+  The person's mail names the network the device asked from, not only the one the code was
+  entered from (a phished victim's own). A request lives ten minutes and is used once; one allowed
+  but never collected has its grant revoked when it expires. Only a client registered without a
+  redirect may use it (`unauthorized_client` otherwise: a redirect client stays bound to its
+  redirect). The user code can't be looked up by a token, and after ten wrong codes in a minute
+  every code answers 429 to that caller, a right one too, so guessing gets nowhere and nothing
+  tells a hit from a miss. (Many IPv6 /48s could still fill the 10,000 live requests for ten
+  minutes: device sign-in waits, nothing leaks.) On a roll
   without the device endpoint, the address the browser ends on is pasted back instead.
 - `$BROWSER` names the browser to open, as `gh` reads it.
 - `roll token whoami` says which credential runs and where it came from (`ROLL_TOKEN`,
@@ -90,7 +106,7 @@ Infisical's and 1Password's CLIs do, rather than a token pasted into a shell pro
   credential set that loses to it (`gh auth status`); with none, it says to `roll login` and exits 1.
   `--json` adds `credential: {source, unused}`.
 - The login is kept in `$XDG_CONFIG_HOME/roll/logins.json` (else `~/.config`), 0600 in a 0700
-  directory, one entry per API URL. Commands use it only when no credential is set for the run
+  directory (written to a fresh file of a random name, never through a symlink, then renamed), one entry per API URL. Commands use it only when no credential is set for the run
   (`ROLL_TOKEN`, `ROLL_IDENTITY`, `ROLL_ADMIN_TOKEN`, `ROLL_API_KEY`, `roll code`'s and `roll
   tasks`' own tokens), refreshing it within a minute of its access token's end under a lock
   (`logins.lock`), so two commands never spend one refresh token. A login that can't be refreshed
@@ -555,7 +571,9 @@ type AuditEvent = {
   the person's `usr_…`), `grant_id` the token it's about (so a token's own log tells who made,
   widened and revoked it), `resource` what else it names (an approval, a sink). Only what worked is
   recorded; a grant's own requests are already the gate's rows, so they aren't written twice. A
-  device's code is never kept. roll's own acts have rows too: a leaked token revoked (`leak`), a
+  device's code is never kept. A connection its own client revokes (`oauth/revoke` with its
+  refresh token: `roll logout`, an MCP client signing out) has a `revoke` row by `its client`. A
+  person reading their tokens' rows sees who else changed one (an admin), not from where. roll's own acts have rows too: a leaked token revoked (`leak`), a
   workload's token revoked (`workload`).
 - The resource id is recorded (the user needs to know which database was dropped); paths, query
   strings and headers are not.

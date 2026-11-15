@@ -468,6 +468,11 @@ pub(crate) enum Refused {
 }
 
 impl Window {
+    /// Whether `key` already has `per_minute` in the last minute (counting nothing).
+    pub(crate) fn full(&self, key: &str, now: i64, per_minute: usize) -> bool {
+        self.by.get(key).is_some_and(|times| times.iter().filter(|t| **t > now - 60_000).count() >= per_minute)
+    }
+
     /// Count one for `key` now, unless it already has `per_minute` in the last minute.
     pub(crate) fn admit(&mut self, key: &str, now: i64, per_minute: usize) -> std::result::Result<(), Refused> {
         let minute_ago = now - 60_000;

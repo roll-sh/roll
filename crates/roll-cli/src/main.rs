@@ -545,7 +545,7 @@ async fn main() -> anyhow::Result<()> {
     // `roll login`'s, last: any credential set for this run wins over it (a workload's identity, a
     // streams key too).
     let identity = std::env::var("ROLL_IDENTITY").is_ok_and(|v| !v.trim().is_empty());
-    let signed_in = if admin.is_none() && cli.api_key.is_none() && !identity && !matches!(cli.cmd, Cmd::Login(_) | Cmd::Logout) { login::token(&base, &http).await } else { None };
+    let signed_in = if admin.is_none() && cli.api_key.is_none() && !identity && !matches!(cli.cmd, Cmd::Login(_) | Cmd::Logout) { login::token(&base).await } else { None };
     // What this run uses, and what's set but loses to it (`roll token whoami` says both): the set
     // ones in the order `key` takes them, then a kept login it didn't use.
     let credential = {
@@ -619,8 +619,8 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
         Cmd::Token(cmd) => return access::token(&api, cli.json, cmd, &credential).await,
         Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,
-        Cmd::Login(l) => return login::login(&api.base, &api.http, cli.json, l).await,
-        Cmd::Logout => return login::logout(&api.base, &api.http, cli.json).await,
+        Cmd::Login(l) => return login::login(&api.base, cli.json, l).await,
+        Cmd::Logout => return login::logout(&api.base, cli.json).await,
         Cmd::Nosql(cmd) => {
             let r = nosql::run(&api, cli.json, *cmd).await;
             if let Err(e) = &r

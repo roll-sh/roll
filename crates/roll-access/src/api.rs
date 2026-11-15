@@ -581,9 +581,11 @@ impl Access {
                 let client = crate::mail_name(client);
                 (format!("{client} was connected to your roll account"), format!("{client} was connected to your roll account{from}, as \"{name}\" ({})", g.id))
             }
-            Added::Device(client) => {
+            Added::Device { client, asked_from } => {
                 let client = crate::mail_name(client);
-                ("A device was signed in to your roll account".to_string(), format!("A device was signed in to your roll account with a code{from}: {client}, as \"{name}\" ({})", g.id))
+                let asked = asked_from.map(|n| format!(", asked from {n}")).unwrap_or_default();
+                let allowed = if from.is_empty() { String::new() } else { format!(" (the code was entered{from})") };
+                ("A device was signed in to your roll account".to_string(), format!("A device was signed in to your roll account with a code: {client}{asked}{allowed}, as \"{name}\" ({})", g.id))
             }
         };
         let text = format!("{what}. It may:\n{}\n\nNot you? Revoke it: {}/dashboard/access/tokens/{}\n", may(g), self.web_url(), g.id);
@@ -596,8 +598,9 @@ pub(crate) enum Added<'a> {
     Token,
     /// An MCP client, by its name, through the consent screen.
     Client(&'a str),
-    /// A device, by its client's name, with a code.
-    Device(&'a str),
+    /// A device, by its client's name, with a code, and the network the device asked from (the
+    /// request's network is the approver's own browser: a phished victim's).
+    Device { client: &'a str, asked_from: Option<&'a str> },
 }
 
 /// What a grant may do, a line a product, for mail: products and actions, never a resource (a
@@ -1051,11 +1054,18 @@ async fn audit(State(a): S, ext: Extensions, Query(mut q): Query<AuditQuery>) ->
         return Err(Error::BadRequest("format: jsonl or csv".into()));
     }
     let jsonl = format.as_deref() == Some("jsonl");
-    // A user reads their own tokens' rows.
-    if let Some(user) = who(&a, &ext)?.mine() {
+    // A user reads their own tokens' rows; a change someone else made to one (an admin's) says who,
+    // but not from where.
+    let me = who(&a, &ext)?.mine().map(str::to_string);
+    if let Some(user) = &me {
         q.grants = Some(grants_of(&a, user).await?.into_iter().collect());
     }
-    let events = blocking(a, move |a| a.store.audit_log(&q)).await?;
+    let mut events = blocking(a, move |a| a.store.audit_log(&q)).await?;
+    if let Some(user) = &me {
+        for e in events.iter_mut().filter(|e| e.source == "access" && e.args.as_ref().and_then(|v| v["by"].as_str()) != Some(user.as_str())) {
+            e.ip = None;
+        }
+    }
     if format.as_deref() == Some("csv") {
         let headers = [(axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8"), (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"roll-audit.csv\"")];
         return Ok((headers, audit_csv(&events)).into_response());

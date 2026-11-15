@@ -49,6 +49,17 @@ fn new_user_code() -> String {
     code
 }
 
+/// Forget expired device requests, revoking the grant of one allowed but never collected (it
+/// would count against its person's tokens, with no secret anyone holds).
+fn expire_devices(c: &code_sql::Conn<'_>, now: i64) -> Result<()> {
+    c.execute(
+        "UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE revoked_at IS NULL AND id IN (SELECT grant_id FROM oauth_devices WHERE expires_at <= ? AND grant_id IS NOT NULL)",
+        params![now, "its device never collected it", now],
+    )?;
+    c.execute("DELETE FROM oauth_devices WHERE expires_at <= ?", [now])?;
+    Ok(())
+}
+
 /// A device request as its poll reads it.
 struct Polled {
     client_id: String,
@@ -67,7 +78,7 @@ impl Store {
         for _ in 0..5 {
             let user_code = new_user_code();
             let made = self.db.write(|c| {
-                c.execute("DELETE FROM oauth_devices WHERE expires_at <= ?", [now])?;
+                expire_devices(c, now)?;
                 let live: i64 = c.query_row("SELECT COUNT(*) FROM oauth_devices", (), |r| r.get(0))?;
                 if live as usize >= MAX_DEVICE_REQUESTS {
                     return Err(Error::Conflict("too many devices are signing in: try again in a few minutes".into()));
@@ -152,6 +163,10 @@ impl Store {
                 return Err(Error::OAuth("invalid_grant", "the device_code was issued to another client".into()));
             }
             if expires_at <= now {
+                // Allowed in its last moments but never collected: its grant goes too.
+                if let Some(g) = &grant_id {
+                    c.execute("UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND revoked_at IS NULL", params![now, "its device never collected it", g])?;
+                }
                 c.execute("DELETE FROM oauth_devices WHERE hash = ?", [&h])?;
                 return Ok(Poll::Wait("expired_token", "no one entered the code in time: start again"));
             }
