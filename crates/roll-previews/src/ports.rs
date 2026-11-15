@@ -153,6 +153,9 @@ pub struct ServiceSpec {
     pub health: Option<String>,
     /// Page states its screenshots reach, from its `roll.toml` (`[[preview.states]]`).
     pub states: Vec<crate::settings::StateRule>,
+    /// More of its own pages, and selectors blanked in screenshots, from its `roll.toml`.
+    pub pages: Vec<String>,
+    pub hide: Vec<String>,
 }
 
 /// A screenshot of a service's page, and how fast it loaded when the backend could time it.

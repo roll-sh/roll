@@ -364,7 +364,7 @@ impl Engine {
                         },
                         None => String::new(),
                     };
-                    let spec = ServiceSpec { name: c.name.clone(), image: String::new(), run: String::new(), port: 0, memory_mb: c.memory_mb, cpus: 0.0, env: Vec::new(), health: None, states: Vec::new() };
+                    let spec = ServiceSpec { name: c.name.clone(), image: String::new(), run: String::new(), port: 0, memory_mb: c.memory_mb, cpus: 0.0, env: Vec::new(), health: None, states: Vec::new(), pages: Vec::new(), hide: Vec::new() };
                     wanted.push((spec, c.repo.unwrap_or_default(), rev, true));
                 }
             }
@@ -552,7 +552,7 @@ impl Engine {
     /// backend that can't, a failure) is remembered for the head, and the last one taken stays.
     pub(super) async fn take_screenshot(&self, r: &Row) -> bool {
         let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return false };
-        let (entries, hide, widths, openapi, endpoints, mut states, browsers) = self
+        let (mut entries, mut hide, widths, openapi, endpoints, mut states, browsers) = self
             .store
             .settings(&r.project_id)
             .map(|s| (s.github.pages, s.github.hide, s.github.widths, s.github.openapi, s.github.endpoints, s.github.states, s.github.browsers))
@@ -566,6 +566,17 @@ impl Engine {
             for st in spec.states {
                 if !states.iter().any(|s| s.name == st.name) {
                     states.push(st);
+                }
+            }
+            // Its own pages and what to blank in them, the same way.
+            for p in spec.pages {
+                if !entries.contains(&p) {
+                    entries.push(p);
+                }
+            }
+            for h in spec.hide {
+                if !hide.contains(&h) {
+                    hide.push(h);
                 }
             }
         }
