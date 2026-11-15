@@ -67,7 +67,9 @@ impl EnvSource for Engine {
         // A protected base (production) reaches a preview only when the project allows it and
         // the change is trusted; a fork's code never gets it.
         let untrusted = !(s.secrets.allow_production && r.trusted);
-        for (k, v) in self.resolve_secrets(&r, untrusted).await? {
+        let (secrets, leases) = self.resolve_secrets(&r, untrusted, service).await?;
+        self.keep_leases(&r, service, &leases).await?;
+        for (k, v) in secrets {
             set(&mut env, &k, v);
         }
         for (k, v) in project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(preview)?) {

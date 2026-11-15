@@ -784,6 +784,18 @@ pub fn page_text(json: &str) -> Option<String> {
     Some(lines.join("\n"))
 }
 
+/// A dynamic credential (roll secrets' lease) a start of a preview's service was given: renewed
+/// while the service runs, revoked when it stops. Only the id is kept, never the credential.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LeaseRow {
+    pub preview: String,
+    /// The service key it started (`web`, `web@<revision>`).
+    pub service: String,
+    pub lease: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+}
+
 /// An earlier push of a change's service, still reachable at a URL of its own (on the preview's
 /// data, asleep until opened).
 #[derive(Clone, Debug, PartialEq, Serialize)]

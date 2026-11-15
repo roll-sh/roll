@@ -310,6 +310,7 @@ impl Engine {
             });
         }
         while set.join_next().await.is_some() {}
+        self.tend_leases().await;
         // Services those converges deployed at a new head, woken so their first visit is warm (a
         // few at a time, off the pass).
         let warm: Vec<(String, String)> = std::mem::take(&mut *self.warm_wanted.lock());
@@ -438,10 +439,14 @@ impl Engine {
         }
     }
 
-    /// The preview's secrets resolved as its code gets them, unresolved keys said once in its
-    /// activity (a check fails on them; a preview starts without them, saying which).
-    pub(super) async fn resolve_secrets(&self, r: &Row, untrusted: bool) -> anyhow::Result<Vec<(String, String)>> {
-        let got = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+    /// The preview's secrets resolved as its code gets them, for `consumer` (a start of a service,
+    /// a job), unresolved keys said once in its activity (a check fails on them; a preview starts
+    /// without them, saying which). The leases of the dynamic credentials among them come back
+    /// too: the caller keeps them while what it starts runs ([`Engine::keep_leases`]) or revokes
+    /// them when it's done.
+    pub(super) async fn resolve_secrets(&self, r: &Row, untrusted: bool, consumer: &str) -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
+        let consumer = format!("preview:{}/{consumer}", env_name(&r.id));
+        let got = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted, &consumer).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
         let mut problems = got.problems.clone();
         problems.sort();
         let new = self.secrets_told.lock().insert(r.id.clone(), problems.clone()).is_none_or(|before| before != problems);
@@ -450,7 +455,68 @@ impl Engine {
             let more = problems.len().saturating_sub(shown.len());
             let _ = self.store.log(&r.id, &format!("secrets that don't resolve: {}{}", shown.join("; "), if more > 0 { format!(" (and {more} more)") } else { String::new() }));
         }
-        Ok(got.values)
+        Ok((got.values, got.leases))
+    }
+
+    /// A start of `service` runs on `leases` now: the previous start's are revoked (that
+    /// container is gone), these renewed while it runs ([`Engine::tend_leases`]).
+    pub(super) async fn keep_leases(&self, r: &Row, service: &str, leases: &[String]) -> anyhow::Result<()> {
+        let now = self.store.now_ms()?;
+        // Until the first renewal says: roll secrets' shortest TTL.
+        self.store.add_leases(&r.id, service, leases, now + LEASE_MIN_MS)?;
+        for old in self.store.leases(Some(&r.id))?.into_iter().filter(|l| l.service == service && !leases.contains(&l.lease)) {
+            self.revoke_lease(&r.project_id, &old).await;
+        }
+        Ok(())
+    }
+
+    /// End a lease, forgetting it once roll secrets has (a failure is tried again next pass).
+    async fn revoke_lease(&self, project: &str, l: &crate::LeaseRow) {
+        match self.secrets.revoke(project, &l.lease).await {
+            Ok(()) => {
+                let _ = self.store.drop_lease(&l.preview, &l.lease);
+            }
+            Err(e) => warn!(preview = %l.preview, lease = %l.lease, error = %e, "previews: revoking a dynamic credential"),
+        }
+    }
+
+    /// The dynamic credentials this node's previews' services started with: revoked once the
+    /// service isn't running here (asleep, failed, removed, moved to another node), renewed when
+    /// their end is near. One that can't be renewed (revoked, at its longest life) puts its
+    /// service to sleep, so the next request starts it with a new credential, said in the activity.
+    pub(super) async fn tend_leases(&self) {
+        let Ok(all) = self.store.leases(None) else { return };
+        let Ok(now) = self.store.now_ms() else { return };
+        let mut held: HashMap<String, Option<Row>> = HashMap::new();
+        for l in all {
+            if !held.contains_key(&l.preview) {
+                let local = match self.cluster.get() {
+                    Some(c) => matches!(c.route_async(&preview_key(&l.preview)).await, Ok(roll_cluster::Route::Local(_))),
+                    None => true,
+                };
+                held.insert(l.preview.clone(), if local { self.store.row(&l.preview).ok() } else { None });
+            }
+            let Some(Some(r)) = held.get(&l.preview) else { continue };
+            let running = matches!(self.apps.status(&l.preview, &l.service), Some(ServiceState::Running | ServiceState::Deploying));
+            if !running || r.desired == Desired::Deleted {
+                self.revoke_lease(&r.project_id, &l).await;
+                continue;
+            }
+            if l.expires_at - now > LEASE_RENEW_MS {
+                continue;
+            }
+            match self.secrets.renew(&r.project_id, &l.lease).await {
+                Ok(Some(until)) => {
+                    let _ = self.store.set_lease_expiry(&l.preview, &l.lease, until);
+                }
+                Ok(None) => {
+                    let _ = self.store.drop_lease(&l.preview, &l.lease);
+                    let _ = self.store.log(&l.preview, &format!("a dynamic credential {} started with ended and can't be renewed: it sleeps, and starts with a new one on its next request", l.service));
+                    self.apps.sleep(&l.preview, &l.service).await;
+                }
+                Err(e) => warn!(preview = %l.preview, lease = %l.lease, error = %e, "previews: renewing a dynamic credential"),
+            }
+        }
     }
 }
 
@@ -465,6 +531,13 @@ fn screenshot_slots() -> usize {
     let set = std::env::var("ROLL_PREVIEWS_SCREENSHOT_SLOTS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| (1..=8).contains(n));
     set.unwrap_or_else(|| (std::thread::available_parallelism().map_or(1, |n| n.get()) / 8).clamp(1, 4))
 }
+
+/// roll secrets' shortest lease (a dynamic link's least `ttl_minutes`): what a new lease is taken
+/// to last until its first renewal says.
+const LEASE_MIN_MS: i64 = 15 * 60_000;
+/// How close to its end a lease is renewed (each renewal is in roll secrets' audit log, so not on
+/// every pass).
+const LEASE_RENEW_MS: i64 = 10 * 60_000;
 
 /// How soon a converge comes back to a deploy that wasn't live yet.
 const DEPLOY_POLL_MS: i64 = 10_000;
