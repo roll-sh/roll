@@ -853,7 +853,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -1005,6 +1005,18 @@ type Settings = {
     more than 20 ms called slower: in the comment's folded checks ("1 endpoint slower than
     main"; "`GET /api/users` 140 ms (main 40 ms), slower"), the sheet and the change page (live:
     `/openapi.json` timed on both).
+    Page states too (Chromatic's interaction tests, Percy's scripted snapshots): much of what a
+    change touches shows only after a click (a cart open, a dialog, a form's errors). A project
+    names up to 3 (`github.states`: a name, a page of the first service's, and 1 to 10 steps:
+    `{"click": selector}`, `{"type": [selector, text]}`, `{"press": key}` from a short list,
+    `{"wait": ms}` up to 5 s), and the first service's run reaches each one after loading its page,
+    in the checks' world (the page's DOM, none of its JavaScript; a value typed the way a person's
+    input sets it, so a framework's change handler sees it), 15 s at most. Each is a page of its own
+    (`state:<name>`): screenshotted, checked, compared with main's same state and reviewed. The
+    first step that finds nothing ends the steps and is said (`step`, "its steps stopped at `click
+    #open: nothing matched`"), the state taken as it was then (checked by hand in the screenshot
+    image: a click opening a cart, typing reaching the page's handler, Escape closing it, a missing
+    element named; live: a Tab state compared with main's).
     A page that moves by itself (Argos's and Chromatic's flake detection): after each page's
     capture the session waits a second and captures it again, stilled as before; Chrome encodes
     the same pixels the same way, so different data is a page that changed with nobody touching
@@ -1225,6 +1237,9 @@ Ranked by what a person notices first. Done so far:
 - a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
+- page states reached by a few steps (Chromatic's interaction tests): `github.states`, each
+  taken after its steps, compared with main's and reviewed like a page, a step that finds nothing
+  said;
 - search masks checked when set against the parent's mapping: `redact` or `email` on a field that
   isn't text (a vector from semantic search, a number, a date) is refused with what it is, where it
   used to fail the masking and the preview; checked live on a number field;
@@ -1357,14 +1372,7 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Page states reached by a few steps** (Chromatic's interaction tests, Percy's scripted
-   snapshots): much of what a change touches shows only after a click (a cart open, a dialog, a
-   menu, a form's errors). A project names states (`github.states`: a name, a page, and steps:
-   `click <selector>`, `type <selector> <text>`, `press <key>`, `wait <ms>`), the session runs
-   them in the checks' world before its capture, and each state is screenshotted, compared with
-   main's same state and reviewed like a page (`state:<name>`). Bounded: a few states, a few
-   steps each, a step that finds nothing fails that state alone.
-2. **Promote a preview's deployment to production on roll apps** (Vercel's promote): built on
+1. **Promote a preview's deployment to production on roll apps** (Vercel's promote): built on
    the stacked `feature/roll-previews-on-apps`. The sheet's "Promote <service> to production"
    (its name typed to confirm) calls roll apps' own `POST …/environments/production/promote`
    with `from: pv-<id>` as the signed-in person, so roll apps decides who may deploy production
@@ -1375,14 +1383,14 @@ Ranked by what a person notices first. Done so far:
    deployment as roll apps' `expect` (fc6fbf48c), so a newer push deployed since is a 409 from
    the same read the promotion is made of (live: a promote expecting another deployment refused).
    It merges into #28 with #26.
-3. **Dynamic credentials a preview renews** (roll secrets' leases): a preview resolves with
+2. **Dynamic credentials a preview renews** (roll secrets' leases): a preview resolves with
    `dynamic: false` today, so a dynamic link inherited from its base is named as a problem.
    Previews converges every few minutes, so it could hold such a lease itself: resolve the
    credential once per data generation, keep it (sealed, as a branch's `kept` credentials),
    renew it with `POST …/leases/{id}/renew` on each converge, and end it when the preview goes.
    Moderate value: a dynamic credential usually reaches something outside roll that previews
    doesn't branch, which a preview shouldn't write to anyway.
-4. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
+3. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
    (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
@@ -1398,19 +1406,19 @@ Ranked by what a person notices first. Done so far:
    host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
    every product port (an image of its own, and roll code's runner changed); on the cloud fleet
    it's security groups, with the cloud thread.
-5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-6. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-7. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-8. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1423,12 +1431,12 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-9. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+8. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-10. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+9. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

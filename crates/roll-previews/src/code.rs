@@ -151,6 +151,7 @@ impl CodeSource {
                         broken_links: x.links.as_ref().map(|l| l.broken.iter().map(|b| code_control::model::PreviewBrokenLink { path: b.path.clone(), status: b.status }).collect()).unwrap_or_default(),
                         a11y_added: x.against.as_ref().and_then(|a| a.a11y_added),
                         links_added: x.against.as_ref().and_then(|a| a.links_added),
+                        step: x.step.clone(),
                     })
                     .collect(),
                 visual_review: p.visual_review.as_ref().map(|v| code_control::model::PreviewVisualReview {

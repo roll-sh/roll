@@ -342,6 +342,27 @@ async fn the_seed_runs_once_on_fresh_data_before_services_deploy() {
 }
 
 #[tokio::test]
+async fn a_page_state_is_taken_and_compared_like_a_page() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "states": [{ "name": "cart", "page": "/", "steps": [{ "click": "#open" }] }] } }));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    e.code.open(change("chg_st", 6));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let mut state = None;
+    for _ in 0..500 {
+        state = e.code.last_report("chg_st").pages.into_iter().find(|p| p.path == "state:cart" && p.base_percent.is_some());
+        if state.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(state.map(|p| p.base_percent), Some(Some(0.0)), "taken, kept and compared with main's same state");
+    assert!(e.apps.states.lock().iter().any(|n| n == "cart"), "the screenshot was asked to reach it");
+}
+
+#[tokio::test]
 async fn the_teardown_runs_once_at_a_head_the_preview_ran_before_its_data_goes() {
     let e = env(json!({ "enabled": true, "teardown": { "image": "node:22", "run": "node scripts/unregister.js" } }));
     // A fork, approved at its first head; a push nobody approved after it.

@@ -652,6 +652,10 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
             if !p.seo.is_empty() {
                 said.push(format!("SEO: {}", p.seo.iter().map(|s| s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == ' ').collect::<String>()).collect::<Vec<_>>().join(", ")));
             }
+            // A state whose steps stopped: taken as it was then, so its picture isn't the state.
+            if let Some(s) = &p.step {
+                said.push(format!("its steps stopped at `{}`", s.replace('`', "'").chars().filter(|c| !c.is_control()).take(120).collect::<String>()));
+            }
             if said.is_empty() {
                 said.push("taken".into());
             }
@@ -1046,6 +1050,7 @@ mod preview_tests {
             broken_links: vec![],
             a11y_added: None,
             links_added: None,
+            step: None,
         };
         e.pages = vec![page("/pricing", Some(40.0), Some(2.0), 1), page("/about", Some(0.0), None, 0)];
         let review = |state: &str, by: Option<&str>| crate::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.04, by: by.map(Into::into), required: false, head: None, pages: Vec::new() };

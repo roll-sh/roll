@@ -338,7 +338,7 @@ ACTIVE=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
-api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json"]}}' >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"}]}]}}' >/dev/null
 # roll keeps a preview of the default branch (github.baseline): the change's screenshots are
 # compared with its.
 MAINPV=""
@@ -594,6 +594,8 @@ case "$PAGES" in "/pricing: "[1-9]*" error(s), "*"% against main") ;; *) echo "/
 PRICING=$(api GET "/v1/previews/$PV" | jq_ "(lambda p: 'a11y %s, seo %s; new: a11y %s, seo %s, links %s' % (p.get('a11y') is not None, ((p.get('a11y') or {}).get('seo')) is not None, (p.get('against') or {}).get('a11y_added'), (p.get('against') or {}).get('seo_added'), (p.get('against') or {}).get('links_added')))([x for x in d['pages'] if x['path'] == '/pricing'][0])")
 [ "$PRICING" = "a11y True, seo True; new: a11y 0, seo 0, links 0" ] || { echo "/pricing should get the first page's checks, against main's /pricing: $PRICING"; exit 1; }
 case "$PAGES" in *"wiki:/: 0 error(s), "*"% against main"*) ;; *) echo "the wiki service's page should be taken in its own run and compared: $PAGES"; exit 1;; esac
+# A page state (github.states: Tab pressed on /), taken after its step and compared with main's.
+case "$PAGES" in *"state:tab: "*"% against main"*) ;; *) echo "the page state should be taken after its steps and compared: $PAGES"; exit 1;; esac
 # The first page at a tablet's width too, compared with main's at that width.
 case "$PAGES" in *"@768: "*"% against main"*) ;; *) echo "the first page should be taken at 768 px and compared: $PAGES"; exit 1;; esac
 [ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?page=%2Fpricing")" = image/png ] || { echo "/pricing's screenshot should be there"; exit 1; }

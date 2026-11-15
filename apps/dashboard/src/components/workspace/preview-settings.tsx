@@ -1,6 +1,6 @@
 import { AlertTriangle, Plus, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { isProduction, previewsApi, unmaskedNote, type PreviewBypass, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
+import { isProduction, previewsApi, unmaskedNote, type PageState, type PreviewBypass, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
 import type { PlacedResource } from "@/lib/workspace-api";
 import { KIND_LABEL, resourceKey } from "@/lib/workspace-resources";
 import { Dialog } from "../agents/ui/dialog";
@@ -10,6 +10,17 @@ const field = "rounded-lg border border-line-2 bg-canvas px-2.5 outline-none tra
 const GIB = 1024 ** 3;
 
 /** The project's preview rules (docs/previews.md `Settings`): saved as a patch of what changed. */
+/** The page states field's JSON (empty: none); anything that isn't a list goes to roll as is,
+ * which says what's wrong with it. */
+function parseStates(text: string): PageState[] {
+  if (!text.trim()) return [];
+  try {
+    return JSON.parse(text) as PageState[];
+  } catch {
+    return [{ name: "", page: "", steps: [] }];
+  }
+}
+
 export function PreviewSettingsDialog({
   projectId,
   resources,
@@ -87,6 +98,7 @@ function Form({
   const [endpoints, setEndpoints] = useState((saved.github.endpoints ?? []).join(", "));
   // Selectors can hold commas: one per line.
   const [hide, setHide] = useState((saved.github.hide ?? []).join("\n"));
+  const [states, setStates] = useState(saved.github.states?.length ? JSON.stringify(saved.github.states, null, 2) : "");
   const [env, setEnv] = useState<[string, string][]>(Object.entries(saved.env));
   // `env_for` as rows of (branch glob, name, value).
   const [perBranch, setPerBranch] = useState<[string, string, string][]>(Object.entries(saved.env_for ?? {}).flatMap(([g, vars]) => Object.entries(vars).map(([k, v]) => [g, k, v] as [string, string, string])));
@@ -94,7 +106,7 @@ function Form({
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof PreviewSettings>(k: K, v: PreviewSettings[K]) => setS((x) => ({ ...x, [k]: v }));
 
-  useEffect(() => setError(null), [s, branches, paths, ignorePaths, pages, widths, openapi, endpoints, hide, env, perBranch]);
+  useEffect(() => setError(null), [s, branches, paths, ignorePaths, pages, widths, openapi, endpoints, states, hide, env, perBranch]);
 
   const next: PreviewSettings = {
     ...s,
@@ -107,6 +119,7 @@ function Form({
       widths: words(widths).map(Number),
       openapi: openapi.trim() || null,
       endpoints: words(endpoints),
+      states: parseStates(states),
       hide: hide
         .split("\n")
         .map((x) => x.trim())
@@ -461,6 +474,11 @@ function Form({
         {s.github.screenshot && (
           <Field label="Visual threshold (%)" note="A page counts as changed for the visual review only past this share of its pixels (up to 50). 0: any change counts.">
             <Num value={s.github.visual_threshold ?? 0} step="any" onChange={(v) => set("github", { ...s.github, visual_threshold: Math.min(v, 50) })} />
+          </Field>
+        )}
+        {s.github.screenshot && (
+          <Field label="Page states" note="Pages reached by a few steps (a cart open, a dialog), each screenshotted and reviewed like a page: a JSON list of {name, page, steps}, steps {click: selector}, {type: [selector, text]}, {press: key} or {wait: ms}. Up to 3.">
+            <textarea value={states} onChange={(e) => setStates(e.target.value)} rows={3} placeholder='[{"name": "cart", "page": "/", "steps": [{"click": "#open-cart"}]}]' className={`${field} w-full py-1.5 font-mono text-[12px]`} spellCheck={false} />
           </Field>
         )}
         {s.github.screenshot && (

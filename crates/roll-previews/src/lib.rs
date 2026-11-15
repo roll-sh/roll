@@ -601,6 +601,9 @@ pub struct PageCheck {
     /// It moves by itself (two captures a second apart differ).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unstable: bool,
+    /// A page state's step that found nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
 }
 
 /// What a page's session found besides its picture: the first page's checks, for another page.
@@ -612,6 +615,10 @@ pub struct PageReport {
     /// It moves by itself (two captures a second apart differ).
     #[serde(default)]
     pub unstable: bool,
+    /// A page state's step that found nothing (`click #open: nothing matched`): the state was
+    /// taken as it was then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
 }
 
 /// A page's checks against main's page at the same path.

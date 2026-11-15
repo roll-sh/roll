@@ -552,14 +552,18 @@ impl Engine {
     /// backend that can't, a failure) is remembered for the head, and the last one taken stays.
     pub(super) async fn take_screenshot(&self, r: &Row) -> bool {
         let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return false };
-        let (entries, hide, widths, openapi, endpoints) = self.store.settings(&r.project_id).map(|s| (s.github.pages, s.github.hide, s.github.widths, s.github.openapi, s.github.endpoints)).unwrap_or_default();
+        let (entries, hide, widths, openapi, endpoints, states) =
+            self.store.settings(&r.project_id).map(|s| (s.github.pages, s.github.hide, s.github.widths, s.github.openapi, s.github.endpoints, s.github.states)).unwrap_or_default();
         // The first page at the project's other widths: entries of their own (`@768`).
         let width_keys: Vec<String> = widths.iter().map(|w| format!("@{w}")).collect();
         // The first service's own pages go in its run; another service's in a run of its own.
         let mine = |svc: Option<&str>| svc.is_none_or(|s| s == first.name);
         let mut first_paths: Vec<String> = width_keys.clone();
         first_paths.extend(entries.iter().filter_map(|e| crate::settings::page_entry(e)).filter(|(s, p)| mine(*s) && *p != "/").map(|(_, p)| p.to_string()));
-        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints };
+        // The project's page states, each a page of its own in the first service's run.
+        let state_keys: Vec<String> = states.iter().map(|s| format!("state:{}", s.name)).collect();
+        first_paths.extend(state_keys.iter().cloned());
+        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states };
         match self.apps.screenshot(&r.id, &first.name, &opts).await {
             Ok(Some(shot)) => {
                 // Kept under the entry that asked for each (`/pricing`, or `web:/pricing`).
@@ -567,7 +571,7 @@ impl Engine {
                     .pages
                     .iter()
                     .filter_map(|p| {
-                        if width_keys.contains(&p.path) {
+                        if width_keys.contains(&p.path) || state_keys.contains(&p.path) {
                             return Some(p.clone());
                         }
                         let entry = entries.iter().find(|e| crate::settings::page_entry(e).is_some_and(|(s, path)| mine(s) && path == p.path))?;
@@ -577,13 +581,13 @@ impl Engine {
                 // `<first>:/` is the screenshot itself (which service is first isn't the person's to know).
                 if let Some(e) = entries.iter().find(|e| crate::settings::page_entry(e) == Some((Some(first.name.as_str()), "/"))) {
                     let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
-                    let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable) };
+                    let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None };
                     pages.push(crate::ports::PageShot { path: e.clone(), png: shot.png.clone(), errors, report });
                 }
                 pages.extend(self.other_services_pages(r, &first.name, &entries, &hide).await);
                 // Keeping it compares PNGs (with the push before, every page): CPU work, off the
                 // runtime's workers.
-                let wanted: Vec<String> = entries.iter().cloned().chain(width_keys.iter().cloned()).collect();
+                let wanted: Vec<String> = entries.iter().cloned().chain(width_keys.iter().cloned()).chain(state_keys.iter().cloned()).collect();
                 let (store, id, head) = (self.store.clone(), r.id.clone(), r.build().to_string());
                 let kept = tokio::task::spawn_blocking(move || {
                     store.set_screenshot(&id, &head, &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok()
@@ -647,12 +651,12 @@ impl Engine {
             if !services.iter().any(|s| s.name == svc) {
                 continue;
             }
-            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), openapi: None, endpoints: Vec::new() };
+            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), openapi: None, endpoints: Vec::new(), states: Vec::new() };
             match self.apps.screenshot(&r.id, svc, &opts).await {
                 Ok(Some(shot)) => {
                     if paths.contains(&"/") {
                         let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
-                        let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable) };
+                        let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None };
                         out.push(crate::ports::PageShot { path: format!("{svc}:/"), png: shot.png.clone(), errors, report });
                     }
                     out.extend(shot.pages.into_iter().map(|p| crate::ports::PageShot { path: format!("{svc}:{}", p.path), ..p }));

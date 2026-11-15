@@ -1426,6 +1426,7 @@ impl Store {
                 links: report.links,
                 against,
                 unstable: report.unstable,
+                step: report.step,
             })
             .collect())
     }

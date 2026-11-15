@@ -181,6 +181,8 @@ pub struct ShotOptions {
     pub openapi: Option<String>,
     /// The first service's GET paths to time (`github.endpoints`).
     pub endpoints: Vec<String>,
+    /// The first service's page states (`github.states`), by name: `state:<name>` in `pages`.
+    pub states: Vec<crate::settings::StateRule>,
 }
 
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.
