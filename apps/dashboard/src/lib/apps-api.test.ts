@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deployChange, parseEnv, stepDurations, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
+import { deployChange, describePending, formatFirewall, formatHeaders, parseEnv, parseFirewall, parseHeaders, stepDurations, toEnv, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
 import { service } from "./workspace-resources";
 
 const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
@@ -27,7 +27,12 @@ describe("a service on the canvas", () => {
     expect(view("crashed")).toMatchObject({ state: "failed", stateLabel: "Crashed" });
     // A deploy on its way is busy whatever the instances do; once it ends the card says how.
     expect(view("stopped", latest("building"))).toMatchObject({ state: "starting", stateLabel: "Building…", note: undefined });
-    expect(view("running", latest("failed"))).toMatchObject({ state: "online", meta: "Failed" });
+    expect(view("running", { ...latest("failed"), active: { id: "dep_live", revision: null, created_at: 1 } })).toMatchObject({ state: "online", meta: "Failed" });
+    // What wants an eye: crashing reads failed between restarts, a capped project paused.
+    expect(view("running", { attention: ["crash_loop"] })).toMatchObject({ state: "failed", stateLabel: "Crashing" });
+    expect(view("stopped", { attention: ["capped"] })).toMatchObject({ state: "idle", stateLabel: "Paused (spend limit)" });
+    // A first deploy that failed: nothing serves, and the card says so in red.
+    expect(view("none", latest("failed"))).toMatchObject({ state: "failed", stateLabel: "Deploy failed" });
     expect(view("running").href).toBe("/dashboard/apps/svc_a");
   });
 });
@@ -58,6 +63,14 @@ describe("pasted .env text", () => {
     expect(vars).toEqual({ DATABASE_URL: "postgres://x?a=b", NAME: 'a "b"\nc', RAW: "$HOME" });
     expect(errors).toEqual([6, 7]);
   });
+
+  it("writes variables as text that reads back exactly (the raw editor)", () => {
+    const vars = { URL: "postgres://u:p@h:5432/db?ssl=true", SPACED: " a b ", QUOTE: `it's "x"`, PEM: "-----BEGIN-----\nabc\\n\t\r\n-----END-----", EMPTY: "", HASH: "a #b", DOLLAR: "$HOME" };
+    expect(parseEnv(toEnv(vars))).toEqual({ vars, errors: [] });
+    expect(toEnv({ A: "plain", B: "two words" })).toBe("A=plain\nB='two words'\n");
+    const odd = parseEnv("__proto__=x\ntoString=y\n").vars;
+    expect([Object.keys(odd), odd.__proto__, Object.hasOwn(odd, "constructor")]).toEqual([["__proto__", "toString"], "x", false]);
+  });
 });
 
 describe("a deployment's steps", () => {
@@ -70,5 +83,40 @@ describe("a deployment's steps", () => {
       { label: "Live", ms: null },
     ]);
     expect(stepDurations({ created_at: 0, steps: [{ step: "build", at: 10 }] }, 110).at(-1)).toEqual({ label: "Build", ms: 100 });
+  });
+});
+
+describe("firewall rules as typed", () => {
+  it("read one a line and come back the same", () => {
+    const text = "allow /admin/health\ndeny /admin/*\ndeny method=DELETE,PUT\n# a note\ndeny ua=Bad Bot/2";
+    const rules = parseFirewall(text);
+    expect(rules).toEqual([
+      { action: "allow", path: "/admin/health" },
+      { action: "deny", path: "/admin/*" },
+      { action: "deny", methods: ["DELETE", "PUT"] },
+      { action: "deny", user_agent: "Bad Bot/2" },
+    ]);
+    expect(formatFirewall(rules)).toBe(text.replace("# a note\n", ""));
+  });
+});
+
+describe("pending changes", () => {
+  it("name what the next deploy does", () => {
+    expect(describePending({ variables: { added: ["ADDED"], removed: ["GONE"], changed: ["MODE"] }, run: ["memory_mb"] })).toBe("MODE changed, ADDED added, GONE removed, memory mb set");
+    expect(describePending({ variables: null, run: [] })).toBeNull();
+    expect(describePending({ variables: null, run: [], secrets: true })).toBe("the project's secrets changed");
+  });
+});
+
+describe("response headers", () => {
+  it("group one header a line into rules by path and replace, and come back the same", () => {
+    const text = "Strict-Transport-Security: max-age=63072000\n/api/* Cache-Control: no-store\n!/api/* Content-Type: application/problem+json\n# a note\nnot a header";
+    const rules = parseHeaders(text);
+    expect(rules).toEqual([
+      { set: { "Strict-Transport-Security": "max-age=63072000" } },
+      { path: "/api/*", set: { "Cache-Control": "no-store" } },
+      { path: "/api/*", set: { "Content-Type": "application/problem+json" }, replace: true },
+    ]);
+    expect(parseHeaders(formatHeaders(rules))).toEqual(rules);
   });
 });

@@ -509,6 +509,10 @@ async fn run() -> anyhow::Result<()> {
     // evaluator joins the gate: setting sessions makes the gate anew.)
     let accounts = accounts::open(&args, &home, code.as_ref().map(|c| c.code.clone()), !auth.enforcing()).await?;
     auth.sessions(accounts.sessions(), &accounts.config().api_url);
+    // roll apps emails a project's owner what needs them, through their account.
+    if let Some(a) = &apps {
+        a.apps.set_mailbox(std::sync::Arc::new(apps::AccountsMail(accounts.clone())));
+    }
     router = router.merge(roll_accounts::router(accounts.clone()));
     // The products this node runs, as rules name them: MCP lists their tools, the token builder
     // offers them.
@@ -600,6 +604,11 @@ async fn run() -> anyhow::Result<()> {
     let mut router = auth.cors(router).layer(axum::middleware::from_fn(logs::access));
     if let Some(c) = &code {
         router = c.router(router);
+    }
+    // roll apps' public traffic another node forwarded to this one (a service it owns): to apps'
+    // public router, not the API (which has no route for an app's paths).
+    if let Some(a) = &apps {
+        router = apps_control::public::with_forwarded(router, a.apps.clone());
     }
     if let Some(rt) = &preview_hosts {
         router = router.layer(axum::middleware::from_fn_with_state(rt.clone(), roll_previews::runtime::route));

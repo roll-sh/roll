@@ -142,6 +142,8 @@ pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
         "stream" => ("streams", "stream"),
         "queue" => ("queues", "vhost"),
         "nosql" => ("nosql", "nosql-database"),
+        // Another service's URLs: no credential, but held to the same `reveal` as the rest.
+        "service" => ("apps", "service"),
         // Not a link: a repo apps reads (`apps_repo`).
         "repo" => ("code", "repo"),
         _ => return None,
@@ -696,7 +698,7 @@ fn secrets_import_sources(b: &Value) -> Sources {
 }
 
 /// A new apps notification: a webhook (the default) answers its signing secret once, so `reveal`;
-/// a Slack or Discord one answers none, so `write`.
+/// a Slack, Discord or email one (the project's owner) answers none, so `write`.
 fn apps_notification_action(b: &Value) -> Action {
     match b["kind"].as_str() {
         Some("slack" | "discord" | "email") => Action::Write,
@@ -1148,14 +1150,21 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/projects/{project}/notifications", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications", "apps", Act::Body(apps_notification_action), one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/notifications/{nid}", "apps", W, one(&["project"], "project")),
+    // An edit can send a webhook more (events, environments, services): reveal, as a drain's edit is.
+    row("PATCH", "/v1/apps/projects/{project}/notifications/{nid}", "apps", REVEAL, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications/{nid}/test", "apps", W, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications/{nid}/deliveries", "apps", R, one(&["project"], "project")),
     // A project's log drains: every service's output POSTed out of roll, signed. Adding one sends
     // runtime output elsewhere and its signing secret comes back once: reveal. The URL is never
     // answered (only its host).
     row("GET", "/v1/apps/projects/{project}/drains", "apps", R, one(&["project"], "project")),
+    // Its services as roll.toml: settings and variables' names, never a value.
+    row("POST", "/v1/apps/projects/{project}/export", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/drains/{did}", "apps", W, one(&["project"], "project")),
+    // An edit can send more out (another source, every environment): reveal, as making one is.
+    row("PATCH", "/v1/apps/projects/{project}/drains/{did}", "apps", REVEAL, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/drains/{did}/test", "apps", W, one(&["project"], "project")),
     // A private registry's login (never answered back), and unlinking a database: settings.
     row("PUT", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
     row("DELETE", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
@@ -1185,6 +1194,13 @@ static ROWS: &[Row] = &[
     // admin in every environment, as an agent's shell is: its WebSocket, and all of a session
     // (opening, keys, screen, resizing, closing: what may close an admin's shell is admin too).
     row("GET", "/v1/apps/services/{id}/environments/{env}/shell", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A tunnel reaches the service's port past its allow list, access token and maintenance
+    // (a private service's admin page, say): admin, as a shell is.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/tunnel", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    // Files in an instance (`roll apps cp`): read, anything the app keeps (its secrets too);
+    // written, anything it runs next: admin, as a shell is.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/files", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("PUT", "/v1/apps/services/{id}/environments/{env}/files", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/shell/sessions", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/keys", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1204,10 +1220,10 @@ static ROWS: &[Row] = &[
     // A plan or an import of a roll code repo reads it: read there too.
     row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
     row("POST", "/v1/apps/import", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
-    // A project as a roll.toml: variables by name, never a value.
-    row("POST", "/v1/apps/projects/{project}/export", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/services", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/variables/values", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // What the next deploy changes: names of variables and settings, never a value.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/pending", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // A job is a command run with the environment's variables: its output can be them.
     row("GET", "/v1/apps/services/{id}/environments/{env}/jobs/{job}/logs", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
     // ── previews (feature/roll-previews, docs/previews.md) ──
