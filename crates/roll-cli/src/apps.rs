@@ -580,6 +580,10 @@ pub enum AppsCmd {
         /// shell's).
         #[arg(long, value_name = "PATH")]
         from_file: Option<PathBuf>,
+        /// Put them live now: a redeploy of the live image with the new values (Heroku's
+        /// `config:set`), followed until it's live.
+        #[arg(long, conflicts_with = "reveal")]
+        deploy: bool,
     },
     /// Link a roll resource (`postgres <project>`, `redis <db>`): its connection variables go in.
     Link {
@@ -937,13 +941,14 @@ async fn project_id(api: &Api, p: &str) -> anyhow::Result<String> {
     if p.starts_with("prj_") {
         return Ok(p.to_string());
     }
+    find_project(api, p).await?.ok_or_else(|| anyhow::anyhow!("no project named {p} (roll apps puts services in workspace projects)"))
+}
+
+/// The project named `name`, if there's one; an error only when the projects can't be read (a
+/// 401, roll unreachable), never taken for "none".
+async fn find_project(api: &Api, name: &str) -> anyhow::Result<Option<String>> {
     let all = api.get("/v1/workspace/projects").await?;
-    all.as_array()
-        .into_iter()
-        .flatten()
-        .find(|x| x["name"] == p)
-        .map(|x| s(&x["id"]))
-        .ok_or_else(|| anyhow::anyhow!("no project named {p} (roll apps puts services in workspace projects)"))
+    Ok(all.as_array().into_iter().flatten().find(|x| x["name"] == name).map(|x| s(&x["id"])))
 }
 
 /// The service a target names: `--service` (id or name), else this directory's link.
@@ -1544,9 +1549,12 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
             let name = if name.is_empty() { "app".to_string() } else { name };
             let project = match &u.target.project {
                 Some(p) => project_id(api, p).await?,
-                None => match project_id(api, &name).await {
-                    Ok(p) => p,
-                    Err(_) => s(&api.post("/v1/workspace/projects", json!({ "name": name })).await?["id"]),
+                None => match find_project(api, &name).await? {
+                    Some(p) => {
+                        eprintln!("using the project {name} ({p}), named as this directory is (-p puts it in another)");
+                        p
+                    }
+                    None => s(&api.post("/v1/workspace/projects", json!({ "name": name })).await?["id"]),
                 },
             };
             let svc = api.post("/v1/apps/services", json!({ "project": project, "name": name, "source": { "kind": "upload" } })).await?;
@@ -2668,7 +2676,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Vars { target, set, unset, seal, reveal, from_file } => {
+        AppsCmd::Vars { target, set, unset, seal, reveal, from_file, deploy } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/variables", env_path(&svc, &target.env));
             let mut m = serde_json::Map::new();
@@ -2686,9 +2694,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     m.insert(k.to_string(), v.into());
                 }
                 api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset, "seal": seal }))).await?;
-                if !json_out {
-                    eprintln!("saved; `roll apps redeploy` puts them live (a new deploy or push does too)");
+                if deploy {
+                    let dep = api.post(&format!("{}/redeploy", env_path(&svc, &target.env)), json!({})).await?;
+                    if !json_out {
+                        eprintln!("saved; redeploying with them");
+                        return watch(api, &svc, &target.env, &dep).await;
+                    }
+                    println!("{}", serde_json::to_string_pretty(&dep)?);
+                    return Ok(());
                 }
+                if !json_out {
+                    eprintln!("saved; `roll apps redeploy` (or --deploy) puts them live (a new deploy or push does too)");
+                }
+            } else if deploy {
+                bail!("--deploy goes with variables to set or unset");
             }
             let v = if reveal { api.get(&format!("{base}/values")).await? } else { api.get(&base).await? };
             if !json_out {

@@ -107,6 +107,9 @@ async fn variables_and_an_environment_through_the_cli() {
     let pending = t.ok(&["pending", "-s", "web", "-p", "acme"]).await;
     assert!(pending.contains("+ API_KEY") && pending.contains("+ PEM") && !pending.contains("sk-live"), "{pending}");
     assert!(t.ok(&["open", "--print", "-s", "web", "-p", "acme"]).await.trim().starts_with("http"));
+    // Set and put live in one go (Heroku's config:set).
+    let dep = t.json(&["vars", "-s", "web", "-p", "acme", "MODE=live", "--deploy"]).await;
+    assert_eq!(dep["trigger"], "settings", "{dep}");
     let listed = t.ok(&["vars", "-s", "web", "-p", "acme"]).await;
     assert!(listed.lines().any(|l| l.starts_with("API_KEY") && l.ends_with("sealed")) && !listed.contains("sk-live-123"), "{listed}");
     let revealed = t.ok(&["vars", "-s", "web", "-p", "acme", "--reveal"]).await;

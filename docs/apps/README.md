@@ -751,7 +751,8 @@ copy would read them, and that can take less than deploying where they are). A s
   hash (or no build would keep the cache past a push); a tree's own Dockerfile gets it as an
   `ARG ROLL_GIT_COMMIT` it declares, which Docker caches by its value.
 - A deployment records the variables' names and a hash of their values: changing a variable
-  marks the environment "needs deploy" (like Railway's staged changes). When a deployment goes
+  marks the environment "needs deploy" (like Railway's staged changes; `roll apps vars K=v
+  --deploy` saves and redeploys in one step, as Heroku's `config:set` does). When a deployment goes
   live, the environment's own variables are kept with it, sealed under the deployment
   (`deploy_vars`), and a rollback to it brings them back as they were then (Heroku's and
   Railway's rollbacks: a bad variable change is undone by rolling back), the change in the
@@ -1936,9 +1937,10 @@ build; a drain naming a deleted service couldn't be edited; route groups filled 
 lines; the pre-deploy container had no `ROLL_INSTANCE`; another environment's routes stayed on
 the charts).
 
-1. **The CLI's rough edges**: `roll apps vars --deploy`; `roll up` saying when it reuses a
-   project of the directory's name, and not taking a 401 for "no project"; `roll apps cp` (files
-   to and from an instance, Fly's `sftp`); shell completions.
+1. **The CLI's rough edges, the rest** (`vars --deploy` and `roll up` naming the project it reuses,
+   never taking a 401 for "no project", are done): `roll apps cp` (files to and from an
+   instance, Fly's `sftp`), and shell completions (`roll completion`, the whole CLI's, so with
+   its other owners).
 2. **A "deploy to roll" link** with variables asked for or generated (Heroku's `app.json`
    `generator: secret`, Render's `generateValue`, Railway's templates).
 3. **Drag and drop a folder to deploy it** (Netlify Drop), for static sites first.
