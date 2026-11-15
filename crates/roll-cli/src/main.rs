@@ -22,6 +22,7 @@ mod secret_refs;
 mod fallback;
 mod secrets;
 mod apps;
+mod login;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]
@@ -114,10 +115,6 @@ enum Cmd {
     /// Run a command with an environment's secrets in its environment, without writing files:
     /// `roll run -p shop -e production -- npm start`.
     Run(secrets::Run),
-    /// Print a completion script for your shell: `roll completions zsh > "${fpath[1]}/_roll"`,
-    /// `roll completions bash > ~/.local/share/bash-completion/completions/roll`,
-    /// `roll completions fish > ~/.config/fish/completions/roll.fish`.
-    Completions { shell: clap_complete::Shell },
     /// SSH with an environment's short-lived certificate (an SSH CA's `ssh` link): the key and
     /// certificate go to a private temporary directory for the session, then are deleted:
     /// `roll ssh -e production -- deploy@db1.example.com`.
@@ -132,6 +129,15 @@ enum Cmd {
     /// roll's MCP server: client config, approvals waiting for you, the audit log.
     #[command(subcommand)]
     Mcp(access::Mcp),
+    /// Sign this CLI in to roll through your browser: you choose what it may do, and commands
+    /// use it when no token is set (`roll logout` ends it).
+    Login(login::Login),
+    /// Revoke this CLI's login and forget it.
+    Logout,
+    /// Shell completions for every command and flag: `roll completions zsh > ~/.zfunc/_roll`
+    /// (bash, zsh, fish, powershell, elvish), as `fly completion` and `railway completion`.
+    #[command(visible_alias = "completion")]
+    Completions { shell: clap_complete::Shell },
 }
 
 #[derive(Subcommand)]
@@ -260,6 +266,25 @@ struct Api {
     login: Option<std::sync::Arc<secrets::Relogin>>,
 }
 
+/// Once a run: the token used expires within a week (`Roll-Token-Expiration`, as GitHub's), so
+/// its holder renews it before scripts start failing.
+fn warn_expiry(h: &reqwest::header::HeaderMap) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let Some(at) = h.get("roll-token-expiration").and_then(|v| v.to_str().ok()).and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok()) else { return };
+    let left = at.with_timezone(&chrono::Utc) - chrono::Utc::now();
+    if left < chrono::Duration::days(7) {
+        WARNED.call_once(|| eprintln!("note: this token expires in {} ({}): roll token edit <id> --expires 30d, or make a new one", human_left(left), at.format("%Y-%m-%d %H:%M UTC")));
+    }
+}
+
+fn human_left(d: chrono::Duration) -> String {
+    match d.num_hours() {
+        h if h >= 48 => format!("{} days", h / 24),
+        h if h >= 1 => format!("{h} hours"),
+        _ => format!("{} minutes", d.num_minutes().max(0)),
+    }
+}
+
 impl Api {
     /// A GET whose body is read as it comes (server-sent events): the response, once its
     /// status is a success.
@@ -332,6 +357,7 @@ impl Api {
         }
         let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
         let status = res.status();
+        warn_expiry(res.headers());
         Ok((status, res.text().await?, used))
     }
     /// The token to send: a workload identity's login, logging in again when it's near its end.
@@ -354,6 +380,24 @@ impl Api {
     }
     async fn get(&self, p: &str) -> anyhow::Result<Value> {
         self.call(reqwest::Method::GET, p, None).await
+    }
+    /// A `GET` whose answer isn't JSON (an export), as text.
+    async fn get_text(&self, p: &str) -> anyhow::Result<String> {
+        let mut req = self.http.get(format!("{}{p}", self.base));
+        if let Some(k) = &self.key {
+            req = req.bearer_auth(k);
+        }
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            bail!("{}", value["error"].as_str().map(str::to_string).unwrap_or_else(|| format!("{status}")));
+        }
+        Ok(text)
     }
     async fn post(&self, p: &str, b: Value) -> anyhow::Result<Value> {
         self.call(reqwest::Method::POST, p, Some(b)).await
@@ -495,9 +539,31 @@ async fn main() -> anyhow::Result<()> {
     let token_flag = matches.value_source("token") == Some(ValueSource::CommandLine);
     let cli = Cli::from_arg_matches(&matches)?;
     // A scoped token, when set, is what everything uses: the narrower credential wins.
-    let admin = cli.roll_token.filter(|t| !t.trim().is_empty()).or(cli.admin_token.filter(|t| !t.trim().is_empty()));
-    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: admin.clone().or(cli.api_key), headers: Vec::new(), login: None };
+    let admin = cli.roll_token.clone().filter(|t| !t.trim().is_empty()).or(cli.admin_token.clone().filter(|t| !t.trim().is_empty()));
+    let base = cli.api.trim_end_matches('/').to_string();
+    let http = reqwest::Client::new();
+    // `roll login`'s, last: any credential set for this run wins over it (a workload's identity, a
+    // streams key too).
+    let identity = std::env::var("ROLL_IDENTITY").is_ok_and(|v| !v.trim().is_empty());
+    let signed_in = if admin.is_none() && cli.api_key.is_none() && !identity && !matches!(cli.cmd, Cmd::Login(_) | Cmd::Logout) { login::token(&base).await } else { None };
+    // What this run uses, and what's set but loses to it (`roll token whoami` says both): the set
+    // ones in the order `key` takes them, then a kept login it didn't use.
+    let credential = {
+        let set = |v: &Option<String>| v.as_ref().is_some_and(|t| !t.trim().is_empty());
+        let mut order: Vec<String> = [(&cli.roll_token, "ROLL_TOKEN"), (&cli.admin_token, "ROLL_ADMIN_TOKEN"), (&cli.api_key, "ROLL_API_KEY")].into_iter().filter(|(v, _)| set(v)).map(|(_, n)| n.to_string()).collect();
+        if let Some(path) = login::kept(&base) {
+            order.push(format!("roll login ({})", path.display()));
+        }
+        let mut order = order.into_iter();
+        access::Credential { source: order.next(), unused: order.collect() }
+    };
+    let admin = admin.or(signed_in);
+    let api = Api { base, http, key: admin.clone().or(cli.api_key), headers: Vec::new(), login: None };
     let cmd = match cli.cmd {
+        Cmd::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "roll", &mut std::io::stdout());
+            return Ok(());
+        }
         Cmd::Db(cmd) => cmd,
         Cmd::Agent(cmd) => return agent::run(&api.base, cli.json, cmd).await,
         Cmd::Gateway(cmd) => return gateway::run(cli.json, cmd).await,
@@ -550,13 +616,11 @@ async fn main() -> anyhow::Result<()> {
             return secrets::run_command(&api, r).await;
         }
         Cmd::Ssh(a) => return secrets::ssh_command(&secrets_api(&api).await?, a).await,
-        Cmd::Completions { shell } => {
-            clap_complete::generate(shell, &mut Cli::command(), "roll", &mut std::io::stdout());
-            return Ok(());
-        }
         Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
-        Cmd::Token(cmd) => return access::token(&api, cli.json, cmd).await,
+        Cmd::Token(cmd) => return access::token(&api, cli.json, cmd, &credential).await,
         Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,
+        Cmd::Login(l) => return login::login(&api.base, cli.json, l).await,
+        Cmd::Logout => return login::logout(&api.base, cli.json).await,
         Cmd::Nosql(cmd) => {
             let r = nosql::run(&api, cli.json, *cmd).await;
             if let Err(e) = &r

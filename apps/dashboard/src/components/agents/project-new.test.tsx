@@ -51,7 +51,8 @@ describe("adding a project (one dialog)", () => {
     // Hidden folders and files stay out; the home folder itself isn't a project.
     expect(within(list).queryByText(".config")).not.toBeInTheDocument();
     expect(within(sheet()).getByRole("button", { name: /^Add / })).toBeDisabled();
-    await userEvent.click(within(list).getByRole("button", { name: "roll" }));
+    // The folders arrive after the list shows "Listing…": waited for, not assumed (a loaded machine is slower).
+    await userEvent.click(await within(list).findByRole("button", { name: "roll" }));
     await userEvent.click(within(sheet()).getByRole("button", { name: "Add roll" }));
     expect(h.command).toHaveBeenCalledWith("mch_1", expect.any(String), { type: "project.add", path: "/Users/ada/roll" });
     const done = await within(sheet()).findByRole("status");

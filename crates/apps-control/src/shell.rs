@@ -275,3 +275,56 @@ impl Apps {
         Ok(())
     }
 }
+
+/// The largest tar `PUT …/files` takes (a seed database, a config): bigger goes another way.
+pub const FILES_MAX: usize = 100 << 20;
+
+/// A path in an instance: absolute, at most 1024 bytes, no NUL.
+fn instance_path(p: &str) -> Result<&str> {
+    if !p.starts_with('/') || p.len() > 1024 || p.contains('\0') {
+        return Err(Error::BadRequest("path is an absolute path in the instance (at most 1024 characters)".into()));
+    }
+    Ok(p)
+}
+
+/// A stream that keeps the instance it reads held (awake) until it's read.
+struct Held {
+    _target: Target,
+    inner: crate::runtime::VolumeStream,
+}
+
+impl tokio::io::AsyncRead for Held {
+    fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl Apps {
+    /// `GET …/files?path=&instance=` (`roll apps cp :/path .`): what's at `path` in an instance
+    /// (the one a shell would get without `instance`), as a tar.
+    pub async fn read_files(self: &Arc<Self>, service: &str, env: &str, instance: Option<&str>, path: &str) -> Result<(String, crate::runtime::VolumeStream)> {
+        let path = instance_path(path)?;
+        let target = self.shell_target(service, env, instance).await?;
+        let name = target.instance.clone();
+        let mut inner = self.deps.runtime.copy_from(&name, path).await.map_err(|e| Error::Conflict(e.to_string()))?;
+        // Its first bytes before the answer starts: a path that isn't there is a 404, not a
+        // broken body after a 200.
+        let mut first = vec![0u8; 8192];
+        let n = tokio::io::AsyncReadExt::read(&mut inner, &mut first).await.map_err(|e| Error::Internal(e.to_string()))?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("nothing at {path} in {name}")));
+        }
+        first.truncate(n);
+        let inner: crate::runtime::VolumeStream = Box::new(tokio::io::AsyncReadExt::chain(std::io::Cursor::new(first), inner));
+        Ok((name, Box::new(Held { _target: target, inner })))
+    }
+
+    /// `PUT …/files?path=&instance=` (`roll apps cp ./seed.db :/data/`): a tar's files written
+    /// under `path` in an instance. Its name.
+    pub async fn write_files(self: &Arc<Self>, service: &str, env: &str, instance: Option<&str>, dir: &str, tar: bytes::Bytes) -> Result<String> {
+        let dir = instance_path(dir)?;
+        let target = self.shell_target(service, env, instance).await?;
+        self.deps.runtime.copy_to(&target.instance, dir, Box::new(std::io::Cursor::new(tar))).await.map_err(|e| Error::Conflict(e.to_string()))?;
+        Ok(target.instance.clone())
+    }
+}
