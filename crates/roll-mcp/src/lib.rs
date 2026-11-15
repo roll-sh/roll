@@ -7,8 +7,10 @@
 //! each one calls; a test checks it's in the permission catalogue), and their annotations
 //! (`readOnlyHint`, `destructiveHint`) come from the action the catalogue gives that route.
 //!
-//! - Stateless: any node answers any request. `initialize` answers an `Mcp-Session-Id` that only
-//!   says whether the client opens URLs for elicitation ([`SESSION_URL`]); nothing is kept.
+//! - Stateless: any node answers any request. A modern request (2026-07-28, [`modern`]) carries its
+//!   version and what the client offers in `_meta`; a legacy one opens with `initialize`, which
+//!   answers an `Mcp-Session-Id` that only says whether the client opens URLs for elicitation
+//!   ([`SESSION_URL`]). Nothing is kept either way.
 //! - Responses are JSON, or server-sent events when the client accepts only `text/event-stream`
 //!   (keep-alive comments while a call waits on an approval).
 //! - Without a token on a daemon that needs one: 401 with `WWW-Authenticate` naming the protected
@@ -19,6 +21,7 @@
 //! - Read-only: `?readonly=1` (or `X-MCP-Readonly: true`) lists and runs only read-only tools, as
 //!   GitHub's server's read-only mode does; the token's rules still decide each call.
 
+pub mod modern;
 pub mod prompts;
 pub mod resources;
 pub mod tools;
@@ -137,6 +140,7 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
         principal: Principal::Grant(grant),
         ip: None,
         url_elicitation: false,
+        modern: false,
         toolsets: None,
         readonly: false,
         client: None,
@@ -169,7 +173,7 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     if !caller {
         return unauthorized(&m.config);
     }
-    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, toolsets: None, readonly: false, client: None, names: Default::default() };
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, modern: false, toolsets: None, readonly: false, client: None, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
         let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
@@ -290,10 +294,23 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         Value::Array(a) => a,
         v => vec![v],
     };
-    if let Some(v) = headers.get("mcp-protocol-version").and_then(|v| v.to_str().ok())
-        && !PROTOCOL_VERSIONS.contains(&v)
+    // A modern request names its version in `_meta` (and the header); its headers must say what
+    // its body says. A version roll doesn't speak gets the list it does, so a client picks one.
+    let header_version = headers.get("mcp-protocol-version").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let modern = messages.iter().any(|m| modern::version(m).is_some()) || header_version.as_deref() == Some(modern::MODERN);
+    if modern {
+        if batch {
+            return http_error(StatusCode::BAD_REQUEST, "a 2026-07-28 request is one JSON-RPC message, not a batch");
+        }
+        if let Err((status, body)) = modern::check(&headers, &messages[0], &PROTOCOL_VERSIONS) {
+            return (status, Json(body)).into_response();
+        }
+    } else if let Some(v) = &header_version
+        && !PROTOCOL_VERSIONS.contains(&v.as_str())
     {
-        return http_error(StatusCode::BAD_REQUEST, &format!("unsupported MCP-Protocol-Version {v}"));
+        let supported: Vec<&str> = std::iter::once(modern::MODERN).chain(PROTOCOL_VERSIONS).collect();
+        let body = json!({ "jsonrpc": "2.0", "id": messages[0].get("id").cloned().unwrap_or(Value::Null), "error": { "code": modern::UNSUPPORTED_VERSION, "message": "Unsupported protocol version", "data": { "supported": supported, "requested": v } } });
+        return (StatusCode::BAD_REQUEST, Json(body)).into_response();
     }
     let has_requests = messages.iter().any(|v| v.get("method").is_some() && v.get("id").is_some());
     if !has_requests {
@@ -307,7 +324,9 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     // Whether the client opens URLs for elicitation: from `initialize` in this message, else the
     // session id it was given.
     let declared = messages.iter().find(|m| m["method"] == "initialize").map(|m| m["params"]["capabilities"]["elicitation"].get("url").is_some());
-    let url_elicitation = declared.unwrap_or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with(SESSION_URL)));
+    // A modern request says on itself what the client offers and who it is.
+    let (modern_url, modern_name) = if modern { modern::client(&messages[0]) } else { (false, None) };
+    let url_elicitation = if modern { modern_url } else { declared.unwrap_or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with(SESSION_URL))) };
     // Who's calling, as it named itself in `initialize` (carried in the session id after), for
     // the audit log: a hint, never a proof.
     let named = messages.iter().find(|m| m["method"] == "initialize").and_then(|m| {
@@ -315,12 +334,12 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         let name = info["name"].as_str()?;
         roll_access::evaluate::client_name(&format!("{name} {}", info["version"].as_str().unwrap_or("")))
     });
-    let client: Option<Arc<str>> = named
-        .clone()
+    let client: Option<Arc<str>> = modern_name
+        .or_else(|| named.clone())
         .or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).and_then(session_client))
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, url_elicitation, toolsets, readonly, client, names: Default::default() });
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, url_elicitation, modern, toolsets, readonly, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
@@ -330,7 +349,16 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE)).into_response()
     } else {
         let mut responses = process(&ctx, messages).await;
-        if batch { Json(Value::Array(responses)).into_response() } else { Json(responses.pop().unwrap_or(Value::Null)).into_response() }
+        match responses.pop() {
+            // A method the revision doesn't have is a 404 (with its JSON-RPC error), so a client
+            // tells it from a server that has no MCP endpoint here.
+            Some(r) if modern && r["error"]["code"] == -32601 => (StatusCode::NOT_FOUND, Json(r)).into_response(),
+            Some(r) if !batch => Json(r).into_response(),
+            last => {
+                responses.extend(last);
+                Json(Value::Array(responses)).into_response()
+            }
+        }
     };
     if let Some(url) = declared {
         use base64::Engine;
@@ -400,6 +428,8 @@ struct Ctx {
     ip: Option<std::net::IpAddr>,
     /// The client opens URLs for elicitation: an approval comes back as one to open, then retry.
     url_elicitation: bool,
+    /// A modern request (2026-07-28): served on its own, its answers marked as that revision's.
+    modern: bool,
     /// The products whose tools are listed (`None`: every product's).
     toolsets: Option<Vec<String>>,
     /// Only read-only tools are listed and run (`?readonly=1`).
@@ -490,6 +520,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         let resp = match method {
             "initialize" => rpc_result(id, initialize(ctx, &params)),
+            "server/discover" => rpc_result(id, modern::discover(&PROTOCOL_VERSIONS, capabilities(), instructions(ctx))),
             "ping" => rpc_result(id, json!({})),
             "tools/list" => rpc_result(id, json!({ "tools": ctx.tools() })),
             "tools/call" => {
@@ -502,7 +533,9 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 } else {
                     match call(ctx, &name, args).await {
                         Some(r) if ctx.url_elicitation && r["structuredContent"]["status"] == "approval_pending" && r["structuredContent"]["url"].as_str().is_some_and(|u| !u.is_empty()) => {
-                            approval_elicitation(id, &r)
+                            // 2026-07-28 asks for it in the result (Multi Round-Trip Requests);
+                            // earlier revisions as URL elicitation's error.
+                            if ctx.modern { rpc_result(id, modern::approval_input_required(&r)) } else { approval_elicitation(id, &r) }
                         }
                         Some(r) => rpc_result(id, r),
                         None => rpc_error(id, -32602, format!("unknown tool {name:?}")),
@@ -542,7 +575,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             },
             other => rpc_error(id, -32601, format!("method not found: {other}")),
         };
-        responses.push(resp);
+        responses.push(if ctx.modern { modern::finish(method, resp) } else { resp });
     }
     responses
 }
@@ -601,6 +634,21 @@ fn approval_elicitation(id: Value, result: &Value) -> Value {
 fn initialize(ctx: &Ctx, params: &Value) -> Value {
     let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
     let version = if PROTOCOL_VERSIONS.contains(&asked) { asked } else { PROTOCOL_VERSIONS[0] };
+    json!({
+        "protocolVersion": version,
+        "capabilities": capabilities(),
+        "serverInfo": { "name": "roll", "title": "roll", "version": env!("CARGO_PKG_VERSION"), "icons": [server_icon()] },
+        "instructions": instructions(ctx),
+    })
+}
+
+/// What roll offers, the same in `initialize` and `server/discover`.
+fn capabilities() -> Value {
+    json!({ "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false }, "completions": {} })
+}
+
+/// How to use roll, for the model: who the connection is and how approvals work.
+fn instructions(ctx: &Ctx) -> Value {
     let who = match &ctx.principal {
         Principal::Operator => "You're connected as roll's operator: every tool is available.".to_string(),
         Principal::Grant(g) => format!(
@@ -608,20 +656,15 @@ fn initialize(ctx: &Ctx, params: &Value) -> Value {
             g.name
         ),
     };
-    json!({
-        "protocolVersion": version,
-        "capabilities": { "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false }, "completions": {} },
-        "serverInfo": { "name": "roll", "title": "roll", "version": env!("CARGO_PKG_VERSION"), "icons": [server_icon()] },
-        // The token's name is a person's: what it might hide stays visible.
-        "instructions": visible(&format!(
-            "roll: serverless Postgres, Redis, storage, streams, queues, tasks, NoSQL, source control (roll code) and coding agents, grouped into workspace projects. \
+    // The token's name is a person's: what it might hide stays visible.
+    json!(visible(&format!(
+        "roll: serverless Postgres, Redis, storage, streams, queues, tasks, NoSQL, source control (roll code) and coding agents, grouped into workspace projects. \
 Tools are named <product>_<verb>. Ids are each product's own (Postgres projects prj_…, Redis rdb_…, streams st_…, buckets by name, repos owner/name). \
 {who} Some actions ask a person first: such a call waits up to a minute, then returns status \"approval_pending\" with an approval id and a link. \
 Tell the user, then call the same tool again with the same arguments plus \"approval\": \"apr_…\": it waits for the decision and runs once approved. \
 postgres_query is read-only (postgres_execute changes data). Credentials come back as [redacted] unless the token may reveal them. \
 Read the resource roll://access/me for what this connection may do, in words, and roll://guide for more."
-        )),
-    })
+    )))
 }
 
 /// roll's Horizon mark for clients that show a server's icon (2025-11-25): the dashboard's favicon,

@@ -229,6 +229,77 @@ async fn tools_follow_the_tokens_rules() {
     assert!(deletes.contains(&"deny") && deletes.contains(&"ask"), "{log}");
 }
 
+/// A 2026-07-28 client (the stateless core) is served with no `initialize`: each request names its
+/// version and what the client offers in `_meta`, its headers must say what its body says, its
+/// answers say they're complete (lists may be kept a minute, for this caller only), no session is
+/// made, and an approval comes back as a Multi Round-Trip Request that runs once a person decides.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_2026_client_is_served_without_initialize() {
+    let d = Daemon::new();
+    let meta = |caps: Value| json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "modern", "version": "2" }, "io.modelcontextprotocol/clientCapabilities": caps });
+    let send = |token: &str, id: i64, method: &str, mut params: Value, headers: Vec<(&'static str, String)>| {
+        params["_meta"] = meta(json!({ "elicitation": { "url": {} } }));
+        let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let token = token.to_string();
+        let d = &d;
+        async move {
+            let h: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            d.http_with(&token, Method::POST, "/v1/mcp", Some(body), &h).await
+        }
+    };
+    let std_headers = |method: &str, name: Option<&str>| {
+        let mut h = vec![("mcp-protocol-version", "2026-07-28".to_string()), ("mcp-method", method.to_string())];
+        if let Some(n) = name {
+            h.push(("mcp-name", n.to_string()));
+        }
+        h
+    };
+
+    let (s, h, out) = send(OPERATOR, 1, "server/discover", json!({}), std_headers("server/discover", None)).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let r = &out["result"];
+    assert_eq!((r["resultType"].as_str(), r["supportedVersions"][0].as_str(), r["_meta"]["io.modelcontextprotocol/serverInfo"]["name"].as_str()), (Some("complete"), Some("2026-07-28"), Some("roll")), "{out}");
+    assert!(r["supportedVersions"].as_array().unwrap().iter().any(|v| v == "2025-11-25"), "legacy too: {out}");
+    assert!(h.get("mcp-session-id").is_none(), "no session");
+
+    let (s, h, out) = send(OPERATOR, 2, "tools/list", json!({}), std_headers("tools/list", None)).await;
+    assert_eq!((s, out["result"]["cacheScope"].as_str(), out["result"]["ttlMs"].as_u64()), (StatusCode::OK, Some("private"), Some(60_000)), "{out}");
+    assert!(!out["result"]["tools"].as_array().unwrap().is_empty() && h.get("mcp-session-id").is_none());
+
+    // Headers that don't say what the body says, or a version roll doesn't speak.
+    let call = json!({ "name": "postgres_list_projects", "arguments": {} });
+    let (s, _, out) = send(OPERATOR, 3, "tools/call", call.clone(), std_headers("tools/call", Some("postgres_delete_project"))).await;
+    assert_eq!((s, out["error"]["code"].as_i64()), (StatusCode::BAD_REQUEST, Some(-32020)), "{out}");
+    let (s, _, out) = send(OPERATOR, 4, "tools/call", call.clone(), vec![("mcp-protocol-version", "2026-07-28".to_string())]).await;
+    assert_eq!((s, out["error"]["code"].as_i64()), (StatusCode::BAD_REQUEST, Some(-32020)), "Mcp-Method missing: {out}");
+    let mut old = json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/list", "params": { "_meta": meta(json!({})) } });
+    old["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] = json!("2099-01-01");
+    let (s, _, out) = d.http_with(OPERATOR, Method::POST, "/v1/mcp", Some(old), &[("mcp-protocol-version", "2099-01-01"), ("mcp-method", "tools/list")]).await;
+    assert_eq!((s, out["error"]["code"].as_i64(), out["error"]["data"]["supported"][0].as_str()), (StatusCode::BAD_REQUEST, Some(-32022), Some("2026-07-28")), "{out}");
+    let (s, _, out) = send(OPERATOR, 6, "nonsense/method", json!({}), std_headers("nonsense/method", None)).await;
+    assert_eq!((s, out["error"]["code"].as_i64()), (StatusCode::NOT_FOUND, Some(-32601)), "{out}");
+
+    let (s, _, out) = send(OPERATOR, 7, "tools/call", call, std_headers("tools/call", Some("postgres_list_projects"))).await;
+    assert_eq!((s, out["result"]["resultType"].as_str(), out["result"]["isError"].as_bool()), (StatusCode::OK, Some("complete"), Some(false)), "{out}");
+
+    // A call that needs a person: input_required with the approval page, then the same call runs
+    // once approved (the gate finds its approval: nothing the client echoes decides it).
+    let asker = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }])).await;
+    let del = json!({ "name": "postgres_delete_project", "arguments": { "project": "pc" } });
+    let (_, _, out) = send(&asker, 8, "tools/call", del.clone(), std_headers("tools/call", Some("postgres_delete_project"))).await;
+    let r = &out["result"];
+    let ask = &r["inputRequests"]["approval"];
+    assert_eq!((r["resultType"].as_str(), ask["method"].as_str(), ask["params"]["mode"].as_str()), (Some("input_required"), Some("elicitation/create"), Some("url")), "{out}");
+    let url = ask["params"]["url"].as_str().unwrap();
+    let approval = url.split("id=").nth(1).unwrap_or_default().split('&').next().unwrap_or_default();
+    assert!(approval.starts_with("apr_"), "{url}");
+    assert_eq!(d.http(OPERATOR, Method::POST, &format!("/v1/access/approvals/{approval}/approve"), None).await.0, StatusCode::OK);
+    let mut retry = del;
+    retry["inputResponses"] = json!({ "approval": { "action": "accept" } });
+    let (_, _, out) = send(&asker, 9, "tools/call", retry, std_headers("tools/call", Some("postgres_delete_project"))).await;
+    assert_eq!((out["result"]["resultType"].as_str(), out["result"]["isError"].as_bool()), (Some("complete"), Some(false)), "{out}");
+}
+
 /// What `tools/list` costs with every product on, by hand in release:
 /// `cargo test --release -p roll-mcp --test mcp tools_list_cost -- --ignored --nocapture`.
 #[tokio::test(flavor = "multi_thread")]

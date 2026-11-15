@@ -134,7 +134,12 @@ A client that opens URLs for elicitation (it declares `capabilities.elicitation.
 `-32042` with `data.elicitations[0]` = `{mode: "url", elicitationId: "apr_…", url, message}` (and
 `data.approval`) at once, without waiting. The client shows the person the approval page, and sends
 the call again once they've decided; the gate finds its approval (and a denial answers with the
-person's reason).
+person's reason). A 2026-07-28 client that declares URL elicitation in its request's
+`clientCapabilities` gets it as a Multi Round-Trip Request instead: the result is
+`{resultType: "input_required", inputRequests: {approval: {method: "elicitation/create", params:
+{mode: "url", url, message}}}}`, and its retry (with `inputResponses`) runs once a person approved.
+No `requestState` is needed: the gate matches the retry to its approval itself, so nothing the
+client echoes can decide what runs.
 
 ## Authorization
 
@@ -176,8 +181,22 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
 
 ## Protocol
 
-- Streamable HTTP, JSON-RPC 2.0, protocol versions `2025-11-25`, `2025-06-18`, `2025-03-26` and
-  `2024-11-05`.
+- Streamable HTTP, JSON-RPC 2.0, protocol versions `2026-07-28`, `2025-11-25`, `2025-06-18`,
+  `2025-03-26` and `2024-11-05`: a dual-era server, as 2026-07-28's compatibility matrix puts it.
+- **2026-07-28, the stateless core** (`roll_mcp::modern`): a request whose `_meta` names
+  `io.modelcontextprotocol/protocolVersion` is served on its own, with no `initialize` and no
+  session; what the client offers (`clientCapabilities`, `clientInfo`, for the audit log) comes
+  with each request.
+  - Its headers must say what its body says: `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name`
+    for `tools/call`, `resources/read` and `prompts/get` (the `=?base64?…?=` form decoded), or 400
+    `HeaderMismatch` (`-32020`), so a proxy routing on headers and roll running the body agree. A
+    version roll doesn't speak is 400 `UnsupportedProtocolVersion` (`-32022`) with `supported`; an
+    unknown method is 404 with `-32601`. It's one message, never a batch.
+  - `server/discover` answers the versions, capabilities and instructions. Every result has
+    `resultType` and `_meta["io.modelcontextprotocol/serverInfo"]`; lists (and discover) have
+    `ttlMs: 60000` and `cacheScope: "private"`: a token's tools are its own, and its rules can
+    change.
+  - Approvals are Multi Round-Trip Requests (see Approvals).
 - **Stateless:** every node of a cluster answers every request, and nothing is lost on a restart.
   `initialize` answers an `Mcp-Session-Id` that holds no state: its prefix says whether the client
   declared URL elicitation (`roll-url-1.` or `roll-1.`, then a random part, so ids are unique), so
@@ -516,16 +535,11 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **MCP 2026-07-28** (the stateless core; roll speaks up to 2025-11-25, and new clients fall back to
-   `initialize`): `server/discover`; requests without `initialize` or `Mcp-Session-Id`, each
-   carrying `io.modelcontextprotocol/protocolVersion`, `clientCapabilities` and `clientInfo` in
-   `_meta`, and `serverInfo` in each result's; `resultType` on every result; `ttlMs` and
-   `cacheScope: "private"` on list results (they depend on the caller); approvals as Multi
-   Round-Trip Requests (an `input_required` result carrying a URL request for the approval page and
-   a signed `requestState`, the client's retry running the call once a person decided), which
-   replaces URL elicitation's `-32042` there; `Mcp-Method`/`Mcp-Name` checked against the body
-   (`HeaderMismatch` -32020); the renumbered errors; log level per request. 2025-11-25 stays for
-   clients that ask for it. Checked with the official SDKs' 2026 clients.
+1. **MCP 2026-07-28 with a real client**: the stateless core is in (`server/discover`, per-request
+   `_meta`, header checks, `resultType`, cacheable lists, approvals as Multi Round-Trip Requests);
+   check it end to end with an official SDK's 2026-07-28 client against the live daemon once one
+   ships (the TypeScript SDK's v2), and add `subscriptions/listen` only if roll's lists ever
+   change under a client (today `listChanged` is false). Legacy clients keep `initialize`.
 2. **MCP tasks, as the 2026-07-28 extension** (`io.modelcontextprotocol/tasks`, SEP-2663: the
    server answers a task handle when a call will take long, `tasks/get` polls with the result in
    it, `tasks/update` carries input, no `tasks/result` or `tasks/list`; 2025-11-25's experimental
@@ -558,7 +572,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: Redis's `@dangerous` commands are admin (`MONITOR` and `SYNC` stream everyone's commands and data, `CLIENT` ends other connections, `SLOWLOG` shows others' arguments: they were write) and `SWAPDB` is delete; `run.rollback_on_crash` is deploy (it puts an older deployment live by itself; apps' review) (#24); an apps service's run settings fail closed: only size, scale, health checks, timers, alerts, rollout and restarts are write, every other run key is deploy, a new one too until it's listed (a list of deploy keys let `run.tcp`, a port on the internet, through as write, as it had `run.schedules`) (#24); setting a service's `run.schedules` (apps-next: commands run as jobs of the live deployment on a timer) is deploy, as a production job is (it was write: a token that couldn't run one production job could schedule one every minute), and `apps_update_service` says how to set it; `secrets_get_values` (one reveal for an environment, not one per key), `secrets_list_leases` and `secrets_end_lease`, and the secrets tools' descriptions brought up to date (secrets' seventeenth review) (#24); `secrets_set`, `secrets_delete` and `secrets_propose` take `if_version` (Vault's check-and-set: an agent can't silently overwrite a person's edit; 409 `stale`; secrets #62); this round's gate additions cost nothing measurable (`gate_latency`, release, pinned, eight alternating runs each at load ~44: CPU 2.88 s against 2.96 s, within ±0.25 s run to run; 32-at-once token throughput median ~60k against ~55k, ranges 35–89k and 23–86k overlapping; one resource p50 84–97 µs against 114–133 µs); `apps_set_environment` takes `paused` and `apps_create_service` a repo's `branch` (apps-next); every answer to an expiring token says when (`Roll-Token-Expiration`, GitHub's `GitHub-Authentication-Token-Expiration`), and the CLI warns a week ahead; `apps_import` (a roll.toml or compose file checked before `roll up --all`; apps-next); the approval UI checked in a browser against `users-live` (the policy's checkboxes, a waiting token's badge with an admin's Approve and Deny, "Needs attention" leading with it, the person's view without them), which moved rotation's choice into a step Rotate opens (it was a select on every row); the `tune_slow_query` prompt (Neon's query tuning: the plan, an index tried on a branch, both plans compared, main only when you say so); the sixteenth review (this round's token surface): a rotated secret in its grace calls products but manages no tokens (it couldn't rotate, change or make one that outlives the grace), and a token whose checksum is wrong is refused before any lookup; `debug_failing_service` starts from what roll already flags (an environment's `attention`, `apps_activity` with `all`); `apps_activity` takes `all` (the whole timeline: deploys, failures, crash loops, alerts; apps-next); `secrets_reach` and `secrets_folder_policies` (secrets #61, #53); rotating a token can keep the old secret working a while (`keep_old_for_s`, at most a week: Stripe's roll key), from the dashboard's Rotate and `roll token rotate --keep-old 1h`, so deployments switch without an outage; `postgres_typescript_types` (Supabase's generated types, written by one read-only query: enums as unions, arrays, nullable) and the `compare_branch_schemas` prompt (Neon's schema compare: both branches described, the difference listed, advisors on the branch); people's tokens past the policy wait for an admin (on #25); open registration's limit is a sliding minute per network (a fixed minute let twice the limit through at its edge, and its test failed when a run crossed one); a token used before its start says so (401 `not_yet_valid`, "this token works from <time>", with `not_before`; the token list and page show the start); the ninth review's findings (apps settings that change what production runs, its
+Done lately: MCP 2026-07-28, the stateless core, beside the handshake revisions (a dual-era server): `server/discover`, requests served on their own `_meta` with no `initialize` or session, `MCP-Protocol-Version`/`Mcp-Method`/`Mcp-Name` checked against the body (`-32020`), unsupported versions answered with the list (`-32022`), unknown methods 404, `resultType` and `serverInfo` on every result, lists cacheable a minute for the caller only, and approvals as Multi Round-Trip Requests (`input_required` with the approval page; the retry runs once approved); a modern-only client failed against roll before (#24); Redis's `@dangerous` commands are admin (`MONITOR` and `SYNC` stream everyone's commands and data, `CLIENT` ends other connections, `SLOWLOG` shows others' arguments: they were write) and `SWAPDB` is delete; `run.rollback_on_crash` is deploy (it puts an older deployment live by itself; apps' review) (#24); an apps service's run settings fail closed: only size, scale, health checks, timers, alerts, rollout and restarts are write, every other run key is deploy, a new one too until it's listed (a list of deploy keys let `run.tcp`, a port on the internet, through as write, as it had `run.schedules`) (#24); setting a service's `run.schedules` (apps-next: commands run as jobs of the live deployment on a timer) is deploy, as a production job is (it was write: a token that couldn't run one production job could schedule one every minute), and `apps_update_service` says how to set it; `secrets_get_values` (one reveal for an environment, not one per key), `secrets_list_leases` and `secrets_end_lease`, and the secrets tools' descriptions brought up to date (secrets' seventeenth review) (#24); `secrets_set`, `secrets_delete` and `secrets_propose` take `if_version` (Vault's check-and-set: an agent can't silently overwrite a person's edit; 409 `stale`; secrets #62); this round's gate additions cost nothing measurable (`gate_latency`, release, pinned, eight alternating runs each at load ~44: CPU 2.88 s against 2.96 s, within ±0.25 s run to run; 32-at-once token throughput median ~60k against ~55k, ranges 35–89k and 23–86k overlapping; one resource p50 84–97 µs against 114–133 µs); `apps_set_environment` takes `paused` and `apps_create_service` a repo's `branch` (apps-next); every answer to an expiring token says when (`Roll-Token-Expiration`, GitHub's `GitHub-Authentication-Token-Expiration`), and the CLI warns a week ahead; `apps_import` (a roll.toml or compose file checked before `roll up --all`; apps-next); the approval UI checked in a browser against `users-live` (the policy's checkboxes, a waiting token's badge with an admin's Approve and Deny, "Needs attention" leading with it, the person's view without them), which moved rotation's choice into a step Rotate opens (it was a select on every row); the `tune_slow_query` prompt (Neon's query tuning: the plan, an index tried on a branch, both plans compared, main only when you say so); the sixteenth review (this round's token surface): a rotated secret in its grace calls products but manages no tokens (it couldn't rotate, change or make one that outlives the grace), and a token whose checksum is wrong is refused before any lookup; `debug_failing_service` starts from what roll already flags (an environment's `attention`, `apps_activity` with `all`); `apps_activity` takes `all` (the whole timeline: deploys, failures, crash loops, alerts; apps-next); `secrets_reach` and `secrets_folder_policies` (secrets #61, #53); rotating a token can keep the old secret working a while (`keep_old_for_s`, at most a week: Stripe's roll key), from the dashboard's Rotate and `roll token rotate --keep-old 1h`, so deployments switch without an outage; `postgres_typescript_types` (Supabase's generated types, written by one read-only query: enums as unions, arrays, nullable) and the `compare_branch_schemas` prompt (Neon's schema compare: both branches described, the difference listed, advisors on the branch); people's tokens past the policy wait for an admin (on #25); open registration's limit is a sliding minute per network (a fixed minute let twice the limit through at its edge, and its test failed when a run crossed one); a token used before its start says so (401 `not_yet_valid`, "this token works from <time>", with `not_before`; the token list and page show the start); the ninth review's findings (apps settings that change what production runs, its
 source, build, start and pre-deploy commands, schedule, kind, port, volume and `run.public`, are
 deploy; `create_grant` refuses extensions that name no caller; the expiry digest leaves out tokens
 made for a day or less); a token can start later (`not_before`, Cloudflare's TTL start): refused
