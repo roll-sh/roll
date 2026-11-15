@@ -509,7 +509,13 @@ impl Runtime for Fake {
         Ok(())
     }
 
-    async fn remove_volume(&self, _name: &str) {}
+    async fn remove_network(&self, name: &str) {
+        self.networks.lock().retain(|x| x != name);
+    }
+
+    async fn remove_volume(&self, name: &str) {
+        self.volumes.lock().remove(name);
+    }
 
     fn reach(&self, url: &str) -> String {
         url.to_string()

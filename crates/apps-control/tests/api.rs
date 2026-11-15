@@ -3460,3 +3460,54 @@ async fn errors_and_latency_read_by_route() {
     assert_eq!((route("/users/:id")["requests"].as_u64(), route("/users/:id")["errors"].as_u64()), (Some(3), Some(0)), "{v}");
     assert_eq!((route("/checkout")["requests"].as_u64(), route("/checkout")["errors"].as_u64(), route("/checkout")["method"].as_str()), (Some(1), Some(1), Some("GET")), "{v}");
 }
+
+/// What runs is billed: requests through the proxy and the instance's CPU and memory reach the
+/// environment's usage at the configured prices (the spend limit's test reads that usage into
+/// the month).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requests_and_cpu_through_the_proxy_are_billed() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "shop", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let h = host(&svc["environments"][0]["url"]);
+    for _ in 0..3 {
+        assert_eq!(visit(&w, &h, "/").await.0, StatusCode::OK);
+    }
+    for (name, ..) in w.fake.instances(&id) {
+        w.fake.set_busy(&name, 0.5);
+    }
+    let mut today = Value::Null;
+    for _ in 0..300 {
+        w.apps.flush_meters(true).await;
+        today = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/usage?days=1"), None).await.1["days"][0].clone();
+        if today["requests"].as_f64() >= Some(3.0) && today["cpu_seconds"].as_f64() > Some(0.0) && today["gb_seconds"].as_f64() > Some(0.0) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(today["requests"].as_f64() >= Some(3.0) && today["cpu_seconds"].as_f64() > Some(0.0) && today["gb_seconds"].as_f64() > Some(0.0), "{today}");
+    assert!(today["egress_bytes"].as_f64() > Some(0.0), "{today}");
+    let p = apps_control::metrics::Prices::default();
+    let f = |k: &str| today[k].as_f64().unwrap();
+    let usd = f("cpu_seconds") * p.cpu_second + f("gb_seconds") * p.gb_second + f("egress_bytes") / 1e9 * p.egress_gb;
+    assert!((today["usd"].as_f64().unwrap() - usd).abs() < 1e-12, "priced as configured: {today}");
+}
+
+/// Deleting a service leaves nothing running or kept for it: its volume goes (after a last
+/// backup), and the project's network once no other service uses it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deleted_service_leaves_nothing_behind() {
+    let w = world_full(|_| {}, true, |_| {}).await;
+    let (db, _) = image_service(&w, "db", json!({"type": "worker", "volume": {"mount": "/data", "size_gb": 1}})).await;
+    let (web, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let (db, web) = (db["id"].as_str().unwrap().to_string(), web["id"].as_str().unwrap().to_string());
+    let volume = apps_control::volume_name(&db, "production");
+    w.fake.put_volume(&volume, b"rows");
+    let net = apps_control::network_name(&w.project, "production");
+    assert!(w.fake.networks().contains(&net), "{:?}", w.fake.networks());
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{db}"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!((w.fake.volume(&volume), w.fake.instances(&db).len()), (None, 0), "its volume and instances");
+    assert!(w.fake.networks().contains(&net), "web still uses the network");
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{web}"), None).await.0, StatusCode::NO_CONTENT);
+    assert!(!w.fake.networks().contains(&net) && w.fake.instances(&web).is_empty(), "{:?}", w.fake.networks());
+}
