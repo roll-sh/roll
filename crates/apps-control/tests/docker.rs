@@ -5,7 +5,7 @@
 //! Everything it makes is named `roll-apps-…` and removed at the end (the service's delete
 //! removes its containers and images; the network is removed by its exact name).
 
-use apps_control::integrations::{NoResources, NoSecrets, StaticDns};
+use apps_control::integrations::{NoSecrets, StaticDns};
 use apps_control::runtime::docker::{Docker, DockerBuilder};
 use apps_control::store::{Sealer, Store};
 use apps_control::{Apps, AppsConfig, Deps};
@@ -37,6 +37,21 @@ async fn get(public: &axum::Router, host: &str) -> (StatusCode, Duration) {
     (status, t.elapsed())
 }
 
+/// A roll database on this host's loopback, as rolld's Postgres proxy is (`127.0.0.1:55432`):
+/// `postgres/main`'s `DATABASE_URL` is whatever [`LOOPBACK_DB`] says, when a test sets it.
+struct LoopbackDb;
+static LOOPBACK_DB: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[async_trait::async_trait]
+impl apps_control::integrations::Resources for LoopbackDb {
+    async fn link_vars(&self, kind: apps_control::model::LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>> {
+        match (kind.as_str(), r#ref, LOOPBACK_DB.lock().unwrap().clone()) {
+            ("postgres", "main", Some(url)) => Ok(vec![("DATABASE_URL".into(), url)]),
+            _ => anyhow::bail!("no {} {ref}", kind.as_str()),
+        }
+    }
+}
+
 fn median(mut v: Vec<Duration>) -> Duration {
     v.sort();
     v[v.len() / 2]
@@ -66,7 +81,7 @@ impl World {
             builder: Arc::new(DockerBuilder::new(2)),
             sources: None,
             secrets: Arc::new(NoSecrets),
-            resources: Arc::new(NoResources),
+            resources: Arc::new(LoopbackDb),
             resolver: Arc::new(StaticDns::default()),
             tls: Arc::new(apps_control::integrations::NoTls),
             objects: None,
@@ -114,7 +129,7 @@ async fn docker_world_with(netns: Option<bool>, setup: impl FnOnce(&mut AppsConf
         builder: Arc::new(DockerBuilder::new(2)),
         sources: None,
         secrets: Arc::new(NoSecrets),
-        resources: Arc::new(NoResources),
+        resources: Arc::new(LoopbackDb),
         resolver: Arc::new(StaticDns::default()),
         tls: Arc::new(apps_control::integrations::NoTls),
         objects: None,
@@ -883,4 +898,59 @@ async fn deno_dotnet_and_elixir_trees_build_and_answer() {
         assert!(body.contains(want), "{name}: {body}");
         assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
     }
+}
+
+/// A link to a database on this host's loopback reaches it from the container, through the
+/// network's relay and a unix socket (a loopback listener answers nothing on the bridge, and a
+/// host firewall may drop container-to-host traffic): the app fetches the URL it was given at
+/// start and serves what came back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_linked_database_on_loopback_is_reached_from_the_container() {
+    let Some(w) = docker_world().await else { return };
+    let db = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = db.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (mut c, _) = db.accept().await.unwrap();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 1024];
+                let _ = c.read(&mut buf).await;
+                let _ = c.write_all(b"HTTP/1.0 200 OK\r\ncontent-length: 13\r\n\r\nfrom-the-host").await;
+            });
+        }
+    });
+    *LOOPBACK_DB.lock().unwrap() = Some(format!("http://u:pw@127.0.0.1:{port}/main"));
+    let start = "wget -qO /tmp/got \"$DATABASE_URL\" || echo unreachable > /tmp/got; mkdir -p /tmp/w; cp /tmp/got /tmp/w/index.html; httpd -f -p $PORT -h /tmp/w";
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "linked", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"port": 8080, "start": start, "memory_mb": 256, "cpu": 0.5}, "links": [{"kind": "postgres", "ref": "main"}] })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let dep = svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string();
+    let mut d = Value::Null;
+    for _ in 0..1200 {
+        let (_, x) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None, "application/json", None).await;
+        if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
+            d = x;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(d["status"], "active", "{d}");
+    let host = svc["environments"][0]["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
+    let resp = w.public.clone().oneshot(Request::get("/").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(String::from_utf8_lossy(&body).trim(), "from-the-host");
+    use apps_control::runtime::docker::docker;
+    let relay = apps_control::runtime::links::relay_name(&apps_control::network_name(&w.project, "production"), port);
+    assert!(docker(&["inspect", &relay]).await.is_ok(), "the relay is on the project's network");
+    // Deleting the service removes its network, and the relay with it.
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    for _ in 0..100 {
+        if docker(&["inspect", &relay]).await.is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(docker(&["inspect", &relay]).await.is_err(), "the relay went with the network");
+    *LOOPBACK_DB.lock().unwrap() = None;
 }

@@ -697,9 +697,10 @@ every deployment is immutable with instant rollback.
 - **roll databases**: a service links to the project's Postgres, Redis, buckets, streams,
   queues and NoSQL. A link injects the resource's connection variables (`DATABASE_URL`,
   `REDIS_URL`, `S3_*`, `KAFKA_*`, `AMQP_URL`, `CASSANDRA_*`), named with the resource's prefix
-  when a service links two of a kind (`ORDERS_DATABASE_URL`). Locally the URLs are rewritten for
-  the container (`host.docker.internal`); on the fleet they're the public edge names over TLS,
-  as previews use, so there's no path from a task into the fleet's network.
+  when a service links two of a kind (`ORDERS_DATABASE_URL`). On one node a URL naming the
+  host's loopback reaches it through a relay (below, "Links on one node"); on the fleet they're
+  the public edge names over TLS, as previews use, so there's no path from a task into the
+  fleet's network.
 - **Service links** (Render's `fromService`, Railway's reference variables): a `service` link
   to another web service of the project gives `<NAME>_URL`, its private
   `http://<name>.<env>.internal:<port>` in the linking environment, and `<NAME>_PUBLIC_URL`
@@ -1566,6 +1567,35 @@ that doesn't answer is a line in the environment's log. Off by default: a deploy
 digest it pinned until someone deploys, so a push to a tag never changes production by
 itself unless asked.
 
+## Links on one node
+
+A link's URL on one node names the host's loopback: rolld's Postgres proxy is
+`127.0.0.1:55432`, and the other products listen on loopback too. A container can't reach that.
+Its `host.docker.internal` is the bridge's gateway, where a loopback listener doesn't answer,
+and a host firewall can drop every packet from a container to the host (ai-server's does).
+`runtime/links.rs` gets around both without opening anything:
+
+- **A unix socket.** When a variable names a loopback `host:port`, the Docker runtime rewrites
+  it to `roll-link-<port>:<port>`. It serves that port on a unix socket,
+  `<home>/apps/links/<port>/s.sock`, which forwards to the loopback port it stands for.
+- **A relay.** Before an instance is made, the project network gets a relay for each such port
+  (`roll-apps-link-<project>-<env>-<port>`). The relay is `socat`, pinned by digest, under the
+  alias `roll-link-<port>`. It connects each caller to the socket through a bind mount, so no
+  firewall is involved. It has a read-only root, no capabilities but binding a low port,
+  32 MiB and 64 processes, and it restarts with the daemon.
+- **Narrower than before.** A container reaches only the ports its project's links name, not
+  the rest of the host. Removing the network removes its relays.
+- **Where it's off.** With a remote Docker daemon, on macOS (Docker Desktop's
+  `host.docker.internal` reaches the host's loopback itself), or with
+  `ROLL_APPS_LINK_RELAY=0`, URLs are rewritten to `host.docker.internal` as before. Deployments
+  made before this keep their old URLs until their next deploy.
+
+`docker.rs::a_linked_database_on_loopback_is_reached_from_the_container` runs on ai-server,
+whose firewall drops container-to-host traffic: the app fetches its `DATABASE_URL` at start and
+serves the answer. With `ROLL_APPS_LINK_RELAY=0` the same test fails. The Umami template went
+live on a real roll Postgres this way on the review rolld (healthy after 12.9 s), where it had
+failed before.
+
 ## A public Git URL
 
 A service can build from any public Git repository by its URL (`{"kind": "git", "url":
@@ -1897,8 +1927,9 @@ a Dockerfile, each answering through roll (55 s for the three from a warm cache,
   timed out isn't re-validated (removing and adding the domain again starts over).
 - An instance's writable layer and volume have no disk quota (Docker's `--storage-opt size`
   needs overlay2 on XFS with project quotas, which a node may not have), and from a container
-  `host.docker.internal` reaches every listener on the host, not just the linked resources'
-  ports; both are the host's set-up (the fleet runs tasks, not containers on a node). roll-fetch
+  `host.docker.internal` reaches every listener on the host that binds more than loopback
+  (links don't use it: they go through their relays); both are the host's set-up (the fleet
+  runs tasks, not containers on a node). roll-fetch
   writes a bundle's env file 0644 (what reads it in previews' containers decides whether it can
   be 0600). Builds' secrets a stopped node left in Secrets Manager are swept at start (two days
   old) and tasks' environment files every ten minutes (`Runtime::sweep`); the bucket's `builds/`

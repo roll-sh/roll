@@ -13,6 +13,7 @@ pub mod docker;
 pub mod engine;
 pub mod fake;
 pub mod fargate;
+pub mod links;
 pub mod netns;
 
 use crate::logs::LogSink;
