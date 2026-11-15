@@ -995,10 +995,13 @@ async fn a_sync_pushes_each_change_once_removes_deleted_keys_and_is_audited() {
     assert_eq!((changed, removed.len()), (vec!["DB_URL".to_string(), "STRIPE_KEY".into()], 0));
     api.secrets.sweep().unwrap();
     assert_eq!(api.sync.pushes.lock().unwrap().len(), 1, "an unchanged environment isn't pushed again");
+    assert_eq!(api.secrets.sweep_due_syncs().unwrap(), (0, 0), "nothing changed: nothing is due");
 
+    // A change marks the project's syncs due: the pass rolld runs every couple of seconds pushes it,
+    // without waiting for the sweep.
     api.set("staging", "DB_URL", "postgres://db2").await;
     api.ok(Method::DELETE, "/environments/staging/secrets/STRIPE_KEY", None).await;
-    api.secrets.sweep().unwrap();
+    assert_eq!(api.secrets.sweep_due_syncs().unwrap(), (1, 0));
     let (values, changed, removed) = pushes(1);
     assert_eq!((values.len(), changed, removed), (2, vec!["DB_URL".to_string()], vec!["STRIPE_KEY".to_string()]));
 

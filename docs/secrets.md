@@ -1647,10 +1647,15 @@ last_synced_at, error}`:
   in front of every name at the target (`prefix: "APP_"` pushes `DB_URL` as `APP_DB_URL`). Personal
   values never sync, and neither do dynamic links (a short-lived credential would expire at the
   target): a dynamic key, or a reference that can't resolve, is left out and named in `error`.
-- **When.** The sweeper (every node, every 30 s) compares each sync's environment `digest` (the
-  hash `roll run --watch` polls) with the sync's `last_digest`. A sync whose digest moved is
-  claimed with a compare-and-swap on its `running_until` (5 minutes), so two nodes never push one
-  sync at once. A new sync first pushes at the next sweep. `POST …/syncs/{id}/run` pushes now, every key, whatever the digest says (also after
+- **When.** A change marks its project's syncs due in the same transaction (as does roll rotating
+  a live link's resource), and every node looks for due syncs every 2 seconds (one indexed read
+  when there are none), so a change reaches its targets in seconds however many syncs there are,
+  as Doppler's and Infisical's do. The sweeper (every node, every 30 s) still goes through the
+  rest, least recently checked first, each node claiming a batch of its own. Either compares the
+  sync's environment `digest` (the hash `roll run --watch` polls) with the sync's
+  `last_digest`. A sync whose digest moved is claimed with a compare-and-swap on its
+  `running_until` (5 minutes), so two nodes never push one sync at once. A new sync first pushes
+  within seconds. `POST …/syncs/{id}/run` pushes now, every key, whatever the digest says (also after
   a live link's resource rotated, which moves no digest).
 - **Only what changed.** A sync remembers a stamp per name it pushed (the secret's id, version,
   fingerprint and link: no value). A push carries the values of every synced key and says which

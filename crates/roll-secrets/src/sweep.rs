@@ -339,7 +339,8 @@ impl Secrets {
                     c.execute(
                         "INSERT INTO source_generations (kind, ref, generation) VALUES (?, ?, 1) ON CONFLICT (kind, ref) DO UPDATE SET generation = source_generations.generation + 1",
                         [link.kind.as_str(), link.r#ref.as_str()],
-                    )
+                    )?;
+                    crate::syncs::due_for_source(c, &link.kind, &link.r#ref)
                 })?;
                 self.audit_now(project, caller, "secrets.rotate", Some(slug), Some(&path), &[key.to_string()], &format!("rotated {} {}'s credential", link.kind, link.r#ref));
                 Ok(Applied { change: None, items: vec![], warnings: vec![], request: None })

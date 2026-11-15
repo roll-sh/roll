@@ -483,6 +483,18 @@ impl Secrets {
         Ok(Caller { principal, grants: Arc::new(scope), ip: None, runtime: false })
     }
 
+    /// A pass over the syncs only when a change marked some due (`checked_at` NULL): what rolld
+    /// runs every couple of seconds, so a change reaches its targets in seconds, however many
+    /// syncs there are. One indexed read when nothing changed.
+    pub fn sweep_due_syncs(&self) -> Result<(usize, usize)> {
+        let now = self.db.now_ms()?;
+        let due = self.db.read(|c| c.query_row("SELECT 1 FROM syncs WHERE checked_at IS NULL AND retry_at <= ? AND running_until <= ? LIMIT 1", params![now, now], |_| Ok(())).optional())?;
+        if due.is_none() {
+            return Ok((0, 0));
+        }
+        self.sweep_syncs()
+    }
+
     /// One pass over the syncs (the sweeper): push those whose environment changed.
     /// Returns (pushed, failed).
     pub(crate) fn sweep_syncs(&self) -> Result<(usize, usize)> {
@@ -699,4 +711,13 @@ impl Secrets {
         let keys = changed.iter().chain(&removed).map(|n| n.strip_prefix(r.info.prefix.as_str()).unwrap_or(n).to_string()).collect();
         Ok(Outcome { digest, state, keys, summary, problems })
     }
+}
+
+/// A live link's resource changed its credential: the syncs of projects that link it check their
+/// digests next (in the transaction that records the change).
+pub(crate) fn due_for_source(c: &code_sql::Conn<'_>, kind: &str, r#ref: &str) -> code_sql::Result<usize> {
+    c.execute(
+        "UPDATE syncs SET checked_at = NULL WHERE checked_at IS NOT NULL AND project_id IN (SELECT DISTINCT project_id FROM secrets WHERE link LIKE ? AND link LIKE ?)",
+        params![format!("%\"kind\":\"{kind}\"%"), format!("%\"ref\":\"{ref}\"%", ref = r#ref)],
+    )
 }
