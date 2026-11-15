@@ -645,8 +645,10 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
 - The builder and the consent screen offer only what they reach (`GET /v1/access` answers
   `{kind: "user", reach: ["code", "agents", "workspace"]}`).
 - **Their tokens' news is mailed to them** (GitHub mails a token's owner), as well as posted
-  where approvals go: an approval one of their tokens waits on (they decide it), a token of theirs
-  used from a new network, one roll revoked as leaked, and, once a day, the ones that expire
+  where approvals go: a token, MCP client or device added to their account (at once, as GitHub
+  mails "a new personal access token was added": what it may do, the network it came from and
+  where to revoke it, so a phished device code or a stolen session reaches its victim), an
+  approval one of their tokens waits on (they decide it), a token of theirs used from a new network, one roll revoked as leaked, and, once a day, the ones that expire
   within a week (made for more than a day). Each person hears of their own tokens only, a
   disabled person hears nothing (`roll_auth::Sessions::tell`, accounts' mailer).
   - **A mail holds roll's words, not anyone else's.** Names are shown as words only (`mail_name`:

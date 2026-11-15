@@ -552,6 +552,7 @@ impl Access {
         };
         self.check_policy(new.expires_at)?;
         let made = blocking(self.clone(), move |a| a.store.create(&new, GrantKind::Token, &by, None, user.as_deref())).await?;
+        self.tell_added(&made.0, Added::Token, ext);
         if let Some(handle) = asker {
             self.tell_admins_waiting(&made.0, &handle);
         }
@@ -562,17 +563,51 @@ impl Access {
     /// who asked, what it reaches, and where to decide. Never its secret.
     pub(crate) fn tell_admins_waiting(self: &Arc<Self>, g: &crate::store::Grant, handle: &str) {
         let (name, handle) = (crate::mail_name(&g.name), crate::mail_name(handle));
-        let reaches: Vec<String> = g.rules.0.iter().map(|r| format!("  {}: {}", r.product, r.actions.keys().map(|a| a.as_str()).collect::<Vec<_>>().join(", "))).collect();
-        let text = format!(
-            "{handle} made the token \"{}\", which waits for an admin's approval. It may:\n{}{}\n\nApprove or deny it: {}/dashboard/access/tokens/{}\n",
-            name,
-            reaches.join("\n"),
-            if g.ask_otherwise { "\n  and ask for anything else" } else { "" },
-            self.web_url(),
-            g.id
-        );
+        let text = format!("{handle} made the token \"{name}\", which waits for an admin's approval. It may:\n{}\n\nApprove or deny it: {}/dashboard/access/tokens/{}\n", may(g), self.web_url(), g.id);
         self.tell_admins(&format!("pending:{}", g.id), format!("A roll token waits for your approval: \"{name}\" ({handle})"), text);
     }
+
+    /// A person hears at once that a token, client or device was added to their account (GitHub
+    /// mails "a new personal access token was added", "a third-party OAuth application has been
+    /// added"): what, what it may do, the network it came from, and where to revoke it. A phished
+    /// device code or a stolen session then reaches its victim. In roll's words only (`mail_name`).
+    pub(crate) fn tell_added(self: &Arc<Self>, g: &crate::store::Grant, added: Added<'_>, ext: &Extensions) {
+        let Some(user) = g.user.as_deref() else { return };
+        let name = crate::mail_name(&g.name);
+        let from = ext.get::<roll_auth::ClientIp>().and_then(|c| crate::store::network_of(&c.0.to_string())).map(|n| format!(" from {n}")).unwrap_or_default();
+        let (subject, what) = match added {
+            Added::Token => (format!("A token was added to your roll account: \"{name}\""), format!("The token \"{name}\" ({}) was made on your roll account{from}", g.id)),
+            Added::Client(client) => {
+                let client = crate::mail_name(client);
+                (format!("{client} was connected to your roll account"), format!("{client} was connected to your roll account{from}, as \"{name}\" ({})", g.id))
+            }
+            Added::Device(client) => {
+                let client = crate::mail_name(client);
+                ("A device was signed in to your roll account".to_string(), format!("A device was signed in to your roll account with a code{from}: {client}, as \"{name}\" ({})", g.id))
+            }
+        };
+        let text = format!("{what}. It may:\n{}\n\nNot you? Revoke it: {}/dashboard/access/tokens/{}\n", may(g), self.web_url(), g.id);
+        self.tell(Some(user), None, subject, text);
+    }
+}
+
+/// What a token was added to a person's account as, for their mail.
+pub(crate) enum Added<'a> {
+    Token,
+    /// An MCP client, by its name, through the consent screen.
+    Client(&'a str),
+    /// A device, by its client's name, with a code.
+    Device(&'a str),
+}
+
+/// What a grant may do, a line a product, for mail: products and actions, never a resource (a
+/// resource can be anyone's text).
+fn may(g: &crate::store::Grant) -> String {
+    let mut lines: Vec<String> = g.rules.0.iter().map(|r| format!("  {}: {}", r.product, r.actions.keys().map(|a| a.as_str()).collect::<Vec<_>>().join(", "))).collect();
+    if g.ask_otherwise {
+        lines.push("  and ask for anything else".into());
+    }
+    lines.join("\n")
 }
 
 /// What a grant would be: what a maker must cover.

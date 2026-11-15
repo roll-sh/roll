@@ -1609,12 +1609,32 @@ async fn a_person_is_told_of_their_tokens() {
             panic!("told {:?}, not {want:?}", people.1.lock().unwrap());
         }
     };
+    // Added to her account: she hears at once (a token from a stolen session is noticed).
+    told(vec!["usr_alice: A token was added to your roll account: \"cursor\""]).await;
     assert!(d.access.expiry_digest().await.unwrap());
-    told(vec!["usr_alice: Your roll token \"cursor\" expires within a week"]).await;
+    told(vec!["usr_alice: A token was added to your roll account: \"cursor\"", "usr_alice: Your roll token \"cursor\" expires within a week"]).await;
 
     let token = made["token"].as_str().unwrap().to_string();
     assert_eq!(d.access.revoke_leaked(&[token], "a public gist").unwrap().len(), 1);
-    told(vec!["usr_alice: Your roll token \"cursor\" expires within a week", "usr_alice: roll revoked your token \"cursor\""]).await;
+    told(vec![
+        "usr_alice: A token was added to your roll account: \"cursor\"",
+        "usr_alice: Your roll token \"cursor\" expires within a week",
+        "usr_alice: roll revoked your token \"cursor\"",
+    ])
+    .await;
+
+    // A device signed in with a code she entered (or was tricked into entering): she hears it.
+    let (_, client) = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "client_name": "roll CLI", "redirect_uris": [], "grant_types": ["urn:ietf:params:oauth:grant-type:device_code"] }))).await;
+    let (_, dev) = d.form("/v1/access/oauth/device_authorization", &[("client_id", client["client_id"].as_str().unwrap())]).await;
+    let code = dev["user_code"].as_str().unwrap();
+    assert_eq!(d.as_user("usr_alice", Method::POST, &format!("/v1/access/oauth/devices/{code}"), Some(json!({ "rules": rules }))).await.0, StatusCode::OK);
+    told(vec![
+        "usr_alice: A token was added to your roll account: \"cursor\"",
+        "usr_alice: Your roll token \"cursor\" expires within a week",
+        "usr_alice: roll revoked your token \"cursor\"",
+        "usr_alice: A device was signed in to your roll account",
+    ])
+    .await;
 }
 
 /// A product's page lists the tokens made for one of its resources (roll secrets' project tokens):
