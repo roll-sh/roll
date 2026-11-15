@@ -3,7 +3,7 @@
  * and the types below are its "Shapes". Change both together.
  */
 
-import { operatorHeaders } from "./code-token";
+import { operatorHeaders, withSession } from "./code-token";
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 import { streamSse } from "./sse";
 
@@ -863,6 +863,16 @@ export const appsApi = {
     const data = await res.json().catch(() => null);
     if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
     return { lines: data as LogLine[], truncated: res.headers.get("x-roll-search-truncated") === "1" };
+  },
+  /** A folder's bundle (`lib/bundle.ts`, what `roll up` sends) deployed to an upload service. */
+  uploadDeploy: async (id: string, e: string, body: Blob, message?: string): Promise<Deployment> => {
+    const headers: Record<string, string> = { ...apiHeaders(), "content-type": "application/gzip" };
+    if (message) headers["x-roll-message"] = encodeURIComponent(message);
+    const res = await fetch(`${ROLL_API}${env(id, e)}/deploys`, withSession({ method: "POST", headers, body }));
+    onApiStatus(res.status);
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
+    return data as Deployment;
   },
   metrics: (id: string, e: string, minutes = 60) => call<Metrics>("GET", `${env(id, e)}/metrics${qs({ minutes })}`),
   /** Errors and latency by route over the last `minutes` (5–60). */

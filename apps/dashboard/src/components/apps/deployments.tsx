@@ -6,6 +6,7 @@ import { btn, panel } from "../ui";
 import { PlanDetails } from "./new-service";
 import { usePageVisible } from "./live";
 import { clock, DeployBadge, LogView, since, SureButton, type Runner } from "./shared";
+import { FolderDeploy } from "./folder-deploy";
 
 /** The API's page of deployments. */
 const PAGE = 100;
@@ -48,6 +49,7 @@ export function Deployments({
   deploys,
   runner,
   own = false,
+  upload = false,
 }: {
   service: string;
   env: Environment;
@@ -55,6 +57,8 @@ export function Deployments({
   /** Its deployments have their own URLs (a web service without a volume). */
   own?: boolean;
   runner: Runner;
+  /** An upload service: a folder dropped here deploys it. */
+  upload?: boolean;
 }) {
   const [open, setOpen] = useState<string | null>(null);
   // A rollback brings its variables back as they were (Heroku's, Railway's), unless they're kept
@@ -106,11 +110,18 @@ export function Deployments({
       <section className={`${panel} flex flex-col items-start gap-2 p-6`}>
         <HorizonMark state="sleep" size={32} />
         <h2 className="text-[15px] font-medium">Nothing deployed to {env.name} yet</h2>
-        <p className="text-[13px] text-muted">Deploy builds the service's source and rolls it out here. Upload services deploy with <code className="font-mono text-fg">roll up -s {service}{env.name !== "production" ? ` -e ${env.name}` : ""}</code>.</p>
+        <p className="text-[13px] text-muted">Deploy builds the service's source and rolls it out here. Upload services deploy with <code className="font-mono text-fg">roll up -s {service}{env.name !== "production" ? ` -e ${env.name}` : ""}</code>{upload ? ", or a folder dropped below" : ""}.</p>
+        {upload && (
+          <div className="mt-2 w-full">
+            <FolderDeploy service={service} env={env.name} onDeployed={(d) => void runner.run("upload", async () => d)} />
+          </div>
+        )}
       </section>
     );
 
   return (
+    <div className="space-y-4">
+    {upload && <FolderDeploy service={service} env={env.name} onDeployed={(d) => void runner.run("upload", async () => d)} />}
     <div className="grid gap-4 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
       <section className={`${panel} overflow-hidden`}>
         <label className="flex items-center gap-1.5 border-b border-line px-4 py-2 text-[12px] text-muted" title="Off: a rollback brings the variables back as they were when it was live">
@@ -203,6 +214,7 @@ export function Deployments({
         )}
       </section>
       {shown && <BuildLog key={shown.id} service={service} env={env.name} d={shown} />}
+    </div>
     </div>
   );
 }

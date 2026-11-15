@@ -3601,7 +3601,14 @@ async fn a_volume_filling_up_is_said_once() {
     let volume = apps_control::volume_name(&id, "production");
     let events = || async { call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().cloned().unwrap_or_default().into_iter().filter(|e| e["kind"] == "volume.full").count() };
     w.fake.set_volume_used(&volume, 1_000_000_000);
-    w.apps.measure_volumes().await;
+    // Measured once the environment's live state has its deployment (a moment after it settles).
+    for _ in 0..200 {
+        w.apps.measure_volumes().await;
+        if events().await > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     w.apps.measure_volumes().await;
     assert_eq!(events().await, 1, "once while it stays full");
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
