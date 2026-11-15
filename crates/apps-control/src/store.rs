@@ -419,6 +419,8 @@ pub struct MinuteRow {
     pub cold_starts: i64,
     pub cold_start_ms: f64,
     pub egress_bytes: i64,
+    /// Requests that found every instance busy at `max_instances`.
+    pub over_capacity: i64,
 }
 
 /// What an hour of an environment used.
@@ -621,6 +623,8 @@ impl Store {
         db.add_column("env_access", "bypass_hash", "TEXT")?;
         // Bytes answered a minute (what egress is billed by), for Metrics.
         db.add_column("metrics", "egress_bytes", "INTEGER NOT NULL DEFAULT 0")?;
+        // Requests past every instance's concurrency at max_instances a minute (saturation).
+        db.add_column("metrics", "over_capacity", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("deployments", "actor", "TEXT")?;
         db.add_column("deployments", "pruned_at", "INTEGER")?;
         db.add_column("deployments", "retired_at", "INTEGER")?;
@@ -1835,8 +1839,8 @@ impl Store {
             for m in rows {
                 c.execute("DELETE FROM metrics WHERE service = ? AND env = ? AND minute = ?", params![service, env, m.minute])?;
                 c.execute(
-                    "INSERT INTO metrics (service, env, minute, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms, egress_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![service, env, m.minute, m.requests, m.errors, m.p50_ms, m.p95_ms, m.p99_ms, m.cpu, m.memory_bytes, m.instances, m.cold_starts, m.cold_start_ms, m.egress_bytes],
+                    "INSERT INTO metrics (service, env, minute, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms, egress_bytes, over_capacity) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![service, env, m.minute, m.requests, m.errors, m.p50_ms, m.p95_ms, m.p99_ms, m.cpu, m.memory_bytes, m.instances, m.cold_starts, m.cold_start_ms, m.egress_bytes, m.over_capacity],
                 )?;
             }
             Ok(())
@@ -1845,7 +1849,7 @@ impl Store {
 
     pub fn minutes(&self, service: &str, env: &str, since_minute: i64) -> Result<Vec<MinuteRow>> {
         Ok(self.db.query(
-            "SELECT minute, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms, egress_bytes FROM metrics WHERE service = ? AND env = ? AND minute >= ? ORDER BY minute",
+            "SELECT minute, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms, egress_bytes, over_capacity FROM metrics WHERE service = ? AND env = ? AND minute >= ? ORDER BY minute",
             params![service, env, since_minute],
             |r| {
                 Ok(MinuteRow {
@@ -1861,6 +1865,7 @@ impl Store {
                     cold_starts: r.get(9)?,
                     cold_start_ms: r.get(10)?,
                     egress_bytes: r.get(11)?,
+                    over_capacity: r.get(12)?,
                 })
             },
         )?)

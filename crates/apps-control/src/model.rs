@@ -633,6 +633,10 @@ pub struct Alerts {
     pub error_pct: u8,
     /// p95 latency at or above this in three of the five minutes.
     pub p95_ms: u32,
+    /// Requests that found every instance busy at `max_instances`, at or above this share of
+    /// the five minutes' requests (at least 20 of them): `alert.capacity` (Cloud Run's
+    /// max-instances warning, Heroku's queue time).
+    pub capacity_pct: u8,
     /// Text its output (stdout and stderr, any case) holds at least `log_count` times in the
     /// five minutes: `alert.log` (the pattern and the count, never a line).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -642,7 +646,7 @@ pub struct Alerts {
 
 impl Default for Alerts {
     fn default() -> Self {
-        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, log_match: None, log_count: 10 }
+        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10 }
     }
 }
 
@@ -688,8 +692,8 @@ impl Run {
     /// The checked settings, with what the type implies filled in (a worker runs at least one
     /// instance; a volume allows one).
     pub fn normalized(mut self) -> Result<Run> {
-        if self.alerts.memory_pct > 100 || self.alerts.error_pct > 100 {
-            return Err(Error::BadRequest("alerts.memory_pct and alerts.error_pct are 0–100 (0 is off)".into()));
+        if self.alerts.memory_pct > 100 || self.alerts.error_pct > 100 || self.alerts.capacity_pct > 100 {
+            return Err(Error::BadRequest("alerts.memory_pct, alerts.error_pct and alerts.capacity_pct are 0–100 (0 is off)".into()));
         }
         if self.alerts.log_match.as_ref().is_some_and(|m| m.trim().is_empty() || m.len() > 200) || !(1..=10_000).contains(&self.alerts.log_count) {
             return Err(Error::BadRequest("alerts.log_match is 1–200 characters, alerts.log_count 1–10000".into()));

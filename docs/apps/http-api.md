@@ -196,7 +196,7 @@ type Run = {
   suspend_after_s: number;  // default 30; 0 never suspends
   sleep_after_s: number;    // default 600; min_instances > 0 never sleeps below min
   volume?: { mount: string; size_gb: number };
-  alerts: { memory_pct: number; error_pct: number; p95_ms: number; log_match?: string; log_count?: number }; // default 90, 5, 0 (0 off): `alert.*` events over five minutes; log_match: text its stdout/stderr holds log_count times (default 10) in five minutes, `alert.log`
+  alerts: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct: number; log_match?: string; log_count?: number }; // default 90, 5, 0, 10 (0 off); capacity_pct: the share of five minutes' requests that found every instance busy at max_instances, `alert.capacity`: `alert.*` events over five minutes; log_match: text its stdout/stderr holds log_count times (default 10) in five minutes, `alert.log`
   /** A gradual rollout (README "Gradual rollouts"): increasing percents 1–99 (at most five; []
    *  switches at once, the default), each for step_s (1–3600, default 120); a step whose 5xx
    *  share reaches error_pct (1–100, default 5) of 20+ requests, and beats the old one's, rolls
@@ -480,6 +480,7 @@ type Metrics = {
   cold_starts: number[];
   cold_start_ms: number[];   // average of the minute's cold starts (0 when none)
   egress_bytes: number[];    // bytes answered (what egress is billed by); format=prometheus: roll_apps_egress_bytes_per_minute
+  over_capacity: number[];   // requests that found every instance busy at max_instances (saturation); roll_apps_over_capacity_per_minute
 };
 
 type Usage = {
@@ -489,7 +490,7 @@ type Usage = {
 
 /** In the event log, each written in the same transaction as the change it records. Sequence
  *  numbers commit in order with no gaps, so a reader moving past `next` never misses one. Kept 7 days. */
-type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" /* data.error: the daily backup failed (notified by default) */ | "volume.full" /* data.used_bytes, size_gb, pct: past 90% of its size, once until it's under 80% (notified by default) */ | "deploy.skipped" /* data.revision, tag: a push whose message said [skip ci] (the timeline only) */ | "alert.resolved" /* data.alert: which alert cleared; sent to targets that get that alert */ | `audit.${string}` /* changes people made: what /activity lists */; service: string; environment: string; deployment: string | null; data: object };
+type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.capacity" /* data.value, threshold, requests, max_instances, concurrency: that share of five minutes' requests found every instance busy at max_instances (notified by default) */ | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" /* data.error: the daily backup failed (notified by default) */ | "volume.full" /* data.used_bytes, size_gb, pct: past 90% of its size, once until it's under 80% (notified by default) */ | "deploy.skipped" /* data.revision, tag: a push whose message said [skip ci] (the timeline only) */ | "alert.resolved" /* data.alert: which alert cleared; sent to targets that get that alert */ | `audit.${string}` /* changes people made: what /activity lists */; service: string; environment: string; deployment: string | null; data: object };
 /** A webhook's body: { type, at, seq, service, environment, deployment, data, title, text, url },
  *  signed as roll code's webhooks are: X-Roll-Signature-256: sha256=hex(HMAC-SHA256(secret,
  *  X-Roll-Timestamp + "." + body)), the timestamp the send time in Unix seconds (a retry is signed
@@ -527,7 +528,7 @@ type AccessLine = {
 };
 /** A volume's backup: a tar in object storage (`apps/volumes/<service>/<env>/<id>.tar`). */
 type Backup = { id: string; at: number; size: number };
-type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord" | "email"; host: string /* an email target's: "the project's owner" */; events: ("deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" | "volume.full")[];
+type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord" | "email"; host: string /* an email target's: "the project's owner" */; events: ("deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.capacity" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" | "volume.full")[];
   environments: string[];  // only these environments' events; empty: every one's
   services: string[];      // only these services' (ids); empty: every one's
   previews: boolean;       // preview (ephemeral) environments' events too (an environment named in `environments` always)

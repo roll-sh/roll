@@ -1835,7 +1835,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
+    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");
@@ -3801,4 +3801,43 @@ async fn an_environments_generated_name_can_be_changed() {
     call(&w.api, "POST", &format!("{base}/domains"), Some(json!({"hostname": "shop.example.com"}))).await;
     let (st, v) = call(&w.api, "PUT", &base, Some(json!({"hostname": "shop-us"}))).await;
     assert_eq!(st, StatusCode::CONFLICT, "a custom domain's CNAME names it: {v}");
+}
+
+/// At max_instances a request goes to a busy instance rather than wait: each such request is
+/// counted (Metrics' over capacity), and five minutes with enough of them are `alert.capacity`
+/// once, naming what to raise.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn saturation_is_counted_and_alerted() {
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "full", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "concurrency": 1, "max_instances": 1}, "variables": {"FAKE_SLOW_MS": "300"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let host = host(&svc["environments"][0]["url"]);
+    visit_deployment(&w, &host, d["id"].as_str().unwrap()).await;
+    let all = futures::future::join_all((0..10).map(|_| visit(&w, &host, "/"))).await;
+    assert!(all.iter().all(|(st, _)| *st == StatusCode::OK), "{all:?}");
+    let (_, m) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/metrics?minutes=5"), None).await;
+    let over: f64 = m["over_capacity"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum();
+    assert!(over >= 5.0, "ten at once on one instance taking one: {m}");
+    // Five minutes with 30% of requests over capacity: one alert, saying what to raise.
+    let into = code_sql::now_ms() % 60_000;
+    if into > 50_000 {
+        tokio::time::sleep(Duration::from_millis((60_000 - into + 100) as u64)).await;
+    }
+    let minute = |m: i64| apps_control::store::MinuteRow { minute: m, requests: 100, over_capacity: 30, instances: 1, memory_bytes: 64 << 20, ..Default::default() };
+    let live = w.apps.live(&id, "production");
+    loop {
+        let now = code_sql::now_ms() / 60_000;
+        w.apps.store.put_minutes(&id, "production", &(1..=5).map(|i| minute(now - i)).collect::<Vec<_>>()).unwrap();
+        w.apps.judge_alerts(&live).await;
+        w.apps.judge_alerts(&live).await;
+        if code_sql::now_ms() / 60_000 == now {
+            break;
+        }
+    }
+    let (_, ev) = call(&w.api, "GET", "/v1/apps/events?after=0", None).await;
+    let alerts: Vec<&Value> = ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "alert.capacity").collect();
+    assert_eq!(alerts.len(), 1, "{ev}");
+    assert_eq!((alerts[0]["data"]["value"].as_i64(), alerts[0]["data"]["threshold"].as_i64(), alerts[0]["data"]["max_instances"].as_i64()), (Some(30), Some(10), Some(1)), "{ev}");
 }

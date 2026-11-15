@@ -50,7 +50,7 @@ type Range = (typeof RANGES)[number];
 /** At most this many points a chart: a week of minutes in 28-minute buckets. */
 const MAX_POINTS = 360;
 
-const COUNTS = ["requests", "errors", "cold_starts", "egress_bytes"] as const;
+const COUNTS = ["requests", "errors", "cold_starts", "egress_bytes", "over_capacity"] as const;
 const PEAKS = ["p50_ms", "p95_ms", "p99_ms", "cpu", "memory_bytes", "instances", "cold_start_ms"] as const;
 
 /** `m` in buckets of `size` minutes (each named by its first): counts summed, the rest their peak. */
@@ -253,7 +253,7 @@ function Routes({ stats }: { stats: RouteStats }) {
 }
 
 /** Requests, errors, latency, CPU, memory, instances and cold starts over the last hour, day or week. */
-export function MetricsTab({ service, env, memoryMb }: { service: string; env: string; /** Its memory limit, MB. */ memoryMb?: number }) {
+export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: string; env: string; /** Its memory limit, MB. */ memoryMb?: number; /** The most instances it scales to. */ maxInstances?: number }) {
   const [range, setRange] = useState<Range>(RANGES[0]);
   const [raw, setM] = useState<MetricsData | null>(null);
   const [deploys, setDeploys] = useState<Deployment[]>([]);
@@ -322,11 +322,18 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
       { title: "CPU (cores)", agg: "peak" as Agg, series: [{ label: "cpu", values: m.cpu, color: ink }], format: cores, summary: `peak ${cores(peak(m.cpu))} cores` },
       { title: "Memory", agg: "peak" as Agg, series: [{ label: "memory", values: m.memory_bytes, color: ink }], format: (v: number) => formatBytes(v), summary: `peak ${formatBytes(peak(m.memory_bytes))}${memoryMb ? ` of ${formatBytes(memoryMb * 1024 * 1024)}` : ""}`, limit: memoryMb ? memoryMb * 1024 * 1024 : undefined },
       { title: `Egress / ${per}`, agg: "total" as Agg, series: [{ label: "egress", values: m.egress_bytes ?? m.minutes.map(() => 0), color: ink }], format: (v: number) => formatBytes(v), summary: `${formatBytes(sum(m.egress_bytes ?? []))} answered in the ${range.label}` },
-      { title: "Instances", agg: "peak" as Agg, series: [{ label: "instances", values: m.instances, color: ink }], format: count, summary: `peak ${peak(m.instances)}` },
+      { title: "Instances", agg: "peak" as Agg, series: [{ label: "instances", values: m.instances, color: ink }], format: count, summary: `peak ${peak(m.instances)}${maxInstances ? ` of ${maxInstances}` : ""}`, limit: maxInstances },
+      {
+        title: `Over capacity / ${per}`,
+        agg: "total" as Agg,
+        series: [{ label: "over capacity", values: m.over_capacity ?? m.minutes.map(() => 0), color: ink }],
+        format: count,
+        summary: sum(m.over_capacity ?? []) ? `${sum(m.over_capacity ?? [])} requests found every instance busy: raise max instances or concurrency` : `none: there was always room under max instances`,
+      },
       { title: `Cold starts / ${per}`, agg: "total" as Agg, series: [{ label: "cold starts", values: m.cold_starts, color: ink }], format: count, summary: `${sum(m.cold_starts)} in the ${range.label}` },
       { title: "Cold start time", agg: "peak" as Agg, series: [{ label: "cold start", values: m.cold_start_ms, color: ink }], format: formatMs, summary: `slowest ${formatMs(peak(m.cold_start_ms))}` },
     ];
-  }, [m, range, per, memoryMb]);
+  }, [m, range, per, memoryMb, maxInstances]);
 
   if (error && !m) return <p className="text-[13px] text-danger">Metrics didn't load: {error}</p>;
   if (!m) return <p className="text-[13px] text-subtle"><span className="shimmer">Loading metrics…</span></p>;

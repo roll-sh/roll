@@ -55,6 +55,7 @@ interface Form {
   alertMemory: string;
   alertErrors: string;
   alertP95: string;
+  alertCapacity: string;
   alertLog: string;
   alertLogCount: string;
   rolloutSteps: string;
@@ -114,6 +115,7 @@ export function formOf(s: Service): Form {
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
     alertP95: str(s.run.alerts?.p95_ms),
+    alertCapacity: str(s.run.alerts?.capacity_pct),
     alertLog: s.run.alerts?.log_match ?? "",
     alertLogCount: str(s.run.alerts?.log_count ?? 10),
     rolloutSteps: (s.run.rollout?.steps ?? []).join(", "),
@@ -186,11 +188,12 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.healthTimeout !== before.healthTimeout) run.health_timeout_s = num(f.healthTimeout);
   if (f.drain !== before.drain) run.drain_s = num(f.drain);
   if (f.cpuTarget !== before.cpuTarget) run.cpu_target = num(f.cpuTarget);
-  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount)
+  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount)
     run.alerts = {
       memory_pct: Number(f.alertMemory) || 0,
       error_pct: Number(f.alertErrors) || 0,
       p95_ms: Number(f.alertP95) || 0,
+      capacity_pct: Number(f.alertCapacity) || 0,
       ...(f.alertLog.trim() ? { log_match: f.alertLog.trim() } : {}),
       log_count: Number(f.alertLogCount) || 10,
     };
@@ -215,7 +218,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -526,6 +529,9 @@ export function SettingsTab({
                 </Field>
                 <Field label="Alert: p95 latency (ms)" hint="in three of five minutes; 0 off">
                   {t("alertP95", "0")}
+                </Field>
+                <Field label="Alert: over capacity (%)" hint="of five minutes' requests finding every instance busy at max instances; 0 off">
+                  {t("alertCapacity", "10")}
                 </Field>
               </>
             )}

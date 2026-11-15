@@ -77,7 +77,7 @@ export interface Run {
   volume?: { mount: string; size_gb: number };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
-  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; log_match?: string; log_count?: number };
+  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number };
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
   rollout?: { steps: number[]; step_s: number; error_pct: number };
@@ -610,6 +610,8 @@ export interface Metrics {
   cold_start_ms: number[];
   /** Bytes answered a minute (what egress is billed by). */
   egress_bytes: number[];
+  /** Requests a minute that found every instance busy at `max_instances` (saturation). */
+  over_capacity: number[];
 }
 
 export interface Usage {
@@ -647,6 +649,7 @@ export type NotifyEvent =
   | "alert.memory"
   | "alert.errors"
   | "alert.latency"
+  | "alert.capacity"
   | "alert.log"
   | "cron.failed"
   | "job.failed"

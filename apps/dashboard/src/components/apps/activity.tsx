@@ -51,6 +51,7 @@ export function describe(e: AppEvent): string {
     case "alert.memory":
     case "alert.errors":
     case "alert.latency":
+    case "alert.capacity":
     case "alert.log":
       return `alerted: ${e.kind.slice(6)} at ${String(d.value ?? d.count ?? "")} (the alert is at ${String(d.threshold ?? "")})${where}`;
     case "alert.resolved":

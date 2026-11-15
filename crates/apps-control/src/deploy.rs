@@ -1534,6 +1534,11 @@ impl Apps {
         if a.error_pct > 0 && requests >= 20 && errors * 100 >= a.error_pct as i64 * requests {
             firing.push(("alert.errors", serde_json::json!({ "value": (errors * 100 / requests), "threshold": a.error_pct, "requests": requests })));
         }
+        // Saturation: requests that found every instance busy at max_instances.
+        let over: i64 = rows.iter().map(|r| r.over_capacity).sum();
+        if a.capacity_pct > 0 && requests >= 20 && over * 100 >= a.capacity_pct as i64 * requests {
+            firing.push(("alert.capacity", serde_json::json!({ "value": (over * 100 / requests), "threshold": a.capacity_pct, "requests": requests, "max_instances": tpl.run.max_instances, "concurrency": tpl.run.concurrency })));
+        }
         if a.p95_ms > 0 {
             let slow = rows.iter().filter(|r| r.requests > 0 && r.p95_ms >= a.p95_ms as f64).count();
             if slow >= 3 {
@@ -1551,7 +1556,7 @@ impl Apps {
                 firing.push(("alert.log", serde_json::json!({ "pattern": pat, "count": count, "threshold": a.log_count })));
             }
         }
-        for kind in ["alert.memory", "alert.errors", "alert.latency", "alert.log"] {
+        for kind in ["alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log"] {
             let key = format!("{}/{}/{kind}", l.service, l.env);
             match firing.iter().find(|(k, _)| *k == kind) {
                 Some((_, data)) => {

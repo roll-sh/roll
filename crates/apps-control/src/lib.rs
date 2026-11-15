@@ -2338,6 +2338,7 @@ impl Apps {
         gauge("roll_apps_cold_starts_per_minute", "Cold starts in the last finished minute.", r.cold_starts as f64, "");
         gauge("roll_apps_cold_start_ms", "Their mean time to answer.", r.cold_start_ms, "");
         gauge("roll_apps_egress_bytes_per_minute", "Bytes answered in the last finished minute.", r.egress_bytes as f64, "");
+        gauge("roll_apps_over_capacity_per_minute", "Requests in the last finished minute that found every instance busy at max_instances.", r.over_capacity as f64, "");
         Ok(out)
     }
 
@@ -2368,6 +2369,7 @@ impl Apps {
             out.entry("cold_starts").or_default().push(r.cold_starts.into());
             out.entry("cold_start_ms").or_default().push(r.cold_start_ms.into());
             out.entry("egress_bytes").or_default().push(r.egress_bytes.into());
+            out.entry("over_capacity").or_default().push(r.over_capacity.into());
         }
         Ok(serde_json::to_value(out).expect("JSON"))
     }
