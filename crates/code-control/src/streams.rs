@@ -51,8 +51,9 @@ impl Streams {
 }
 
 /// Who a stream counts against: the token for signed-in callers (a hash, never the token), the
-/// client address for anonymous ones (the forwarded address only when the operator trusts the
-/// proxy in front), and one shared bucket for anonymous callers whose address is unknown.
+/// client address for anonymous ones (the forwarded address, as the proxy in front saw it, only when
+/// the operator trusts that proxy), and one shared bucket for anonymous callers whose address is
+/// unknown.
 pub fn key(caller: &Caller, token: Option<&str>, headers: &HeaderMap, peer: Option<SocketAddr>, trust_forwarded: bool) -> String {
     match caller {
         Caller::Admin if token.is_some() => format!("admin:{}", token.map(crate::hash_token).unwrap_or_default()),
@@ -60,10 +61,7 @@ pub fn key(caller: &Caller, token: Option<&str>, headers: &HeaderMap, peer: Opti
         Caller::App { id, .. } => format!("app:{id}"),
         // Anonymous callers, and everyone on an open daemon (they're all admin there).
         Caller::Admin | Caller::Anonymous => {
-            let forwarded = trust_forwarded
-                .then(|| headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.split(',').next()).map(|v| v.trim().to_string()))
-                .flatten()
-                .filter(|v| !v.is_empty());
+            let forwarded = trust_forwarded.then(|| forwarded_client(headers, peer.map(|p| p.ip()))).flatten().map(|ip| ip.to_string());
             match (forwarded, peer) {
                 (Some(ip), _) => format!("ip:{ip}"),
                 (None, Some(p)) => format!("ip:{}", p.ip()),
@@ -71,6 +69,21 @@ pub fn key(caller: &Caller, token: Option<&str>, headers: &HeaderMap, peer: Opti
             }
         }
     }
+}
+
+/// The client the trusted proxy in front saw: over every `X-Forwarded-For` line, the right-most
+/// entry that isn't the proxy itself (`peer`); entries left of it are whatever the client sent.
+/// Only an address counts: an entry that doesn't parse means none, and the peer counts.
+fn forwarded_client(headers: &HeaderMap, peer: Option<std::net::IpAddr>) -> Option<std::net::IpAddr> {
+    let all = headers.get_all("x-forwarded-for").iter().filter_map(|v| v.to_str().ok()).collect::<Vec<_>>().join(",");
+    let peer = peer.map(|p| p.to_canonical());
+    for hop in all.split(',').map(str::trim).filter(|h| !h.is_empty()).rev() {
+        let ip = hop.parse::<std::net::IpAddr>().ok()?.to_canonical();
+        if Some(ip) != peer {
+            return Some(ip);
+        }
+    }
+    None
 }
 
 impl Code {
@@ -97,4 +110,23 @@ pub(crate) fn too_many(msg: &str) -> Box<Response> {
     let mut r = (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "error": msg }))).into_response();
     r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
     Box::new(r)
+}
+
+#[cfg(test)]
+mod forwarded_tests {
+    /// Behind a trusted proxy, a client can't pick its bucket by writing X-Forwarded-For itself.
+    #[test]
+    fn the_client_is_what_the_proxy_saw() {
+        let mut h = axum::http::HeaderMap::new();
+        h.append("x-forwarded-for", "1.1.1.1, 2.2.2.2".parse().unwrap());
+        h.append("x-forwarded-for", "203.0.113.9".parse().unwrap());
+        assert_eq!(super::forwarded_client(&h, None), Some("203.0.113.9".parse().unwrap()));
+        // A proxy that lists itself last is skipped.
+        let mut own = axum::http::HeaderMap::new();
+        own.insert("x-forwarded-for", "1.1.1.1, 198.51.100.1, 10.0.0.1".parse().unwrap());
+        assert_eq!(super::forwarded_client(&own, Some("10.0.0.1".parse().unwrap())), Some("198.51.100.1".parse().unwrap()));
+        let mut bad = axum::http::HeaderMap::new();
+        bad.insert("x-forwarded-for", "1.1.1.1, nonsense".parse().unwrap());
+        assert_eq!(super::forwarded_client(&bad, None), None, "an entry that isn't an address counts for nothing");
+    }
 }

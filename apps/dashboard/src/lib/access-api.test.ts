@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { denyRedirect, draftOf, expiringSoon, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, withToolsets, approvableTogether, byConcern, type Approval, type Preset } from "./access-api";
+import { approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -38,9 +38,28 @@ describe("tokens", () => {
     const list = [g("later", now + 30 * day), g("soon", now + 3 * day), g("sooner", now + day), g("gone", now - day), g("never", null), g("revoked", now + day, now)];
     expect(expiringSoon(list, now).map((x) => x.name)).toEqual(["sooner", "soon"]);
   });
+
+  it("filters by every word typed, and a pasted secret finds its own token", () => {
+    const secret = "rlt_abcdefghijklmnopqrstuvwxyz234567wxyz";
+    const g = (name: string, hint: string | null, product: string) => ({ name, id: `tok_${name}`, hint, client: undefined, user: "usr_ada", created_by: "operator", rules: [{ product, resources: "*" as const, actions: {} }] });
+    const list = [g("ci deploy", "rlt_…wxyz", "apps"), g("cursor", "rlt_…a1b2", "postgres")];
+    const names = (typed: string) => list.filter((x) => grantMatches(x, typed)).map((x) => x.name);
+    expect(names("")).toEqual(["ci deploy", "cursor"]);
+    expect(names("POSTGRES")).toEqual(["cursor"]);
+    expect(names("ci apps")).toEqual(["ci deploy"]);
+    expect(names("ci postgres")).toEqual([]);
+    expect(names(secret)).toEqual(["ci deploy"]);
+  });
 });
 
 describe("the builder", () => {
+  it("offers a signed-in user only the products their account reaches", () => {
+    const c = { products: ["workspace", "postgres", "code", "agents"], actions: [], presets, routes: [], operator_only: [], api_url: "" };
+    const user = { kind: "user" as const, user: { id: "usr_a", handle: "a" }, reach: ["code", "agents", "workspace"], locked: true };
+    expect(catalogFor(c, user).products).toEqual(["workspace", "code", "agents"]);
+    expect(catalogFor(c, { kind: "operator", locked: true }).products).toEqual(c.products);
+  });
+
   it("keeps a product narrowed to some resources, next to the others' place", () => {
     const d = { matrix: { postgres: { read: "allow" as const }, redis: { write: "allow" as const } }, project: "prj_a", environments: [], ids: { redis: ["db_1", "db_2"] } };
     const rules = rulesOf(d);
@@ -75,6 +94,19 @@ describe("toolsets", () => {
   it("narrows the MCP URL to the products picked, and leaves it whole for none", () => {
     expect(withToolsets("https://api.roll.sh/v1/mcp", ["redis", "postgres"])).toBe("https://api.roll.sh/v1/mcp?toolsets=postgres,redis");
     expect(withToolsets("https://api.roll.sh/v1/mcp", [])).toBe("https://api.roll.sh/v1/mcp");
+    // What a choice lists: the access tools always, read-only only what reads.
+    const costs = [
+      { product: "access", tools: 5, read_only: 3, context_tokens: 400 },
+      { product: "apps", tools: 45, read_only: 20, context_tokens: 5400 },
+      { product: "redis", tools: 8, read_only: 4, context_tokens: 700 },
+    ];
+    expect(toolsetCost(costs, [], false)).toEqual({ tools: 58, tokens: 6500 });
+    // A person's token that reaches what the policy has an admin approve says so before it's made.
+    const person = { kind: "user" as const, user: { id: "usr_a", handle: "a" }, reach: ["workspace"], approve_people: ["admin" as const], locked: true };
+    const read = [{ product: "workspace", resources: "*" as const, actions: { read: "allow" as const } }];
+    expect([waitsForAdmin(person, read, false), waitsForAdmin(person, read, true), waitsForAdmin(person, [{ ...read[0], actions: { admin: "allow" as const } }], false), waitsForAdmin({ kind: "operator", locked: true }, read, true)]).toEqual([false, true, true, false]);
+    expect(toolsetCost(costs, ["redis"], true)).toEqual({ tools: 7, tokens: 590 });
+    expect(withToolsets("https://api.roll.sh/v1/mcp", ["postgres"], true)).toBe("https://api.roll.sh/v1/mcp?toolsets=postgres&readonly=1");
   });
 });
 

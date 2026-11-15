@@ -50,8 +50,11 @@ func (l *relogin) token(ctx context.Context, c *Client, stale string) (string, e
 	}
 	// An answer without an expiry is renewed only when the server refuses it.
 	ending := !l.expires.IsZero() && time.Now().After(l.expires.Add(-margin))
-	if (stale != "" && stale == c.Token) || ending {
-		if err := l.renewLocked(ctx, c); err != nil {
+	refused := stale != "" && stale == c.Token
+	if refused || ending {
+		// Renewing early that fails keeps the token it has until it really ends (the identity
+		// provider or roll may be down for a moment).
+		if err := l.renewLocked(ctx, c); err != nil && (refused || !time.Now().Before(l.expires)) {
 			return "", err
 		}
 	}
