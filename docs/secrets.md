@@ -2302,7 +2302,7 @@ isn't in the workspace is 404.
 | `POST /environments/{env}/requests/{id}/close` | | `Request` |
 | `GET /links` | | `LinkTarget[]` |
 | `GET /leases` | | `Lease[]` |
-| `DELETE /leases/{id}` | | 204 |
+| `DELETE /leases/{id}` | | 204 (whoever may reveal the credential, or delete there) |
 | `POST /leases/{id}/renew` | `{ttl_minutes?}` | `Lease` (`reveal` on its environment) |
 | `GET /tokens` | | `Token[]` |
 | `POST /tokens` | `NewToken` | 201 `Token & {token}` (shown once) |

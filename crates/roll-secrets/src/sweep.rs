@@ -185,13 +185,17 @@ impl Secrets {
         self.lease(project, id)
     }
 
-    /// Revoke a lease now.
+    /// Revoke a lease now: whoever could reveal the credential may end it (it only takes access
+    /// away; Terraform's ephemeral reads close their leases with a read token), or delete there.
     pub fn revoke_lease(&self, project: &str, id: &str, caller: &Caller) -> Result<()> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let l = self.lease(project, id)?;
         let env = l.environment;
-        caller.need(Action::Delete, &Scope::at(project, &env, &l.path))?;
+        let at = Scope::at(project, &env, &l.path);
+        if !caller.allows(Action::Reveal, &at) {
+            caller.need(Action::Delete, &at)?;
+        }
         match self.revoke_one(id)? {
             true => {
                 self.audit_now(project, caller, "lease.revoke", Some(&env), None, &[], &format!("revoked {id}"));
