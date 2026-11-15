@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { appsApi, followLog, type LogLine, atLeast, type LogLevel } from "@/lib/apps-api";
+import { matchesTerms, splitFilter } from "@/lib/log-where";
 import { btn } from "../ui";
 import { LogBar, LogView } from "./shared";
 
@@ -24,13 +25,13 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
   const [slow, setSlow] = useState(0);
   // A search back through the stored days, or the lines before a time, shown instead of the
   // live tail until left.
-  const [found, setFound] = useState<{ q?: string; before?: number; by?: string; lines: LogLine[]; truncated: boolean; error?: string } | null>(null);
+  const [found, setFound] = useState<{ q?: string; where?: string; before?: number; by?: string; lines: LogLine[]; truncated: boolean; error?: string } | null>(null);
   const [searching, setSearching] = useState(false);
-  const read = async (q: { q?: string; before?: number; by?: string }) => {
+  const read = async (q: { q?: string; where?: string; before?: number; by?: string }) => {
     setSearching(true);
     try {
       const narrow = requests ? { status: status || undefined, min_ms: slow || undefined } : {};
-      const got = await appsApi.readLogs(service, env, { ...q, ...narrow, since: Date.now() - 7 * 86_400_000, instance: instance || undefined, level: (!requests && level) || undefined, deployment: (!requests && deployment) || undefined, stream: (!requests && stream) || undefined, http: requests, tail: q.q ? 2000 : 500 });
+      const got = await appsApi.readLogs(service, env, { ...q, ...narrow, since: Date.now() - 7 * 86_400_000, instance: instance || undefined, level: (!requests && level) || undefined, deployment: (!requests && deployment) || undefined, stream: (!requests && stream) || undefined, http: requests, tail: q.q || q.where ? 2000 : 500 });
       setFound({ ...q, ...got });
     } catch (e) {
       setFound({ ...q, lines: [], truncated: false, error: e instanceof Error ? e.message : String(e) });
@@ -39,8 +40,9 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
     }
   };
   const search = () => {
-    const q = filter.trim();
-    if (q) void read({ q });
+    // Field terms (`level:error user_id:42`) are the API's `where`; the other words its text search.
+    const { where, words } = splitFilter(filter);
+    if (where || words) void read({ ...(words ? { q: words } : {}), ...(where ? { where } : {}) });
   };
   const at = (t: number) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   // Lines keep arriving while paused; the view shows them on resume.
@@ -86,7 +88,8 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
   const instances = useMemo(() => [...new Set(lines.map((l) => l.instance).filter((i): i is string => !!i))], [lines]);
   const deployments = useMemo(() => [...new Set(lines.map((l) => l.deployment).filter((d): d is string => !!d))], [lines]);
   const shown = useMemo(() => {
-    const q = filter.trim().toLowerCase();
+    const split = splitFilter(filter);
+    const q = split.words.toLowerCase();
     const request = (l: LogLine) => {
       if (!requests || (!status && !slow)) return true;
       try {
@@ -100,6 +103,7 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
       (l) =>
         (!instance || l.instance === instance) &&
         (!q || l.text.toLowerCase().includes(q)) &&
+        matchesTerms(split.terms, l.text) &&
         request(l) &&
         (requests || (atLeast(l, level) && (!deployment || l.deployment === deployment) && (!stream || l.stream === stream))),
     );
@@ -223,9 +227,9 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
                 {found.lines.length} {found.lines.length === 1 ? "request" : "requests"} roll answered itself in the last 7 days
                 {found.truncated && " (the newest)"}
               </>
-            ) : found.q ? (
+            ) : found.q || found.where ? (
               <>
-                {found.truncated ? `The newest ${found.lines.length}` : found.lines.length} {found.lines.length === 1 ? "line" : "lines"} with “{found.q}” in the last 7 days
+                {found.truncated ? `The newest ${found.lines.length}` : found.lines.length} {found.lines.length === 1 ? "line" : "lines"} with “{[found.where, found.q].filter(Boolean).join(" ")}” in the last 7 days
                 {found.truncated && " (more matched: narrow the search)"}
               </>
             ) : (

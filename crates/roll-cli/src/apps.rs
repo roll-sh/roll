@@ -114,6 +114,10 @@ pub struct Logs {
     /// from JSON's `level`/`severity`, logfmt's `level=` or a leading `ERROR`.
     #[arg(long, value_parser = ["trace", "debug", "info", "warn", "error", "fatal"], conflicts_with_all = ["http", "build"])]
     pub level: Option<String>,
+    /// Only lines whose fields say so, JSON's or logfmt's (`level:error user_id:42`; `key:*`
+    /// there, `-key:value` not that, `req.method:POST` nested; Railway's `@attr:value`).
+    #[arg(long = "where", value_name = "FIELDS", conflicts_with = "build")]
+    pub fields: Option<String>,
     /// The requests instead (the proxy's access log): method, path, status, time.
     #[arg(long, conflicts_with = "build")]
     pub http: bool,
@@ -1417,7 +1421,7 @@ async fn project_logs(api: &Api, json_out: bool, l: &Logs) -> anyhow::Result<()>
     if let Some(d) = &l.before {
         q.push_str(&format!("&before={}", chrono::Utc::now().timestamp_millis() - ago_ms(d)?));
     }
-    for (k, v) in [("stream", &l.stream), ("level", &l.level), ("status", &l.status), ("by", &l.by)] {
+    for (k, v) in [("stream", &l.stream), ("level", &l.level), ("status", &l.status), ("by", &l.by), ("where", &l.fields)] {
         if let Some(v) = v {
             q.push_str(&format!("&{k}={}", enc(v)));
         }
@@ -1877,7 +1881,7 @@ pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
         };
         since.push_str(&format!("&instance={}", enc(&name)));
     }
-    for (k, v) in [("deployment", &l.deployment), ("stream", &l.stream), ("level", &l.level)] {
+    for (k, v) in [("deployment", &l.deployment), ("stream", &l.stream), ("level", &l.level), ("where", &l.fields)] {
         if let Some(v) = v {
             since.push_str(&format!("&{k}={}", enc(v)));
         }

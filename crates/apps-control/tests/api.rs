@@ -3321,6 +3321,11 @@ async fn an_apps_log_filters_by_the_level_its_lines_say() {
     assert_eq!(got, [("error", r#"{"level":"error","msg":"db down"}"#), ("warn", "level=warn msg=slow"), ("fatal", "FATAL out of memory")]);
     let (st, v) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs?level=loud"), None).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    // And by a line's fields, JSON's or logfmt's (Railway's @attr:value).
+    let (_, lines) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs?where=msg:slow&tail=100"), None).await;
+    assert_eq!(lines.as_array().unwrap().iter().map(|l| l["text"].as_str().unwrap()).collect::<Vec<_>>(), ["level=warn msg=slow"]);
+    let (_, lines) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs?where=level:*%20-level:info&tail=100"), None).await;
+    assert_eq!(lines.as_array().unwrap().len(), 2, "{lines}");
 }
 
 /// A paused cron service skips what falls due and doesn't make it up when it's resumed, and

@@ -32,6 +32,7 @@ pub mod export;
 pub mod integrations;
 pub mod jobs;
 pub mod live;
+pub mod log_where;
 pub mod logs;
 pub mod metrics;
 pub mod model;
