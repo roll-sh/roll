@@ -1,5 +1,7 @@
-import { ArrowUpRight } from "lucide-react";
+import { ArrowUpRight, KeyRound } from "lucide-react";
+import { useEffect, useState } from "react";
 import { Link } from "@/components/link";
+import { allFindings, type ProjectFindings } from "@/lib/secrets-api";
 import { KIND_LABEL, monthOf, projectMonth, resourceKey, usd } from "@/lib/workspace-resources";
 import { spendOf, useWorkspace } from "@/lib/workspace-store";
 import { AppShell } from "../app-shell";
@@ -65,6 +67,8 @@ export function Home() {
         </div>
       </section>
 
+      <SecretsToFix />
+
       <section id="usage" className="rise mt-10 scroll-mt-16">
         <h2 className="text-[15px] font-semibold tracking-[-0.03em]">{month.label}</h2>
         <div className="mt-3 grid grid-cols-3 gap-2.5">
@@ -124,3 +128,46 @@ function Stat({ label, value, note }: { label: string; value: string; note: stri
     </div>
   );
 }
+
+const SERIOUS = new Set(["expired", "missing", "exposed"]);
+
+/** Secrets that need fixing now (expired, missing, exposed), in every project: nothing when none. */
+function SecretsToFix() {
+  const [projects, setProjects] = useState<ProjectFindings[]>([]);
+  useEffect(() => {
+    let live = true;
+    allFindings().then(
+      (all) => live && setProjects(all.map((p) => ({ ...p, findings: p.findings.filter((f) => SERIOUS.has(f.issue)) })).filter((p) => p.findings.length)),
+      () => live && setProjects([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+  if (!projects.length) return null;
+  return (
+    <section className="rise mt-10">
+      <h2 className="text-[15px] font-semibold tracking-[-0.03em]">Secrets to fix</h2>
+      <div className="mt-3 divide-y divide-line rounded-xl border border-line-2 bg-panel">
+        {projects.map((p) =>
+          p.findings.slice(0, 5).map((f) => (
+            <Link
+              key={`${p.project}/${f.environment}/${f.path}/${f.key}/${f.issue}`}
+              href={`/dashboard/projects/${p.project}/secrets?view=health`}
+              className="flex items-center gap-3 px-3 py-2 text-[12.5px] transition-colors hover:bg-fg/[0.03]"
+            >
+              <KeyRound className="size-3.5 text-muted" />
+              <span className="text-fg">{p.project_name}</span>
+              <span className="font-mono text-muted">{f.key}</span>
+              <span className="text-subtle">{f.environment}</span>
+              <span className="ml-auto text-[11.5px] text-danger">
+                {f.detail.startsWith(f.issue) ? f.detail : `${f.issue}: ${f.detail}`}
+              </span>
+            </Link>
+          )),
+        )}
+      </div>
+    </section>
+  );
+}
+
