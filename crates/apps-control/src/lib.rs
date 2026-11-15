@@ -715,9 +715,16 @@ impl Apps {
         let sid = id.to_string();
         let envs = self.db(move |s| s.environments(&sid)).await?;
         let sid = id.to_string();
-        let project = self.db(move |s| s.service(&sid)).await?.project;
+        let row = self.db(move |s| s.service(&sid)).await?;
+        let project = row.project.clone();
         for e in &envs {
             self.teardown_live(id, &e.name).await;
+        }
+        // Each environment's volume goes with it (a last backup first, kept a week).
+        for e in &envs {
+            let had = row.for_env(e).map(|s| s.run.volume.is_some()).unwrap_or(row.run.volume.is_some());
+            self.last_backup(id, &e.name, had).await;
+            self.deps.runtime.remove_volume(&volume_name(id, &e.name)).await;
         }
         for name in self.deps.runtime.list(Some(id)).await {
             self.deps.runtime.remove(&name).await;
@@ -1288,6 +1295,10 @@ impl Apps {
         self.release_domains(&domains).await;
         self.teardown_live(service, env).await;
         self.set_access_cache(service, env, None);
+        // Its last backup before the volume goes (kept a week), its instances stopped first.
+        let sid = service.to_string();
+        let had = self.db(move |s| s.service(&sid)).await.is_ok_and(|s| s.run.volume.is_some());
+        self.last_backup(service, env, had).await;
         self.deps.runtime.remove_volume(&volume_name(service, env)).await;
         let sid = service.to_string();
         if let Ok(svc) = self.db(move |s| s.service(&sid)).await {

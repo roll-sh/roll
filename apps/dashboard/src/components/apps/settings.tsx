@@ -649,6 +649,7 @@ export function SettingsTab({
                 }}
               >
                 Deletes every environment, instance, deployment and image of <span className="font-mono text-fg">{service.name}</span>. Its URLs stop answering.
+                {service.run.volume ? " Its volume goes too, after a last backup kept for a week." : ""}
               </Confirm>
             ) : (
               <div className="flex flex-wrap items-center justify-between gap-3">

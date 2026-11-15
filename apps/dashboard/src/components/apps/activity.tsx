@@ -59,6 +59,8 @@ export function describe(e: AppEvent): string {
       return `warned ${String(d.hostname)} is removed tomorrow unless it verifies`;
     case "domain.expired":
       return `removed ${String(d.hostname)}: unverified for 7 days`;
+    case "volume.backup_failed":
+      return `couldn't back up the volume${where}: ${String(d.error ?? "no reason given")}`;
     case "domain.tls_failed":
       return `saw ${String(d.hostname)}'s certificate fail: ${String(d.error ?? "")}`;
     case "spend.alert":

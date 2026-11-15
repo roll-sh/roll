@@ -1089,6 +1089,17 @@ async fn a_volume_is_backed_up_and_restored() {
     let (st, _) = call(&w.api, "POST", &format!("{base}/{}/restore", b["id"].as_str().unwrap()), None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(w.fake.volume(&volume).as_deref(), Some(&b"the first state"[..]));
+    // What the restore wrote over was backed up first: it can be undone.
+    let (_, list) = call(&w.api, "GET", &base, None).await;
+    assert!(list.as_array().unwrap().iter().any(|b| b["size"] == 21), "the state before the restore: {list}");
+    // A deleted environment's volume is backed up before it goes (kept a week, restorable by hand).
+    let staging = format!("/v1/apps/services/{id}/environments/staging");
+    call(&w.api, "PUT", &staging, Some(json!({}))).await;
+    w.fake.put_volume(&apps_control::volume_name(&id, "staging"), b"staging data");
+    assert_eq!(call(&w.api, "DELETE", &staging, None).await.0, StatusCode::NO_CONTENT);
+    call(&w.api, "PUT", &staging, Some(json!({}))).await;
+    let (_, kept) = call(&w.api, "GET", &format!("{staging}/volume/backups"), None).await;
+    assert!(kept.as_array().unwrap().iter().any(|b| b["size"] == 12), "its last backup: {kept}");
     let (_, trail) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
     assert!(trail.to_string().contains("audit.volume.restored"), "{trail}");
     let (st, _) = call(&w.api, "POST", &format!("{base}/123/restore"), None).await;
@@ -1807,7 +1818,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed"]), "the default events");
+    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");
