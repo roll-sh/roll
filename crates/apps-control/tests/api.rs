@@ -397,6 +397,12 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     assert_eq!(d2["trigger"], "push");
     assert_eq!(d2["actor"], "git:Ada Lovelace", "a push names its commit's author, as the commit claims it");
     assert_eq!(settled(&w, &id, "production", &first).await["status"], "inactive");
+    // A push whose message says `[skip ci]` isn't deployed, and the timeline says why.
+    w.code.push("c3c3c3c3c3c3", "docs: a typo\n\n[skip ci]", &[("README.md", "hi")]);
+    let skipped = get_until(&w.api, &format!("/v1/apps/services/{id}/activity?all=1"), |a| a.as_array().is_some_and(|a| a.iter().any(|e| e["kind"] == "deploy.skipped"))).await;
+    assert!(skipped.to_string().contains("c3c3c3c3c3c3"), "{skipped}");
+    let (_, all) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys"), None).await;
+    assert!(!all.to_string().contains("c3c3c3c3c3c3"), "{all}");
     // A rollback runs the old image again: no build.
     let builds = Fake::count(&w.fake.counts.builds);
     let (st, rb) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys/{first}/rollback"), None).await;

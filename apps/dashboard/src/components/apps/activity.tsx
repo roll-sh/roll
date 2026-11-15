@@ -40,6 +40,8 @@ export function describe(e: AppEvent): string {
       return `put a deployment live${where}`;
     case "deploy.failed":
       return `saw a deploy fail${where}: ${String(d.error ?? "no reason given")}`;
+    case "deploy.skipped":
+      return `skipped push ${String(d.revision ?? "").slice(0, 8)}${where}: its message says ${String(d.tag ?? "to")}`;
     case "crash_loop":
       return `saw it crash ${String(d.crashes ?? "")} times in 10 minutes${where}: ${String(d.last_error ?? "")}`;
     case "cron.failed":

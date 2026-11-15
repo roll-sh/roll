@@ -1852,6 +1852,14 @@ impl Apps {
                     self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} not deployed: deploys are held after the rollback {r}", &l.revision.sha[..l.revision.sha.len().min(12)]));
                     continue;
                 }
+                // `[skip deploy]` or `[skip ci]` in its message (Render's `[skip render]`): a push
+                // that says so isn't deployed, which the log and the timeline say.
+                if let Some(tag) = skip_tag(&l.revision.message) {
+                    self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} not deployed: its message says {tag}", &l.revision.sha[..l.revision.sha.len().min(12)]));
+                    let (sid, en, data) = (svc.id.clone(), e.name.clone(), serde_json::json!({ "revision": l.revision.sha, "tag": tag }));
+                    let _ = self.db(move |s| s.add_event("deploy.skipped", &sid, &en, None, &data)).await;
+                    continue;
+                }
                 let watch = file.as_ref().and_then(|f| f.watch_for(&e.name)).or_else(|| svc.build.watch.clone()).filter(|w| !w.is_empty());
                 if let Some(patterns) = &watch
                     && !self.push_touches(svc, e, &l.revision.sha, patterns).await
@@ -2184,3 +2192,21 @@ ERROR: failed to solve: process \"/bin/sh -c npm ci\" did not complete successfu
     }
 }
 
+
+/// What in a commit's message skips its deploy: `[skip deploy]`, `[skip ci]`, `[skip roll]` and
+/// each the other way round (`[ci skip]`), in any case, anywhere in it.
+pub(crate) fn skip_tag(message: &str) -> Option<&'static str> {
+    const TAGS: [&str; 6] = ["[skip deploy]", "[deploy skip]", "[skip ci]", "[ci skip]", "[skip roll]", "[roll skip]"];
+    let m = message.to_ascii_lowercase();
+    TAGS.into_iter().find(|t| m.contains(t))
+}
+
+#[cfg(test)]
+mod skip_tests {
+    #[test]
+    fn a_message_can_skip_its_deploy() {
+        assert_eq!(super::skip_tag("docs: typo\n\n[Skip CI]"), Some("[skip ci]"));
+        assert_eq!(super::skip_tag("readme [deploy skip]"), Some("[deploy skip]"));
+        assert_eq!(super::skip_tag("skip the cache"), None);
+    }
+}
