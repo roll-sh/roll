@@ -90,7 +90,9 @@ export function AwsRoles() {
                 the role trust it with the conditions <span className="font-mono">aud</span> = <span className="font-mono">sts.amazonaws.com</span> and <span className="font-mono">sub</span> ={" "}
                 <span className="font-mono select-all">{externalId}</span>.
                 {issuer.data && !issuer.data.issuer.startsWith("https://") && (
-                  <span className="text-warn"> AWS reaches roll&apos;s issuer only over HTTPS at a public address: set rolld&apos;s ROLL_CODE_PUBLIC_URL first, or trust by ExternalId.</span>
+                  <span className="mt-2 block rounded-lg border border-line-2 bg-panel px-3 py-2">
+                    AWS reaches roll&apos;s issuer only over HTTPS at a public address: this server&apos;s is {issuer.data.issuer}. Set rolld&apos;s <span className="font-mono">ROLL_CODE_PUBLIC_URL</span> first, or trust by ExternalId.
+                  </span>
                 )}
               </>
             ) : (
