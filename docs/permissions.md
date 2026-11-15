@@ -208,7 +208,9 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   agent's shell is. Waking a sleeping environment starts compute someone pays for: `write`.
 - A service's settings (`PATCH …/services/{id}`) are `deploy` when they change what production
   runs or who reaches it: `source` and `build` (the next landing deploys them), `run.start`,
-  `run.pre_deploy` (it runs with production's variables), `run.schedule`, `run.kind`, `run.port`,
+  `run.pre_deploy` (it runs with production's variables), `run.schedule`, `run.schedules` (commands
+  run as jobs of the live deployment on a timer: a production job is deploy, so one on a timer is),
+  `run.kind`, `run.port`,
   `run.volume`, and `run.public` (a web service on the internet or off it, at once). Its size,
   scale, health checks, alerts and rollout are `write`. Rolling back to a deployment puts back the variables it went live with
   (unless `keep_variables`); it's the environment's act as writing its variables is (`deploy` in
