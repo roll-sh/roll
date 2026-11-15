@@ -595,6 +595,18 @@ previews are listed once those products are on.
 | `apps_cancel_cron_run` | Stop a running cron run (production: deploy). | `POST /v1/apps/services/{id}/environments/{env}/runs/{run}/cancel` |
 | `apps_run_cron` | Run a cron job now (deploy in production). | `POST …/environments/{env}/runs` |
 | `apps_limits` | A project's apps spend limits. | `GET /v1/apps/projects/{project}/limits` |
+| `apps_list_project_services` | The services in one workspace project. | `GET /v1/apps/projects/{project}/services` |
+| `apps_list_notifications` | Where a project's deploy, crash and preview events are sent (webhook, Slack, Discord, email; the URL's host only). | `GET /v1/apps/projects/{project}/notifications` |
+| `apps_add_notification` | Send a project's events somewhere: a webhook, Slack, Discord or email address (the URL is stored sealed and never shown again). | `POST /v1/apps/projects/{project}/notifications` |
+| `apps_update_notification` | Change which events, environments and services a notification gets: given ones replace. | `PATCH /v1/apps/projects/{project}/notifications/{nid}` |
+| `apps_delete_notification` | Stop sending a project's events there. | `DELETE /v1/apps/projects/{project}/notifications/{nid}` |
+| `apps_test_notification` | Send a test event now (not retried): whether it arrived. | `POST /v1/apps/projects/{project}/notifications/{nid}/test` |
+| `apps_notification_deliveries` | A notification's last 50 deliveries, newest first: what was sent and whether it arrived. | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` |
+| `apps_list_drains` | Where a project's logs are sent (the URL's host only). | `GET /v1/apps/projects/{project}/drains` |
+| `apps_add_drain` | Send every matching service's logs out of roll to an HTTPS endpoint, signed (its signing secret comes back once). | `POST /v1/apps/projects/{project}/drains` |
+| `apps_update_drain` | Change what a drain sends or its headers: given ones replace (a new URL is a new drain). | `PATCH /v1/apps/projects/{project}/drains/{did}` |
+| `apps_delete_drain` | Stop sending a project's logs there. | `DELETE /v1/apps/projects/{project}/drains/{did}` |
+| `apps_test_drain` | Send one signed test line now (not retried): whether it arrived. | `POST /v1/apps/projects/{project}/drains/{did}/test` |
 | `apps_pending` | What the next deploy changes: variables (names), run settings, project secrets. | `GET /v1/apps/services/{service}/environments/{env}/pending` |
 | `apps_deploy_commits` | The commits a deploy brings over the one live before it. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/commits` |
 | `apps_rollback` | Roll an environment back to an earlier deploy, with the variables it went live with. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback` |
