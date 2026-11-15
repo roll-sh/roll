@@ -8,7 +8,7 @@
 //! preparation cost. [`FastPlan`] is compiled once per index mapping (per bulk request): the
 //! leaf fields of the plain types (`text`, `keyword`, the integer types, `double`, `float`,
 //! `half_float`, `scaled_float`, `boolean`, `date`/`date_nanos`, `ip`, `geo_point` as
-//! `[lon, lat]`) with their multi-fields and the mapping parameters their parsers read, at the
+//! `[lon, lat]` or `{"lat", "lon"}`, `double_range` and `float_range` as objects of number bounds) with their multi-fields and the mapping parameters their parsers read, at the
 //! root and in plain objects (not nested, enabled, with sub-objects: what ECS-style logs are
 //! made of). [`FastPlan::parse`] then scans the document
 //! bytes once and emits exactly the fields the general path would emit, in the same order.
@@ -56,6 +56,8 @@ enum Kind {
     GeoPoint,
     /// `ip` from a string (anything else, and unparseable addresses, take the general path).
     Ip,
+    /// `double_range`, or `float_range`: an object of number bounds ([`Scan::range`]).
+    Range { float: bool },
 }
 
 /// A field (or multi-field) the plan parses into.
@@ -125,7 +127,7 @@ fn leaf_of(f: &FieldMapper, full: &str, ctx: &MappingCtx) -> Option<Leaf> {
     for (sub_name, sub) in &f.fields {
         match kind_of(sub, ctx) {
             // Multi-fields parse the parent's value; a point can't be one.
-            Some(k) if !matches!(k, Kind::GeoPoint) => subs.push(Target { kind: k, name: sub.full_name(&format!("{full}.{sub_name}")) }),
+            Some(k) if !matches!(k, Kind::GeoPoint | Kind::Range { .. }) => subs.push(Target { kind: k, name: sub.full_name(&format!("{full}.{sub_name}")) }),
             _ => return None,
         }
     }
@@ -153,6 +155,8 @@ fn kind_of(f: &FieldMapper, ctx: &MappingCtx) -> Option<Kind> {
         "date" | "date_nanos" => Kind::Date { fmt: f.date_formatter(ctx).ok()?, nanos: f.ty == "date_nanos" },
         // A `position` metric takes one point per document (checked by the general path).
         "geo_point" if f.fields.is_empty() && f.raw("time_series_metric").is_none() => Kind::GeoPoint,
+        "double_range" if f.fields.is_empty() => Kind::Range { float: false },
+        "float_range" if f.fields.is_empty() => Kind::Range { float: true },
         _ => return None,
     })
 }
@@ -371,6 +375,16 @@ impl FastPlan {
                 }
             }
         }
+        if matches!(leaf.main.kind, Kind::GeoPoint) && s.peek()? == b'{' {
+            let p = s.lat_lon()?;
+            out.fields.push(DocField { name: leaf.main.name.clone(), value: FieldValue::GeoPoint(p) });
+            return Some(());
+        }
+        if let Kind::Range { float } = leaf.main.kind {
+            let v = s.range(float)?;
+            out.fields.push(DocField { name: leaf.main.name.clone(), value: v });
+            return Some(());
+        }
         let tok = s.scalar()?;
         push(&leaf.main, &tok, out, ignored)?;
         for sub in &leaf.subs {
@@ -540,6 +554,79 @@ impl<'a> Scan<'a> {
         None
     }
 
+    /// A `double_range` or `float_range` value as `values::parse_range` reads it, when it is an
+    /// object of `gte`/`gt` and `lte`/`lt` (one of each at most, one at least) with finite
+    /// number bounds, `from <= to`; anything else (`null` bounds, strings, other keys, a bound
+    /// given twice) is left to the general path.
+    fn range(&mut self, float: bool) -> Option<FieldValue> {
+        if self.peek()? != b'{' {
+            return None;
+        }
+        self.i += 1;
+        self.ws()?;
+        let (mut from, mut to) = (None, None);
+        let (mut include_from, mut include_to) = (true, true);
+        loop {
+            if self.peek()? != b'"' {
+                return None;
+            }
+            let key = self.key()?;
+            self.ws()?;
+            if self.peek()? != b':' {
+                return None;
+            }
+            self.i += 1;
+            self.ws()?;
+            let d = match self.scalar()? {
+                t @ (Tok::Int(..) | Tok::Float(..)) => t.number()?,
+                _ => return None,
+            };
+            // `XParser::double_value`, or `float_value` (the double, then a float).
+            let v = if float {
+                let f = d as f32;
+                if !f.is_finite() {
+                    return None;
+                }
+                crate::query::xparser::float_value(f)
+            } else {
+                if !d.is_finite() {
+                    return None;
+                }
+                Value::Num(crate::json::Number::Float(d))
+            };
+            match key {
+                "gte" | "gt" if from.is_none() => {
+                    from = Some(v);
+                    include_from = key == "gte";
+                }
+                "lte" | "lt" if to.is_none() => {
+                    to = Some(v);
+                    include_to = key == "lte";
+                }
+                _ => return None,
+            }
+            self.ws()?;
+            match self.peek()? {
+                b',' => {
+                    self.i += 1;
+                    self.ws()?;
+                }
+                b'}' => {
+                    self.i += 1;
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        // `min value (..) is greater than max value (..)` is the general path's error.
+        if let (Some(a), Some(b)) = (from.as_ref().and_then(Value::as_f64), to.as_ref().and_then(Value::as_f64))
+            && a > b
+        {
+            return None;
+        }
+        Some(FieldValue::Range { from: from.unwrap_or(Value::Null), to: to.unwrap_or(Value::Null), include_from, include_to })
+    }
+
     fn key(&mut self) -> Option<&'a str> {
         // Escaped names (rare) take the general path.
         self.plain_string()?.ok()
@@ -684,6 +771,46 @@ impl<'a> Scan<'a> {
             return None;
         }
         self.i += 1;
+        ((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)).then_some(GeoPoint { lat, lon })
+    }
+
+    /// A point as an object of exactly `lat` and `lon`, both numbers, in range (strings, `z`,
+    /// GeoJSON and the rest are the general path's).
+    fn lat_lon(&mut self) -> Option<GeoPoint> {
+        self.i += 1;
+        self.ws()?;
+        let (mut lat, mut lon) = (None, None);
+        loop {
+            if self.peek()? != b'"' {
+                return None;
+            }
+            let key = self.key()?;
+            self.ws()?;
+            if self.peek()? != b':' {
+                return None;
+            }
+            self.i += 1;
+            self.ws()?;
+            let slot = match key {
+                "lat" if lat.is_none() => &mut lat,
+                "lon" if lon.is_none() => &mut lon,
+                _ => return None,
+            };
+            *slot = Some(self.coord()?);
+            self.ws()?;
+            match self.peek()? {
+                b',' => {
+                    self.i += 1;
+                    self.ws()?;
+                }
+                b'}' => {
+                    self.i += 1;
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        let (lat, lon) = (lat?, lon?);
         ((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)).then_some(GeoPoint { lat, lon })
     }
 

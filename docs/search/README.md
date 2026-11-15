@@ -243,8 +243,8 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `default` 1.20x); dense_vector `knn-search-100-1000_multiple_segments` 2.09x; so_vector, 25 of
    32 `knn` tasks 1.03-1.92x (filtered and `concurrency` worst; segments are searched
    concurrently since, `66d16fce6`); nested `randomized-sorted-term-queries` 1.62x OpenSearch;
-   noaa indexing (Elasticsearch 1.29x roll's docs/s: `double_range` keeps every document off the
-   direct parser); nyc_taxis `distance_amount_agg` 1.27x Elasticsearch (103 against 81 ms: roll
+   noaa indexing (Elasticsearch 1.29x roll's docs/s: `double_range` kept every document off the
+   direct parser; it takes them now, -34% server CPU per document, Rally rerun pending); nyc_taxis `distance_amount_agg` 1.27x Elasticsearch (103 against 81 ms: roll
    runs a shard on one thread, Elasticsearch splits its segments across threads at twice roll's
    CPU); nyc_taxis `autohisto_agg` 1.19x OpenSearch (tie), with `date_histogram_agg`, because the
    points-tree counts don't apply to segments of 0.8M+ documents (Rally's merges make them; the

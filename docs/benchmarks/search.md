@@ -198,7 +198,8 @@ ranges overlap):
    17.5).
 6. noaa indexing: Elasticsearch indexes 1.29x roll's docs/s (67.5k against 52.5k), on less CPU:
    the general document path for `double_range` and `dbe79f8f7`'s mapping walk (the noaa
-   table's notes).
+   table's notes). Both fixed since: the walk by `6c2834a3e`, and the direct parser now takes
+   noaa's documents (34% less server CPU per document; the noaa notes). Not rerun in Rally yet.
 7. nyc_taxis `distance_amount_agg`: 1.27x Elasticsearch (103.2 ms against 81.1; the ranges are
    apart). One thread per shard against Elasticsearch's concurrent segments (above).
 8. nyc_taxis `autohisto_agg`: 1.19x OpenSearch (9.0 against 7.6, tie). The points-tree count
@@ -368,7 +369,14 @@ no kind in the direct parser (`document/fast.rs` `kind_of`), so every document t
 path, as nyc_taxis' scaled floats did before `3735abaac`; and `dbe79f8f7`'s mapping walk per
 bulk item (above) costs more on noaa's 84 fields: 1M documents, 8 clients, 6 interleaved rounds
 on the build CPUs, 59.5-64.4 µs of server CPU per document on its parent's code against
-67.8-77.3 (+14%; `83fac5982` 68.7-75.2), identical aggregations.
+67.8-77.3 (+14%; `83fac5982` 68.7-75.2), identical aggregations. Since then the direct parser
+takes `double_range` and `float_range` objects of number bounds and `geo_point` objects of
+`lat`/`lon` (noaa's `station.location`), so every noaa document takes it (20,000 of the corpus's
+first 20,000, field for field the general path's): 1M documents, 8 clients, lane b, 6
+alternating rounds against `729eda764` (with `6c2834a3e`), 64.4-75.0 µs of server CPU per
+document (median 72.9) against 45.7-51.6 (median 48.2), -34% in every round, identical
+aggregations (a range-field `within` and `intersects` filter, geo bounds, stats, max); docs/s
+followed the host's load (28-81) more than the build.
 
 | task | metric | roll | Elasticsearch | OpenSearch | roll / best |
 |---|---|---:|---:|---:|---:|

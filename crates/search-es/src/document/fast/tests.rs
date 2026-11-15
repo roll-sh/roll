@@ -168,6 +168,36 @@ fn nyc_taxis_documents_take_the_fast_path() {
     }
 }
 
+/// Rally's `noaa` documents: a `double_range` (and a `float_range`) as an object of number
+/// bounds takes the fast path; bounds the general path converts or refuses stay with it.
+#[test]
+fn range_objects_take_the_fast_path() {
+    let idx = index(r#"{"dynamic":"strict","properties":{"TMAX":{"type":"double"},"TRANGE":{"type":"double_range"},"F":{"type":"float_range"},
+        "station":{"properties":{"name":{"type":"keyword"},"location":{"type":"geo_point"}}}}}"#, &[]);
+    let plan = FastPlan::new(&idx).expect("plan");
+    for doc in [
+        r#"{"TMAX": 2.4, "TRANGE": {"lte": 2.4, "gte": -12.0}, "station": {"name": "Lily Lake", "location": {"lon": -110.8, "lat": 40.86}}}"#,
+        r#"{"station": {"location": [{"lat": -90, "lon": 180}, [1.5, 2], {"lon": 0, "lat": 0.5}]}}"#,
+        r#"{"TRANGE": {"gt": 1, "lt": 1.0}, "F": {"gte": 0.1, "lt": 16777217}}"#,
+        r#"{"TRANGE": [{"gte": 1}, {"lte": -5e-324}], "F": { "lte" : 3.4028235e38 } }"#,
+    ] {
+        assert!(agree(&idx, &plan, doc), "not taken: {doc}");
+    }
+    for doc in [
+        r#"{"TRANGE": {}}"#,
+        r#"{"TRANGE": {"gte": 3, "lte": 1}}"#,
+        r#"{"TRANGE": {"gte": null, "lte": 1}}"#,
+        r#"{"TRANGE": {"gte": "1"}}"#,
+        r#"{"TRANGE": {"gte": 1, "gt": 2}}"#,
+        r#"{"TRANGE": {"from": 1}}"#,
+        r#"{"TRANGE": 1}"#,
+        r#"{"TRANGE": {"gte": 1e400}}"#,
+        r#"{"F": {"lte": 1e39}}"#,
+    ] {
+        assert!(plan.parse(doc.as_bytes()).is_none(), "taken: {doc}");
+    }
+}
+
 #[test]
 fn everything_else_takes_the_general_path() {
     let idx = index(GEONAMES, &[]);
@@ -185,7 +215,12 @@ fn everything_else_takes_the_general_path() {
         r#"{"location": [181, 0]}"#,
         r#"{"location": [1, 2, 3]}"#,
         r#"{"location": "1,2"}"#,
-        r#"{"location": {"lat": 1, "lon": 2}}"#,
+        r#"{"location": {"lat": 1}}"#,
+        r#"{"location": {"lat": 1, "lon": 2, "z": 0}}"#,
+        r#"{"location": {"lat": "1", "lon": 2}}"#,
+        r#"{"location": {"lat": 91, "lon": 2}}"#,
+        r#"{"location": {"lat": 1, "lat": 1, "lon": 2}}"#,
+        r#"{"location": {"type": "Point", "coordinates": [1, 2]}}"#,
         r#"{"name": {"a": 1}}"#,
         r#"{"_id": "x"}"#,
         "{\"n\\u0061me\": \"x\"}",
@@ -228,7 +263,9 @@ const TYPES: &str = r#"{"properties":{
     "o2":{"properties":{"p":{"properties":{"y":{"type":"long"}}},"z":{"type":"scaled_float","scaling_factor":10}}},
     "c":{"type":"keyword","copy_to":"t"},
     "ip":{"type":"ip"},
-    "mot":{"type":"match_only_text","fields":{"raw":{"type":"keyword","ignore_above":4}}}
+    "mot":{"type":"match_only_text","fields":{"raw":{"type":"keyword","ignore_above":4}}},
+    "dr":{"type":"double_range"},
+    "fr":{"type":"float_range"}
 }}"#;
 
 /// A deterministic generator (xorshift) instead of a dependency.
@@ -280,7 +317,7 @@ fn scalar(r: &mut Rng) -> String {
         0 => r.pick(&strings).to_string(),
         1 => r.pick(&nums).to_string(),
         2 => r.pick(&["true", "false", "null"]).to_string(),
-        _ => r.pick(&["[1.5, 2.5]", "[-200, 0]", "[0, 95]", "[1, 2, 3]", "\"1,2\"", "{\"x\": \"a\"}", "[]", "[\"a\", [\"b\"]]", "[1, \"x\"]", "{\"x\": [\"a\", 1]}", "{\"x\": null}", "{}", "{\"x\": \"a\", \"x\": \"b\"}", "{\"p\": {\"y\": 3}, \"z\": 1.25}", "{\"z\": [0.05, -2.25], \"p\": {}}", "{\"p\": {\"y\": 1.5}}", "[{\"x\": \"a\"}, {\"x\": \"b\"}]", "[{\"p\": {\"y\": 2}}, [{\"z\": 0.5}]]", "[{\"x\": \"a\"}, null]"]).to_string(),
+        _ => r.pick(&["[1.5, 2.5]", "[-200, 0]", "[0, 95]", "[1, 2, 3]", "\"1,2\"", "{\"x\": \"a\"}", "[]", "[\"a\", [\"b\"]]", "[1, \"x\"]", "{\"x\": [\"a\", 1]}", "{\"x\": null}", "{\"gte\": 1.5, \"lte\": 2.5}", "{\"lt\": 1e3, \"gt\": -0.0}", "{\"gte\": 16777217, \"lte\": 3.4028235e38}", "{\"gte\": 3, \"lte\": 1}", "{\"lte\": 0.1}", "{\"gte\": null}", "{\"gte\": \"2\"}", "{\"gte\": 1, \"gt\": 2}", "{\"lt\": 1e39}", "{\"lat\": 1.5, \"lon\": -2}", "{\"lon\": 181, \"lat\": 0}", "{\"lat\": 1, \"lon\": \"2\"}", "{}", "{\"x\": \"a\", \"x\": \"b\"}", "{\"p\": {\"y\": 3}, \"z\": 1.25}", "{\"z\": [0.05, -2.25], \"p\": {}}", "{\"p\": {\"y\": 1.5}}", "[{\"x\": \"a\"}, {\"x\": \"b\"}]", "[{\"p\": {\"y\": 2}}, [{\"z\": 0.5}]]", "[{\"x\": \"a\"}, null]"]).to_string(),
     }
 }
 
@@ -288,7 +325,7 @@ fn scalar(r: &mut Rng) -> String {
 fn random_documents_agree() {
     let idx = index(TYPES, &[]);
     let plan = FastPlan::new(&idx).unwrap();
-    let keys = ["t", "k", "kn", "l", "i", "s", "b", "d", "bo", "dt", "de", "dn", "dk", "g", "f", "o", "o2", "c", "zz", "ip", "mot"];
+    let keys = ["t", "k", "kn", "l", "i", "s", "b", "d", "bo", "dt", "de", "dn", "dk", "g", "f", "o", "o2", "c", "zz", "ip", "mot", "dr", "fr"];
     let mut r = Rng(0x9E37_79B9_7F4A_7C15);
     let seeds: u64 = std::env::var("FAST_DOCS").ok().and_then(|s| s.parse().ok()).unwrap_or(20_000);
     let (mut fast, mut total) = (0, 0);
@@ -379,6 +416,7 @@ fn the_opensearch_dialect_agrees() {
         geonames_documents_take_the_fast_path();
         http_logs_documents_take_the_fast_path();
         nyc_taxis_documents_take_the_fast_path();
+        range_objects_take_the_fast_path();
         everything_else_takes_the_general_path();
         ignore_above_records_ignored_fields();
         random_documents_agree();
