@@ -254,6 +254,7 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/approvals/{id}/approve", "a grant never approves a request"),
     ("/v1/access/approvals/{id}/deny", "a grant never decides a request"),
     ("/v1/access/oauth/authorize", "the consent screen is the operator's"),
+    ("/v1/access/oauth/devices/{code}", "only a person signs a device in, as on the consent screen"),
     ("/v1/access/notify", "where approvals go is the operator's choice"),
     ("/v1/access/policy", "the rules for every token are the operator's"),
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),

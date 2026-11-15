@@ -44,6 +44,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/oauth/clients", get(clients))
         .route("/v1/access/oauth/clients/{id}", get(client))
         .route("/v1/access/oauth/authorize", post(crate::oauth::authorize))
+        .route("/v1/access/oauth/devices/{code}", get(crate::oauth::device_view).post(crate::oauth::device_approve).delete(crate::oauth::device_deny))
         .with_state(access)
 }
 

@@ -10,7 +10,8 @@ API, once, in front of every route, so no surface can do more than another.
   `crates/roll-access` (the store, the catalogue, the evaluator, `/v1/access`, OAuth), wired in by
   `crates/rolld/src/access.rs`. The MCP server is `crates/roll-mcp` ([mcp.md](mcp.md)).
 - Client: `apps/dashboard/src/lib/access-api.ts`. Change it and the [HTTP API](#http-api) together.
-- Dashboard: `/dashboard/access` ("MCP & access") and the consent screen at `/oauth/authorize`.
+- Dashboard: `/dashboard/access` ("MCP & access"), the consent screen at `/oauth/authorize`, and
+  `/oauth/device`, where a code a device shows is entered.
   Each token has a page, `/dashboard/access/tokens/<id>`: what it may do in words (resources by
   name), what approvals allow it for a while and until when, the approvals it asked for, its recent
   requests, and edit, rotate and revoke.
@@ -72,8 +73,18 @@ Infisical's and 1Password's CLIs do, rather than a token pasted into a shell pro
   screen starts from. The person chooses what it may do there, as for any MCP client; a person's
   login waits for an admin the same way (`approve_people`).
 - The answer's `state` and `iss` (RFC 9207) are checked before the code is exchanged.
-- `--no-browser` (over SSH, in a container) prints the address to open on any machine; the person
-  pastes back the address the browser ends on.
+- **With no browser here** (`--no-browser`, an SSH session, or a browser that didn't open) it signs in
+  with a code instead, as `gh auth login` does (RFC 8628's device flow): it registers as a
+  device-only client (no redirect), prints a link and a code (`BCDF-GHJK`: eight letters of RFC
+  8628's vowel-free alphabet, about 34 bits), and polls the token endpoint every `interval` (5 s;
+  `slow_down` adds 5). The person opens `/oauth/device` signed in, on any device (a phone), enters
+  the code or follows the link, and chooses what it may do on the consent screen's own form; a
+  person's device waits for an admin as any of their connections does. The page says what asks,
+  the network it asked from and when, and that roll never sends anyone a code to enter (device-code
+  phishing, RFC 8628 5.4). A request lives ten minutes and is used once; the user code can't be
+  looked up by a token, and ten wrong codes in a minute answer 429 to that caller. On a roll
+  without the device endpoint, the address the browser ends on is pasted back instead.
+- `$BROWSER` names the browser to open, as `gh` reads it.
 - The login is kept in `$XDG_CONFIG_HOME/roll/logins.json` (else `~/.config`), 0600 in a 0700
   directory, one entry per API URL. Commands use it only when no credential is set for the run
   (`ROLL_TOKEN`, `ROLL_IDENTITY`, `ROLL_ADMIN_TOKEN`, `ROLL_API_KEY`, `roll code`'s and `roll
@@ -821,6 +832,10 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/oauth/clients` | access read | MCP clients with a live connection |
 | `GET /v1/access/oauth/clients/{id}` | access read | a registered client (the consent screen shows it); only the operator's lookups fetch a metadata document |
 | `POST /v1/access/oauth/authorize` | operator | the consent screen's answer: `{client_id, redirect_uri, code_challenge, state, resource, name, rules, expires_at?}` → `{redirect}` |
+| `POST /v1/access/oauth/device_authorization` | public | RFC 8628: `client_id`, `scope` (form) → `{device_code, user_code, verification_uri, verification_uri_complete, expires_in, interval}`; 10 a minute per network |
+| `GET /v1/access/oauth/devices/{code}` | operator or person | the device request a code names (any case, dash optional): `{user_code, client, scope, network, created_at, expires_at}`; 404 for a wrong one, 429 after ten wrong in a minute |
+| `POST /v1/access/oauth/devices/{code}` | operator or person | allow it what the body says (`{name?, rules, expires_at?, ip_allow?, rate_per_minute?, ask_otherwise?}`, as the consent screen) → `{grant_id, pending}` |
+| `DELETE /v1/access/oauth/devices/{code}` | operator or person | refuse it: its next poll answers `access_denied` |
 
 OAuth's public endpoints (discovery, registration, token, revocation) are in [mcp.md](mcp.md#authorization).
 
@@ -850,7 +865,7 @@ classify, so the check skips them):
 | `/v1/code/review-apps` | review apps' own tokens |
 | `/v1/accounts` | people's accounts (docs/accounts.md): sign-in, sessions and invites are a person's, never a token's |
 | `/v1/code/mcp` | roll code's MCP server calls roll code without the gate; grants use `/v1/mcp` |
-| `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/notify`, `/v1/access/policy`, `/v1/access/audit/sinks` | the operator decides |
+| `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/oauth/devices/{code}`, `/v1/access/notify`, `/v1/access/policy`, `/v1/access/audit/sinks` | the operator decides |
 
 Rows match a route by its shape, not its parameters' names (`…/secrets/{key}/value` finds the row
 written `…/secrets/{name}/value`), so renaming a parameter can never change an action. To check a

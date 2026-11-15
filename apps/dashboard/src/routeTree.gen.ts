@@ -19,6 +19,7 @@ import { Route as DashboardDatabasesRouteImport } from './routes/dashboard/datab
 import { Route as DashboardStreamsRouteImport } from './routes/dashboard/streams'
 import { Route as DashboardTasksRouteImport } from './routes/dashboard/tasks'
 import { Route as OauthAuthorizeRouteImport } from './routes/oauth/authorize'
+import { Route as OauthDeviceRouteImport } from './routes/oauth/device'
 import { Route as ShareIdRouteImport } from './routes/share/$id'
 import { Route as OwnerRepoIndexRouteImport } from './routes/$owner/$repo/index'
 import { Route as OwnerRepoGitReceivePackRouteImport } from './routes/$owner/$repo/git-receive-pack'
@@ -122,6 +123,11 @@ const DashboardTasksRoute = DashboardTasksRouteImport.update({
 const OauthAuthorizeRoute = OauthAuthorizeRouteImport.update({
   id: '/oauth/authorize',
   path: '/oauth/authorize',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OauthDeviceRoute = OauthDeviceRouteImport.update({
+  id: '/oauth/device',
+  path: '/oauth/device',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ShareIdRoute = ShareIdRouteImport.update({
@@ -418,6 +424,7 @@ export interface FileRoutesByFullPath {
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
+  '/oauth/device': typeof OauthDeviceRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
@@ -483,6 +490,7 @@ export interface FileRoutesByTo {
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
+  '/oauth/device': typeof OauthDeviceRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner': typeof OwnerIndexRoute
   '/dashboard': typeof DashboardIndexRoute
@@ -550,6 +558,7 @@ export interface FileRoutesById {
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
+  '/oauth/device': typeof OauthDeviceRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
@@ -618,6 +627,7 @@ export interface FileRouteTypes {
     | '/dashboard/streams'
     | '/dashboard/tasks'
     | '/oauth/authorize'
+    | '/oauth/device'
     | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
@@ -683,6 +693,7 @@ export interface FileRouteTypes {
     | '/dashboard/streams'
     | '/dashboard/tasks'
     | '/oauth/authorize'
+    | '/oauth/device'
     | '/share/$id'
     | '/$owner'
     | '/dashboard'
@@ -749,6 +760,7 @@ export interface FileRouteTypes {
     | '/dashboard/streams'
     | '/dashboard/tasks'
     | '/oauth/authorize'
+    | '/oauth/device'
     | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
@@ -816,6 +828,7 @@ export interface RootRouteChildren {
   DashboardStreamsRoute: typeof DashboardStreamsRoute
   DashboardTasksRoute: typeof DashboardTasksRoute
   OauthAuthorizeRoute: typeof OauthAuthorizeRoute
+  OauthDeviceRoute: typeof OauthDeviceRoute
   ShareIdRoute: typeof ShareIdRoute
   OwnerIndexRoute: typeof OwnerIndexRoute
   DashboardIndexRoute: typeof DashboardIndexRoute
@@ -931,6 +944,13 @@ declare module '@tanstack/react-router' {
       path: '/oauth/authorize'
       fullPath: '/oauth/authorize'
       preLoaderRoute: typeof OauthAuthorizeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/oauth/device': {
+      id: '/oauth/device'
+      path: '/oauth/device'
+      fullPath: '/oauth/device'
+      preLoaderRoute: typeof OauthDeviceRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/share/$id': {
@@ -1368,6 +1388,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardStreamsRoute: DashboardStreamsRoute,
   DashboardTasksRoute: DashboardTasksRoute,
   OauthAuthorizeRoute: OauthAuthorizeRoute,
+  OauthDeviceRoute: OauthDeviceRoute,
   ShareIdRoute: ShareIdRoute,
   OwnerIndexRoute: OwnerIndexRoute,
   DashboardIndexRoute: DashboardIndexRoute,

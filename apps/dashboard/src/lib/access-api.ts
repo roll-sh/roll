@@ -279,13 +279,8 @@ export interface Policy {
 /** The actions an admin may require approval for in people's tokens, strongest first. */
 export const APPROVABLE: Action[] = ["admin", "reveal", "deploy", "delete"];
 
-export interface Consent {
-  client_id: string;
-  redirect_uri: string;
-  code_challenge: string;
-  code_challenge_method?: string;
-  state?: string;
-  resource?: string;
+/** What a person allows a client: on the consent screen, or for a device signing in. */
+export interface Allowed {
   name?: string;
   rules: Rule[];
   expires_at?: number | null;
@@ -294,8 +289,29 @@ export interface Consent {
   ask_otherwise?: boolean;
 }
 
+export interface Consent extends Allowed {
+  client_id: string;
+  redirect_uri: string;
+  code_challenge: string;
+  code_challenge_method?: string;
+  state?: string;
+  resource?: string;
+}
+
+/** A device signing in (RFC 8628), as the person who entered its code sees it. */
+export interface DeviceRequest {
+  user_code: string;
+  client: { id: string; name: string; uri?: string | null };
+  scope?: string | null;
+  /** The network it asked from (`203.0.113.0/24`), to tell it isn't yours. */
+  network?: string | null;
+  created_at: number;
+  expires_at: number;
+}
+
 const token = (id: string) => `/v1/access/tokens/${encodeURIComponent(id)}`;
 const approval = (id: string) => `/v1/access/approvals/${encodeURIComponent(id)}`;
+const device = (code: string) => `/v1/access/oauth/devices/${encodeURIComponent(code.trim())}`;
 
 export interface AuditFilter {
   grant?: string;
@@ -397,6 +413,10 @@ export const accessApi = {
   client: (id: string) => call<OAuthClient>("GET", `/v1/access/oauth/clients/${encodeURIComponent(id)}`),
   /** The consent screen's answer: where to send the browser (the client's redirect, with a code). */
   authorize: (c: Consent) => call<{ redirect: string }>("POST", "/v1/access/oauth/authorize", c),
+  /** A device's request by the code its person typed (any case, with or without the dash). */
+  device: (code: string) => call<DeviceRequest>("GET", device(code)),
+  allowDevice: (code: string, a: Allowed) => call<{ grant_id: string; pending: boolean }>("POST", device(code), a),
+  denyDevice: (code: string) => call<null>("DELETE", device(code)),
   /** A search cluster's indices by name (search's own route; it wakes the cluster), for the builder. */
   /** Each product's tool count and context cost, for the connect panel (counts only). */
   toolsetCosts: () => call<{ products: ToolsetCost[] }>("GET", "/v1/mcp/toolsets").then((r) => r.products),

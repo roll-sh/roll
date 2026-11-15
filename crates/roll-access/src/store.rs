@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use serde_json::Value;
 
+mod device;
+pub use device::{DEVICE_TTL_MS, DeviceRequest, normalize_user_code, show_user_code};
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS grants (
     id TEXT PRIMARY KEY,
@@ -115,6 +118,18 @@ CREATE TABLE IF NOT EXISTS oauth_codes (
     challenge TEXT NOT NULL,
     resource TEXT,
     expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS oauth_devices (
+    hash TEXT PRIMARY KEY,
+    user_code TEXT NOT NULL UNIQUE,
+    client_id TEXT NOT NULL,
+    scope TEXT,
+    network TEXT,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    polled_at INTEGER,
+    grant_id TEXT,
+    denied INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;
 ";
 
@@ -255,6 +270,49 @@ pub struct Client {
 pub struct Issuer<'a> {
     pub created_by: &'a str,
     pub user: Option<&'a str>,
+}
+
+/// What a consent's grant must be, checked before its write.
+fn check_oauth_grant(new: &NewGrant) -> Result<()> {
+    check_name(&new.name)?;
+    check_rules(&new.rules)?;
+    parse_ip_allow(&new.ip_allow)?;
+    check_rate(new.rate_per_minute)
+}
+
+/// A consented client's grant, inside a write: unusable (no secret) until its code or device
+/// request is exchanged. The client is kept from then on (its signed id stops working after a
+/// day, a kept client doesn't).
+fn insert_oauth_grant(c: &code_sql::Conn<'_>, grant_id: &str, client: &Client, new: &NewGrant, by: Issuer<'_>, now: i64) -> Result<()> {
+    let Issuer { created_by, user } = by;
+    // The same room a token takes: everyone's, and its person's.
+    let count: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE revoked_at IS NULL AND kind <> 'workload'", (), |r| r.get(0))?;
+    if count as usize >= MAX_GRANTS {
+        return Err(Error::Conflict(format!("at most {MAX_GRANTS} tokens: revoke some first")));
+    }
+    if let Some(u) = user {
+        let theirs: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE user_id = ? AND revoked_at IS NULL AND kind <> 'workload'", [u], |r| r.get(0))?;
+        if theirs as usize >= USER_MAX_GRANTS {
+            return Err(Error::Conflict(format!("a person has at most {USER_MAX_GRANTS} live tokens and connections: revoke some first")));
+        }
+    }
+    let uris = serde_json::to_string(&client.redirect_uris).unwrap_or_default();
+    c.execute("INSERT INTO oauth_clients (id, name, uri, redirect_uris, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING", params![client.id, client.name, client.uri, uris, now])?;
+    let rules = serde_json::to_string(&new.rules).unwrap_or_default();
+    let ip = serde_json::to_string(&new.ip_allow).unwrap_or_default();
+    c.execute(
+        "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise, pending) VALUES (?, ?, 'oauth', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![grant_id, new.name.trim(), rules, new.expires_at, ip, created_by, now, client.id, new.rate_per_minute.map(i64::from), user, new.ask_otherwise, new.pending],
+    )?;
+    Ok(())
+}
+
+/// A connection's first access and refresh tokens, inside a write.
+fn insert_oauth_secrets(c: &code_sql::Conn<'_>, grant_id: &str, client_id: &str, access: &str, refresh: &str, now: i64) -> Result<()> {
+    c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'access', ?, ?)", params![hash(access), grant_id, now + ACCESS_TTL_MS, now])?;
+    c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'refresh', ?, ?)", params![hash(refresh), grant_id, now + REFRESH_TTL_MS, now])?;
+    c.execute("UPDATE oauth_clients SET last_used_at = ? WHERE id = ?", params![now, client_id])?;
+    Ok(())
 }
 
 /// What a token is made from. Code outside this crate builds it with `..Default::default()`, so
@@ -1609,40 +1667,12 @@ impl Store {
     /// The consent screen's grant, waiting for its code to be exchanged: stored without secrets.
     /// A code for `new`, and the grant it will be (pending, if a person's past the policy).
     pub fn issue_code(&self, client: &Client, new: &NewGrant, by: Issuer<'_>, redirect_uri: &str, challenge: &str, resource: Option<&str>) -> Result<(String, String)> {
-        let Issuer { created_by, user } = by;
-        check_name(&new.name)?;
-        check_rules(&new.rules)?;
-        parse_ip_allow(&new.ip_allow)?;
-        check_rate(new.rate_per_minute)?;
-        let now = code_sql::now_ms();
         let grant_id = new_id("tok");
         let code = new_secret("rlz_");
-        let rules = serde_json::to_string(&new.rules).unwrap_or_default();
-        let ip = serde_json::to_string(&new.ip_allow).unwrap_or_default();
-        let uris = serde_json::to_string(&client.redirect_uris).unwrap_or_default();
+        let now = code_sql::now_ms();
+        check_oauth_grant(new)?;
         self.db.write(|c| {
-            // The same room a token takes: everyone's, and its person's.
-            let count: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE revoked_at IS NULL AND kind <> 'workload'", (), |r| r.get(0))?;
-            if count as usize >= MAX_GRANTS {
-                return Err(Error::Conflict(format!("at most {MAX_GRANTS} tokens: revoke some first")));
-            }
-            if let Some(u) = user {
-                let theirs: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE user_id = ? AND revoked_at IS NULL AND kind <> 'workload'", [u], |r| r.get(0))?;
-                if theirs as usize >= USER_MAX_GRANTS {
-                    return Err(Error::Conflict(format!("a person has at most {USER_MAX_GRANTS} live tokens and connections: revoke some first")));
-                }
-            }
-            // A registered client is kept once a person consents to it (its signed id stops
-            // working after a day, but a kept client doesn't).
-            c.execute(
-                "INSERT INTO oauth_clients (id, name, uri, redirect_uris, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
-                params![client.id, client.name, client.uri, uris, now],
-            )?;
-            // The grant exists from now, unusable (no secret) until the code is exchanged.
-            c.execute(
-                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise, pending) VALUES (?, ?, 'oauth', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![grant_id, new.name.trim(), rules, new.expires_at, ip, created_by, now, client.id, new.rate_per_minute.map(i64::from), user, new.ask_otherwise, new.pending],
-            )?;
+            insert_oauth_grant(c, &grant_id, client, new, by, now)?;
             c.execute(
                 "INSERT INTO oauth_codes (hash, client_id, grant_id, redirect_uri, challenge, resource, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 params![hash(&code), client.id, grant_id, redirect_uri, challenge, resource, now + CODE_TTL_MS],
@@ -1687,9 +1717,7 @@ impl Store {
             {
                 return Err(Error::OAuth("invalid_target", "the code was issued for another resource".into()));
             }
-            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'access', ?, ?)", params![hash(&access), grant_id, now + ACCESS_TTL_MS, now])?;
-            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'refresh', ?, ?)", params![hash(&refresh), grant_id, now + REFRESH_TTL_MS, now])?;
-            c.execute("UPDATE oauth_clients SET last_used_at = ? WHERE id = ?", params![now, client_id])?;
+            insert_oauth_secrets(c, &grant_id, client_id, &access, &refresh, now)?;
             Ok(grant_id)
         })?;
         Ok((self.get(&grant_id)?, access, refresh))

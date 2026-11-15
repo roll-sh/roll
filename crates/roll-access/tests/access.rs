@@ -751,6 +751,72 @@ async fn oauth_connects_an_mcp_client() {
     assert!(g["revoked_why"].as_str().is_some_and(|w| w.contains("used again")), "{g}");
 }
 
+/// A device signs in with a code (RFC 8628, `roll login` over SSH): it registers without a
+/// redirect, gets a short code, polls (too fast is `slow_down`), a person enters the code and
+/// allows it, and its next poll takes the tokens, once. A token never looks a code up, wrong codes
+/// are capped per caller, and a refused device is told so.
+#[tokio::test]
+async fn a_device_signs_in_with_a_code() {
+    let d = Daemon::with(0, |c| c.device_interval = std::time::Duration::from_millis(200));
+    let (_, meta) = d.call("", Method::GET, "/.well-known/oauth-authorization-server", None).await;
+    assert!(meta["device_authorization_endpoint"].as_str().is_some_and(|e| e.ends_with("/v1/access/oauth/device_authorization")), "{meta}");
+    let (s, client) = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "client_name": "roll CLI", "redirect_uris": [], "grant_types": ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"] }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{client}");
+    let client_id = client["client_id"].as_str().unwrap().to_string();
+    let start = || {
+        let (d, client_id) = (&d, client_id.clone());
+        async move { d.form("/v1/access/oauth/device_authorization", &[("client_id", &client_id), ("scope", "development")]).await }
+    };
+    let (s, dev) = start().await;
+    assert_eq!(s, StatusCode::OK, "{dev}");
+    let user_code = dev["user_code"].as_str().unwrap().to_string();
+    assert!(user_code.len() == 9 && user_code.as_bytes()[4] == b'-', "{user_code}");
+    let device_code = dev["device_code"].as_str().unwrap().to_string();
+    let poll = |code: String| {
+        let client_id = client_id.clone();
+        let d = &d;
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", "urn:ietf:params:oauth:grant-type:device_code"), ("device_code", &code), ("client_id", &client_id)]).await }
+    };
+    assert_eq!(poll(device_code.clone()).await.1["error"], "authorization_pending");
+    assert_eq!(poll(device_code.clone()).await.1["error"], "slow_down", "polled within the interval");
+
+    // A token never signs a device in, whatever its rules.
+    let (token, _) = d.token(json!([{ "product": "access", "resources": "*", "actions": { "admin": "allow" } }]), json!({})).await;
+    assert_eq!(d.call(&token, Method::GET, &format!("/v1/access/oauth/devices/{user_code}"), None).await.0, StatusCode::FORBIDDEN);
+    // The person types it as they like; the page shows what asks and from where.
+    let typed = user_code.to_lowercase().replace('-', " ");
+    let (s, seen) = d.call(OPERATOR, Method::GET, &format!("/v1/access/oauth/devices/{}", urlencoding(&typed)), None).await;
+    assert_eq!((s, seen["client"]["name"].as_str(), seen["scope"].as_str()), (StatusCode::OK, Some("roll CLI"), Some("development")), "{seen}");
+    let allow = json!({ "rules": [{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }] });
+    let (s, ok) = d.call(OPERATOR, Method::POST, &format!("/v1/access/oauth/devices/{user_code}"), Some(allow.clone())).await;
+    assert_eq!(s, StatusCode::OK, "{ok}");
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/oauth/devices/{user_code}"), Some(allow)).await.0, StatusCode::NOT_FOUND, "a code is used once");
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let (s, tokens) = poll(device_code.clone()).await;
+    assert_eq!(s, StatusCode::OK, "{tokens}");
+    assert_eq!(tokens["grant_id"], ok["grant_id"]);
+    let access = tokens["access_token"].as_str().unwrap();
+    assert_eq!(d.call(access, Method::GET, "/v1/projects", None).await.0, StatusCode::OK);
+    assert_eq!(d.call(access, Method::DELETE, "/v1/projects/pa", None).await.0, StatusCode::FORBIDDEN, "only what was allowed");
+    assert_eq!(poll(device_code).await.1["error"], "invalid_grant", "the tokens are taken once");
+
+    // Refused: the device hears it.
+    let (_, dev) = start().await;
+    let refused = dev["user_code"].as_str().unwrap();
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/oauth/devices/{refused}"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(poll(dev["device_code"].as_str().unwrap().to_string()).await.1["error"], "access_denied");
+
+    // Guessing: ten wrong codes a minute, then 429 (the used code above was one).
+    for _ in 0..9 {
+        assert_eq!(d.call(OPERATOR, Method::GET, "/v1/access/oauth/devices/BCDF-GHJK", None).await.0, StatusCode::NOT_FOUND);
+    }
+    assert_eq!(d.call(OPERATOR, Method::GET, "/v1/access/oauth/devices/BCDF-GHJK", None).await.0, StatusCode::TOO_MANY_REQUESTS);
+}
+
+fn urlencoding(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>().replace('+', "%20")
+}
+
 /// A delivery: its headers and body.
 type Sent = (Vec<(String, String)>, Vec<u8>);
 
