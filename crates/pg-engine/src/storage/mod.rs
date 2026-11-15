@@ -946,18 +946,11 @@ impl Store {
         self.get_versions_with(keys, ts, false)
     }
 
-    /// The rows visible at `ts` under `keys` (strictly ascending) into `batch`, those that
-    /// exist, in their order, by reference (`Scan::fetch_sorted`); with their out-of-line
-    /// values put back when `resolve`.
-    pub fn get_sorted_into<K: AsRef<[u8]>>(&self, keys: &[K], ts: u64, resolve: bool, batch: &mut batch::RowBatch) -> Result<()> {
-        let (Some(first), Some(last)) = (keys.first(), keys.last()) else {
-            return Ok(());
-        };
-        // (Past every version of the last key: storage keys end in their version.)
-        let end = [last.as_ref(), &[0xFF; 9]].concat();
-        let mut s = Scan::new(self.view(), first.as_ref().to_vec(), end, ts, self.horizon_hint());
-        s.resolve = resolve;
-        s.fetch_sorted(keys, batch)
+    /// The rows visible at `ts` under `keys` (strictly ascending), each in its key's place
+    /// (None: no visible row), read together (`PointReader::get_sorted`); with their
+    /// out-of-line values put back when `resolve`.
+    pub fn get_sorted<K: AsRef<[u8]>>(&self, keys: &[K], ts: u64, resolve: bool) -> Result<Vec<Option<Bytes>>> {
+        self.point_reader(ts, false).get_sorted(keys, resolve)
     }
 
     fn get_versions_with(&self, keys: &[&[u8]], ts: u64, resolve: bool) -> Result<Vec<Option<(u64, Option<Bytes>)>>> {
@@ -3156,39 +3149,6 @@ impl Scan {
         }
         Ok(())
     }
-    /// The rows stored under `keys` (strictly ascending, within the scan's range) into
-    /// `batch`, those it has, in their order: the merge sought forward from key to key, a
-    /// source staying in its block while the next key is there (a sorted batch of point
-    /// reads without a lookup each). Rows are by reference, as `fill_batch` gives them.
-    pub fn fetch_sorted<K: AsRef<[u8]>>(&mut self, keys: &[K], batch: &mut batch::RowBatch) -> Result<()> {
-        debug_assert!(self.rows.is_none(), "a merging scan");
-        self.dead = None;
-        for k in keys {
-            let k = k.as_ref();
-            // (A key's versions are all after it: user keys are prefix-free.)
-            self.merge.seek(k);
-            self.decided = None;
-            self.newer = None;
-            self.skipped = 0;
-            let Some(i) = self.position()? else {
-                return Ok(());
-            };
-            let c = &mut self.merge.sources[i];
-            let (sk, v) = c.head().expect("a head entry");
-            if user_key(sk) != k {
-                continue;
-            }
-            if self.resolve && v.is_some_and(toast::has_external) {
-                let (mut sk, v) = c.take();
-                sk.truncate(sk.len().saturating_sub(8));
-                let v = toast::resolve(&self._view, &sk, v.expect("a value"), self.ts)?;
-                batch.push(&sk, v);
-                continue;
-            }
-            c.push_head(sk.len().saturating_sub(8), batch);
-        }
-        Ok(())
-    }
 }
 
 impl Iterator for Scan {
@@ -3657,11 +3617,16 @@ mod tests {
             }
             assert_eq!(batched, expect, "batched scan, {what}, ts {ts}");
             let wanted: Vec<Vec<u8>> = (0..400u32).step_by(2).map(key).collect();
-            let mut b = batch::RowBatch::default();
-            store.get_sorted_into(&wanted, ts, false, &mut b).unwrap();
-            let got: Vec<_> = std::iter::from_fn(|| b.take()).collect();
+            let got: Vec<_> = store.get_sorted(&wanted, ts, false).unwrap().into_iter().zip(&wanted).filter_map(|(v, k)| Some((k.clone(), v?))).collect();
             let want: Vec<_> = expect.iter().filter(|(k, _)| wanted.contains(k)).cloned().collect();
             assert_eq!(got, want, "sorted point reads, {what}, ts {ts}");
+            // (One reader for two batches: the second's first keys in the block it holds.)
+            let mut r = store.point_reader(ts, false);
+            let (lo, hi) = wanted.split_at(wanted.len() / 2);
+            let mut got = r.get_sorted(lo, false).unwrap();
+            got.extend(r.get_sorted(hi, false).unwrap());
+            let got: Vec<_> = got.into_iter().zip(&wanted).filter_map(|(v, k)| Some((k.clone(), v?))).collect();
+            assert_eq!(got, want, "sorted point reads by one reader, {what}, ts {ts}");
             // Point reads: the newest version at `ts`. (A deletion every snapshot sees may
             // be gone, as compaction drops it: no version and a deletion read alike.)
             let keys: Vec<Vec<u8>> = model.keys().cloned().collect();
