@@ -1,5 +1,5 @@
 import { Bot, Eye, KeyRound, Lock, Moon, Plus, Search, Settings } from "lucide-react";
-import { useNavigate } from "@tanstack/react-router";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import type { ResourceKind, WorkspaceProject } from "@/lib/workspace-api";
@@ -64,7 +64,9 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
   const [selected, setSelected] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [settings, setSettings] = useState(false);
+  // `?settings=services` (a service's Settings links here) opens the project's settings there.
+  const asked = useLocation({ select: (l) => (l.search as { settings?: string }).settings });
+  const [settings, setSettings] = useState(asked === "services");
   /** Where a new service's card goes while its sheet is open. */
   const [newService, setNewService] = useState<{ x: number; y: number } | null>(null);
   const live = useProjectServices(project.id, ws.kinds.has("service"));
@@ -323,7 +325,7 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
           {usd(spend.usd)} this month · ≈ {usd(projectMonth(spend.usd, month))} by {month.end}
         </span>
       </footer>
-      <ProjectSettings project={project} open={settings} onClose={() => setSettings(false)} />
+      <ProjectSettings project={project} open={settings} initialTab={asked === "services" ? "apps" : "general"} onClose={() => setSettings(false)} />
     </AppShell>
   );
 }

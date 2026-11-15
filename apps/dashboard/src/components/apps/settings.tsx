@@ -3,13 +3,11 @@ import { useReducedMotion } from "@roll/brand";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { appsApi, SERVICE_NAME, type Build, type Environment, type Prices, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
-import { btn, Confirm, danger, input, Panel, primary } from "../ui";
+import { btn, Confirm, danger, input, Panel, panel, primary } from "../ui";
+import { Link } from "@/components/link";
 import { ActivityPanel } from "./activity";
-import { DrainsPanel } from "./drains";
 import { DuplicatePanel } from "./duplicate";
 import { EnvironmentPanel, InstancesPanel } from "./environment";
-import { NotificationsPanel } from "./notifications";
-import { SpendPanel } from "./spend";
 import { resourceKey } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { CPU, MEMORY, mb, type Runner } from "./shared";
@@ -274,11 +272,7 @@ export function SettingsTab({
     ...(web ? ([["networking", "Networking"], ["rollout", "Rollout"]] as [string, string][]) : []),
     ...(env ? ([["environment", "Environment"]] as [string, string][]) : []),
   ];
-  const project: [string, string][] = [
-    ["notifications", "Notifications"],
-    ["drains", "Log drains"],
-    ["spend", "Spend limits"],
-  ];
+  const project: [string, string][] = [["project", "Notifications and limits"]];
 
   return (
     <div className="lg:grid lg:grid-cols-[9.5rem_minmax(0,1fr)] lg:gap-8">
@@ -648,16 +642,14 @@ export function SettingsTab({
           </Anchor>
         )}
 
-        <Anchor id="notifications">
-          <NotificationsPanel project={service.project} projectName={projectName} runner={runner} />
-        </Anchor>
-
-        <Anchor id="drains">
-          <DrainsPanel project={service.project} projectName={projectName} runner={runner} />
-        </Anchor>
-
-        <Anchor id="spend">
-          <SpendPanel project={service.project} projectName={projectName} runner={runner} />
+        {/* The project's, not this service's: said once, where they live. */}
+        <Anchor id="project">
+          <section className={`${panel} flex flex-wrap items-center justify-between gap-3 px-5 py-4`}>
+            <p className="text-[13px] text-muted">Notifications, log drains and spend limits are {projectName}'s, shared by its services.</p>
+            <Link href={`/dashboard/projects/${service.project}?settings=services`} className={btn}>
+              {projectName}'s settings
+            </Link>
+          </section>
         </Anchor>
 
         <Anchor id="activity">

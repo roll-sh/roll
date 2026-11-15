@@ -52,8 +52,12 @@ export function describe(e: AppEvent): string {
     case "alert.errors":
     case "alert.latency":
     case "alert.capacity":
-    case "alert.log":
-      return `alerted: ${e.kind.slice(6)} at ${String(d.value ?? d.count ?? "")} (the alert is at ${String(d.threshold ?? "")})${where}`;
+    case "alert.log": {
+      // Each alert's unit: a share of the memory limit, of requests, milliseconds, or lines.
+      const unit = e.kind === "alert.latency" ? " ms" : e.kind === "alert.log" ? " lines" : "%";
+      const what = { "alert.memory": "memory", "alert.errors": "5xx answers", "alert.latency": "p95 latency", "alert.capacity": "requests over capacity", "alert.log": `lines matching ${String(d.pattern ?? "")}` }[e.kind];
+      return `alerted: ${what} at ${String(d.value ?? d.count ?? "")}${unit} (the alert is at ${String(d.threshold ?? "")}${unit})${where}`;
+    }
     case "alert.resolved":
       return `cleared the ${String(d.alert ?? "alert.").slice(6)} alert${where}`;
     case "domain.active":
@@ -98,7 +102,7 @@ export function ActivityPanel({ service }: { service: string }) {
               <li key={e.seq} className="flex gap-3 px-5 py-2 text-[12.5px]">
                 <span className="shrink-0 font-mono text-[11.5px] text-subtle tabular-nums">{clock(e.at, true)}</span>
                 <span className="min-w-0 flex-1">
-                  <span className="text-fg">{who ?? "someone"}</span> <span className="text-muted">{describe(e)}</span>
+                  <span className="text-fg">{who ?? "the operator"}</span> <span className="text-muted">{describe(e)}</span>
                 </span>
               </li>
             );
@@ -130,7 +134,7 @@ export function EventsTab({ service, changed }: { service: string; changed: stri
         <ul className="divide-y divide-line">
           {events.map((e) => {
             const bad = /failed|crash_loop|alert\.|expired|spend\.limit/.test(e.kind);
-            const who = e.kind.startsWith("audit.") ? (typeof e.data?.actor === "string" ? (e.data.actor as string) : "someone") : "roll";
+            const who = e.kind.startsWith("audit.") ? (typeof e.data?.actor === "string" ? (e.data.actor as string) : "the operator") : "roll";
             return (
               <li key={e.seq} className="flex gap-3 px-5 py-2.5 text-[12.5px]">
                 <span className="shrink-0 font-mono text-[11.5px] text-subtle tabular-nums">{clock(e.at, true)}</span>

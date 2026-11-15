@@ -2111,14 +2111,29 @@ fn human(v: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// An environment's or instance's state in words: a web service that's stopped is asleep (the
+/// next request wakes it), a frozen one resumes in milliseconds, `none` was never deployed.
+fn state_word(state: &str, kind: &str) -> String {
+    match (state, kind) {
+        ("stopped", "web") => "asleep".into(),
+        ("stopped", "cron") => "idle".into(),
+        ("suspended", _) => "frozen".into(),
+        ("none", _) => "not deployed".into(),
+        (s, _) => s.to_string(),
+    }
+}
+
 fn print_service(v: &Value) {
-    println!("{}  {}  {}", s(&v["id"]), s(&v["name"]), s(&v["run"]["type"]));
+    let kind = s(&v["run"]["type"]);
+    println!("{:<16} {:<7} {}", s(&v["name"]), kind, s(&v["id"]));
     for e in v["environments"].as_array().into_iter().flatten() {
         let latest = match e["latest"]["status"].as_str() {
             Some(st) if st != "active" => format!("  (latest deploy {st})"),
             _ => String::new(),
         };
-        println!("  {:<12} {:<10} {}{latest}", s(&e["name"]), s(&e["state"]), s(&e["url"]));
+        // Only a web service answers at a URL (a worker's and a cron's would only 404).
+        let url = if kind == "web" { s(&e["url"]) } else { String::new() };
+        println!("  {:<12} {:<13} {url}{latest}", s(&e["name"]), state_word(&s(&e["state"]), &kind));
     }
 }
 
@@ -2143,8 +2158,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             if !json_out {
                 print_service(&svc);
                 let e = api.get(&env_path(&svc, &target.env)).await?;
+                let kind = s(&svc["run"]["type"]);
                 for i in e["instances"].as_array().into_iter().flatten() {
-                    println!("    {}  {}  {} in flight", s(&i["id"]), s(&i["state"]), s(&i["in_flight"]));
+                    println!("    {}  {}  {} in flight", s(&i["id"]), state_word(&s(&i["state"]), &kind), s(&i["in_flight"]));
                 }
                 return Ok(());
             }

@@ -376,6 +376,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
   const envName = env?.name ?? envParam ?? mainEnvironment(service)?.name ?? PRODUCTION;
   const st = env?.state ?? "none";
   const asleep = st === "stopped" || st === "suspended";
+  const awake = env?.instances.filter((i) => i.state === "running" || i.state === "waking" || i.state === "deploying").length ?? 0;
   const localUrl = env?.port && typeof window !== "undefined" ? `http://${window.location.hostname}:${env.port}` : null;
   const deploy = (body: NewDeploy = {}) => runner.run("deploy", () => appsApi.deploy(service.id, envName, body));
 
@@ -416,7 +417,12 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           <SureButton className={`${btn} shrink-0`} disabled={busy || !env?.active} sure="Sure? Restart" onSure={() => runner.run("restart", () => appsApi.restart(service.id, envName))} title="Replace the instances with fresh ones">
             <RotateCw className="size-3.5" /> Restart
           </SureButton>
-          {upload ? (
+          {upload && !env?.active ? (
+            // Nothing to redeploy yet: its first deploy is a folder (or `roll up`).
+            <button className={`${primary} !py-1 !text-[12px]`} disabled={busy} onClick={() => go({ tab: "deployments" })} title="Drop a folder on Deployments, or run roll up in its directory">
+              <Rocket className="size-3.5" /> Deploy a folder
+            </button>
+          ) : upload ? (
             <button className={`${primary} !py-1 !text-[12px]`} disabled={busy || !env?.active} onClick={redeploy} title="Run the live image again with the current variables and settings (new code: roll up)">
               <Rocket className="size-3.5" /> Redeploy
             </button>
@@ -438,11 +444,12 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           <h1 className="truncate text-2xl font-semibold tracking-[-0.04em]">{service.name}</h1>
           <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-muted">
             <StateBadge state={st} />
-            {env && env.instances.length > 0 && (
+            {/* What's up now: a sleeping or frozen instance isn't one serving. */}
+            {awake > 0 && (
               <>
                 <span className="text-subtle">·</span>
                 <span className="font-mono text-[12px]">
-                  {env.instances.length} {env.instances.length === 1 ? "instance" : "instances"}
+                  {awake} {awake === 1 ? "instance" : "instances"}
                 </span>
               </>
             )}

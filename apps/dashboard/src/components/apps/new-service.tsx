@@ -11,6 +11,7 @@ import { CopyField, Head, Label, Rows } from "../workspace/inspector";
 import { KindTile } from "../workspace/kind";
 import { FolderDeploy } from "./folder-deploy";
 import { TemplateList } from "./deploy-repo";
+import { useInstallLine } from "@/lib/install-line";
 
 type From = "repo" | "image" | "upload" | "file";
 
@@ -58,6 +59,7 @@ export function NewServiceSheet({
   onImported: (made: Service[]) => void;
 }) {
   const [from, setFrom] = useState<From>("repo");
+  const install = useInstallLine();
   const [repos, setRepos] = useState<Repo[] | null>(null);
   const [reposError, setReposError] = useState<string | null>(null);
   const [repo, setRepo] = useState("");
@@ -323,6 +325,8 @@ export function NewServiceSheet({
             />
             <Label>From the app's directory</Label>
             <CopyField shown={`roll up --project ${shellQuote(project.name)}`} value={`roll up --project ${shellQuote(project.name)}`} />
+            <p className="mt-2 text-[11.5px] text-subtle">No CLI yet? Install it, then sign it in:</p>
+            <CopyField shown={install} value={`${install}\nroll login`} />
             <p className="mt-2 text-[11.5px] leading-relaxed text-muted">
               Makes a service named after the directory in {project.name}, uploads the tree and follows the build. Its card shows up here; run it again to deploy what changed.
             </p>
