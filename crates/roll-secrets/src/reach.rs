@@ -106,7 +106,10 @@ impl Secrets {
         let tokens = all
             .into_iter()
             .filter_map(|g| {
-                let actions = granted(&g, project, slug, &path);
+                // As each of its requests is judged here: a person's own token only within their own
+                // projects (a token that reaches nothing here isn't listed, nor its name or person).
+                let grants = self.grant_grants(&g).ok()?;
+                let actions: Vec<Action> = ACTIONS.into_iter().filter(|a| grants.allows(*a, &Scope::at(project, slug, &path))).collect();
                 (!actions.is_empty()).then(|| Holder { id: g.id.to_string(), name: g.name.to_string(), actions, expires_at: None, last_used_at: None, created_by: g.user.as_deref().unwrap_or("operator").to_string() })
             })
             .collect();
