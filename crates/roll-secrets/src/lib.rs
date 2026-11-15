@@ -443,6 +443,9 @@ impl Secrets {
         db.ensure_schema(pki::SCHEMA)?;
         db.ensure_schema(ssh::SCHEMA)?;
         db.ensure_schema(aws::SCHEMA)?;
+        // An audit sink's format and its SIEM's token, sealed (sinks.rs): absent is roll's own.
+        db.add_column("audit_sinks", "format", "TEXT")?;
+        db.add_column("audit_sinks", "token", "BLOB")?;
         db.ensure_schema(issuer::SCHEMA)?;
         db.ensure_schema(clouds::SCHEMA)?;
         db.ensure_schema(iam::SCHEMA)?;

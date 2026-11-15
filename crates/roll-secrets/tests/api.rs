@@ -106,6 +106,14 @@ impl roll_secrets::Deliver for Sent {
         self.0.lock().unwrap().push(body.clone());
         Ok(())
     }
+    /// A SIEM's format: what it was sent with (the token as rolld would put it in a header).
+    fn post_format(&self, url: &str, id: &str, secret: &Secret, format: &str, token: Option<&Secret>, body: &Value) -> roll_secrets::Result<()> {
+        if format == "roll" {
+            return self.post(url, id, secret, body);
+        }
+        self.0.lock().unwrap().push(json!({ "format": format, "token": token.map(|t| t.expose().to_string()), "events": body["events"] }));
+        Ok(())
+    }
     fn get(&self, url: &str, _: usize) -> roll_secrets::Result<Vec<u8>> {
         let doc = match url.strip_prefix(ISSUER) {
             Some("/.well-known/openid-configuration") => json!({ "issuer": ISSUER, "jwks_uri": format!("{ISSUER}/keys") }),
@@ -1047,6 +1055,19 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     let actions: Vec<&str> = sent[0]["events"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
     assert_eq!(actions, ["sink.create", "secrets.write", "secrets.export"]);
     assert!(!serde_json::to_string(&sent).unwrap().contains("sk_live_never_sent"));
+    // A SIEM's own format with its token, sealed: never shown again, sent only with the batch.
+    assert_eq!(api.call(Method::POST, "/audit/sinks", Some(json!({ "url": "https://splunk.example:8088/services/collector/event", "format": "splunk" }))).await.0, StatusCode::BAD_REQUEST, "a token is needed");
+    let splunk = api.ok(Method::POST, "/audit/sinks", Some(json!({ "url": "https://splunk.example:8088/services/collector/event", "format": "splunk", "token": "hec-token-1" }))).await;
+    assert_eq!(splunk["format"], "splunk");
+    assert!(!api.ok(Method::GET, "/audit/sinks", None).await.to_string().contains("hec-token-1") && !splunk.to_string().contains("hec-token-1"));
+    api.set("production", "AFTER", "x-after").await;
+    api.db.write(|c| c.execute("UPDATE audit SET at = at - 60000", ())).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    let sent = api.sent.0.lock().unwrap().clone();
+    let to_splunk = sent.iter().find(|b| b["format"] == "splunk").expect("a splunk batch");
+    assert_eq!(to_splunk["token"], "hec-token-1");
+    assert!(to_splunk["events"].as_array().unwrap().iter().any(|e| e["action"] == "secrets.write"));
     // Or a roll bucket: of the project's own canvas only.
     let (s, _) = api.call(Method::POST, "/audit/sinks", Some(json!({ "url": "bucket:audit-archive" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
