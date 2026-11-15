@@ -318,6 +318,10 @@ pub struct Build {
     /// stage isn't what runs (Fly's and Render's).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// System packages the generated Dockerfile installs (Railpack's `aptPkgs`, Heroku's
+    /// Aptfile): apt or apk names, in every stage built on an image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packages: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,6 +353,9 @@ impl Build {
         {
             return Err(Error::BadRequest("build.target is a Dockerfile stage's name: letters, digits, _, - and . (at most 64)".into()));
         }
+        if let Some(p) = &self.packages {
+            apps_build::packages::check(p).map_err(|why| Error::BadRequest(format!("build.{why}")))?;
+        }
         Ok(())
     }
 
@@ -363,6 +370,7 @@ impl Build {
             build: self.build.clone(),
             start: self.start.clone(),
             spa: self.spa,
+            packages: self.packages.clone().unwrap_or_default(),
             build_env: Vec::new(),
             process: None,
         }

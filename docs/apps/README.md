@@ -85,8 +85,17 @@ every deployment is immutable with instant rollback.
   command. A multi-stage Dockerfile whose last stage isn't what runs is built at its stage with
   `build.target` (`--target`, a stage's name and never a flag; the tree's own Dockerfile only;
   Fly's `build.target`, Render's Docker target; `docker.rs::a_dockerfiles_stage_is_built_by_its_target`).
+- **System packages** (Railpack's `aptPkgs`, Heroku's Aptfile): `build.packages` or roll.toml
+  `[app] packages = ["ffmpeg", "chromium"]` (Settings → Build, `roll apps set --packages`), so
+  an app that needs ffmpeg, Chromium or libvips doesn't need a Dockerfile. A generated
+  Dockerfile installs them after each `FROM` of an image (a stage built on an earlier one has
+  them), with apt (`--no-install-recommends`, the lists removed) or apk on an Alpine image; the
+  plan's notes name them. A name is lowercase letters, digits and `+ - . : = ~ _` (a pinned
+  `libvips42=8.14.1-3` too), at most 50, so nothing in one is a shell's. A static site (no
+  container) and a distroless runtime (Go's, no package manager) refuse them; the tree's own
+  Dockerfile is left alone (it says what it installs).
 - **Config as code** (`roll.toml` `[app]` in the service's root, like `railway.json`): `builder`,
-  `dockerfile`, `install`, `build`, `start`, `pre_deploy`, `health_path`, `watch`. Read at each build;
+  `dockerfile`, `install`, `build`, `start`, `pre_deploy`, `health_path`, `watch`, `packages`. Read at each build;
   what it sets wins over the service's settings and is named in the build log and the plan's
   notes (`POST /v1/apps/plan` shows it too). It's checked as the API checks settings, an unknown
   key is an error (a typo never silently does nothing), and it must be a regular file. The
@@ -1900,55 +1909,52 @@ build; a drain naming a deleted service couldn't be edited; route groups filled 
 lines; the pre-deploy container had no `ROLL_INSTANCE`; another environment's routes stayed on
 the charts).
 
-1. **System packages for the automatic builder** (Railpack's `aptPkgs`, Heroku's Aptfile):
-   `[app] packages = ["ffmpeg"]` and `build.packages`, installed in the runtime stage, so an app
-   that needs `ffmpeg` or Chromium doesn't need a Dockerfile.
-2. **Schedules on any service** (Heroku Scheduler, Vercel crons): a schedule that runs a
+1. **Schedules on any service** (Heroku Scheduler, Vercel crons): a schedule that runs a
    command as a job of the live deployment, without a separate cron service.
-3. **Volume fullness and egress in Metrics**, and a `volume.full` alert (Railway's and Render's
+2. **Volume fullness and egress in Metrics**, and a `volume.full` alert (Railway's and Render's
    disk charts): a volume that fills up silently takes its database down.
-4. **Log filters by a JSON line's fields** (`level:error user_id:42`; Railway's `@attr:value`,
+3. **Log filters by a JSON line's fields** (`level:error user_id:42`; Railway's `@attr:value`,
    Cloud Run's `jsonPayload`), on the Logs tab, the API and `roll apps logs --where`.
-5. **The CLI's rough edges**: `roll apps vars --deploy`; `roll up` saying when it reuses a
+4. **The CLI's rough edges**: `roll apps vars --deploy`; `roll up` saying when it reuses a
    project of the directory's name, and not taking a 401 for "no project"; `roll apps cp` (files
    to and from an instance, Fly's `sftp`); shell completions.
-6. **A "deploy to roll" link** with variables asked for or generated (Heroku's `app.json`
+5. **A "deploy to roll" link** with variables asked for or generated (Heroku's `app.json`
    `generator: secret`, Render's `generateValue`, Railway's templates).
-7. **Drag and drop a folder to deploy it** (Netlify Drop), for static sites first.
-8. *Waiting on accounts' owner (docs/accounts.md lists it).* **`roll login`**: a browser sign-in
+6. **Drag and drop a folder to deploy it** (Netlify Drop), for static sites first.
+7. *Waiting on accounts' owner (docs/accounts.md lists it).* **`roll login`**: a browser sign-in
    whose session the CLI keeps, as `railway login` and `fly auth login` do.
-9. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+8. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-10. **Region**: the region shown on the overview and each environment, defaulting to the project's
+9. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-11. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+10. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-12. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+11. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-13. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+12. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-14. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+13. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-15. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-16. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+14. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+15. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-17. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+16. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-18. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+17. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-19. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+18. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-20. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+19. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

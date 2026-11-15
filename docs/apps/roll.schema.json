@@ -206,6 +206,15 @@
         },
         "run": {
           "$ref": "#/definitions/run"
+        },
+        "packages": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9+\\-.:=~_]{0,99}$"
+          },
+          "description": "System packages the generated Dockerfile installs (apt, or apk on Alpine): ffmpeg, chromium, libvips42."
         }
       }
     },
@@ -240,6 +249,9 @@
         },
         "spa": {
           "$ref": "#/definitions/settings/properties/spa"
+        },
+        "packages": {
+          "$ref": "#/definitions/settings/properties/packages"
         },
         "run": {
           "$ref": "#/definitions/settings/properties/run"
@@ -287,6 +299,9 @@
         },
         "spa": {
           "$ref": "#/definitions/settings/properties/spa"
+        },
+        "packages": {
+          "$ref": "#/definitions/settings/properties/packages"
         },
         "run": {
           "$ref": "#/definitions/settings/properties/run"

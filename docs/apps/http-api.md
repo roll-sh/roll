@@ -164,6 +164,10 @@ type Build = {
   watch?: string[];
   spa?: boolean;            // a single-page app (a page path with no file answers index.html); unset: detected
   target?: string;          // the tree's own Dockerfile's stage to build (--target): letters, digits, _ - . (64 at most)
+  /** System packages the generated Dockerfile installs, apt (or apk on Alpine) in every stage built on an image:
+   *  at most 50 names of lowercase letters, digits and + - . : = ~ _; refused for a static site and a
+   *  distroless runtime, left to the tree's own Dockerfile. roll.toml `[app] packages` wins over it. */
+  packages?: string[];
 };
 
 type Run = {

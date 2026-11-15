@@ -66,6 +66,8 @@ pub struct AppConfig {
     pub watch: Option<Vec<String>>,
     /// A single-page app.
     pub spa: Option<bool>,
+    /// System packages the generated Dockerfile installs (`["ffmpeg"]`).
+    pub packages: Option<Vec<String>>,
     /// Run settings ([`RUN_KEYS`], as the API's `run`).
     pub run: Option<toml::Table>,
     /// Per environment, the same keys again (no `environments` in them), applied last.
@@ -141,6 +143,9 @@ pub fn parse(text: &str) -> Result<Option<AppConfig>, String> {
         all.push((name, e));
     }
     for (name, e) in &all {
+        if let Some(p) = &e.packages {
+            crate::packages::check(p).map_err(|why| format!("roll.toml [{name}]: {why}"))?;
+        }
         if e.screenshots.is_some() && name != "app.previews" {
             return Err(format!("roll.toml: screenshots go in [app.previews.screenshots], not [{name}]"));
         }
@@ -202,6 +207,9 @@ impl AppConfig {
         if let Some(v) = self.spa {
             set("spa", &v.to_string());
         }
+        if let Some(p) = &self.packages {
+            set("packages", &p.join(", "));
+        }
         for (k, v) in self.run.iter().flatten() {
             set(&format!("run.{k}"), &v.to_string());
         }
@@ -228,6 +236,9 @@ impl AppConfig {
             }
             if c.spa.is_some() {
                 o.spa = c.spa;
+            }
+            if let Some(p) = &c.packages {
+                o.packages.clone_from(p);
             }
             said.extend(c.lines(&scope));
         }
@@ -278,6 +289,7 @@ mod tests {
             health_path: s.clone(),
             watch: Some(vec![]),
             spa: Some(true),
+            packages: Some(vec![]),
             run: Some(toml::Table::new()),
             environments: Some(Default::default()),
             previews: Some(Box::default()),

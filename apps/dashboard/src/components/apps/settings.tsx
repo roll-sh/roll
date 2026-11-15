@@ -31,6 +31,8 @@ interface Form {
   buildStart: string;
   /** Watch paths, comma-separated. */
   watch: string;
+  /** System packages, comma- or space-separated. */
+  packages: string;
   type: Run["type"];
   port: string;
   start: string;
@@ -88,6 +90,7 @@ export function formOf(s: Service): Form {
     build: str(s.build.build),
     buildStart: str(s.build.start),
     watch: (s.build.watch ?? []).join(", "),
+    packages: (s.build.packages ?? []).join(" "),
     type: s.run.type,
     port: str(s.run.port),
     start: str(s.run.start),
@@ -154,6 +157,10 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.watch !== before.watch) {
     const list = f.watch.split(/[,\n]/).map((p) => p.trim()).filter(Boolean);
     build.watch = list.length ? list : null;
+  }
+  if (f.packages !== before.packages) {
+    const list = f.packages.split(/[\s,]+/).filter(Boolean);
+    build.packages = list.length ? list : null;
   }
   if (Object.keys(build).length) patch.build = build;
   const run: Reset<Run> = {};
@@ -330,6 +337,9 @@ export function SettingsTab({
               <Field label="Build command">{t("build", "detected")}</Field>
               <Field label="Image's start command" hint="baked into the image at the build">
                 {t("buildStart", "detected")}
+              </Field>
+              <Field label="System packages" hint="installed in the generated image (apt, or apk on Alpine)">
+                {t("packages", "ffmpeg chromium")}
               </Field>
               {form.sourceKind === "repo" && (
                 <Field label="Watch paths" hint="a push deploys only when it changes one">

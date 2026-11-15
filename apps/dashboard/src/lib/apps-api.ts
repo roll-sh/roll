@@ -41,6 +41,8 @@ export interface Build {
   spa?: boolean;
   /** The Dockerfile's stage to build (a multi-stage one whose last stage isn't what runs). */
   target?: string;
+  /** System packages the generated Dockerfile installs (apt, or apk on Alpine): `ffmpeg`, `chromium`. */
+  packages?: string[];
 }
 
 export type ServiceType = "web" | "worker" | "cron";

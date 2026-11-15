@@ -316,6 +316,10 @@ pub enum AppsCmd {
         /// `none`: every push.
         #[arg(long)]
         watch: Option<String>,
+        /// System packages the generated Dockerfile installs (comma-separated: `ffmpeg,chromium`;
+        /// apt, or apk on Alpine); `none`: no more.
+        #[arg(long)]
+        packages: Option<String>,
         /// A gradual rollout: the shares of requests a new deployment takes in turn (`10,50`);
         /// `none` switches at once.
         #[arg(long, value_name = "PERCENTS")]
@@ -2044,7 +2048,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() {
@@ -2103,6 +2107,16 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 Some(w) => {
                     let paths: Vec<&str> = w.split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
                     build.insert("watch".into(), json!(paths));
+                }
+            }
+            match packages.as_deref() {
+                None => {}
+                Some("none") => {
+                    build.insert("packages".into(), Value::Null);
+                }
+                Some(p) => {
+                    let names: Vec<&str> = p.split([',', ' ']).map(str::trim).filter(|n| !n.is_empty()).collect();
+                    build.insert("packages".into(), json!(names));
                 }
             }
             for (k, v) in [("builder", builder.map(Value::from)), ("dockerfile", text(dockerfile)), ("target", text(stage)), ("install", text(install)), ("build", text(build_command)), ("start", text(build_start))] {

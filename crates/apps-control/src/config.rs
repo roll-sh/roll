@@ -75,6 +75,9 @@ fn apply_one(c: &AppConfig, build: &Build, run: &Run) -> Result<(Build, Run)> {
     if c.spa.is_some() {
         b.spa = c.spa;
     }
+    if c.packages.is_some() {
+        b.packages.clone_from(&c.packages);
+    }
     if let Some(t) = &c.run {
         let patch = serde_json::to_value(t).map_err(|e| Error::BadRequest(format!("roll.toml: {e}")))?;
         r = r.merged(Some(&patch)).map_err(|e| Error::BadRequest(format!("roll.toml [app.run]: {e}")))?;
