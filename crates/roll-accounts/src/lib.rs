@@ -510,6 +510,11 @@ impl Accounts {
         self.db.read(|c| load_user(c, id))?.ok_or_else(|| Error::NotFound(format!("no user {id}")))
     }
 
+    /// The roll code owner a user has (its id), if any.
+    pub fn code_owner_id(&self, user: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT code_owner_id FROM users WHERE id = ?", [user], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
+    }
+
     pub fn users(&self) -> Result<Vec<User>> {
         let ids = self.db.read(|c| c.query("SELECT id FROM users ORDER BY created_at, id", (), |r| r.get::<_, String>(0)))?;
         ids.iter().map(|id| self.user(id)).collect()

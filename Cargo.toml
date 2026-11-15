@@ -49,6 +49,7 @@ url = "2"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-dynamodb = "1"
 aws-sdk-s3 = "1"
+aws-sdk-kms = "1"
 aws-sdk-sesv2 = "1"
 # Tests only: endpoints that make the SDK sign with SigV4a.
 aws-smithy-types = "1"
@@ -153,8 +154,9 @@ roll-previews = { path = "crates/roll-previews" }
 apps-build = { path = "crates/apps-build" }
 apps-control = { path = "crates/apps-control" }
 roll-access = { path = "crates/roll-access" }
-roll-net = { path = "crates/roll-net" }
 roll-mcp = { path = "crates/roll-mcp" }
+roll-net = { path = "crates/roll-net" }
+roll-secrets = { path = "crates/roll-secrets" }
 code-store = { path = "crates/code-store" }
 code-git = { path = "crates/code-git" }
 code-github = { path = "crates/code-github" }
@@ -178,6 +180,9 @@ aes-gcm = "0.10"
 # Endpoint keys sealed to a daemon (agent-host `endpoints.rs`): X25519 and HKDF.
 curve25519-dalek = "4"
 hkdf = "0.12"
+# GitHub Actions secrets are libsodium sealed boxes (code-github `seal_secret`).
+crypto_box = { version = "0.9", features = ["seal"] }
+blake2 = "0.10"
 toml = "1"
 http-body-util = "0.1"
 ignore = "0.4"

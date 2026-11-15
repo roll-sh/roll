@@ -1,9 +1,10 @@
 import { RollLogo } from "@roll/brand";
 import { GitBranch, House, KeyRound, Plus, Search } from "lucide-react";
 import { useLocation } from "@tanstack/react-router";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import { requestSignIn } from "@/lib/code-token";
+import { cachedHealth } from "@/lib/secrets-health-cache";
 import { hideAgents } from "@/lib/agents-surface";
 import { monthOf, projectMonth, usd } from "@/lib/workspace-resources";
 import { spendOf, useWorkspace } from "@/lib/workspace-store";
@@ -142,17 +143,20 @@ function Projects({ pathname }: { pathname: string }) {
           )
         ) : null}
         {ws.projects.map((p) => {
-          const active = pathname === `/dashboard/projects/${p.id}`;
+          const base = `/dashboard/projects/${p.id}`;
+          const inside = pathname === base || pathname.startsWith(`${base}/`);
+          const active = pathname === base;
+          const secrets = pathname === `${base}/secrets`;
           const spend = spendOf(ws, p.resources);
           const staged = ws.staged[p.id] ?? [];
           const repos = new Set(p.resources.filter((r) => r.kind === "repo").map((r) => r.ref));
           const working = agents && repos.size ? threadsOf(agents, repos).filter((t) => t.status !== "idle").length : 0;
           return (
+            <div key={p.id}>
             <Link
-              key={p.id}
-              href={`/dashboard/projects/${p.id}`}
+              href={base}
               onClick={() => hideAgents()}
-              className={`${row} ${active ? "border-line-2 bg-raised inset-shadow-highlight" : "border-transparent hover:bg-white/[0.03]"}`}
+              className={`${row} ${active ? "border-line-2 bg-raised inset-shadow-highlight" : inside ? "border-transparent bg-white/[0.03]" : "border-transparent hover:bg-white/[0.03]"}`}
             >
               <ProjectIcon project={p} className="size-6" />
               <span className="min-w-0 flex-1 leading-tight">
@@ -176,6 +180,20 @@ function Projects({ pathname }: { pathname: string }) {
               </span>
               <span className="font-mono text-[10.5px] text-subtle">{p.resources.length ? usd(spend.usd) : ""}</span>
             </Link>
+            {inside && (
+              <Link
+                href={`${base}/secrets`}
+                onClick={() => hideAgents()}
+                className={`fade-in mt-px ml-[1.375rem] flex h-6 items-center gap-1.5 rounded-md border-l border-line-2 pl-3 text-[12px] transition-colors ${
+                  secrets ? "text-fg" : "text-muted hover:text-fg"
+                }`}
+              >
+                <KeyRound className={`size-3 ${secrets ? "text-accent" : ""}`} />
+                Secrets
+                <SecretsToFix project={p.id} at={pathname} />
+              </Link>
+            )}
+            </div>
           );
         })}
         {ws.status === "ready" && !ws.projects.length && (
@@ -188,5 +206,27 @@ function Projects({ pathname }: { pathname: string }) {
         )}
       </div>
     </>
+  );
+}
+
+/** How many of a project's secrets findings need fixing now (expired, missing, exposed), looked at
+ *  again as the page changes (at most every 30 seconds); nothing while it's none or can't be read. */
+function SecretsToFix({ project, at }: { project: string; at: string }) {
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    let live = true;
+    cachedHealth(project).then(
+        (found) => live && setN(found.filter((f) => f.issue === "expired" || f.issue === "missing" || f.issue === "exposed").length),
+        () => live && setN(0),
+      );
+    return () => {
+      live = false;
+    };
+  }, [project, at]);
+  if (!n) return null;
+  return (
+    <span className="ml-auto mr-1 grid h-4 min-w-4 place-items-center rounded-full bg-danger/15 px-1 font-mono text-[10px] text-danger tabular-nums" title={`${n} to fix now: open Health`}>
+      {n}
+    </span>
   );
 }

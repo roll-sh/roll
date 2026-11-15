@@ -20,12 +20,43 @@ use tracing::debug;
 pub const LABEL: &str = "sh.roll.code";
 
 pub async fn docker(args: &[&str]) -> anyhow::Result<String> {
+    docker_with_env(args, &[]).await
+}
+
+/// `docker <args>` with `env` in the docker CLI's own environment, for `--env NAME` (no value)
+/// to pass on: values never go on a command line (any user sees those in `ps`) or in logs.
+pub async fn docker_with_env(args: &[&str], env: &[(String, String)]) -> anyhow::Result<String> {
     debug!(?args, "docker");
-    let out = Command::new("docker").args(args).stdin(Stdio::null()).output().await.context("running docker")?;
+    let mut cmd = Command::new("docker");
+    cmd.args(args).stdin(Stdio::null());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().await.context("running docker")?;
     if !out.status.success() {
         bail!("docker {}: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Variables the docker CLI reads itself: a job's must not reach its environment.
+fn docker_reads(k: &str) -> bool {
+    let u = k.to_ascii_uppercase();
+    ["DOCKER_", "XDG_", "LD_", "SSL_"].iter().any(|p| u.starts_with(p)) || ["PATH", "HOME", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "TMPDIR"].contains(&u.as_str())
+}
+
+/// An env file only this user reads, removed when dropped. Env files hold one line per value.
+fn private_env_file(env: &[(String, String)]) -> anyhow::Result<tempfile::NamedTempFile> {
+    use std::io::Write;
+    let mut f = tempfile::Builder::new().prefix("roll-env-").tempfile()?;
+    for (k, v) in env {
+        if v.contains('\n') {
+            bail!("{k} has several lines, which docker can't pass for this name");
+        }
+        writeln!(f, "{k}={v}")?;
+    }
+    f.flush()?;
+    Ok(f)
 }
 
 pub async fn available() -> bool {
@@ -259,13 +290,25 @@ impl Isolation for Docker {
             env.extend(crate::isolation::CACHE_ENV.iter().map(|(k, v)| (k.to_string(), v.to_string())));
         }
         env.extend(job.env.iter().cloned());
-        for (k, v) in &env {
+        // Values never go on the command line. Names docker itself reads (DOCKER_HOST, PATH,
+        // proxies…) go in a private env file; every other is passed by name, its value in the
+        // docker CLI's environment (which keeps multi-line values, as env files can't).
+        let (own, by_name): (Vec<_>, Vec<_>) = env.into_iter().partition(|(k, _)| docker_reads(k));
+        let file = match own.is_empty() {
+            true => None,
+            false => Some(private_env_file(&own)?),
+        };
+        if let Some(f) = &file {
+            args.extend(["--env-file".into(), f.path().display().to_string()]);
+        }
+        for (k, _) in &by_name {
             args.push("--env".into());
-            args.push(format!("{k}={v}"));
+            args.push(k.clone());
         }
         args.extend(["--entrypoint".into(), "sh".into(), job.image.clone(), "-c".into(), job.run.clone()]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        docker(&argv).await?;
+        docker_with_env(&argv, &by_name).await?;
+        drop(file);
         docker(&["cp", &format!("{}/.", tree.display()), &format!("{}:{workdir}", job.name)]).await?;
         Ok(())
     }

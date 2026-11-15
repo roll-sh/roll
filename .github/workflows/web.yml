@@ -36,4 +36,6 @@ jobs:
       # @roll/storage's tests run storage-js against the real developer API.
       - run: cargo build -p s3-api --example storage-api
       - run: pnpm --filter @roll/storage test
+      # @roll/secrets: the sealed box against a box rolld sealed, and the watch loop.
+      - run: pnpm --filter @roll/secrets test
       - run: pnpm build
