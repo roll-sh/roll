@@ -30,10 +30,12 @@
 //! memory_mb = 256
 //! ```
 //!
-//! Here the file is parsed and its shape checked (unknown keys, blocks inside blocks, a volume,
-//! run settings that don't exist), so `roll apps plan DIR` and `roll up` say what's wrong before
-//! anything is pushed; apps-control applies it to a service's settings and checks the values as
-//! the API does. `docs/apps/roll.schema.json` is the same shape for editors.
+//! Here the file is parsed and its shape checked (unknown keys, blocks inside blocks, a volume);
+//! [`AppConfig::check_all`] also names run settings that don't exist in any block, so
+//! `roll apps plan DIR` and `roll up` say what's wrong before anything is pushed. A build checks
+//! only the blocks it applies (apps-control, with the values, as the API does): a typo in
+//! staging's block never stops production's deploys. `docs/apps/roll.schema.json` is the same
+//! shape for editors.
 
 use crate::{Builder, Overrides};
 use serde::{Deserialize, Serialize};
@@ -88,23 +90,39 @@ struct File {
     _rest: toml::Table,
 }
 
+/// Why a `roll.toml` wasn't read: the file's fault, or the machine's (it couldn't be read).
+#[derive(Debug)]
+pub enum ReadError {
+    Invalid(String),
+    Io(String),
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadError::Invalid(m) | ReadError::Io(m) => f.write_str(m),
+        }
+    }
+}
+
 /// `[app]` of `<root>/roll.toml`, if there's one. The file must be a regular file (a pushed tree
 /// can hold symlinks), and a malformed `[app]` is an error, not a silent default.
-pub fn read(root: &Path) -> Result<Option<AppConfig>, String> {
+pub fn read(root: &Path) -> Result<Option<AppConfig>, ReadError> {
     let path = root.join("roll.toml");
     let meta = match std::fs::symlink_metadata(&path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("roll.toml: {e}")),
+        Err(e) => return Err(ReadError::Io(format!("roll.toml: {e}"))),
     };
     if !meta.is_file() {
-        return Err("roll.toml isn't a regular file".into());
+        return Err(ReadError::Invalid("roll.toml isn't a regular file".into()));
     }
     if meta.len() > MAX_BYTES {
-        return Err(format!("roll.toml is larger than {} KiB", MAX_BYTES >> 10));
+        return Err(ReadError::Invalid(format!("roll.toml is larger than {} KiB", MAX_BYTES >> 10)));
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("roll.toml: {e}"))?;
-    parse(&text)
+    let text = std::fs::read(&path).map_err(|e| ReadError::Io(format!("roll.toml: {e}")))?;
+    let text = String::from_utf8(text).map_err(|_| ReadError::Invalid("roll.toml isn't UTF-8".into()))?;
+    parse(&text).map_err(ReadError::Invalid)
 }
 
 pub fn parse(text: &str) -> Result<Option<AppConfig>, String> {
@@ -118,20 +136,26 @@ pub fn parse(text: &str) -> Result<Option<AppConfig>, String> {
         }
         all.push((name, e));
     }
-    for (name, e) in all {
-        for k in e.run.iter().flat_map(|r| r.keys()) {
-            if k == "volume" {
-                return Err("roll.toml: a volume is the service's setting, not the tree's (`roll apps set --volume`)".into());
-            }
-            if !RUN_KEYS.contains(&k.as_str()) {
-                return Err(format!("roll.toml: [{name}.run] has no setting {k}"));
-            }
+    for (_, e) in all {
+        if e.run.as_ref().is_some_and(|r| r.contains_key("volume")) {
+            return Err("roll.toml: a volume is the service's setting, not the tree's (`roll apps set --volume`)".into());
         }
     }
     Ok(f.app)
 }
 
 impl AppConfig {
+    /// Every block's run settings exist (before a push: a deploy checks only what it applies).
+    pub fn check_all(&self) -> Result<(), String> {
+        let blocks = std::iter::once(("app".to_string(), self)).chain(self.environments.iter().flatten().map(|(n, e)| (format!("app.environments.{n}"), e))).chain(self.previews.iter().map(|p| ("app.previews".to_string(), &**p)));
+        for (name, e) in blocks {
+            if let Some(k) = e.run.iter().flat_map(|r| r.keys()).find(|k| !RUN_KEYS.contains(&k.as_str())) {
+                return Err(format!("roll.toml: [{name}.run] has no setting {k}"));
+            }
+        }
+        Ok(())
+    }
+
     /// The blocks that apply in `env`, in the order they're applied, each with what its lines
     /// end with: the file's, a preview's `[app.previews]`, then the environment's own.
     pub fn layers(&self, env: Option<EnvScope<'_>>) -> Vec<(&AppConfig, String)> {
@@ -203,7 +227,8 @@ mod tests {
     #[test]
     fn its_shape_is_checked_and_its_build_settings_planned_with() {
         assert!(parse("[app]\nbuidl = \"x\"\n").is_err(), "a typo isn't ignored");
-        assert!(parse("[app.run]\nmin_instaces = 1\n").unwrap_err().contains("min_instaces"), "nor in run");
+        let typo = parse("[app.environments.staging.run]\nmin_instaces = 1\n").unwrap().unwrap();
+        assert!(typo.check_all().unwrap_err().contains("min_instaces"), "nor in run, before a push");
         assert!(parse("[app.run]\nvolume = { mount = \"/data\", size_gb = 9 }\n").is_err(), "a push can't move a volume");
         assert!(parse("[app.environments.production.environments.x]\nstart = \"a\"\n").is_err());
         assert_eq!(parse("[checks.test]\nrun = \"npm test\"\n[apps.web]\nroot = \"web\"\n").unwrap(), None, "roll code's and roll up --all's sections are theirs");

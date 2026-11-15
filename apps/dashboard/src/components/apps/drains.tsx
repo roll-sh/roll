@@ -59,7 +59,6 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
   };
   const edit = (d: LogDrain) => {
     setEditing(d);
-    setSecret(null);
     setUrl(d.host);
     setSources(d.sources);
     setEnvs(d.environments.join(", "));
@@ -139,8 +138,11 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
             const headers = Object.keys(parsed.headers).length ? { headers: parsed.headers } : {};
             void runner.run("drain", async () => {
               if (editing) {
-                // Every filter sent, so a cleared one goes back to every; headers only when typed (they replace them all).
-                await appsApi.updateDrain(project, editing.id, { sources, environments, services: only, previews, ...headers });
+                // A cleared filter goes back to every; services only when changed, and never one since
+                // deleted (it would be refused, and can't be unticked); headers only when typed (they replace them all).
+                const same = only.length === editing.services.length && only.every((id) => editing.services.includes(id));
+                const services = same ? {} : { services: only.filter((id) => all.some((s) => s.id === id)) };
+                await appsApi.updateDrain(project, editing.id, { sources, environments, previews, ...services, ...headers });
               } else {
                 const d = await appsApi.addDrain(project, {
                   url: url.trim(),

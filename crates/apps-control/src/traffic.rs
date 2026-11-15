@@ -37,7 +37,8 @@ impl Apps {
         let cut = cut || lines.len() >= MAX_LINES;
         let mut groups: HashMap<(String, String), Group> = HashMap::new();
         let mut total = 0u64;
-        for l in &lines {
+        // Newest first: the groups kept apart are the latest traffic's, not an old burst's.
+        for l in lines.iter().rev() {
             let Ok(v) = serde_json::from_str::<Value>(&l.text) else { continue };
             let (Some(method), Some(path), Some(status)) = (v["method"].as_str(), v["path"].as_str(), v["status"].as_u64()) else { continue };
             total += 1;

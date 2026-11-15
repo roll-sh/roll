@@ -894,6 +894,7 @@ impl Apps {
         spec.port = None;
         spec.volume = None;
         spec.aliases.clear();
+        spec.vars.push(("ROLL_INSTANCE".into(), spec.name.clone()));
         let limit = self.cfg.build_timeout;
         log.stream(Stream::System).line(format!("pre-deploy: {cmd}"));
         let rt = &self.deps.runtime;

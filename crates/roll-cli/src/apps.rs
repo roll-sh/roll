@@ -1490,7 +1490,9 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
     let dir = std::fs::canonicalize(&dir).with_context(|| format!("{}", dir.display()))?;
     // A roll.toml the build would refuse is refused here, before anything is made or uploaded.
     if !u.all {
-        apps_build::app::read(&dir).map_err(|e| anyhow::anyhow!("{e}"))?;
+        if let Some(app) = apps_build::app::read(&dir).map_err(|e| anyhow::anyhow!("{e}"))? {
+            app.check_all().map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
     }
     if u.all {
         return up_all(api, json_out, &dir, &u).await;
@@ -1620,7 +1622,10 @@ fn local_plan(dir: &Path, env: &str) -> anyhow::Result<apps_build::Plan> {
     anyhow::ensure!(dir.is_dir(), "{} isn't a directory", dir.display());
     let base = apps_build::Overrides { process: Some("web".into()), ..Default::default() };
     let (o, said) = match apps_build::app::read(dir).map_err(|e| anyhow::anyhow!("{e}"))? {
-        Some(app) => app.overrides(&base, Some(apps_build::app::EnvScope { name: env, ephemeral: false })),
+        Some(app) => {
+            app.check_all().map_err(|e| anyhow::anyhow!("{e}"))?;
+            app.overrides(&base, Some(apps_build::app::EnvScope { name: env, ephemeral: false }))
+        }
         None => (base, Vec::new()),
     };
     let mut p = apps_build::plan(&apps_build::DirTree::new(dir), &o).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -2391,8 +2396,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let svc = service(api, &target).await?;
             let e = api.get(&env_path(&svc, &target.env)).await?;
             let Some(url) = e["url"].as_str().map(str::to_string) else { bail!("{} has no address in {} (a worker or a cron)", s(&svc["name"]), target.env) };
+            // Only a web address goes to the opener (never a file, another scheme or a flag).
+            anyhow::ensure!(url.starts_with("https://") || url.starts_with("http://"), "the API answered an address that isn't http(s): {url}");
             if !print {
-                let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+                let opener = if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" };
                 if std::process::Command::new(opener).arg(&url).status().is_err() {
                     eprintln!("couldn't start {opener}: open it yourself");
                 }
@@ -2808,7 +2815,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let svc = service(api, &target).await?;
             let v = api.get(&format!("{}/routes?minutes={minutes}", env_path(&svc, &target.env))).await?;
             if !json_out {
-                let mut rows: Vec<&Value> = v["routes"].as_array().into_iter().flatten().filter(|r| key != "errors" || r["errors"].as_u64() > Some(0)).collect();
+                let mut rows: Vec<&Value> = v["routes"].as_array().into_iter().flatten().filter(|r| match key {
+                    "errors" => r["errors"].as_u64() > Some(0),
+                    // The slowest of those asked enough to say, as the dashboard shows them.
+                    "p95_ms" => r["requests"].as_u64() >= Some(5),
+                    _ => true,
+                })
+                .collect();
                 rows.sort_by_key(|r| std::cmp::Reverse(r[key].as_u64().unwrap_or(0)));
                 println!("{} requests in the last {} minutes{}", v["requests"], v["minutes"], if v["cut"] == true { " (the newest read)" } else { "" });
                 if !rows.is_empty() {

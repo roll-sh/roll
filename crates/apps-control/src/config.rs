@@ -27,7 +27,10 @@ pub fn preview_defaults(mut run: Run, file: Option<&AppConfig>) -> (Run, Option<
 
 /// `[app]` of `<root>/roll.toml`, if there's one ([`apps_build::app::read`]).
 pub fn read(root: &Path) -> Result<Option<AppConfig>> {
-    apps_build::app::read(root).map_err(Error::BadRequest)
+    apps_build::app::read(root).map_err(|e| match e {
+        apps_build::app::ReadError::Invalid(m) => Error::BadRequest(m),
+        apps_build::app::ReadError::Io(m) => Error::Internal(m),
+    })
 }
 
 pub fn parse(text: &str) -> Result<Option<AppConfig>> {

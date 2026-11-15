@@ -106,7 +106,7 @@ export function Deployments({
       <section className={`${panel} flex flex-col items-start gap-2 p-6`}>
         <HorizonMark state="sleep" size={32} />
         <h2 className="text-[15px] font-medium">Nothing deployed to {env.name} yet</h2>
-        <p className="text-[13px] text-muted">Deploy builds the service's source and rolls it out here. Upload services deploy with <code className="font-mono text-fg">roll up</code>.</p>
+        <p className="text-[13px] text-muted">Deploy builds the service's source and rolls it out here. Upload services deploy with <code className="font-mono text-fg">roll up -s {service}{env.name !== "production" ? ` -e ${env.name}` : ""}</code>.</p>
       </section>
     );
 

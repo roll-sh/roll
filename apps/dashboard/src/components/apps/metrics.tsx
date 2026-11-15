@@ -267,6 +267,11 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
   const scrape = appsApi.prometheusUrl(service, env);
 
   const visible = usePageVisible();
+  // Another environment's deploys and routes never stay on this one's charts.
+  useEffect(() => {
+    setDeploys([]);
+    setRoutes(null);
+  }, [service, env]);
   useEffect(() => {
     if (!visible) return;
     let alive = true;
@@ -402,7 +407,7 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
               </li>
             ))}
           </ul>
-          {marks.length > 6 && <p className="mt-0.5">and {marks.length - 6} earlier (the table has every one)</p>}
+          {marks.length > 6 && <p className="mt-0.5">and {marks.length - 6} earlier (the table marks them)</p>}
         </div>
       )}
       {routes && <Routes stats={routes} />}

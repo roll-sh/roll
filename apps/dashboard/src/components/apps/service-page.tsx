@@ -629,7 +629,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           <p className="text-[13px] text-muted">
             {service.source.kind === "upload" ? (
               <>
-                Nothing's deployed to {envName} yet. From the app's directory, run <code className="font-mono text-fg">roll up -s {service.name}</code>.
+                Nothing's deployed to {envName} yet. From the app's directory, run <code className="font-mono text-fg">roll up -s {service.name}{envName !== PRODUCTION ? ` -e ${envName}` : ""}</code>.
               </>
             ) : (
               <>Nothing's deployed to {envName} yet. Deploy builds the source and rolls it out here.</>
