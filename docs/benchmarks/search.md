@@ -188,7 +188,14 @@ ranges overlap):
 1. noaa `range_field_conjunction_big_range_big_term_query`: 5.12x Elasticsearch (49.4 ms against
    9.6; the other seven range-field queries lead, from Round 6's 3.5-12x losses).
 2. nested `randomized-nested-queries-with-inner-hits_default_big_size`: 2.25x Elasticsearch (49.3
-   against 21.9; Round 6: 2.3x); `..._default`: 1.20x (11.2 against 9.4).
+   against 21.9; Round 6: 2.3x); `..._default`: 1.20x (11.2 against 9.4). Leads since `7fe679918`
+   (each hit's inner query runs over its own block, the block leading, so a range reads that
+   block's doc values instead of collecting the whole segment's points per hit): `big_size` 12.9-13.1
+   ms against Elasticsearch's 21.8-26.1 on the same CPUs (0.55x; server CPU per request 11.9-12.1 ms
+   against 25.2-34.2), was 95.6-131.2 ms; `_default` 7.7-8.0 against 10.3-11.7 (0.71x). Rally's 2M
+   documents loaded by script and merged to 7 segments (Rally's roll runs had 6-9), Rally's
+   param sources with their seed, 3 alternating rounds on lane b (2 cores), responses identical
+   before and after; Rally rerun pending.
 3. dense_vector `knn-search-100-1000_multiple_segments`: 2.09x Elasticsearch (13.7 against 6.5).
 4. so_vector: 25 of its 32 `knn` tasks, 1.03-1.92x Elasticsearch (15 with the ranges apart; the
    `css` filter 1.92x, `concurrency` 1.5-1.8x, the 10%-random filters 1.2-1.6x; Round 6: 4-9x).
