@@ -542,7 +542,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: the access page's token list has a filter (name, id, hint, client, person or product; GitHub and Stripe search theirs), and a token pasted into it finds its own row by its hint without leaving the browser (#25); a scoped token's row shows what its secret looks like (`rlt_…a1b2`, Stripe's last
+Done lately: `roll login` checked live against a rolld set up as a deployment is (`ROLL_CODE_PUBLIC_URL`, over the tailnet; `users-live/login.sh`): over SSH it shows a code and link, the device page sees it with its network, allowing it signs the CLI in (0600), `whoami` names the login, the same server's `127.0.0.1` alias is refused naming the address to use, and logout revokes the grant (#25); the access page's token list has a filter (name, id, hint, client, person or product; GitHub and Stripe search theirs), and a token pasted into it finds its own row by its hint without leaving the browser (#25); a scoped token's row shows what its secret looks like (`rlt_…a1b2`, Stripe's last
 four), in the dashboard, `roll token list` and the API, so a token found in a config can be matched
 to its row (#25); the seventeenth review (#25's device flow, `roll login`, the change audit and the
 mails; nothing high), all fixed: past the wrong-code limit every code answers 429, a right one too
