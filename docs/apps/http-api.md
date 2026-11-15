@@ -461,8 +461,15 @@ type Plan = {
   release?: string;
 };
 
-/** Wired on a node today: postgres (DATABASE_URL) and redis (REDIS_URL, REDIS_REST_URL/TOKEN). */
-type Link = { kind: "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "service"; ref: string; prefix: string; vars: string[] };
+/** Wired on a node today: postgres (DATABASE_URL), redis (REDIS_URL, REDIS_REST_URL/TOKEN) and search. */
+type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service";
+type Link = { kind: LinkKind; ref: string; prefix: string; vars: string[] };
+// `search`: `ref` is a roll search cluster (id or name). The link makes a data-only credential of
+// its own, once (never the cluster's password): ELASTICSEARCH_URL and ELASTICSEARCH_API_KEY, or on
+// an OpenSearch-flavor cluster OPENSEARCH_URL, OPENSEARCH_USERNAME and OPENSEARCH_PASSWORD (an
+// internal user of its own). Kept
+// sealed with the link; unlinking (or deleting the service) revokes it. A scoped token needs
+// `reveal` on the cluster.
 // `service`: `ref` is another web service of the project (its id); `URL` is
 // `http://<name>.<env>.internal:<port>` in the linking environment, `PUBLIC_URL` its public URL
 // when it has one there. The prefix defaults to its name (`API_`). A service's links go with it.
