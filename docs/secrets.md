@@ -2711,53 +2711,35 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **The Secrets Store CSI Driver provider** (#63, on #62): secrets mounted
-   into a pod as files, never a Kubernetes Secret in etcd, as Vault's, AWS', Azure's, GCP's and
-   Infisical's providers do; each pod logs in with its own service account. Checked live against
-   the driver v1.6.2 on k3s (mount, no Secret, another account refused, rotation in about 20 s, a
-   key that stops resolving keeps the files).
-2. **`roll login` for people** (roll MCP is building it on #25, where a person's own token acts as
-   them): a browser sign-in with PKCE and a loopback redirect, the token kept and refreshed, as
-   `doppler login`, `infisical login` and `op signin` do.
-3. **Conditional reads and caching in the SDKs** (#65, on #62): `ETag` and `If-None-Match` on
-   `…/values` (a 304 reads, issues and audits nothing; never for dynamic credentials), and a TTL
-   cache in the TypeScript, Go and Python clients that revalidates with it.
-4. **Terraform without values in state** (#66, on #62): an `ephemeral "roll_secrets_values"`
-   resource (dynamic credentials revoked when the run closes) and a write-only `value_wo`. Resources for
-   CAs, SSH CAs, encryption keys and outside databases are #72; transit in the Go and Python clients
-   is #67.
-5. **AWS through roll's own issuer** (#68, on #62): `trust: "oidc"` roles, assumed with
-   `AssumeRoleWithWebIdentity` and a token roll's issuer signs for the project (`sub` pinned, as GCP
-   and Azure): no AWS credential of roll's at all.
-6. **The operator restarts what reads a Secret** when it changes (#69, on #62:
-   `spec.rolloutRestart`, as Infisical's reload annotation and Vault Secrets Operator's
-   `rolloutRestartTargets`).
-7. **Audit sinks SIEMs take** (#70, on #62): Splunk HEC, Datadog and bearer formats with a sealed
-   token (Doppler, Infisical). A sink into roll search is #71.
-8. *Waits on roll redis and roll nosql:* a live rotation that keeps the old password a while (their
-   `POST …/password` taking a grace, as Redis ACL users can hold two passwords); roll secrets'
-   managed rotation already keeps a grace.
-9. **More dynamic credentials**: GitHub App installation tokens (one repository, narrowed
-   permissions), Kubernetes service account tokens, Snowflake.
-10. **A gateway into private networks**: an agent in the customer's network that connects out and
-   carries rotation and per-lease logins to private databases (Infisical's and Akeyless'
-   gateways).
-11. **ACME on project CAs**, starting with external account binding (Vault PKI, step-ca).
-12. *The user's call:* land the stack (#62).
-13. *Waits on roll MCP's #25 on `main`:* #64 (#30 onto #62: roll-access's tokens replace `rlst_`,
-   re-keyed identities revoke their workload tokens, reach lists roll-access's tokens; every suite
-   passes; roll MCP's `feature/mcp-on-landing` is #25 with it, its gate passing), then a workload identity a person creates
-   asks roll-access's policy (held until an admin approves, `policy_now().needs_approval(&scope,
-   false)`, admins told through `Access::tell_admins`), and the Access tab shows tokens waiting
-   for approval and rotations that keep the old secret (`keep_old_for_s`).
-14. *Waits on other threads:* transit keys scoped by name (#24/#25 with #47), roll search's #29 (it
-   echoes a key's `access`: then a key that doesn't say `data` is refused), previews resolving with
-   `dynamic: false`, a live check of OpenSearch links (#29 with #51), splitting the CLI's
-   `secrets.rs` once the stack has landed.
-15. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
-16. *Waits on products serving signed-in people:* a person's project linking their own databases,
+Built, in pull requests on #62 (each reviewed, its fixes in): the Secrets Store CSI Driver provider
+(#63), conditional reads and client caches (#65), Terraform without values in state, transit in the
+Go and Python clients and Terraform resources for registrations (#66, #67, #72), AWS through roll's
+issuer (#68), the operator's restarts (#69), SIEM and roll search audit sinks (#70, #71).
+
+1. **GitHub App installation tokens** (building): a dynamic link to the project's own GitHub App
+   issues an installation token per lease, narrowed to chosen repositories and permissions and
+   ended with the lease (GitHub revokes it), as Akeyless and Vault's GitHub plugin do; the App's
+   private key sealed with the project's key, registered as `github_app`.
+2. **Kubernetes service account tokens** per lease (TokenRequest against a cluster the project
+   registers), as Vault's Kubernetes engine, Akeyless and Infisical do.
+3. **Snowflake** logins outside roll (key-pair users per lease or two that take turns), as Vault,
+   Akeyless and Infisical do.
+4. **A gateway into private networks**: an agent in the customer's network that connects out and
+   carries rotation and per-lease logins to private databases (Infisical's and Akeyless' gateways).
+5. **ACME on project CAs**, starting with external account binding (Vault PKI, step-ca).
+6. *The user's call:* land the stack (#62, then #63–#72).
+7. *Waits on roll MCP's #25 on `main`:* #64 (#30 onto #62: roll-access's tokens replace `rlst_`;
+   roll MCP's `feature/mcp-on-landing` is #25 with it, its gate passing), then a workload identity
+   a person creates asks roll-access's policy (held until an admin approves), and the Access tab
+   shows tokens waiting for approval and rotations that keep the old secret (`keep_old_for_s`).
+8. *Waits on other threads:* transit keys scoped by name (#24/#25 with #47), roll search's #29 (it
+   echoes a key's `access`: then a key that doesn't say `data` is refused), a live check of
+   OpenSearch links (#29 with #51), roll redis and nosql keeping a rotated password a while,
+   splitting the CLI's `secrets.rs` once the stack has landed.
+9. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
+10. *Waits on products serving signed-in people:* a person's project linking their own databases,
    buckets and streams.
-17. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+11. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
 
 ### Landing
