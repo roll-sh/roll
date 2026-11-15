@@ -12,7 +12,9 @@ async fn serve() -> (String, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let ws = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
     let workspace = Arc::new(roll_workspace::Workspace::new(ws).unwrap());
-    let config = roll_access::Config { locked: true, approval_wait: std::time::Duration::from_secs(20), ..Default::default() };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let config = roll_access::Config { locked: true, approval_wait: std::time::Duration::from_secs(20), api_url: api.clone(), device_interval: std::time::Duration::from_secs(1), ..Default::default() };
     let access = roll_access::Access::open(&code_sql::Target::Sqlite(dir.path().join("access.db")), Default::default(), config, Default::default()).unwrap();
     let gate = roll_auth::Gate::new(Some(roll_auth::AdminToken::new(OPERATOR).unwrap()), Vec::new());
     gate.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
@@ -22,10 +24,10 @@ async fn serve() -> (String, tempfile::TempDir) {
         .route("/v1/projects/{id}", axum::routing::delete(|| async { axum::http::StatusCode::NO_CONTENT }));
     let router = postgres
         .merge(roll_workspace::router(workspace))
-        .merge(roll_access::api::router(access))
-        .layer(axum::middleware::from_fn_with_state(gate, roll_auth::check));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let api = format!("http://{}", listener.local_addr().unwrap());
+        .merge(roll_access::api::router(access.clone()))
+        .layer(axum::middleware::from_fn_with_state(gate, roll_auth::check))
+        // Discovery, registration, token and revocation sit in front of the gate, as in rolld.
+        .merge(roll_access::oauth::public_router(access));
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     (api, dir)
 }
@@ -50,6 +52,10 @@ async fn a_token_from_the_cli_is_held_to_its_rules() {
     let made = json_of(&roll(&api, "", &["--json", "token", "create", "agent", "--product", "postgres", "--allow", "read", "--ask", "delete", "--expires", "7d"]));
     let token = made["token"].as_str().unwrap().to_string();
     let id = made["grant"]["id"].as_str().unwrap().to_string();
+    // Listed by what it's for: a rule on postgres, but not naming one database.
+    let ids = |args: &[&str]| json_of(&roll(&api, "", args)).as_array().unwrap().iter().map(|g| g["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    assert_eq!(ids(&["--json", "token", "list", "--product", "postgres"]), vec![id.clone()]);
+    assert!(ids(&["--json", "token", "list", "--product", "postgres", "--resource", "prj_a"]).is_empty());
 
     // ROLL_TOKEN wins over ROLL_ADMIN_TOKEN: the scoped token is what's used.
     let me = json_of(&roll(&api, &token, &["--json", "token", "whoami"]));
@@ -96,4 +102,92 @@ async fn a_token_from_the_cli_is_held_to_its_rules() {
     let csv = String::from_utf8(roll(&api, "", &["mcp", "audit", "--token", &id, "--format", "csv"]).stdout).unwrap();
     assert!(csv.starts_with("at,token,token_name,") && csv.lines().count() > 1, "{csv}");
     assert!(audit.as_array().unwrap().iter().any(|e| e["decision"] == "ask"), "{audit}");
+}
+
+/// `roll login` signs a person's CLI in through the browser: it registers itself, the consent
+/// screen's answer comes back to its loopback port, commands with no token set use the login
+/// (within what was allowed), and `roll logout` revokes the connection. With no browser here
+/// (`--no-browser`, SSH) it signs in with a code entered on roll instead (RFC 8628).
+#[tokio::test(flavor = "multi_thread")]
+async fn roll_login_signs_the_cli_in_through_the_browser() {
+    use std::io::BufRead;
+    let (api, _dir) = serve().await;
+    let home = tempfile::tempdir().unwrap();
+    let bare = |args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_roll"));
+        c.env_clear().env("PATH", std::env::var("PATH").unwrap_or_default()).env("ROLL_API_URL", &api).env("XDG_CONFIG_HOME", home.path()).args(args);
+        c
+    };
+    // A browser that opened, as far as the CLI can tell (`$BROWSER`, as gh reads it).
+    let mut login = bare(&["login"]).env("BROWSER", "true").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let mut lines = std::io::BufReader::new(login.stderr.take().unwrap()).lines();
+    let address = lines.by_ref().map_while(Result::ok).find_map(|l| l.trim().contains("code_challenge=").then(|| l.trim().to_string())).expect("the address to open");
+    let asked = url::Url::parse(&address).unwrap();
+    let q = |k: &str| asked.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.into_owned()).unwrap();
+
+    // The consent screen: the operator lets it read Postgres, nothing else.
+    let http = reqwest::Client::new();
+    let consent = json!({ "client_id": q("client_id"), "redirect_uri": q("redirect_uri"), "code_challenge": q("code_challenge"), "code_challenge_method": "S256", "state": q("state"),
+        "rules": [{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }] });
+    let answer: Value = http.post(format!("{api}/v1/access/oauth/authorize")).bearer_auth(OPERATOR).json(&consent).send().await.unwrap().json().await.unwrap();
+    // The browser follows the redirect back to the CLI.
+    let back = http.get(answer["redirect"].as_str().unwrap()).send().await.unwrap();
+    assert!(back.status().is_success());
+    let out = tokio::task::spawn_blocking(move || login.wait_with_output()).await.unwrap().unwrap();
+    assert!(out.status.success() && String::from_utf8_lossy(&out.stdout).contains("Signed in"), "{out:?}");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(home.path().join("roll/logins.json")).unwrap().permissions().mode() & 0o777, 0o600);
+
+    // No token set: commands use the login, within its rules, and whoami says it's the login's
+    // (or, with the operator's token set too, that the login loses to it: gh auth status).
+    let me = json_of(&bare(&["--json", "token", "whoami"]).output().unwrap());
+    let id = me["grant"]["id"].as_str().unwrap().to_string();
+    assert!(me["credential"]["source"].as_str().is_some_and(|s| s.starts_with("roll login")), "{me}");
+    let both = json_of(&bare(&["--json", "token", "whoami"]).env("ROLL_ADMIN_TOKEN", OPERATOR).output().unwrap());
+    assert_eq!(both["credential"]["source"], "ROLL_ADMIN_TOKEN");
+    assert!(both["credential"]["unused"][0].as_str().is_some_and(|s| s.starts_with("roll login")), "{both}");
+    assert!(bare(&["db", "list"]).output().unwrap().status.success());
+    assert!(!bare(&["token", "list"]).output().unwrap().status.success());
+    // An access token at its end is refreshed, and the new pair kept.
+    let file = home.path().join("roll/logins.json");
+    let mut saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let before = saved[&api]["access_token"].as_str().unwrap().to_string();
+    saved[&api]["expires_at"] = json!(0);
+    std::fs::write(&file, saved.to_string()).unwrap();
+    assert!(bare(&["db", "list"]).output().unwrap().status.success());
+    let after: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert!(after[&api]["access_token"].as_str().unwrap() != before && after[&api]["expires_at"].as_i64().unwrap() > 0);
+
+    // Signing out revokes the connection, not just this machine's copy, and says so in its log.
+    assert!(bare(&["logout"]).output().unwrap().status.success());
+    let g: Value = http.get(format!("{api}/v1/access/tokens/{id}")).bearer_auth(OPERATOR).send().await.unwrap().json().await.unwrap();
+    assert!(g["revoked_at"].is_number(), "{g}");
+    let mut revoked = false;
+    for _ in 0..50 {
+        let log: Value = http.get(format!("{api}/v1/access/audit?grant={id}")).bearer_auth(OPERATOR).send().await.unwrap().json().await.unwrap();
+        if log.as_array().unwrap().iter().any(|e| e["decision"] == "revoke" && e["args"]["by"] == "its client") {
+            revoked = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(revoked, "the client's revoke is in the token's log");
+    // An address that isn't the server's own (its issuer): no login, so a token is never kept
+    // under, and later sent to, an address other than the one that issued it.
+    let other = api.replace("127.0.0.1", "localhost");
+    let wrong = bare(&["login", "--no-browser"]).env("ROLL_API_URL", &other).stdin(std::process::Stdio::null()).output().unwrap();
+    assert!(!wrong.status.success() && String::from_utf8_lossy(&wrong.stderr).contains("says it's"), "{wrong:?}");
+    assert!(!bare(&["db", "list"]).output().unwrap().status.success());
+
+    // No browser here: a code to enter on roll, allowed by a person; the CLI's poll takes it.
+    let mut login = bare(&["login", "--no-browser"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let mut lines = std::io::BufReader::new(login.stderr.take().unwrap()).lines();
+    let said = lines.by_ref().map_while(Result::ok).find(|l| l.contains("enter the code")).expect("a code to enter");
+    let code = said.split("enter the code ").nth(1).unwrap().split('.').next().unwrap().trim().to_string();
+    let allow = json!({ "rules": [{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }] });
+    let r = http.post(format!("{api}/v1/access/oauth/devices/{code}")).bearer_auth(OPERATOR).json(&allow).send().await.unwrap();
+    assert!(r.status().is_success(), "{:?}", r.text().await);
+    let out = tokio::task::spawn_blocking(move || login.wait_with_output()).await.unwrap().unwrap();
+    assert!(out.status.success() && String::from_utf8_lossy(&out.stdout).contains("Signed in"), "{out:?}");
+    assert!(bare(&["db", "list"]).output().unwrap().status.success());
 }

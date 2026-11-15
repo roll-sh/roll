@@ -19,6 +19,7 @@ mod redis;
 mod seal;
 mod secrets;
 mod apps;
+mod login;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]
@@ -121,6 +122,11 @@ enum Cmd {
     /// roll's MCP server: client config, approvals waiting for you, the audit log.
     #[command(subcommand)]
     Mcp(access::Mcp),
+    /// Sign this CLI in to roll through your browser: you choose what it may do, and commands
+    /// use it when no token is set (`roll logout` ends it).
+    Login(login::Login),
+    /// Revoke this CLI's login and forget it.
+    Logout,
     /// Shell completions for every command and flag: `roll completions zsh > ~/.zfunc/_roll`
     /// (bash, zsh, fish, powershell, elvish), as `fly completion` and `railway completion`.
     #[command(visible_alias = "completion")]
@@ -478,8 +484,26 @@ async fn main() -> anyhow::Result<()> {
     let token_flag = matches.value_source("token") == Some(ValueSource::CommandLine);
     let cli = Cli::from_arg_matches(&matches)?;
     // A scoped token, when set, is what everything uses: the narrower credential wins.
-    let admin = cli.roll_token.filter(|t| !t.trim().is_empty()).or(cli.admin_token.filter(|t| !t.trim().is_empty()));
-    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: admin.clone().or(cli.api_key), headers: Vec::new() };
+    let admin = cli.roll_token.clone().filter(|t| !t.trim().is_empty()).or(cli.admin_token.clone().filter(|t| !t.trim().is_empty()));
+    let base = cli.api.trim_end_matches('/').to_string();
+    let http = reqwest::Client::new();
+    // `roll login`'s, last: any credential set for this run wins over it (a workload's identity, a
+    // streams key too).
+    let identity = std::env::var("ROLL_IDENTITY").is_ok_and(|v| !v.trim().is_empty());
+    let signed_in = if admin.is_none() && cli.api_key.is_none() && !identity && !matches!(cli.cmd, Cmd::Login(_) | Cmd::Logout) { login::token(&base).await } else { None };
+    // What this run uses, and what's set but loses to it (`roll token whoami` says both): the set
+    // ones in the order `key` takes them, then a kept login it didn't use.
+    let credential = {
+        let set = |v: &Option<String>| v.as_ref().is_some_and(|t| !t.trim().is_empty());
+        let mut order: Vec<String> = [(&cli.roll_token, "ROLL_TOKEN"), (&cli.admin_token, "ROLL_ADMIN_TOKEN"), (&cli.api_key, "ROLL_API_KEY")].into_iter().filter(|(v, _)| set(v)).map(|(_, n)| n.to_string()).collect();
+        if let Some(path) = login::kept(&base) {
+            order.push(format!("roll login ({})", path.display()));
+        }
+        let mut order = order.into_iter();
+        access::Credential { source: order.next(), unused: order.collect() }
+    };
+    let admin = admin.or(signed_in);
+    let api = Api { base, http, key: admin.clone().or(cli.api_key), headers: Vec::new() };
     let cmd = match cli.cmd {
         Cmd::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "roll", &mut std::io::stdout());
@@ -517,8 +541,10 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Secrets { at, cmd } => return secrets::run(&secrets_api(&api).await?, cli.json, at, cmd).await,
         Cmd::Run(r) => return secrets::run_command(&secrets_api(&api).await?, r).await,
         Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
-        Cmd::Token(cmd) => return access::token(&api, cli.json, cmd).await,
+        Cmd::Token(cmd) => return access::token(&api, cli.json, cmd, &credential).await,
         Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,
+        Cmd::Login(l) => return login::login(&api.base, cli.json, l).await,
+        Cmd::Logout => return login::logout(&api.base, cli.json).await,
         Cmd::Nosql(cmd) => {
             let r = nosql::run(&api, cli.json, *cmd).await;
             if let Err(e) = &r

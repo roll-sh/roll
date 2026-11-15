@@ -3,7 +3,7 @@
 //! catalogue's `access` rows); handlers only tell the operator from a grant.
 
 use crate::store::{AuditQuery, GrantChange, NewGrant};
-use crate::{Access, Error, catalog};
+use crate::{USER_REACH, Access, Error, catalog};
 use axum::extract::{Path, Query, State};
 use axum::http::{Extensions, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -25,6 +25,8 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/tokens", get(list).post(create))
         .route("/v1/access/tokens/{id}", get(get_one).patch(update).delete(revoke))
         .route("/v1/access/tokens/{id}/rotate", post(rotate))
+        .route("/v1/access/tokens/{id}/approve", post(approve_token))
+        .route("/v1/access/tokens/{id}/deny", post(deny_token))
         .route("/v1/access/tokens/{id}/tighten", get(tighten).post(apply_tighten))
         .route("/v1/access/tokens/{id}/networks", get(networks))
         .route("/v1/access/checkup", get(checkup))
@@ -42,27 +44,149 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/oauth/clients", get(clients))
         .route("/v1/access/oauth/clients/{id}", get(client))
         .route("/v1/access/oauth/authorize", post(crate::oauth::authorize))
+        .route("/v1/access/oauth/devices/{code}", get(crate::oauth::device_view).post(crate::oauth::device_approve).delete(crate::oauth::device_deny))
+        .route_layer(axum::middleware::from_fn_with_state(access.clone(), audit_changes))
         .with_state(access)
+}
+
+/// The grant a change made or touched, for its audit row, when the path doesn't name it (a new
+/// token, a client connected): set on the answer by the handler.
+#[derive(Clone)]
+pub(crate) struct Changed(pub String);
+
+/// What a change is called in the audit log (`decision`), by its route and method: GitHub's
+/// `personal_access_token.create`, `oauth_authorization.create` and the like.
+fn change_name(method: &axum::http::Method, route: &str) -> String {
+    use axum::http::Method;
+    let last = route.rsplit('/').next().unwrap_or_default();
+    match (method, route) {
+        (&Method::POST, "/v1/access/tokens") => "create".into(),
+        (&Method::PATCH, "/v1/access/tokens/{id}") => "change".into(),
+        (&Method::DELETE, "/v1/access/tokens/{id}") => "revoke".into(),
+        (&Method::DELETE, "/v1/access/tokens/{id}/temporary/{approval}") => "forget".into(),
+        (&Method::POST, "/v1/access/oauth/authorize") => "connect".into(),
+        (&Method::POST, "/v1/access/oauth/devices/{code}") => "connect".into(),
+        (&Method::DELETE, "/v1/access/oauth/devices/{code}") => "refuse".into(),
+        (&Method::PUT, "/v1/access/policy") => "policy".into(),
+        (&Method::PUT, "/v1/access/notify") => "notify".into(),
+        (&Method::POST, "/v1/access/audit/sinks") => "add_sink".into(),
+        (&Method::DELETE, "/v1/access/audit/sinks/{id}") => "remove_sink".into(),
+        // …/rotate, …/approve, …/deny, …/tighten, …/retry.
+        _ => last.trim_matches(|c| c == '{' || c == '}').to_string(),
+    }
+}
+
+/// Every change made from a session or with the operator's token, in the audit log (source
+/// `access`): who made, changed, rotated, revoked or approved a token, connected a client, or set
+/// the policy, from where. A grant's own requests are the gate's rows already, and reads aren't
+/// changes. The row's `grant_id` is the token the change is about (so a token's log tells its
+/// story), `resource` what else it names, `args.by` who.
+async fn audit_changes(State(a): S, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let method = req.method().clone();
+    let route = req.extensions().get::<axum::extract::MatchedPath>().map(|m| m.as_str().to_string()).unwrap_or_default();
+    if method == axum::http::Method::GET || req.extensions().get::<roll_auth::Grant>().is_some() || route == "/v1/access/check" {
+        return next.run(req).await;
+    }
+    // The path's own ids, where the route names them: `{id}` (a token, an approval, a sink) and
+    // `{approval}`. A device's code isn't kept: it's a short secret, and the grant is in the answer.
+    let named: Vec<(String, String)> = route.split('/').zip(req.uri().path().split('/')).filter(|(p, _)| p.starts_with('{') && *p != "{code}").map(|(p, v)| (p.to_string(), v.to_string())).collect();
+    let (by, ip) = (actor(req.extensions()), req.extensions().get::<roll_auth::ClientIp>().map(|c| c.0.to_string()));
+    let res = next.run(req).await;
+    if !res.status().is_success() {
+        return res;
+    }
+    let id = named.iter().find(|(p, _)| p == "{id}").map(|(_, v)| v.clone());
+    let about_token = route.starts_with("/v1/access/tokens/");
+    let grant_id = res.extensions().get::<Changed>().map(|c| c.0.clone()).or_else(|| id.clone().filter(|_| about_token));
+    let resource = if about_token { named.iter().find(|(p, _)| p == "{approval}").map(|(_, v)| v.clone()) } else { id };
+    let status = res.status().as_u16();
+    let a2 = a.clone();
+    tokio::spawn(async move {
+        let name = match grant_id.clone() {
+            Some(g) => blocking(a2.clone(), move |a| a.store.get(&g)).await.ok().map(|g| g.name),
+            None => None,
+        };
+        let e = crate::store::AuditEvent {
+            id: crate::new_id("aud"),
+            at: code_sql::now_ms(),
+            grant_id,
+            grant_name: name,
+            source: "access".into(),
+            tool: None,
+            method: method.to_string(),
+            decision: change_name(&method, &route),
+            route,
+            product: Some("access".into()),
+            action: Some("admin".into()),
+            resource,
+            approval: None,
+            status,
+            args: Some(json!({ "by": by })),
+            ip,
+            duration_ms: 0,
+            client: None,
+        };
+        if let Some(e) = a2.store.queue_audit(e) {
+            let _ = blocking(a2, move |a| {
+                a.store.audit(&e);
+                Ok(())
+            })
+            .await;
+        }
+    });
+    res
 }
 
 async fn blocking<T: Send + 'static>(a: Arc<Access>, f: impl FnOnce(&Access) -> crate::Result<T> + Send + 'static) -> crate::Result<T> {
     tokio::task::spawn_blocking(move || f(&a)).await.map_err(|e| Error::Internal(e.to_string()))?
 }
 
-/// Who's calling: the operator (`None`), or a grant.
+/// Who's calling: the operator (or an admin), a grant, or a signed-in user who isn't an admin
+/// (docs/permissions.md, "Users' own tokens": they manage only their own).
 pub(crate) enum Who {
     Operator,
     Grant(roll_auth::Grant),
+    User(roll_auth::SignedIn),
+}
+
+impl Who {
+    /// Whose tokens this caller sees and manages: a user's own (theirs, or their token's), or
+    /// every token (`None`).
+    fn mine(&self) -> Option<&str> {
+        match self {
+            Who::Operator => None,
+            Who::Grant(g) => g.user.as_deref(),
+            Who::User(u) => Some(&u.user),
+        }
+    }
 }
 
 pub(crate) fn who(access: &Access, ext: &Extensions) -> crate::Result<Who> {
     if let Some(g) = roll_auth::Grant::on(ext) {
         return Ok(Who::Grant(g.clone()));
     }
-    if roll_auth::Operator::on(ext) || !access.config.locked {
+    if roll_auth::Operator::on(ext) {
+        return Ok(Who::Operator);
+    }
+    if let Some(u) = ext.get::<roll_auth::SignedIn>().filter(|u| !u.admin) {
+        return Ok(Who::User(u.clone()));
+    }
+    if !access.config.locked {
         return Ok(Who::Operator);
     }
     Err(Error::Unauthorized("this API needs a token".into()))
+}
+
+/// A token `who` may see: every one for the operator, else only the user's own.
+fn visible(who: &Who, g: &crate::store::Grant) -> bool {
+    who.mine().is_none_or(|u| g.user.as_deref() == Some(u))
+}
+
+/// The token `id`, when `who` may see it (else 404, as if it weren't there).
+async fn visible_grant(a: &Arc<Access>, who: &Who, id: &str) -> crate::Result<crate::store::Grant> {
+    let id2 = id.to_string();
+    let g = blocking(a.clone(), move |a| a.store.get(&id2)).await?;
+    if visible(who, &g) { Ok(g) } else { Err(Error::NotFound(format!("no token {id}"))) }
 }
 
 /// Who acted, for the record: the signed-in admin (`usr_…`, docs/accounts.md), else the operator's
@@ -74,7 +198,7 @@ pub(crate) fn actor(ext: &Extensions) -> String {
 fn operator_only(access: &Access, ext: &Extensions, what: &str) -> crate::Result<()> {
     match who(access, ext)? {
         Who::Operator => Ok(()),
-        Who::Grant(_) => Err(Error::Forbidden(format!("only the operator can {what}"))),
+        Who::Grant(_) | Who::User(_) => Err(Error::Forbidden(format!("only the operator can {what}"))),
     }
 }
 
@@ -84,8 +208,20 @@ async fn me(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
         Who::Grant(g) => {
             let id = g.id.to_string();
             let grant = blocking(a.clone(), move |a| a.store.get(&id)).await?;
-            json!({ "kind": if g.kind == GrantKind::Oauth { "oauth" } else { "token" }, "grant": grant, "locked": a.config.locked })
+            let mut out = json!({ "kind": if g.kind == GrantKind::Oauth { "oauth" } else { "token" }, "grant": grant, "locked": a.config.locked });
+            // A person's own token reaches what they do, as the gate decides it: say so.
+            if let (Some(user), Some(people)) = (g.user.as_deref(), a.people.get())
+                && let Ok(Some(p)) = people.person(user).await
+                && !p.admin
+            {
+                out["as_user"] = json!(p.handle);
+                out["reach"] = json!(USER_REACH);
+            }
+            out
         }
+        // What a user's tokens can reach: what their session can (docs/accounts.md).
+        // `approve_people`: what in their tokens waits for an admin (the builder and consent say so first).
+        Who::User(u) => json!({ "kind": "user", "user": { "id": u.user, "handle": u.handle }, "reach": USER_REACH, "approve_people": a.policy_now().approve_people, "locked": a.config.locked }),
     }))
 }
 
@@ -151,15 +287,16 @@ struct Check {
 /// token", and an agent asking before it tries. Same catalogue and resolvers as a real request;
 /// a nested or catch-all route is matched by its path, as the gate matches it.
 async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Result<Json<Value>> {
-    let (scope, ask_otherwise) = match (who(&a, &ext)?, &c.token) {
+    let who = who(&a, &ext)?;
+    let (scope, ask_otherwise) = match (&who, &c.token) {
         (Who::Grant(g), None) => (g.scope.as_ref().clone(), g.ask_otherwise),
         (Who::Grant(_), Some(_)) => return Err(Error::Forbidden("a token checks only itself".into())),
-        (Who::Operator, Some(id)) => {
-            let id = id.clone();
-            let g = blocking(a.clone(), move |a| a.store.get(&id)).await?;
+        (Who::Operator | Who::User(_), Some(id)) => {
+            let g = visible_grant(&a, &who, id).await?;
             (g.effective_rules(code_sql::now_ms()), g.ask_otherwise)
         }
         (Who::Operator, None) => return Ok(Json(json!({ "decision": "allow", "why": "the operator may do everything" }))),
+        (Who::User(_), None) => return Err(Error::BadRequest("name the token to check (token)".into())),
     };
     let method = c.method.to_ascii_uppercase();
     let uri: axum::http::Uri = c.path.parse().map_err(|_| Error::BadRequest("path isn't a request path".into()))?;
@@ -211,6 +348,8 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
 struct ListFilter {
     product: Option<String>,
     resource: Option<String>,
+    /// `workload`: the workload tokens instead (the latest 500).
+    kind: Option<String>,
 }
 
 /// Whether a rule of `g`'s is about `product` (by name, not `*`) and, with `resource`, names it
@@ -231,13 +370,22 @@ fn made_for(g: &crate::store::Grant, product: &str, resource: Option<&str>) -> b
     })
 }
 
-async fn list(State(a): S, Query(f): Query<ListFilter>) -> crate::Result<Json<Value>> {
+/// A user sees their own.
+async fn list(State(a): S, ext: Extensions, Query(f): Query<ListFilter>) -> crate::Result<Json<Value>> {
     if f.resource.is_some() && f.product.is_none() {
         return Err(Error::BadRequest("resource needs product".into()));
     }
-    let (grants, activity) = blocking(a, |a| Ok((a.store.list()?, a.store.activity()?))).await?;
+    let who = who(&a, &ext)?;
+    let workloads = match f.kind.as_deref() {
+        None => false,
+        Some("workload") => true,
+        Some(k) => return Err(Error::BadRequest(format!("kind {k:?}: only workload"))),
+    };
+    let mine = who.mine().map(str::to_string);
+    let (grants, activity) = blocking(a, move |a| Ok((if workloads { a.store.workloads(500, mine.as_deref())? } else { a.store.list()? }, a.store.activity()?))).await?;
     let out: Vec<Value> = grants
         .into_iter()
+        .filter(|g| visible(&who, g))
         .filter(|g| f.product.as_deref().is_none_or(|p| made_for(g, p, f.resource.as_deref())))
         .map(|g| {
             let (allowed, denied, asked) = activity.get(&g.id).copied().unwrap_or_default();
@@ -249,22 +397,26 @@ async fn list(State(a): S, Query(f): Query<ListFilter>) -> crate::Result<Json<Va
     Ok(Json(json!(out)))
 }
 
-async fn get_one(State(a): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
-    Ok(Json(json!(blocking(a, move |a| a.store.get(&id)).await?)))
+async fn get_one(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    let who = who(&a, &ext)?;
+    Ok(Json(json!(visible_grant(&a, &who, &id).await?)))
 }
 
 /// Tokens checked for this many at most for a narrower tighten proposal (an audit query each).
 const CHECKUP_TIGHTEN: usize = 200;
 
 /// The access checkup: the live tokens that need attention, each with its findings and fixes.
-async fn checkup(State(a): S) -> crate::Result<Json<Value>> {
-    let out = blocking(a, |a| {
+async fn checkup(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
+    // A person's checkup is of their own tokens.
+    let who = who(&a, &ext)?;
+    let policy = a.policy_now();
+    let out = blocking(a, move |a| {
         let now = code_sql::now_ms();
         let counts = a.store.network_counts()?;
         let since = now - crate::checkup::UNUSED_DAYS * 86_400_000;
         let mut checked = 0;
         let mut out = Vec::new();
-        for g in a.store.list()?.into_iter().filter(|g| g.live(now)) {
+        for g in a.store.list()?.into_iter().filter(|g| g.live(now) && visible(&who, g)) {
             // Whether its proposal is narrower: for tokens used lately, a bounded number of them.
             let used_lately = g.last_used_at.is_some_and(|t| t >= since);
             let narrower = if used_lately && checked < CHECKUP_TIGHTEN {
@@ -275,7 +427,15 @@ async fn checkup(State(a): S) -> crate::Result<Json<Value>> {
                 false
             };
             let seen = crate::checkup::Seen { networks: counts.get(&g.id).copied().unwrap_or(0), narrower };
-            let findings = crate::checkup::findings(&g, &seen, now);
+            let mut findings = crate::checkup::findings(&g, &seen, now);
+            // A person sees that their own waits elsewhere; deciding it isn't theirs.
+            if matches!(who, Who::User(_)) {
+                findings.retain(|f| f.kind != "pending");
+            } else if g.user.is_some() && !g.pending && g.approved_at.is_none() && g.live(now) && policy.needs_approval(&g.rules, g.ask_otherwise) {
+                // A person's token made before the policy asked: it works, unapproved, until an
+                // admin decides it.
+                findings.insert(0, crate::checkup::Finding { kind: "unapproved", why: "a person's token that reaches what the policy has an admin approve, made before the policy asked: approve it or deny it".into(), fix: "approve" });
+            }
             if !findings.is_empty() {
                 out.push(json!({
                     "grant": { "id": g.id, "name": g.name, "kind": g.kind, "last_used_at": g.last_used_at, "expires_at": g.expires_at, "created_at": g.created_at },
@@ -290,7 +450,10 @@ async fn checkup(State(a): S) -> crate::Result<Json<Value>> {
 }
 
 /// The networks a token has been used from (its /24 or /48), with when first and last.
-async fn networks(State(a): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+async fn networks(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    // A person sees only their own tokens'.
+    let who = who(&a, &ext)?;
+    visible_grant(&a, &who, &id).await?;
     let list = blocking(a, move |a| a.store.networks(&id)).await?;
     Ok(Json(json!(list.into_iter().map(|(network, first_at, last_at)| json!({ "network": network, "first_at": first_at, "last_at": last_at })).collect::<Vec<_>>())))
 }
@@ -303,15 +466,18 @@ struct TightenQuery {
 
 /// Its rules narrowed to what its requests used ([`crate::tighten`]): a proposal, never wider,
 /// with the rules it was made `from` (what applying it checks).
-async fn tighten(State(a): S, Path(id): Path<String>, Query(q): Query<TightenQuery>) -> crate::Result<Json<Value>> {
-    let (grant, days, since, used, rules) = proposal(&a, id, q.days).await?;
+async fn tighten(State(a): S, ext: Extensions, Path(id): Path<String>, Query(q): Query<TightenQuery>) -> crate::Result<Json<Value>> {
+    let who = who(&a, &ext)?;
+    let (grant, days, since, used, rules) = proposal(&a, &who, id, q.days).await?;
     Ok(Json(json!({ "since": since, "days": days, "used": used, "rules": rules, "from": grant.rules, "narrower": rules != grant.rules })))
 }
 
-async fn proposal(a: &Arc<Access>, id: String, days: Option<i64>) -> crate::Result<(crate::store::Grant, i64, i64, Vec<crate::tighten::Used>, roll_auth::scope::Scope)> {
+/// A person sees only their own tokens' activity.
+async fn proposal(a: &Arc<Access>, who: &Who, id: String, days: Option<i64>) -> crate::Result<(crate::store::Grant, i64, i64, Vec<crate::tighten::Used>, roll_auth::scope::Scope)> {
     let days = days.unwrap_or(30).clamp(1, 90);
     let since = code_sql::now_ms() - days * 86_400_000;
-    let (grant, used) = blocking(a.clone(), move |a| Ok((a.store.get(&id)?, a.store.used(&id, since)?))).await?;
+    let grant = visible_grant(a, who, &id).await?;
+    let used = blocking(a.clone(), move |a| a.store.used(&id, since)).await?;
     let rules = crate::tighten::tighten(&grant.rules, &used);
     // A proposal the rules' own checks would refuse (too many rules, too long) isn't one.
     let rules = if rules.problems().is_empty() { rules } else { grant.rules.clone() };
@@ -328,8 +494,12 @@ struct ApplyTighten {
 /// Apply the proposal, made again now, if the token's rules are still the ones it was shown from
 /// (another change in between: 409). The operator's, like editing rules.
 async fn apply_tighten(State(a): S, ext: Extensions, Path(id): Path<String>, Json(b): Json<ApplyTighten>) -> crate::Result<Json<Value>> {
-    operator_only(&a, &ext, "tighten a token")?;
-    let (grant, _, _, _, rules) = proposal(&a, id.clone(), b.days).await?;
+    // The operator, or a person for their own token (narrowing never widens). A token never.
+    let who = who(&a, &ext)?;
+    if matches!(who, Who::Grant(_)) {
+        return Err(Error::Forbidden("a token doesn't tighten tokens: the operator or its owner does".into()));
+    }
+    let (grant, _, _, _, rules) = proposal(&a, &who, id.clone(), b.days).await?;
     if rules == grant.rules {
         return Ok(Json(json!(grant)));
     }
@@ -339,7 +509,10 @@ async fn apply_tighten(State(a): S, ext: Extensions, Path(id): Path<String>, Jso
 async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate::Result<Response> {
     let new: NewGrant = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
     let (grant, token) = a.create_for(&ext, new).await?;
-    Ok((StatusCode::CREATED, Json(json!({ "grant": grant, "token": token }))).into_response())
+    let id = grant.id.clone();
+    let mut res = (StatusCode::CREATED, Json(json!({ "grant": grant, "token": token }))).into_response();
+    res.extensions_mut().insert(Changed(id));
+    Ok(res)
 }
 
 impl Access {
@@ -357,17 +530,87 @@ impl Access {
         self.create_for(ext, new).await
     }
 
-    async fn create_for(self: &Arc<Self>, ext: &Extensions, new: NewGrant) -> crate::Result<(crate::store::Grant, String)> {
-        let by = match who(self, ext)? {
-            Who::Operator => actor(ext),
+    async fn create_for(self: &Arc<Self>, ext: &Extensions, mut new: NewGrant) -> crate::Result<(crate::store::Grant, String)> {
+        // A user's token is theirs, and so is one their token makes: it acts as them.
+        let who = who(self, ext)?;
+        // A person's own token past what the policy has an admin approve waits for one (one their
+        // token makes is within that token, which was approved).
+        let asker = match &who {
+            Who::User(u) if self.policy_now().needs_approval(&new.rules, new.ask_otherwise) => Some(u.handle.clone()),
+            _ => None,
+        };
+        new.pending = asker.is_some();
+        let (by, user) = match who {
+            // An admin's token is theirs too: it acts as the operator while they're an admin, and
+            // stops (or narrows to their own reach) when they aren't.
+            Who::Operator => (actor(ext), ext.get::<roll_auth::SignedIn>().map(|u| u.user.clone())),
+            Who::User(u) => (u.user.clone(), Some(u.user)),
             Who::Grant(g) => {
                 check_within(self, &g, &Shape { rules: &new.rules, expires_at: new.expires_at, ip_allow: &new.ip_allow, rate: new.rate_per_minute, ask_otherwise: new.ask_otherwise }).await?;
-                g.id.to_string()
+                (g.id.to_string(), g.user.as_deref().map(str::to_string))
             }
         };
         self.check_policy(new.expires_at)?;
-        blocking(self.clone(), move |a| a.store.create(&new, GrantKind::Token, &by, None)).await
+        let made = blocking(self.clone(), move |a| a.store.create(&new, GrantKind::Token, &by, None, user.as_deref())).await?;
+        self.tell_added(&made.0, Added::Token, ext);
+        if let Some(handle) = asker {
+            self.tell_admins_waiting(&made.0, &handle);
+        }
+        Ok(made)
     }
+
+    /// Admins hear that a person's token waits for one of them (GitHub mails organization owners):
+    /// who asked, what it reaches, and where to decide. Never its secret.
+    pub(crate) fn tell_admins_waiting(self: &Arc<Self>, g: &crate::store::Grant, handle: &str) {
+        let (name, handle) = (crate::mail_name(&g.name), crate::mail_name(handle));
+        let text = format!("{handle} made the token \"{name}\", which waits for an admin's approval. It may:\n{}\n\nApprove or deny it: {}/dashboard/access/tokens/{}\n", may(g), self.web_url(), g.id);
+        self.tell_admins(&format!("pending:{}", g.id), format!("A roll token waits for your approval: \"{name}\" ({handle})"), text);
+    }
+
+    /// A person hears at once that a token, client or device was added to their account (GitHub
+    /// mails "a new personal access token was added", "a third-party OAuth application has been
+    /// added"): what, what it may do, the network it came from, and where to revoke it. A phished
+    /// device code or a stolen session then reaches its victim. In roll's words only (`mail_name`).
+    pub(crate) fn tell_added(self: &Arc<Self>, g: &crate::store::Grant, added: Added<'_>, ext: &Extensions) {
+        let Some(user) = g.user.as_deref() else { return };
+        let name = crate::mail_name(&g.name);
+        let from = ext.get::<roll_auth::ClientIp>().and_then(|c| crate::store::network_of(&c.0.to_string())).map(|n| format!(" from {n}")).unwrap_or_default();
+        let (subject, what) = match added {
+            Added::Token => (format!("A token was added to your roll account: \"{name}\""), format!("The token \"{name}\" ({}) was made on your roll account{from}", g.id)),
+            Added::Client(client) => {
+                let client = crate::mail_name(client);
+                (format!("{client} was connected to your roll account"), format!("{client} was connected to your roll account{from}, as \"{name}\" ({})", g.id))
+            }
+            Added::Device { client, asked_from } => {
+                let client = crate::mail_name(client);
+                let asked = asked_from.map(|n| format!(", asked from {n}")).unwrap_or_default();
+                let allowed = if from.is_empty() { String::new() } else { format!(" (the code was entered{from})") };
+                ("A device was signed in to your roll account".to_string(), format!("A device was signed in to your roll account with a code: {client}{asked}{allowed}, as \"{name}\" ({})", g.id))
+            }
+        };
+        let text = format!("{what}. It may:\n{}\n\nNot you? Revoke it: {}/dashboard/access/tokens/{}\n", may(g), self.web_url(), g.id);
+        self.tell(Some(user), None, subject, text);
+    }
+}
+
+/// What a token was added to a person's account as, for their mail.
+pub(crate) enum Added<'a> {
+    Token,
+    /// An MCP client, by its name, through the consent screen.
+    Client(&'a str),
+    /// A device, by its client's name, with a code, and the network the device asked from (the
+    /// request's network is the approver's own browser: a phished victim's).
+    Device { client: &'a str, asked_from: Option<&'a str> },
+}
+
+/// What a grant may do, a line a product, for mail: products and actions, never a resource (a
+/// resource can be anyone's text).
+fn may(g: &crate::store::Grant) -> String {
+    let mut lines: Vec<String> = g.rules.0.iter().map(|r| format!("  {}: {}", r.product, r.actions.keys().map(|a| a.as_str()).collect::<Vec<_>>().join(", "))).collect();
+    if g.ask_otherwise {
+        lines.push("  and ask for anything else".into());
+    }
+    lines.join("\n")
 }
 
 /// What a grant would be: what a maker must cover.
@@ -391,6 +634,11 @@ async fn check_within(a: &Arc<Access>, g: &roll_auth::Grant, shape: &Shape<'_>) 
     let Shape { rules, expires_at, ip_allow, rate, ask_otherwise } = *shape;
     let id = g.id.to_string();
     let maker = blocking(a.clone(), move |a| a.store.get(&id)).await?;
+    // A workload's token is a job's for minutes: what it makes would be a credential nobody set
+    // up, so it makes and changes none.
+    if maker.kind == "workload" {
+        return Err(Error::Forbidden("a workload token can't make or change tokens".into()));
+    }
     // Its own rules, not what it's allowed for a while: a while never becomes for good.
     if !maker.rules.covers(rules) {
         return Err(Error::Forbidden("a token can only make tokens it covers: every rule must be within one of its own".into()));
@@ -429,9 +677,19 @@ async fn may_touch(a: &Arc<Access>, g: &roll_auth::Grant, target: &crate::store:
 
 async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
     let change: GrantChange = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
-    let (target_id, a2) = (id.clone(), a.clone());
-    let target = blocking(a2, move |a| a.store.get(&target_id)).await?;
-    if let Who::Grant(g) = who(&a, &ext)? {
+    let who = who(&a, &ext)?;
+    let target = visible_grant(&a, &who, &id).await?;
+    // What an admin is deciding doesn't change under them: a waiting token's reach is fixed until
+    // they do (an approval would otherwise take rules they never saw).
+    if target.pending && (change.rules.is_some() || change.ask_otherwise.is_some()) {
+        return Err(Error::Conflict("it waits for an admin's approval: its rules can't change until they decide (revoke it and make another)".into()));
+    }
+    let person = matches!(who, Who::User(_));
+    let who_handle = match &who {
+        Who::User(u) => Some(u.handle.clone()),
+        _ => None,
+    };
+    if let Who::Grant(g) = who {
         // What the token is now, and what it would become, must both be within the caller's; a
         // token never widens its own addresses.
         may_touch(&a, &g, &target).await?;
@@ -449,13 +707,61 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
     if change.rules.is_some() || change.expires_at.is_some() || change.ip_allow.is_some() {
         a.check_policy(change.expires_at.unwrap_or(target.expires_at))?;
     }
-    Ok(Json(json!(blocking(a, move |a| a.store.update(&id, &change)).await?)))
+    // A person widening their own token past what the policy has an admin approve: it waits again.
+    let asker = match &who_handle {
+        Some(h) => h.clone(),
+        None => String::new(),
+    };
+    let again = person
+        && (change.rules.is_some() || change.ask_otherwise.is_some())
+        && a.policy_now().needs_approval(change.rules.as_ref().unwrap_or(&target.rules), change.ask_otherwise.unwrap_or(target.ask_otherwise));
+    let mut change = change;
+    if again {
+        change.pending = Some(true);
+    }
+    let updated = blocking(a.clone(), move |a| a.store.update(&id, &change)).await?;
+    if again {
+        a.tell_admins_waiting(&updated, &asker);
+    }
+    Ok(Json(json!(updated)))
+}
+
+/// `POST /v1/access/tokens/{id}/approve`: an admin lets a person's pending token work (GitHub's
+/// organization approval of fine-grained tokens). An admin's call, never a token's.
+async fn approve_token(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    decide_token(a, &ext, id, true).await
+}
+
+/// `POST /v1/access/tokens/{id}/deny`: it's revoked, saying an admin denied it.
+async fn deny_token(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    decide_token(a, &ext, id, false).await
+}
+
+async fn decide_token(a: Arc<Access>, ext: &Extensions, id: String, approve: bool) -> crate::Result<Json<Value>> {
+    if !matches!(who(&a, ext)?, Who::Operator) {
+        return Err(Error::Forbidden("only an admin approves people's tokens".into()));
+    }
+    let by = actor(ext);
+    let (by2, id2) = (by.clone(), id.clone());
+    let g = blocking(a.clone(), move |a| a.store.decide_pending(&id2, approve, &by2)).await?;
+    // Its audit row (who decided, as GitHub's organizations log a token request approved or
+    // denied) is `audit_changes`'s, as every change's is.
+    if let Some(user) = g.user.as_deref() {
+        let name = crate::mail_name(&g.name);
+        let (subject, text) = if approve {
+            (format!("Your roll token \"{name}\" was approved"), "An admin approved it: it works now.\n".to_string())
+        } else {
+            (format!("Your roll token \"{name}\" was denied"), "An admin denied it, so it's revoked. Make one that reaches less, or ask them.\n".to_string())
+        };
+        a.tell(Some(user), None, subject, text);
+    }
+    Ok(Json(json!(g)))
 }
 
 async fn revoke(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
-    if let Who::Grant(g) = who(&a, &ext)? {
-        let (target_id, a2) = (id.clone(), a.clone());
-        let target = blocking(a2, move |a| a.store.get(&target_id)).await?;
+    let who = who(&a, &ext)?;
+    let target = visible_grant(&a, &who, &id).await?;
+    if let Who::Grant(g) = who {
         // A grant revokes itself, or tokens it covers.
         may_touch(&a, &g, &target).await?;
     }
@@ -465,7 +771,15 @@ async fn revoke(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
 /// Take back what an approval allowed a token for a while. The operator decides approvals, so
 /// the operator takes them back.
 async fn forget(State(a): S, ext: Extensions, Path((id, approval)): Path<(String, String)>) -> crate::Result<Json<Value>> {
-    operator_only(&a, &ext, "take back an approval")?;
+    // Whoever may decide the approval takes it back: the operator, or a person for their own token.
+    may_decide(&a, &ext, &approval).await?;
+    // The approval is this token's, and the token is one the caller sees.
+    let who = who(&a, &ext)?;
+    visible_grant(&a, &who, &id).await?;
+    let (a2, apr) = (a.clone(), approval.clone());
+    if blocking(a2, move |a| a.store.approval(&apr)).await?.grant_id != id {
+        return Err(Error::NotFound(format!("{approval} isn't this token's")));
+    }
     Ok(Json(json!(blocking(a, move |a| a.store.forget(&id, &approval)).await?)))
 }
 
@@ -483,9 +797,9 @@ async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
     if body.keep_old_for_s.is_some_and(|s| s < 0 || s * 1000 > crate::store::MAX_KEEP_OLD_MS) {
         return Err(Error::BadRequest("keep_old_for_s is 0 to 604800 (a week)".into()));
     }
-    let (target_id, a2) = (id.clone(), a.clone());
-    let target = blocking(a2, move |a| a.store.get(&target_id)).await?;
-    if let Who::Grant(g) = who(&a, &ext)? {
+    let who = who(&a, &ext)?;
+    let target = visible_grant(&a, &who, &id).await?;
+    if let Who::Grant(g) = who {
         may_touch(&a, &g, &target).await?;
     }
     // A new secret is a new token: it meets the policy (set an expiry first if it must expire).
@@ -503,9 +817,41 @@ struct ApprovalsQuery {
     limit: Option<usize>,
 }
 
-async fn approvals(State(a): S, Query(q): Query<ApprovalsQuery>) -> crate::Result<Json<Value>> {
-    let list = blocking(a, move |a| a.store.approvals(q.state.as_deref(), q.grant.map(|g| vec![g]).as_deref(), q.limit.unwrap_or(100))).await?;
+/// The ids of the grants `user` owns.
+async fn grants_of(a: &Arc<Access>, user: &str) -> crate::Result<std::collections::HashSet<String>> {
+    let user = user.to_string();
+    blocking(a.clone(), move |a| a.store.grant_ids_of(&user)).await
+}
+
+/// A person sees their own tokens' approvals only: filtered in the query, so the limit counts theirs.
+async fn approvals(State(a): S, ext: Extensions, Query(q): Query<ApprovalsQuery>) -> crate::Result<Json<Value>> {
+    let who = who(&a, &ext)?;
+    let grants: Option<Vec<String>> = match (who.mine(), q.grant) {
+        (None, g) => g.map(|g| vec![g]),
+        (Some(user), g) => {
+            let mine = grants_of(&a, user).await?;
+            Some(match g {
+                Some(g) => mine.contains(&g).then_some(g).into_iter().collect(),
+                None => mine.into_iter().collect(),
+            })
+        }
+    };
+    let list = blocking(a, move |a| a.store.approvals(q.state.as_deref(), grants.as_deref(), q.limit.unwrap_or(100))).await?;
     Ok(Json(json!(list)))
+}
+
+/// Who may decide an approval: the operator (or an admin), and a user for their own tokens'. A
+/// token never decides one, not even its own.
+async fn may_decide(a: &Arc<Access>, ext: &Extensions, id: &str) -> crate::Result<String> {
+    match who(a, ext)? {
+        Who::Operator => Ok(actor(ext)),
+        Who::Grant(_) => Err(Error::Forbidden("a token never decides a request".into())),
+        Who::User(u) => {
+            let id2 = id.to_string();
+            let found = blocking(a.clone(), move |a| a.store.approval(&id2)).await?;
+            if grants_of(a, &u.user).await?.contains(&found.grant_id) { Ok(u.user) } else { Err(Error::NotFound(format!("no approval {id}"))) }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -518,10 +864,16 @@ async fn approval(State(a): S, ext: Extensions, Path(id): Path<String>, Query(q)
     let who = who(&a, &ext)?;
     let (a2, id2) = (a.clone(), id.clone());
     let found = blocking(a2, move |a| a.store.approval(&id2)).await?;
-    if let Who::Grant(g) = &who
-        && *g.id != *found.grant_id
-        && g.scope.outcome(&Target::Product { product: "access".into() }, Action::Read) != Outcome::Allow
-    {
+    let hidden = match &who {
+        Who::Operator => false,
+        Who::Grant(g) => *g.id != *found.grant_id && g.scope.outcome(&Target::Product { product: "access".into() }, Action::Read) != Outcome::Allow,
+        Who::User(_) => false,
+    };
+    let not_mine = match who.mine() {
+        Some(user) => !grants_of(&a, user).await?.contains(&found.grant_id),
+        None => false,
+    };
+    if hidden || not_mine {
         return Err(Error::NotFound(format!("no approval {id}")));
     }
     let found = match q.wait.filter(|w| *w > 0) {
@@ -546,10 +898,9 @@ struct Approve {
 /// Approve a request, once, or also for what's asked again (docs/permissions.md, "Remembered
 /// approvals"): the same action on the same resource for a while, or for good.
 async fn approve(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
-    operator_only(&a, &ext, "approve a request")?;
+    let by = may_decide(&a, &ext, &id).await?;
     let ap: Approve = if body.iter().all(u8::is_ascii_whitespace) { Approve::default() } else { serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))? };
     let remembered = remembered(&a, &id, ap.remember.as_deref()).await?;
-    let by = actor(&ext);
     let decided = blocking(a.clone(), move |a| a.store.decide(&id, true, &by, None)).await?;
     a.changed(&decided);
     if let Some((grant, rule, until)) = remembered {
@@ -615,10 +966,9 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
 }
 
 async fn deny(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
-    operator_only(&a, &ext, "deny a request")?;
+    let by = may_decide(&a, &ext, &id).await?;
     let d: Decision = if body.iter().all(u8::is_ascii_whitespace) { Decision::default() } else { serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))? };
     let reason = d.reason.map(|r| r.chars().take(500).collect::<String>());
-    let by = actor(&ext);
     let decided = blocking(a.clone(), move |a| a.store.decide(&id, false, &by, reason.as_deref())).await?;
     a.changed(&decided);
     Ok(Json(json!(decided)))
@@ -627,7 +977,8 @@ async fn deny(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::
 /// Where approvals are posted: `{chat: {install, channel, approvers} | null}` (docs/permissions.md,
 /// "Approvals in chat"). `approvers` are the chat user ids (Slack `U…`, Discord snowflakes) who
 /// may decide there: the operator names them, whoever else sees the channel.
-async fn notify(State(a): S) -> crate::Result<Json<Value>> {
+async fn notify(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
+    operator_only(&a, &ext, "see where approvals go")?;
     let v = blocking(a, |a| a.store.setting("notify")).await?;
     Ok(Json(v.unwrap_or_else(|| json!({ "chat": null }))))
 }
@@ -697,13 +1048,24 @@ async fn set_policy(State(a): S, ext: Extensions, Json(p): Json<crate::Policy>) 
 }
 
 /// The audit log; `?format=jsonl`: one event per line, as a download (what a SIEM or `jq` reads).
-async fn audit(State(a): S, Query(q): Query<AuditQuery>) -> crate::Result<Response> {
+async fn audit(State(a): S, ext: Extensions, Query(mut q): Query<AuditQuery>) -> crate::Result<Response> {
     let format = q.format.clone();
     if format.as_deref().is_some_and(|f| f != "jsonl" && f != "csv") {
         return Err(Error::BadRequest("format: jsonl or csv".into()));
     }
     let jsonl = format.as_deref() == Some("jsonl");
-    let events = blocking(a, move |a| a.store.audit_log(&q)).await?;
+    // A user reads their own tokens' rows; a change someone else made to one (an admin's) says who,
+    // but not from where.
+    let me = who(&a, &ext)?.mine().map(str::to_string);
+    if let Some(user) = &me {
+        q.grants = Some(grants_of(&a, user).await?.into_iter().collect());
+    }
+    let mut events = blocking(a, move |a| a.store.audit_log(&q)).await?;
+    if let Some(user) = &me {
+        for e in events.iter_mut().filter(|e| e.source == "access" && e.args.as_ref().and_then(|v| v["by"].as_str()) != Some(user.as_str())) {
+            e.ip = None;
+        }
+    }
     if format.as_deref() == Some("csv") {
         let headers = [(axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8"), (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"roll-audit.csv\"")];
         return Ok((headers, audit_csv(&events)).into_response());
@@ -769,11 +1131,12 @@ pub fn audit_csv(events: &[crate::store::AuditEvent]) -> String {
     out
 }
 
-async fn clients(State(a): S) -> crate::Result<Json<Value>> {
-    // Clients with a live connection, from the grants that name them.
+async fn clients(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
+    // Clients with a live connection, from the grants that name them (a user's own).
+    let who = who(&a, &ext)?;
     let grants = blocking(a, |a| a.store.list()).await?;
     let mut seen = std::collections::BTreeMap::new();
-    for g in grants.into_iter().filter(|g| g.revoked_at.is_none()) {
+    for g in grants.into_iter().filter(|g| g.revoked_at.is_none() && visible(&who, g)) {
         if let Some(c) = g.client {
             seen.entry(c.id.clone()).or_insert(c);
         }
@@ -785,7 +1148,8 @@ async fn clients(State(a): S) -> crate::Result<Json<Value>> {
 /// the clients roll knows: it never makes roll fetch a document.
 async fn client(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     let c = match who(&a, &ext)? {
-        Who::Operator => crate::oauth::known_client(&a, &id).await?,
+        // People on the consent screen (the operator, a signed-in user) may have a document fetched.
+        Who::Operator | Who::User(_) => crate::oauth::known_client(&a, &id).await?,
         Who::Grant(_) => {
             let id = id.clone();
             blocking(a.clone(), move |a| a.store.client(&id)).await?
