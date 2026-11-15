@@ -479,7 +479,7 @@ fn plain_index_html_and_nothing() {
     );
 
     let err = plan(&tree(&[("README.md", "hi")]), &Overrides::default()).unwrap_err();
-    assert!(matches!(err, Error::NothingDetected));
+    assert!(matches!(err, Error::NothingDetected(_)));
     assert!(
         err.to_string().contains("package.json") && err.to_string().contains("go.mod"),
         "{err}"
@@ -613,7 +613,7 @@ fn dir_tree_refuses_symlinks_and_escapes() {
     // The symlinked requirements.txt doesn't count, so this is just a file with no manifest.
     assert!(matches!(
         plan(&t, &Overrides::default()),
-        Err(Error::NothingDetected)
+        Err(Error::NothingDetected(_))
     ));
 }
 
@@ -698,4 +698,58 @@ fn a_procfile_names_the_start_command_and_the_release_phase() {
     assert_eq!(set.start.as_deref(), Some("node other.js"));
     let docker = plan(&tree(&[("Dockerfile", "FROM node:22\nCMD [\"node\", \"x.js\"]\n"), ("Procfile", "web: node y.js\nrelease: migrate\n")]), &Overrides { process: Some("web".into()), ..Default::default() }).unwrap();
     assert_eq!((docker.start, docker.release), (None, None));
+}
+
+#[test]
+fn deno_runs_its_start_task_or_its_entry_module() {
+    let p = detect(&[("deno.json", r#"{"tasks": {"start": "deno run -A main.ts", "build": "deno task bundle"}}"#), ("main.ts", "Deno.serve(() => new Response('hi'))"), ("deno.lock", "{}")]);
+    assert_eq!((p.provider, p.start.as_deref(), p.build.as_deref()), (Provider::Deno, Some("deno task start"), Some("deno task build")));
+    has(&p, &["FROM denoland/deno:", "COPY deno.json deno.lock ./", "RUN deno install", "USER deno"]);
+    let p = detect(&[("deno.jsonc", "// a comment\n{\n  \"imports\": {}\n}"), ("server.ts", "")]);
+    assert_eq!(p.start.as_deref(), Some("deno run --allow-net --allow-env --allow-read server.ts"));
+    // A package.json beside it: still Deno.
+    assert_eq!(detect(&[("deno.json", "{}"), ("main.ts", ""), ("package.json", "{}")]).provider, Provider::Deno);
+    assert!(plan(&tree(&[("deno.json", "{}")]), &Overrides::default()).is_err(), "nothing to start");
+}
+
+#[test]
+fn dotnet_publishes_its_project_and_runs_it_on_port() {
+    let csproj = r#"<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><TargetFramework>net9.0</TargetFramework><AssemblyName>Shop.Api</AssemblyName></PropertyGroup></Project>"#;
+    let p = detect(&[("Shop.Api.csproj", csproj), ("Program.cs", "")]);
+    assert_eq!((p.provider, p.framework.as_deref(), p.language_version.as_deref()), (Provider::Dotnet, Some("aspnetcore"), Some("9.0")));
+    assert_eq!(p.start.as_deref(), Some("dotnet /app/Shop.Api.dll --urls http://0.0.0.0:$PORT"));
+    has(&p, &["FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build", "COPY Shop.Api.csproj ./", "dotnet restore", "dotnet publish -c Release -o /out --no-restore", "FROM mcr.microsoft.com/dotnet/aspnet:9.0", "COPY --from=build /out ./", "USER app"]);
+    // Two projects at the root: which one is the person's to say.
+    assert!(plan(&tree(&[("A.csproj", csproj), ("B.csproj", csproj)]), &Overrides::default()).is_err());
+}
+
+#[test]
+fn elixir_is_built_as_a_release_and_phoenix_serves() {
+    let mix = "defmodule Shop.MixProject do\n  use Mix.Project\n  def project, do: [app: :shop, version: \"0.1.0\", deps: deps(), aliases: [\"assets.deploy\": [\"esbuild default --minify\", \"phx.digest\"]]]\n  defp deps, do: [{:phoenix, \"~> 1.7\"}]\nend\n";
+    let p = detect(&[("mix.exs", mix), ("mix.lock", "%{}"), ("assets/app.js", "")]);
+    assert_eq!((p.provider, p.framework.as_deref(), p.start.as_deref()), (Provider::Elixir, Some("phoenix"), Some("/app/bin/shop start")));
+    assert_eq!(p.build.as_deref(), Some("mix assets.deploy && mix release"));
+    has(&p, &["FROM elixir:1.17-slim AS build", "ENV MIX_ENV=prod", "ca-certificates git", "COPY mix.exs mix.lock ./", "mix deps.get --only prod", "COPY --from=build --chown=nobody:nogroup /app/_build/prod/rel/shop ./", "PHX_SERVER=true", "USER nobody"]);
+    assert!(p.notes.iter().any(|n| n.contains("SECRET_KEY_BASE")), "{:?}", p.notes);
+    // A plain Elixir app: its release, no assets step.
+    let p = detect(&[("mix.exs", "defmodule Hi.MixProject do\n  def project, do: [app: :hi, deps: []]\nend\n")]);
+    assert_eq!((p.framework.as_deref(), p.build.as_deref()), (None, Some("mix release")));
+}
+
+#[test]
+fn nothing_detected_says_what_it_did_find() {
+    let err = plan(&tree(&[("pubspec.yaml", "name: shop")]), &Overrides::default()).unwrap_err();
+    assert!(err.to_string().contains("found pubspec.yaml: Dart"), "{err}");
+    let err = plan(&tree(&[("Shop.sln", "")]), &Overrides::default()).unwrap_err();
+    assert!(err.to_string().contains("Shop.sln: a .NET solution"), "{err}");
+}
+
+#[test]
+fn system_packages_go_in_a_generated_dockerfile_and_are_said() {
+    let o = Overrides { packages: vec!["ffmpeg".into()], ..Overrides::default() };
+    let p = plan(&tree(&[("package.json", r#"{"scripts":{"start":"node server.js"}}"#)]), &o).unwrap();
+    assert!(p.dockerfile.contains("apt-get install -y --no-install-recommends ffmpeg") && p.notes.contains(&"packages: ffmpeg".to_string()), "{}", p.dockerfile);
+    assert!(matches!(plan(&tree(&[("index.html", "<h1>hi</h1>")]), &o), Err(Error::Packages(_))), "a static site runs nothing to install them in");
+    let own = plan(&tree(&[("Dockerfile", "FROM alpine\n")]), &o).unwrap();
+    assert!(!own.dockerfile.contains("ffmpeg"), "the tree's own Dockerfile is its own");
 }

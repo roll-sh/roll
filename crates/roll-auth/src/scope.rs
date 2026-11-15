@@ -92,9 +92,10 @@ pub enum Selector {
     },
     Id {
         id: String,
-        /// Only some indices of it (search: `logs-*`, `a,b`), as Elasticsearch names them: each
-        /// name or pattern a request's index expression lists must be one of these, or start with
-        /// what's before one's trailing `*`. A request about the resource as a whole never matches.
+        /// Only some named parts of it ([`sub_resources`]: search's indices, `logs-*,a`; secrets'
+        /// encryption keys), named as Elasticsearch names indices: each name or pattern a
+        /// request's `{index}` lists must be one of these, or start with what's before one's
+        /// trailing `*`. A request about the resource as a whole never matches.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         index: Option<String>,
     },
@@ -119,6 +120,17 @@ impl<'de> Deserialize<'de> for Selector {
     }
 }
 
+/// What a product's selectors can narrow to by name (`{id, index}`), and the catalogue rows that
+/// name it: search's indices (`…/indices/{index}/…`), secrets' encryption keys
+/// (`…/transit/{name}/…`, so signing with one key needn't be write on the whole project).
+pub fn sub_resources(product: &str) -> Option<&'static str> {
+    match product {
+        "search" => Some("indices"),
+        "secrets" => Some("encryption keys"),
+        _ => None,
+    }
+}
+
 impl Selector {
     pub fn id(id: impl Into<String>) -> Selector {
         Selector::Id { id: id.into(), index: None }
@@ -130,19 +142,25 @@ impl Selector {
                 r.id.as_deref() == Some(id.as_str())
                     && match index {
                         None => true,
-                        Some(mine) => r.index.as_deref().is_some_and(|asked| index_covers(mine, asked)),
+                        Some(mine) => r.index.as_deref().is_some_and(|asked| match r.product.as_str() {
+                            // A request names one key, literally: a `*` or `,` in a key's name names none.
+                            "secrets" => key_name(asked) && keys_cover(mine, asked),
+                            _ => index_covers(mine, asked),
+                        }),
                     }
             }
             Selector::Project { project } => r.project.as_deref() == Some(project) || r.also_in.contains(project),
         }
     }
 
-    /// Whether everything `other` selects, this selects too.
-    fn covers(&self, other: &Selector) -> bool {
+    /// Whether everything `other` selects, this selects too (`product`'s: how its parts are named).
+    fn covers(&self, other: &Selector, product: &str) -> bool {
         match (self, other) {
             (Selector::Project { project: a }, Selector::Project { project: b }) => a == b,
             (Selector::Id { id: a, index: None }, Selector::Id { id: b, .. }) => a == b,
-            (Selector::Id { id: a, index: Some(mine) }, Selector::Id { id: b, index: Some(theirs) }) => a == b && index_covers(mine, theirs),
+            (Selector::Id { id: a, index: Some(mine) }, Selector::Id { id: b, index: Some(theirs) }) => {
+                a == b && if product == "secrets" { keys_cover(mine, theirs) } else { index_covers(mine, theirs) }
+            }
             _ => false,
         }
     }
@@ -167,6 +185,34 @@ fn index_covers(mine: &str, asked: &str) -> bool {
                     *m == "*" || (!n.starts_with('<') && (*m == n || m.strip_suffix('*').is_some_and(|prefix| !prefix.is_empty() && n.starts_with(prefix))))
                 })
         })
+}
+
+/// One encryption key's name as secrets names them: letters, digits, `-` and `_` (no pattern).
+fn key_name(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 200 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Secrets' encryption keys in a rule: names, `prefix*` patterns or `*`, comma separated. Names
+/// are literal: none of an index expression's meanings (`_all`, `-` exclusions, date math).
+fn key_entries(expr: &str) -> Option<Vec<&str>> {
+    let v: Vec<&str> = expr.split(',').map(str::trim).collect();
+    v.iter().all(|e| *e == "*" || key_name(e.strip_suffix('*').unwrap_or(e))).then_some(v)
+}
+
+/// Whether the keys `mine` lists cover every name or pattern `asked` lists: the same name, or a
+/// name or pattern starting with what's before one of `mine`'s trailing `*`.
+fn keys_cover(mine: &str, asked: &str) -> bool {
+    let (Some(mine), Some(asked)) = (key_entries(mine), key_entries(asked)) else { return false };
+    asked.iter().all(|n| {
+        mine.iter().any(|m| *m == "*" || m == n || m.strip_suffix('*').is_some_and(|prefix| n.strip_suffix('*').unwrap_or(n).starts_with(prefix) && *n != "*"))
+    })
+}
+
+/// Whether an approval's `{index}` can be remembered as a rule as it stands: search's index
+/// expression is what the approved request read; a secrets request names one key, and anything
+/// else in its place (a `pay*` or `a,b` secrets answers 404 to) would remember as a pattern.
+pub fn rememberable_part(product: &str, index: &str) -> bool {
+    product != "secrets" || key_name(index)
 }
 
 /// `"*"` (every resource, including ones made later) or a list of selectors.
@@ -332,7 +378,7 @@ impl Rule {
         let resources = match (&self.resources, &other.resources) {
             (Resources::All, _) => true,
             (Resources::Some(_), Resources::All) => false,
-            (Resources::Some(mine), Resources::Some(theirs)) => theirs.iter().all(|t| mine.iter().any(|m| m.covers(t))),
+            (Resources::Some(mine), Resources::Some(theirs)) => theirs.iter().all(|t| mine.iter().any(|m| m.covers(t, &other.product))),
         };
         let environments = match (&self.environments, &other.environments) {
             (None, _) => true,
@@ -403,10 +449,13 @@ impl Scope {
                             out.push(format!("{at}: a resource id must be 1-200 characters, one line without backticks"));
                         }
                         if let Selector::Id { index: Some(ix), .. } = s {
-                            if r.product != "search" {
-                                out.push(format!("{at}: only search resources have indices"));
-                            } else if index_names(ix).next().is_none() || ix.len() > 200 || !plain(ix) {
-                                out.push(format!("{at}: an index is 1-200 characters naming at least one index or pattern"));
+                            if let Some(kind) = sub_resources(&r.product) {
+                                let ok = if r.product == "secrets" { key_entries(ix).is_some() } else { index_names(ix).next().is_some() };
+                                if !ok || ix.len() > 200 || !plain(ix) {
+                                    out.push(format!("{at}: `index` is 1-200 characters naming at least one of its {kind} or a pattern"));
+                                }
+                            } else {
+                                out.push(format!("{at}: only search's indices and secrets' encryption keys narrow a resource by name"));
                             }
                         }
                     }
@@ -450,6 +499,26 @@ mod tests {
         assert!(r.covers(&narrower) && !narrower.covers(&r));
     }
 
+    /// Secrets' encryption keys are literal names: a request names one key, and none of an index
+    /// expression's meanings (`_all`, lists, exclusions) reach another key.
+    #[test]
+    fn keys_narrow_a_project() {
+        let r = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "payments,pay-*" }], "actions": { "write": "allow" } }));
+        let at = |key: &str| Target::One(Resource { index: Some(key.into()), ..Resource::new("secrets", "prj_1") });
+        for ok in ["payments", "pay-eu", "pay-"] {
+            assert!(r.matches(&at(ok)), "{ok}");
+        }
+        for no in ["pay", "pay-*", "payments,pay-eu", "payments,billing", "_all", "*", "-payments", "billing"] {
+            assert!(!r.matches(&at(no)), "{no}");
+        }
+        let all = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "_all" }], "actions": { "write": "allow" } }));
+        assert!(all.matches(&at("_all")) && !all.matches(&at("payments")), "a key named _all is only that key");
+        let one = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "pay-eu" }], "actions": { "write": "allow" } }));
+        assert!(r.covers(&one) && !one.covers(&r));
+        assert!(!Scope(vec![rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "logs-{now}" }], "actions": { "write": "allow" } }))]).problems().is_empty());
+        assert!(super::rememberable_part("secrets", "payments") && !super::rememberable_part("secrets", "pay*") && !super::rememberable_part("secrets", "a,b"));
+    }
+
     /// A selector's indices cover an index expression name by name and pattern by pattern, as
     /// Elasticsearch authorizes one; the cluster as a whole is never theirs.
     #[test]
@@ -469,6 +538,7 @@ mod tests {
         assert!(whole.matches(&at(Some("anything"))) && whole.covers(&r) && r.covers(&one) && !one.covers(&r) && !r.covers(&whole));
         assert!(!Scope(vec![rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1", "index": "-x" }], "actions": { "read": "allow" } }))]).problems().is_empty());
         assert!(!Scope(vec![rule(serde_json::json!({ "product": "redis", "resources": [{ "id": "rdb_1", "index": "x" }], "actions": { "read": "allow" } }))]).problems().is_empty());
+        assert!(Scope(vec![rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "payments" }], "actions": { "write": "allow" } }))]).problems().is_empty(), "an encryption key");
         // A field a selector doesn't have is refused, never dropped (that would widen the rule).
         for bad in [serde_json::json!({ "project": "p", "index": "logs-*" }), serde_json::json!({ "id": "a", "extra": 1 }), serde_json::json!({})] {
             assert!(serde_json::from_value::<Selector>(bad.clone()).is_err(), "{bad}");
