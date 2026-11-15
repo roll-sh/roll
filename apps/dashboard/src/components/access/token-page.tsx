@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { accessApi, describeRule, productName, RISKY, statusOf, type Approval, type AuditEvent, type Grant, type Tightened } from "@/lib/access-api";
+import { accessApi, describeRule, productName, RISKY, statusOf, type AgentSees, type Approval, type AuditEvent, type Grant, type Tightened } from "@/lib/access-api";
 import { loadInventory, resourcesByProduct } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { Link } from "../link";
@@ -23,6 +23,7 @@ function Token({ id }: { id: string }) {
   const { data: events } = usePoll(() => accessApi.audit({ grant: id, limit: 30 }), 15_000);
   const { data: approvals } = usePoll(() => accessApi.approvals(undefined, id), 15_000);
   const { data: networks } = usePoll(() => accessApi.networks(id), 30_000);
+  const { data: sees } = usePoll(() => accessApi.agentSees(id), 60_000);
   const ws = useWorkspace();
   const [inventory, setInventory] = useState<Record<string, { id: string; name: string }[]>>({});
   useEffect(() => {
@@ -66,6 +67,7 @@ function Token({ id }: { id: string }) {
             </Panel>
             {statusOf(g) === "active" && <Temporary g={g} refresh={refresh} projectName={projectName} resourceName={resourceName} />}
             {statusOf(g) === "active" && <Tighten g={g} refresh={refresh} projectName={projectName} resourceName={resourceName} />}
+            {sees && <AgentSeesPanel sees={sees} />}
             <Approvals list={approvals ?? []} />
             <Networks list={networks ?? []} />
             <Requests id={id} events={events} />
@@ -217,6 +219,58 @@ function Temporary({
 }
 
 /** Where it's been used from: a network it hasn't been used from before is told where approvals go. */
+/** What an agent with this token is offered over MCP, by product: so a token can be checked as
+ * narrow before an agent gets it. */
+function AgentSeesPanel({ sees }: { sees: AgentSees }) {
+  const [open, setOpen] = useState(false);
+  if (!sees.live) return null;
+  const byProduct = new Map<string, AgentSees["tools"]>();
+  for (const t of sees.tools) byProduct.set(t.product, [...(byProduct.get(t.product) ?? []), t]);
+  const changes = sees.tools.filter((t) => !t.read_only).length;
+  return (
+    <Panel
+      title="What an agent sees"
+      aside={
+        <span className="font-mono text-[12px] text-subtle">
+          {sees.tools.length} tools{sees.context_tokens ? ` · ~${sees.context_tokens.toLocaleString("en")} tokens of context` : ""}
+        </span>
+      }
+    >
+      <div className="space-y-2 p-5 text-[13px]">
+        <p className="text-muted">
+          Connected over MCP with this token, an agent is offered {sees.tools.length} tools ({changes} that change things)
+          {sees.prompts.length > 0 ? ` and ${sees.prompts.length} prompts` : ""}. Each call is still decided by its rules.
+        </p>
+        <button onClick={() => setOpen((o) => !o)} className="text-[12px] text-accent hover:underline" aria-expanded={open}>
+          {open ? "Hide the list" : "Show the list"}
+        </button>
+        {open && (
+          <ul className="rise space-y-2">
+            {[...byProduct.entries()].map(([product, tools]) => (
+              <li key={product}>
+                <p className="text-[12px] font-medium">{productName(product)}</p>
+                <p className="mt-0.5 font-mono text-[11px] leading-relaxed text-subtle">
+                  {tools.map((t) => (
+                    <span key={t.name} className={t.destructive ? "text-accent" : t.read_only ? "" : "text-fg"}>
+                      {t.name}{" "}
+                    </span>
+                  ))}
+                </p>
+              </li>
+            ))}
+            {sees.prompts.length > 0 && (
+              <li>
+                <p className="text-[12px] font-medium">Prompts</p>
+                <p className="mt-0.5 font-mono text-[11px] text-subtle">{sees.prompts.map((p) => p.name).join(" ")}</p>
+              </li>
+            )}
+          </ul>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
 function Networks({ list }: { list: { network: string; first_at: number; last_at: number }[] }) {
   if (list.length === 0) return null;
   return (
