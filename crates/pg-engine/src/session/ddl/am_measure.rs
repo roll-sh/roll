@@ -1,6 +1,6 @@
 //! The pages of a BRIN or GIN index of a table too big to model, measured in its build's pass
 //! over the rows (`Ddl::measure_rows_with`) the way the access method builds it, rather than
-//! by sorting every row's key as a btree's would be (`btree_pages_of`):
+//! by sorting every row's key as a btree's would be (`btree_pages_est`):
 //! - BRIN: one summary tuple per page range (brinbuild's callback forms a range's tuple when
 //!   the scan leaves it), packed after the metapage and the range map;
 //! - GIN: per-key posting lists accumulated in memory and inserted into the entry tree each

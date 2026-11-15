@@ -105,16 +105,46 @@ fn grouping(s: &mut Session, q: &str) -> &'static str {
 
 /// The serial and parallel runs' rows agree: in the same order, or (when the parallel plan
 /// groups otherwise than the serial one, as Postgres's plans for the two settings do) as
-/// sets, the groups coming out in each plan's order.
+/// sets, the groups coming out in each plan's order. A query without ORDER BY may give them
+/// in another order too: past the model the serial scan reads an updated table in its heap
+/// order, the workers in storage order (as PostgreSQL's parallel scans give theirs in no
+/// fixed one).
 fn assert_same(q: &str, a: &[String], b: &[String], plans: (&str, &str)) {
-    if a == b {
+    if a == b || floats_rounded(a) == floats_rounded(b) {
         return;
     }
-    assert_ne!(plans.0, plans.1, "{q}: the rows differ under the same grouping\n{a:?}\n{b:?}");
+    assert!(
+        plans.0 != plans.1 || !q.contains("ORDER BY"),
+        "{q}: the rows differ under the same grouping\n{a:?}\n{b:?}"
+    );
     let (mut x, mut y) = (a.to_vec(), b.to_vec());
     x.sort();
     y.sort();
     assert_eq!(x, y, "{q}");
+}
+
+/// Rows with their float8 values to 12 significant digits: a float sum's last digits depend
+/// on its rows' order, which past the model is the heap's for the serial scan of an updated
+/// table and storage order for the workers (PostgreSQL's parallel sums vary from run to run).
+fn floats_rounded(rows: &[String]) -> Vec<String> {
+    rows.iter()
+        .map(|r| {
+            let mut out = String::new();
+            let mut rest = r.as_str();
+            while let Some(i) = rest.find("Float8(") {
+                out.push_str(&rest[..i + 7]);
+                rest = &rest[i + 7..];
+                let end = rest.find(')').unwrap_or(rest.len());
+                match rest[..end].parse::<f64>() {
+                    Ok(v) => out.push_str(&format!("{v:.11e}")),
+                    Err(_) => out.push_str(&rest[..end]),
+                }
+                rest = &rest[end..];
+            }
+            out.push_str(rest);
+            out
+        })
+        .collect()
 }
 
 fn seq_read(s: &mut Session) -> String {
@@ -207,7 +237,9 @@ fn parallel_scans_match_serial_inner() {
     // query itself.)
     assert_eq!(i, [2 * a[0], 2 * a[1]], "{stat_serial} {stat_inline}");
     assert_eq!(b[0], 3 * a[0], "{stat_serial} {stat_parallel}");
-    assert_eq!(b[1], 3 * a[1], "{stat_serial} {stat_parallel}");
+    // (An error stops a scan at the first row it meets that fails: the serial scan meets it in
+    // the updated table's heap order, the workers in storage order, a few hundred rows apart.)
+    assert!((b[1] - 3 * a[1]).abs() <= 1000, "{stat_serial} {stat_parallel}");
     // Errors came out as errors.
     assert!(serial[10][0].starts_with("ERROR: integer out of range"), "{:?}", serial[10]);
     assert!(serial[11][0].starts_with("ERROR: LIKE pattern must not end"), "{:?}", serial[11]);

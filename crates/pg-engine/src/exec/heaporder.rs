@@ -82,6 +82,9 @@ pub(super) enum Stream {
         ready: Option<u64>,
         early: VecDeque<Held>,
         late: BinaryHeap<Reverse<Held>>,
+        /// Each row's rank by position in storage order, when its stored bytes don't say it
+        /// (a table too big to model: the estimate's places, `sizing::estimated_rank`).
+        ranks: Vec<u64>,
     },
 }
 
