@@ -1537,7 +1537,8 @@ impl Store {
     }
 
     /// Drop audit rows older than `days`, approvals decided or expired a day ago, spent codes and
-    /// expired secrets.
+    /// expired secrets, OAuth connections that ended `days` ago (each `roll login` and MCP client
+    /// connection is one; scoped tokens stay listed), and kept clients no grant names any more.
     pub fn prune(&self, days: i64) -> Result<()> {
         let now = code_sql::now_ms();
         // The audit log in bounded batches, oldest first: one huge delete would hold the write
@@ -1566,6 +1567,16 @@ impl Store {
                 c.execute(&format!("DELETE FROM {table} WHERE grant_id IN ({ended})"), [day])?;
             }
             c.execute(&format!("DELETE FROM grants WHERE id IN ({ended})"), [day])?;
+            // A connection that ended as long ago as the log keeps: nothing still points at it.
+            let gone = "SELECT id FROM grants WHERE kind = 'oauth' AND COALESCE(revoked_at, expires_at) < ?";
+            for table in ["grant_secrets", "grant_networks", "approvals"] {
+                c.execute(&format!("DELETE FROM {table} WHERE grant_id IN ({gone})"), [before])?;
+            }
+            c.execute(&format!("DELETE FROM grants WHERE id IN ({gone})"), [before])?;
+            c.execute(
+                "DELETE FROM oauth_clients WHERE COALESCE(last_used_at, created_at) < ? AND id NOT IN (SELECT client_id FROM grants WHERE client_id IS NOT NULL)",
+                [before],
+            )?;
             Ok::<_, Error>(())
         })
     }

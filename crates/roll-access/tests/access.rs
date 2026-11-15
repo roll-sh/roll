@@ -823,6 +823,30 @@ async fn a_device_signs_in_with_a_code() {
     assert_eq!(d.call(OPERATOR, Method::GET, &format!("/v1/access/oauth/devices/{live}"), None).await.0, StatusCode::TOO_MANY_REQUESTS);
 }
 
+/// An OAuth connection that ended long ago is forgotten with its client (each `roll login` is a
+/// connection and a client), so neither piles up; a scoped token stays listed.
+#[tokio::test]
+async fn ended_connections_and_their_clients_are_forgotten() {
+    let d = Daemon::new(0);
+    let (_, client) = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "client_name": "roll CLI", "redirect_uris": [], "grant_types": ["urn:ietf:params:oauth:grant-type:device_code"] }))).await;
+    let client_id = client["client_id"].as_str().unwrap();
+    let (_, dev) = d.form("/v1/access/oauth/device_authorization", &[("client_id", client_id)]).await;
+    let rules = json!({ "rules": [{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }] });
+    let (_, ok) = d.call(OPERATOR, Method::POST, &format!("/v1/access/oauth/devices/{}", dev["user_code"].as_str().unwrap()), Some(rules)).await;
+    let (_, tokens) = d.form("/v1/access/oauth/token", &[("grant_type", "urn:ietf:params:oauth:grant-type:device_code"), ("device_code", dev["device_code"].as_str().unwrap()), ("client_id", client_id)]).await;
+    let (_, scoped) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{scoped}"), None).await.0, StatusCode::OK);
+    d.form("/v1/access/oauth/revoke", &[("token", tokens["refresh_token"].as_str().unwrap())]).await;
+    assert_eq!(d.access.store.list_clients().unwrap().len(), 1);
+    // Ended "0 days ago" is ended long enough here.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    d.access.store.prune(0).unwrap();
+    let connection = ok["grant_id"].as_str().unwrap();
+    assert_eq!(d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{connection}"), None).await.0, StatusCode::NOT_FOUND);
+    assert!(d.access.store.list_clients().unwrap().is_empty(), "its client went with it");
+    assert_eq!(d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{scoped}"), None).await.0, StatusCode::OK, "a scoped token stays listed");
+}
+
 fn urlencoding(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>().replace('+', "%20")
 }

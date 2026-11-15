@@ -588,6 +588,9 @@ type AuditEvent = {
 - The log is kept for 90 days (`ROLL_ACCESS_AUDIT_DAYS`; older rows are deleted 5,000 at a time,
   so a large prune never holds the database's write lock) and read through `/v1/access/audit`,
   filtered by grant, product, decision and time.
+- An OAuth connection (each `roll login`, each MCP client's) that ended as long ago as the log
+  keeps is forgotten with its secrets, networks and approvals, and so is a kept client no grant
+  names any more: neither piles up. Scoped tokens stay listed.
 
 Each node writes its audit rows through one writer, which takes what's queued (up to 512 rows)
 and writes it in one statement (`Store::queue_audit`): a write per request, serialized, held a
