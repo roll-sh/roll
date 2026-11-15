@@ -75,6 +75,8 @@ export function blockerCopy(b: Blocker): BlockerCopy {
       return { title: "Review required", detail: b.message, action: null };
     case "visual":
       return { title: "Visual change to accept", detail: b.message, action: "visual" };
+    case "secret_leak":
+      return { title: "Adds a secret's value", detail: b.message, action: null };
     default:
       return { title: b.message, detail: "", action: null };
   }

@@ -8,7 +8,7 @@
 # `roll code` against a live API, then typecheck and the dashboard's and desktop's tests. One
 # cargo build for everything (scripts/lib/gate.sh); the test binaries run side by side. The
 # cluster layer's suite also runs on DynamoDB Local (`amazon/dynamodb-local` as
-# `roll-cloud-cluster-ddb`, removed afterwards) when Docker is there, and skips it otherwise.
+# `roll-cloud-cluster-ddb-<checkout>`, removed afterwards) when Docker is there, and skips it otherwise.
 #
 # Opt in (AGENTS.md says when each must run):
 #   --docker  the stores again on Postgres 18 (ROLL_CODE_TEST_DATABASE), checks and previews in real
@@ -72,7 +72,8 @@ default_args() {
 mapfile -t targets < <(default_targets)
 
 # DynamoDB Local for the cluster layer's DynamoDB backend, shared by every test binary of the run.
-ddb=roll-cloud-cluster-ddb
+# One per checkout: two runs on one machine don't take each other's container.
+ddb=roll-cloud-cluster-ddb-$(printf %s "$PWD" | cksum | cut -d' ' -f1)
 cleanup=()
 trap 'for c in "${cleanup[@]}"; do docker rm -f "$c" >/dev/null 2>&1 || true; done' EXIT
 start_dynamodb() {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parsePatch, splitRows } from "./diff";
+import { diffLines, parsePatch, splitRows } from "./diff";
 
 const patch = [
   "diff --git a/x b/x",
@@ -52,5 +52,13 @@ describe("splitRows", () => {
       ["three", "three"],
     ]);
     expect(pair).toContainEqual(["gone", null]);
+  });
+});
+
+describe("diffLines", () => {
+  it("keeps common lines and pairs a changed one for the split view", () => {
+    const rows = diffLines("A=1\nB=2\nC=3", "A=1\nB=20\nC=3\nD=4");
+    expect(rows.map((r) => [r.kind, r.text])).toEqual([["ctx", "A=1"], ["del", "B=2"], ["add", "B=20"], ["ctx", "C=3"], ["add", "D=4"]]);
+    expect(splitRows(rows)[1].map((s) => s?.text)).toEqual(["B=2", "B=20"]);
   });
 });

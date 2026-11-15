@@ -1,0 +1,219 @@
+//! `roll apps …` end to end: roll apps (its fake runtime, no Docker) and the workspace API run in
+//! process, and the real `roll` binary talks to them through `ROLL_API_URL`.
+
+use apps_control::integrations::{NoResources, NoSecrets, NoTls, StaticDns};
+use apps_control::runtime::fake::Fake;
+use apps_control::store::{Sealer, Store};
+use apps_control::{Apps, AppsConfig, Deps};
+use serde_json::Value;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
+
+struct T {
+    api: String,
+    work: tempfile::TempDir,
+    _data: tempfile::TempDir,
+}
+
+async fn start() -> T {
+    let data = tempfile::tempdir().unwrap();
+    let ws = Arc::new(roll_workspace::Workspace::open(&code_sql::Target::Sqlite(data.path().join("ws.db")), Default::default()).unwrap());
+    ws.create("", "acme", "", None).unwrap();
+    let db = code_sql::Db::open_sqlite(&data.path().join("apps.db"), code_sql::SqliteOptions { readers: 2, cache_kib: 1024 }).unwrap();
+    let store = Store::new(db, Sealer::new("0123456789abcdef0123456789abcdef").unwrap()).unwrap();
+    let cluster = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::solo()), roll_cluster::ClusterConfig::new("n1", "http://127.0.0.1:1", b"0123456789abcdef".to_vec())).unwrap();
+    let fake = Fake::new();
+    let mut cfg = AppsConfig::new(data.path().to_path_buf());
+    cfg.live.probe_every = Duration::from_millis(2);
+    let deps = Deps {
+        runtime: fake.clone(),
+        builder: fake,
+        sources: None,
+        secrets: Arc::new(NoSecrets),
+        resources: Arc::new(NoResources),
+        resolver: Arc::new(StaticDns::default()),
+        tls: Arc::new(NoTls),
+        objects: None,
+        cluster,
+        workspace: Some(ws.clone()),
+    };
+    let apps = Apps::new(cfg, store, deps);
+    apps.start();
+    let router = apps_control::api::router(apps).merge(roll_workspace::router(ws));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, router).await.unwrap() });
+    T { api, work: tempfile::tempdir().unwrap(), _data: data }
+}
+
+impl T {
+    /// `roll apps <args>`: its exit code, stdout and stderr.
+    async fn run(&self, args: &[&str]) -> (Option<i32>, String, String) {
+        let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
+            .arg("apps")
+            .args(args)
+            .current_dir(self.work.path())
+            .env("ROLL_API_URL", &self.api)
+            .env_remove("ROLL_API_KEY")
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .unwrap();
+        (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+
+    /// `roll apps <args>` from a directory under the work directory.
+    async fn run_in(&self, sub: &str, args: &[&str]) -> (Option<i32>, String, String) {
+        let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).arg("apps").args(args).current_dir(self.work.path().join(sub)).env("ROLL_API_URL", &self.api).env_remove("ROLL_API_KEY").stdin(Stdio::null()).output().await.unwrap();
+        (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+
+    /// `roll up` in the work directory.
+    async fn run_up(&self) -> (Option<i32>, String, String) {
+        let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).arg("up").current_dir(self.work.path()).env("ROLL_API_URL", &self.api).env_remove("ROLL_API_KEY").stdin(Stdio::null()).output().await.unwrap();
+        (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+
+    async fn ok(&self, args: &[&str]) -> String {
+        let (code, out, err) = self.run(args).await;
+        assert_eq!(code, Some(0), "roll apps {args:?}: {err}\n{out}");
+        out
+    }
+
+    async fn json(&self, args: &[&str]) -> Value {
+        let mut all = vec!["--json"];
+        all.extend_from_slice(args);
+        serde_json::from_str(&self.ok(&all).await).unwrap_or_else(|e| panic!("{e}: {args:?}"))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn variables_and_an_environment_through_the_cli() {
+    let t = start().await;
+    t.ok(&["create", "web", "-p", "acme", "--image", "nginx:1.27", "--port", "80"]).await;
+    // Live first, so what's set next is the next deploy's.
+    for _ in 0..200 {
+        if t.json(&["deploys", "-s", "web", "-p", "acme"]).await[0]["status"] == "active" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    // Sealed: run with, never shown again, `--reveal` included; the rest reveal as a `.env`
+    // `--from-file` reads back exactly (quotes, line breaks).
+    let pem = "-----BEGIN-----\nab \"c\"\n-----END-----";
+    t.ok(&["vars", "-s", "web", "-p", "acme", "API_KEY=sk-live-123", &format!("PEM={pem}"), "--seal", "API_KEY"]).await;
+    // What the next deploy changes, by name; and where it answers.
+    let pending = t.ok(&["pending", "-s", "web", "-p", "acme"]).await;
+    assert!(pending.contains("+ API_KEY") && pending.contains("+ PEM") && !pending.contains("sk-live"), "{pending}");
+    assert!(t.ok(&["open", "--print", "-s", "web", "-p", "acme"]).await.trim().starts_with("http"));
+    // Set and put live in one go (Heroku's config:set).
+    let dep = t.json(&["vars", "-s", "web", "-p", "acme", "MODE=live", "--deploy"]).await;
+    assert_eq!(dep["trigger"], "settings", "{dep}");
+    let listed = t.ok(&["vars", "-s", "web", "-p", "acme"]).await;
+    assert!(listed.lines().any(|l| l.starts_with("API_KEY") && l.ends_with("sealed")) && !listed.contains("sk-live-123"), "{listed}");
+    let revealed = t.ok(&["vars", "-s", "web", "-p", "acme", "--reveal"]).await;
+    assert!(!revealed.contains("API_KEY") && !revealed.contains("sk-live-123"), "{revealed}");
+    std::fs::write(t.work.path().join("back.env"), &revealed).unwrap();
+    t.ok(&["env", "-s", "web", "-p", "acme", "-e", "staging"]).await;
+    t.ok(&["vars", "-s", "web", "-p", "acme", "-e", "staging", "--from-file", "back.env"]).await;
+    let staging = t.ok(&["vars", "-s", "web", "-p", "acme", "-e", "staging", "--reveal"]).await;
+    let pem_line = staging.lines().find(|l| l.starts_with("PEM=")).unwrap_or_else(|| panic!("{staging}"));
+    assert_eq!(pem_line, revealed.lines().find(|l| l.starts_with("PEM=")).unwrap(), "read back exactly");
+    // An environment's own error page, and back to roll's.
+    std::fs::write(t.work.path().join("oops.html"), "<h1>oops</h1>").unwrap();
+    let env = t.json(&["env", "-s", "web", "-p", "acme", "--error-page", "oops.html"]).await;
+    assert_eq!(env["pages"]["error"], "<h1>oops</h1>", "{env}");
+    let env = t.json(&["env", "-s", "web", "-p", "acme", "--roll-pages"]).await;
+    assert!(env.get("pages").is_none(), "{env}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settings_through_the_cli() {
+    let t = start().await;
+    t.ok(&["create", "web", "-p", "acme", "--image", "nginx:1.27", "--port", "80"]).await;
+    // A rename, the health timeout, one alert changed with the others kept, a start command.
+    let svc = t.json(&["set", "-s", "web", "-p", "acme", "--name", "site", "--health-timeout", "90", "--alert-p95", "800", "--alert-log", "panic", "--start", "nginx -g 'daemon off;'"]).await;
+    assert_eq!(svc["name"], "site", "{svc}");
+    assert_eq!(svc["run"]["health_timeout_s"], 90, "{svc}");
+    let alerts = &svc["run"]["alerts"];
+    assert_eq!((alerts["p95_ms"].as_u64(), alerts["memory_pct"].as_u64(), alerts["log_match"].as_str()), (Some(800), Some(90), Some("panic")), "{svc}");
+    // `none` is a text setting's default; an alert left out stays.
+    let svc = t.json(&["set", "-s", "site", "-p", "acme", "--start", "none", "--alert-log", "none"]).await;
+    assert!(svc["run"].get("start").is_none() && svc["run"]["alerts"].get("log_match").is_none(), "{svc}");
+    assert_eq!(svc["run"]["alerts"]["p95_ms"], 800, "{svc}");
+    // A copy: the settings and own variables, a sealed one named instead of copied.
+    t.ok(&["vars", "-s", "site", "-p", "acme", "MODE=prod", "KEY=sk-1", "--seal", "KEY"]).await;
+    let copy = t.json(&["duplicate", "site-copy", "-s", "site", "-p", "acme"]).await;
+    assert_eq!((copy["service"]["run"]["health_timeout_s"].as_u64(), &copy["sealed"]), (Some(90), &serde_json::json!(["KEY"])), "{copy}");
+    let vars = t.ok(&["vars", "-s", "site-copy", "-p", "acme", "--reveal"]).await;
+    assert!(vars.contains("MODE=prod") && !vars.contains("KEY="), "{vars}");
+    // A directory linked to a service made elsewhere: no --service, in it or under it.
+    t.ok(&["use", "site", "-p", "acme"]).await;
+    std::fs::create_dir_all(t.work.path().join("src/lib")).unwrap();
+    let here = t.run_in("src/lib", &["--json", "show"]).await;
+    assert_eq!((here.0, serde_json::from_str::<serde_json::Value>(&here.1).map(|v| v["name"].clone()).ok()), (Some(0), Some(serde_json::json!("site"))), "{here:?}");
+    // A command here with the environment's variables, the platform's own left out, its exit code kept.
+    // A variable that would steer this machine's programs (anyone who may write variables could set one) isn't set either.
+    t.ok(&["vars", "-s", "site", "-p", "acme", "NODE_OPTIONS=--require=/tmp/evil.js"]).await;
+    let (code, out, err) = t.run(&["exec", "-s", "site", "-p", "acme", "--", "sh", "-c", "echo \"$MODE ${PORT:-no-port} ${KEY:-no-key} ${NODE_OPTIONS:-no-node-options}\"; exit 3"]).await;
+    assert_eq!((code, out.trim()), (Some(3), "prod no-port no-key no-node-options"), "{err}");
+    assert!(err.contains("not set here (sealed") && err.contains("KEY") && err.contains("steer") && err.contains("NODE_OPTIONS"), "{err}");
+    // `roll up` doesn't upload to an image service: it says what deploys one.
+    let (code, _, err) = t.run_up().await;
+    assert!(code != Some(0) && err.contains("roll deploy"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_local_tree_is_planned_before_anything_is_made() {
+    let t = start().await;
+    let app = t.work.path().join("web");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("package.json"), r#"{"scripts":{"start":"node server.js"}}"#).unwrap();
+    let plan = t.json(&["plan", "web"]).await;
+    assert_eq!((plan["provider"].as_str(), plan["start"].as_str()), (Some("node"), Some("node server.js")), "{plan}");
+    // Its roll.toml `[app]` applied as the environment's deploy would, and a mistake in it said
+    // here, before anything is uploaded.
+    std::fs::write(app.join("roll.toml"), "[app.environments.production]\nstart = \"node cluster.js\"\n").unwrap();
+    let plan = t.json(&["plan", "web"]).await;
+    assert_eq!(plan["start"], "node cluster.js", "{plan}");
+    assert_eq!(t.json(&["plan", "web", "-e", "staging"]).await["start"], "node server.js");
+    std::fs::write(app.join("roll.toml"), "[app.run]\nmin_instaces = 1\n").unwrap();
+    let (code, _, err) = t.run(&["plan", "web"]).await;
+    assert!(code != Some(0) && err.contains("min_instaces"), "{err}");
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).args(["up", "web", "-p", "acme"]).current_dir(t.work.path()).env("ROLL_API_URL", &t.api).env_remove("ROLL_API_KEY").output().await.unwrap();
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("min_instaces"), "{}", String::from_utf8_lossy(&out.stderr));
+    std::fs::remove_file(app.join("roll.toml")).unwrap();
+    // A tree nothing builds: said before any project or service is made.
+    std::fs::create_dir_all(t.work.path().join("empty")).unwrap();
+    std::fs::write(t.work.path().join("empty/notes.txt"), "hi").unwrap();
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).args(["up", "empty", "-p", "acme"]).current_dir(t.work.path()).env("ROLL_API_URL", &t.api).env_remove("ROLL_API_KEY").output().await.unwrap();
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("couldn't tell how to build"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(t.json(&["list"]).await, serde_json::json!([]), "nothing made");
+    // Every command completes in a shell.
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).args(["completion", "zsh"]).output().await.unwrap();
+    let script = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && script.contains("#compdef roll") && script.contains("routes"), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_projects_services_logs_read_together() {
+    let t = start().await;
+    t.ok(&["create", "web", "-p", "acme", "--image", "nginx:1.27", "--port", "80"]).await;
+    t.ok(&["create", "api", "-p", "acme", "--image", "nginx:1.27", "--port", "80"]).await;
+    // Each deploy writes its own lines; read together, each is named by its service, oldest first.
+    let mut names = std::collections::BTreeSet::new();
+    let mut lines = serde_json::json!([]);
+    for _ in 0..100 {
+        let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).args(["--json", "logs", "--all-services", "-p", "acme"]).current_dir(t.work.path()).env("ROLL_API_URL", &t.api).env_remove("ROLL_API_KEY").output().await.unwrap();
+        lines = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+        names = lines.as_array().unwrap().iter().filter_map(|l| l["service_name"].as_str().map(str::to_string)).collect();
+        if names.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(names, ["api".to_string(), "web".to_string()].into(), "{lines}");
+    let ts: Vec<i64> = lines.as_array().unwrap().iter().map(|l| l["t"].as_i64().unwrap()).collect();
+    assert!(ts.windows(2).all(|w| w[0] <= w[1]), "merged by time: {ts:?}");
+}

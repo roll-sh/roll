@@ -40,6 +40,9 @@ pub struct McpCall {
     pub elicits: bool,
     /// The MCP client's name and version, as it said in `initialize`.
     pub client: Option<Arc<str>>,
+    /// Asked for nobody's sake (an argument's completions): what would ask a person is refused at
+    /// once instead, so typing never opens an approval.
+    pub quiet: bool,
 }
 
 /// What a client calls itself, fit for a log line: one line, no control characters, at most 120
@@ -71,7 +74,7 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> crate::Result<T> + Send
 
 /// The client's address: the MCP call's, the one the first node saw (a signed hop), the forwarded
 /// one behind the edge, or the peer.
-pub fn client_ip(req: &Request, trust_forwarded_for: bool) -> Option<IpAddr> {
+pub fn client_ip(req: &Request, config: &crate::Config) -> Option<IpAddr> {
     if let Some(c) = req.extensions().get::<McpCall>() {
         return c.ip;
     }
@@ -81,12 +84,37 @@ pub fn client_ip(req: &Request, trust_forwarded_for: bool) -> Option<IpAddr> {
     if let Some(f) = req.extensions().get::<roll_cluster::Forwarded>() {
         return f.client.as_deref().and_then(|c| c.parse().ok());
     }
-    if trust_forwarded_for
-        && let Some(ip) = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.split(',').next()).and_then(|v| v.trim().parse().ok())
-    {
-        return Some(ip);
+    let peer = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_canonical());
+    if config.trust_forwarded_for {
+        // Every X-Forwarded-For line, in order: a proxy may add its own line rather than append.
+        let xff = req.headers().get_all("x-forwarded-for").iter().filter_map(|v| v.to_str().ok()).collect::<Vec<_>>().join(",");
+        if !xff.is_empty()
+            && let Some(ip) = forwarded_client(&xff, peer, &config.trusted_proxies)
+        {
+            return Some(ip);
+        }
     }
-    req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip())
+    peer
+}
+
+/// The client an `X-Forwarded-For` names: only from a listed proxy (`peer` one of `trusted`), the
+/// right-most entry that isn't a proxy; entries left of it are whatever the client sent. Nothing
+/// listed, nothing counts (roll's edge hands the client's address over as the connection's own),
+/// and an entry that doesn't parse (`ip:port`) stops the walk: the peer is the answer then.
+pub fn forwarded_client(xff: &str, peer: Option<IpAddr>, trusted: &[ipnet::IpNet]) -> Option<IpAddr> {
+    let is_trusted = |ip: &IpAddr| trusted.iter().any(|n| n.contains(&ip.to_canonical()));
+    if trusted.is_empty() || !peer.is_some_and(|p| is_trusted(&p)) {
+        return None;
+    }
+    let mut last = None;
+    for hop in xff.split(',').map(str::trim).filter(|h| !h.is_empty()).rev() {
+        let ip = hop.parse::<IpAddr>().ok()?.to_canonical();
+        if !is_trusted(&ip) {
+            return Some(ip);
+        }
+        last = Some(ip);
+    }
+    last
 }
 
 fn deny(status: StatusCode, code: &str, message: String, extra: Value) -> Response {
@@ -166,6 +194,23 @@ fn storage_account(row: &Row, query: Option<&str>, headers: &axum::http::HeaderM
     headers.get("x-roll-account").and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string()).or_else(from_query).filter(|a| !a.is_empty())
 }
 
+/// The lists of items a list answer holds: `items` names one (`{"items": [...]}`), else the answer
+/// is the list, or every list in it whose items have an `id_field` (`{"databases": [...], ...}`).
+fn item_lists<'a>(v: &'a mut Value, items: Option<&str>, id_field: &str) -> Vec<&'a mut Vec<Value>> {
+    match (items, v) {
+        (Some(k), v) => v.get_mut(k).and_then(Value::as_array_mut).into_iter().collect(),
+        (None, Value::Array(l)) => vec![l],
+        (None, Value::Object(o)) => o
+            .values_mut()
+            .filter_map(|x| match x {
+                Value::Array(l) if l.iter().any(|i| i.get(id_field).is_some()) => Some(l),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub(crate) fn describe(t: &Target) -> Option<String> {
     match t {
         // Indices of a resource read as `cl_1/logs-*`.
@@ -240,23 +285,44 @@ impl Ctx {
 async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     let started = Instant::now();
     let Some(token) = roll_auth::grant_credential(req.headers()) else { return invalid_token(&access) };
-    if token.starts_with(REFRESH_PREFIX) {
+    // A refresh token opens nothing here; one whose checksum is wrong isn't roll's (no lookup: a
+    // flood of made-up tokens costs nothing).
+    if token.starts_with(REFRESH_PREFIX) || !crate::checksum_ok(&token) {
         return invalid_token(&access);
     }
     let lookup = {
-        let a = access.clone();
-        blocking(move || a.store.by_secret(&token)).await
+        let (a, t) = (access.clone(), token.clone());
+        blocking(move || a.store.by_secret(&t)).await
     };
     let grant = match lookup {
         // Unused longer than the operator's policy allows: it stops (making it again is a person's
         // choice, not an agent's).
         Ok(Some(g)) if access.policy_now().idle(&g, code_sql::now_ms()) => return invalid_token(&access),
         Ok(Some(g)) => g,
-        Ok(None) => return invalid_token(&access),
+        // One that starts later says when, so its holder isn't left guessing.
+        Ok(None) => {
+            let a = access.clone();
+            return match blocking(move || a.store.not_started(&token)).await {
+                Ok(Some(at)) => {
+                    let when = chrono::DateTime::from_timestamp_millis(at).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)).unwrap_or_default();
+                    deny(StatusCode::UNAUTHORIZED, "not_yet_valid", format!("this token works from {when}"), json!({ "not_before": at }))
+                }
+                _ => invalid_token(&access),
+            };
+        }
         Err(e) => return e.into_response(),
     };
-    let ip = client_ip(&req, access.config.trust_forwarded_for);
+    let ip = client_ip(&req, &access.config);
     let route = req.extensions().get::<MatchedPath>().map_or_else(|| "unmatched".to_string(), |m| m.as_str().to_string());
+    // A secret a rotation left working for a while (it may have leaked: that's why one rotates)
+    // keeps calling products, but manages no tokens: it can't rotate, change or make one that
+    // outlives its grace.
+    if route.starts_with("/v1/access") {
+        let (a, t) = (access.clone(), token.clone());
+        if blocking(move || a.store.in_grace(&t)).await.unwrap_or(true) {
+            return deny(StatusCode::FORBIDDEN, "rotated_secret", "this secret was rotated: it works until its grace ends, but can't manage tokens (use the new one)".into(), json!({}));
+        }
+    }
     // Forwarded by a node that decided it for this grant already (a signed hop to an owner): a
     // person isn't asked twice, and the first node logs it. Everything else is decided again.
     let decided_before = req.extensions().get::<roll_cluster::Forwarded>().and_then(|f| f.decided.as_deref()) == Some(grant.id.as_str());
@@ -264,7 +330,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // but not the MCP envelope around it (a batch of calls is each call); a hop counts where it was
     // decided. Over it, nothing is written: a flood stays cheap.
     let mut limit = None;
-    if let Some(rate) = grant.rate_per_minute.filter(|_| !decided_before && route != "/v1/mcp") {
+    if let Some(rate) = grant.rate_per_minute.filter(|_| !decided_before && route != "/v1/mcp").map(|r| access.rate_share(r)) {
         match access.limiter.check(&grant.id, rate, Instant::now()) {
             crate::rate::Verdict::Over { retry_after } => return rate_limited(rate, retry_after),
             crate::rate::Verdict::Allowed { remaining, reset } => limit = Some((rate, remaining, reset)),
@@ -398,11 +464,11 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // What the request itself does, and the second checks it took (a copy's or a link's reveal):
     // each is its own audit row, so what a token used ("Tighten to what it used") has them all.
     let own = (action, describe(&target));
-    let mut seconds: Vec<(&'static str, Option<String>)> = Vec::new();
+    let mut seconds: Vec<(&'static str, Action, Option<String>)> = Vec::new();
     let mut asked_env: Option<String> = None;
     let mut asked_path: Option<String> = None;
     if let Some((copied, from, from_path)) = copy_outcome(&access, row, &params, &target, (json_body.as_ref(), original.query()), &scope).await {
-        seconds.push((row.product, own.1.clone()));
+        seconds.push((row.product, Action::Reveal, own.1.clone()));
         if rank(copied) < rank(outcome) {
             (outcome, action) = (copied, Action::Reveal);
             (asked_env, asked_path) = (Some(from), from_path);
@@ -411,12 +477,12 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // Handing another resource's credentials to this one (apps' links) is revealing them: when
     // that decides, the request (and its approval) is about the linked resource.
     let mut lent: Option<(&'static str, String)> = None;
-    if let Some((o, product, id, all)) = lend_outcome(&access, row, &params, json_body.as_ref(), &scope).await {
-        seconds.extend(all.into_iter().map(|(p, r)| (p, Some(r))));
-        if rank(o) < rank(outcome) {
-            (outcome, action) = (o, Action::Reveal);
+    if let Some(l) = lend_outcome(&access, row, &params, json_body.as_ref(), &scope).await {
+        seconds.extend(l.all.into_iter().map(|(p, a, r)| (p, a, Some(r))));
+        if rank(l.outcome) < rank(outcome) {
+            (outcome, action) = (l.outcome, l.action);
             (asked_env, asked_path) = (None, None);
-            lent = Some((product, id));
+            lent = Some((l.product, l.id));
         }
     }
     // "Ask for anything else": what the rules refuse asks a person instead. Operator-only routes
@@ -504,6 +570,12 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // A list filtered, an answer's credentials redacted, a create placed: the answer is read.
     let filter_list = matches!(row.target, Tgt::List { .. }) && narrowed(&scope, row.product, action);
     let redact_fields = !row.reveals.is_empty() && scope.outcome(&target, Action::Reveal) != Outcome::Allow;
+    // A list's items are each their own resource: a token that may reveal some of them, not all of
+    // the product's, sees credentials in only those (redact_fields can't tell, it judges the list).
+    let redact_items = !redact_fields
+        && !row.reveals.is_empty()
+        && matches!(row.target, Tgt::List { .. })
+        && scope.outcome(&Target::Product { product: row.product.to_string() }, Action::Reveal) != Outcome::Allow;
     let place = match (&row.target, &target) {
         (Tgt::Create { place: Some(kind), id_field, .. }, Target::Create { project: Some(p), .. }) => Some((*kind, *id_field, p.clone())),
         _ => None,
@@ -514,8 +586,8 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     };
     let resp = next.run(Request::from_parts(parts, body)).await;
     let status = resp.status();
-    let resp = if status.is_success() && (filter_list || redact_fields || place.is_some()) {
-        post_process(&ctx, row, action, &scope, resp, filter_list, redact_fields, place).await
+    let resp = if status.is_success() && (filter_list || redact_fields || redact_items || place.is_some()) {
+        post_process(&ctx, row, action, &scope, resp, filter_list, redact_fields, redact_items, place).await
     } else {
         resp
     };
@@ -523,13 +595,20 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     if let Some((rate, remaining, reset)) = limit {
         limit_headers(resp.headers_mut(), rate, remaining, reset);
     }
+    // When the token stops working, on every answer (GitHub's `GitHub-Authentication-Token-
+    // Expiration`): a CLI or an agent can warn before it does.
+    if let Some(when) = ctx.grant.expires_at.and_then(chrono::DateTime::from_timestamp_millis)
+        && let Ok(v) = HeaderValue::from_str(&when.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    {
+        resp.headers_mut().insert("roll-token-expiration", v);
+    }
     if !decided_before {
         let decision = if approval_used.is_some() { "ask" } else { "allow" };
         ctx.about = None;
         ctx.audit(Some(row), Some(own.0), own.1, decision, approval_used.as_deref(), resp.status());
-        for (product, r) in seconds {
+        for (product, a, r) in seconds {
             ctx.about = Some(product);
-            ctx.audit(Some(row), Some(Action::Reveal), r, decision, approval_used.as_deref(), resp.status());
+            ctx.audit(Some(row), Some(a), r, decision, approval_used.as_deref(), resp.status());
         }
     }
     resp
@@ -602,46 +681,54 @@ pub(crate) async fn copy_outcome(
 /// What handing other resources' credentials to this one needs ([`catalog::Lend`]): `reveal` on
 /// each, as a rule places it. The weakest decides; a kind roll doesn't know is refused.
 #[allow(clippy::type_complexity)]
-pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params: &[(String, String)], body: Option<&Value>, scope: &Scope) -> Option<(Outcome, &'static str, String, Vec<(&'static str, String)>)> {
+pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params: &[(String, String)], body: Option<&Value>, scope: &Scope) -> Option<Lending> {
     let param = |n: &str| params.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
-    let links: Vec<(String, String)> = match row.lends? {
+    let lent: Vec<catalog::Lent> = match row.lends? {
         // A route that names them otherwise than its row is refused, never let through.
         catalog::Lend::Path(k, r) => match (param(k), param(r)) {
-            (Some(k), Some(r)) => vec![(k, r)],
-            _ => return Some((Outcome::Deny, row.product, "a link this route doesn't name".into(), Vec::new())),
+            (Some(kind), Some(r#ref)) => vec![catalog::Lent { kind, r#ref, action: Action::Reveal }],
+            _ => return Some(Lending { outcome: Outcome::Deny, product: row.product, action: Action::Reveal, id: "a link this route doesn't name".into(), all: Vec::new() }),
         },
-        catalog::Lend::Body(field) => body?
-            .get(field)?
-            .as_array()?
-            .iter()
-            .map(|l| (l["kind"].as_str().unwrap_or("").to_string(), l["ref"].as_str().unwrap_or("").to_string()))
-            .collect(),
+        catalog::Lend::Each(f) => f(body?),
     };
-    let mut weakest: Option<(Outcome, &'static str, String)> = None;
-    // Every linked resource not allowed outright is named (approving once hands over all of them).
+    if lent.is_empty() {
+        return None;
+    }
+    let mut weakest: Option<(Outcome, &'static str, Action, String)> = None;
+    // Every one not allowed outright is named (approving once hands over all of them).
     let mut short: Vec<String> = Vec::new();
-    let mut all: Vec<(&'static str, String)> = Vec::new();
-    for (kind, r) in links {
-        let found = match catalog::link_target(&kind) {
-            None => (Outcome::Deny, row.product, format!("{kind}/{r}")),
+    let mut all: Vec<(&'static str, Action, String)> = Vec::new();
+    for l in lent {
+        let found = match catalog::link_target(&l.kind) {
+            None => (Outcome::Deny, row.product, l.action, format!("{}/{}", l.kind, l.r#ref)),
             Some((product, rkind)) => {
-                let (a, r2) = (access.clone(), r.clone());
+                let (a, r2) = (access.clone(), l.r#ref.clone());
                 match tokio::task::spawn_blocking(move || a.resource(product, rkind, &r2)).await {
                     // Named as rules name it (a database by name is its id).
-                    Ok(res) => (scope.outcome(&Target::One(res.clone()), Action::Reveal), product, res.id.unwrap_or(r)),
-                    Err(_) => (Outcome::Deny, product, r),
+                    Ok(res) => (scope.outcome(&Target::One(res.clone()), l.action), product, l.action, res.id.unwrap_or(l.r#ref)),
+                    Err(_) => (Outcome::Deny, product, l.action, l.r#ref),
                 }
             }
         };
         if found.0 != Outcome::Allow {
-            short.push(found.2.clone());
+            short.push(found.3.clone());
         }
-        all.push((found.1, found.2.clone()));
+        all.push((found.1, found.2, found.3.clone()));
         if weakest.as_ref().is_none_or(|(w, ..)| rank(found.0) < rank(*w)) {
             weakest = Some(found);
         }
     }
-    weakest.map(|(o, p, id)| (o, p, if short.len() > 1 { short.join(", ") } else { id }, all))
+    weakest.map(|(outcome, product, action, id)| Lending { outcome, product, action, id: if short.len() > 1 { short.join(", ") } else { id }, all })
+}
+
+/// What handing other resources to this one decides ([`lend_outcome`]): the weakest outcome, the
+/// product, action and resource it's about, and every resource it named (each an audit row).
+pub(crate) struct Lending {
+    pub outcome: Outcome,
+    pub product: &'static str,
+    pub action: Action,
+    pub id: String,
+    pub all: Vec<(&'static str, Action, String)>,
 }
 
 /// Outcomes from weakest to strongest.
@@ -717,6 +804,10 @@ struct Asked<'a> {
 
 /// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
 async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req: Asked<'_>) -> Result<String, Box<Response>> {
+    // A completion never asks a person, nor waits on (or uses up) an approval an agent's call opened.
+    if ctx.mcp.as_ref().is_some_and(|m| m.quiet) {
+        return Err(Box::new(deny(StatusCode::FORBIDDEN, "would_ask", "this would ask a person, and a completion never does".into(), json!({}))));
+    }
     let Asked { headers, path, body, request_hash, args, environment, scope_path, scope_index, product: about } = req;
     let access = &ctx.access;
     let mut existing = headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
@@ -831,6 +922,7 @@ async fn post_process(
     resp: Response,
     filter_list: bool,
     redact_fields: bool,
+    redact_items: bool,
     place: Option<(&'static str, &'static str, String)>,
 ) -> Response {
     let (mut parts, body) = resp.into_parts();
@@ -841,7 +933,7 @@ async fn post_process(
     };
     let Some(mut v) = is_json.then(|| serde_json::from_slice::<Value>(&bytes).ok()).flatten() else {
         // Not JSON: nothing to filter. A list or a credential we can't see into isn't passed on.
-        if filter_list || redact_fields {
+        if filter_list || redact_fields || redact_items {
             return deny(StatusCode::FORBIDDEN, "unfilterable", "this answer can't be checked for this token".into(), json!({}));
         }
         return Response::from_parts(parts, Body::from(bytes));
@@ -859,36 +951,36 @@ async fn post_process(
             }
         }
     }
-    if filter_list && let Tgt::List { items, id_field, kind } = row.target {
-        let (a, s, product, prefix) = (ctx.access.clone(), scope.clone(), row.product, ctx.list_prefix.clone());
+    if (filter_list || redact_items) && let Tgt::List { items, id_field, kind } = row.target {
+        let (a, s, product, prefix, fields) = (ctx.access.clone(), scope.clone(), row.product, ctx.list_prefix.clone(), row.reveals);
         let kind = kind.unwrap_or(product);
         v = tokio::task::spawn_blocking(move || {
-            let keep = |item: &Value| {
-                let Some(id) = item.get(id_field).and_then(Value::as_str) else { return false };
+            // Each item is its own resource: the token keeps the ones it may `action`, and sees
+            // the credentials of only the ones it may reveal.
+            let resource = |item: &Value| {
+                let id = item.get(id_field).and_then(Value::as_str)?;
                 let named = prefix.as_ref().map(|p| format!("{p}/{id}"));
                 let id = named.as_deref().unwrap_or(id);
-                let r = if product == "workspace" { Resource { project: Some(id.into()), ..Resource::new("workspace", id) } } else { a.resource(product, kind, id) };
-                s.outcome(&Target::One(r), action) == Outcome::Allow
+                Some(if product == "workspace" { Resource { project: Some(id.into()), ..Resource::new("workspace", id) } } else { a.resource(product, kind, id) })
             };
-            let filter = |list: &mut Vec<Value>| list.retain(&keep);
-            match (items, &mut v) {
-                (Some(k), _) => {
-                    if let Some(Value::Array(l)) = v.get_mut(k) {
-                        filter(l);
-                    }
+            let may = |item: &Value, act: Action| resource(item).is_some_and(|r| s.outcome(&Target::One(r), act) == Outcome::Allow);
+            if filter_list {
+                for list in item_lists(&mut v, items, id_field) {
+                    list.retain(|item| may(item, action));
                 }
-                (None, Value::Array(l)) => filter(l),
-                // `{"databases": [...], ...}`: every list of items with ids.
-                (None, Value::Object(o)) => {
-                    for x in o.values_mut() {
-                        if let Value::Array(l) = x
-                            && l.iter().any(|i| i.get(id_field).is_some())
-                        {
-                            filter(l);
+            }
+            if redact_items {
+                // Everything is redacted but the items it may reveal, which go back as they were:
+                // a credential outside the items (or in one with no id) is never shown.
+                let kept: Vec<Vec<Option<Value>>> = item_lists(&mut v, items, id_field).into_iter().map(|l| l.iter().map(|i| may(i, Action::Reveal).then(|| i.clone())).collect()).collect();
+                redact::fields(&mut v, fields);
+                for (list, kept) in item_lists(&mut v, items, id_field).into_iter().zip(kept) {
+                    for (item, original) in list.iter_mut().zip(kept) {
+                        if let Some(original) = original {
+                            *item = original;
                         }
                     }
                 }
-                _ => {}
             }
             v
         })
@@ -901,4 +993,23 @@ async fn post_process(
     let out = serde_json::to_vec(&v).unwrap_or_default();
     parts.headers.remove(header::CONTENT_LENGTH);
     Response::from_parts(parts, Body::from(out))
+}
+
+
+#[cfg(test)]
+mod forwarded_tests {
+    /// Behind listed proxies, what a client wrote into X-Forwarded-For isn't its address, and a
+    /// peer that isn't a proxy can't send the header at all.
+    #[test]
+    fn the_client_is_who_the_edge_saw() {
+        let trusted: Vec<ipnet::IpNet> = vec!["10.0.0.0/8".parse().unwrap()];
+        let edge = Some("10.1.2.3".parse().unwrap());
+        // The client claimed 1.1.1.1; the edge appended what it saw, 203.0.113.9.
+        assert_eq!(super::forwarded_client("1.1.1.1, 203.0.113.9", edge, &trusted), Some("203.0.113.9".parse().unwrap()));
+        assert_eq!(super::forwarded_client("1.1.1.1", Some("198.51.100.7".parse().unwrap()), &trusted), None, "not from a proxy");
+        assert_eq!(super::forwarded_client("1.1.1.1, 203.0.113.9", edge, &[]), None, "no proxies listed: the header counts for nothing");
+        assert_eq!(super::forwarded_client("1.1.1.1, 203.0.113.9:443", edge, &trusted), None, "an entry that doesn't parse stops the walk");
+        // An IPv4 address as a dual-stack listener reports it.
+        assert_eq!(super::forwarded_client("203.0.113.9", Some("::ffff:10.1.2.3".parse().unwrap()), &trusted), Some("203.0.113.9".parse().unwrap()));
+    }
 }

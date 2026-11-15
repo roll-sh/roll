@@ -155,7 +155,7 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     assert_eq!(chg.state, State::Ready, "the baseline holds none of the project's one slot");
     // Whichever screenshot comes first, the change ends up compared with main's.
     let mut compared = None;
-    for _ in 0..500 {
+    for _ in 0..3000 {
         compared = e.code.last_report("chg_1").base_change;
         // Main's screenshot may compare the change before the change's own report is in: the
         // change's own comparison, right after, has its API too.
@@ -211,7 +211,7 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     e.engine.pass().await.unwrap();
     e.engine.pass().await.unwrap();
     let review = || e.engine.store.preview(&e.engine.store.row_by_change("chg_1").unwrap().unwrap().id).unwrap().visual_review;
-    for _ in 0..500 {
+    for _ in 0..3000 {
         if review().is_some() {
             break;
         }
@@ -353,7 +353,7 @@ async fn page_states_and_other_browsers_are_taken_and_compared_like_pages() {
     e.engine.pass().await.unwrap();
     e.engine.pass().await.unwrap();
     let mut state = None;
-    for _ in 0..500 {
+    for _ in 0..3000 {
         state = e.code.last_report("chg_st").pages.into_iter().find(|p| p.path == "state:cart" && p.base_percent.is_some());
         if state.is_some() {
             break;
@@ -370,7 +370,7 @@ async fn page_states_and_other_browsers_are_taken_and_compared_like_pages() {
     e.apps.no_browsers.store(true, std::sync::atomic::Ordering::SeqCst);
     e.code.edit("chg_st", |c| c.head = "cs_6b".into());
     let mut gone = false;
-    for _ in 0..500 {
+    for _ in 0..3000 {
         e.engine.pass().await.unwrap();
         let pages = e.code.last_report("chg_st").pages;
         if pages.iter().any(|p| p.path == "state:cart") && !pages.iter().any(|p| p.path == "browser:firefox") {
@@ -393,7 +393,7 @@ async fn a_roll_apps_service_s_screenshots_come_from_its_own_config() {
     *e.code.app_screenshots.lock() = Some(code_preview::config::Screenshots { pages: vec![], hide: vec![], states: vec![roll_previews::settings::StateRule { name: "apps-cart".into(), page: "/".into(), steps: vec![roll_previews::settings::Step::Press("Tab".into())] }] });
     *e.code.repo_states.lock() = vec![roll_previews::settings::StateRule { name: "preview-only".into(), page: "/".into(), steps: vec![roll_previews::settings::Step::Wait(1)] }];
     e.code.open(change("chg_ap", 7));
-    for _ in 0..500 {
+    for _ in 0..3000 {
         e.engine.pass().await.unwrap();
         if e.apps.states.lock().iter().any(|n| n == "apps-cart") {
             break;

@@ -51,7 +51,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const IMAGE: &str = "roll-code:e2e";
+/// This checkout's key: its image and its cargo cache are its own, so two checkouts on one machine
+/// never test each other's code (a shared target cache hands one branch's crates to another).
+fn checkout_key() -> String {
+    use std::hash::{Hash, Hasher};
+    let root = std::fs::canonicalize(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).unwrap_or_default();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    root.hash(&mut h);
+    format!("{:08x}", h.finish() as u32)
+}
+
+static IMAGE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!("roll-code:e2e-{}", checkout_key()));
 // The dependencies, pinned by digest (the multi-arch index).
 const POSTGRES_IMAGE: &str = "postgres:18-alpine@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395";
 const SEAWEEDFS_IMAGE: &str = "chrislusf/seaweedfs:4.50@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860";
@@ -209,7 +219,7 @@ impl Env {
         for e in &envs {
             args.extend(["-e", e.as_str()]);
         }
-        args.push(IMAGE);
+        args.push(IMAGE.as_str());
         docker(&args);
         self.refresh(i);
     }
@@ -826,7 +836,8 @@ async fn code_cluster_keeps_every_landing_through_kill_rolling_restart_and_postg
     }
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
     let built = Instant::now();
-    docker(&["build", "-q", "--build-arg", "PROFILE=dev", "-f", &format!("{root}/deploy/code/Dockerfile"), "-t", IMAGE, root]);
+    let cache = format!("TARGET_CACHE=roll-code-target-{}", checkout_key());
+    docker(&["build", "-q", "--build-arg", "PROFILE=dev", "--build-arg", &cache, "-f", &format!("{root}/deploy/code/Dockerfile"), "-t", IMAGE.as_str(), root]);
     eprintln!("image built in {:.1}s", built.elapsed().as_secs_f64());
 
     let tag = format!("{:x}{:05x}", std::process::id(), now_ms() % 0xfffff);

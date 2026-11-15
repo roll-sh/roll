@@ -248,6 +248,7 @@ fn change_row(r: &Row<'_>) -> code_sql::Result<Change> {
         labels: serde_json::from_str(&r.get::<_, String>(22)?).unwrap_or_default(),
         queue: None,
         blockers: Vec::new(),
+        notices: Vec::new(),
         review: None,
     })
 }

@@ -51,3 +51,28 @@ export function splitRows(lines: Line[]): [Side, Side][] {
   }
   return rows;
 }
+
+/**
+ * Two texts' line diff as rows (`ctx`, `del`, `add`), by longest common subsequence: for values
+ * (a secret's versions), not files. Past `limit` cells it's every old line removed, then every new
+ * one added.
+ */
+export function diffLines(a: string, b: string, limit = 4_000_000): Line[] {
+  const x = a.split("\n");
+  const y = b.split("\n");
+  const n = x.length;
+  const m = y.length;
+  if (n * m > limit) return [...x.map((t, i): Line => ({ kind: "del", text: t, old: i + 1, new: null })), ...y.map((t, j): Line => ({ kind: "add", text: t, old: null, new: j + 1 }))];
+  // lcs[i][j]: the common lines of x[i..] and y[j..].
+  const lcs = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) lcs[i][j] = x[i] === y[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+  const out: Line[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && x[i] === y[j]) out.push({ kind: "ctx", text: x[i], old: ++i, new: ++j });
+    else if (i < n && (j === m || lcs[i + 1][j] >= lcs[i][j + 1])) out.push({ kind: "del", text: x[i], old: ++i, new: null });
+    else out.push({ kind: "add", text: y[j], old: null, new: ++j });
+  }
+  return out;
+}

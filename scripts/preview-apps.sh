@@ -51,7 +51,9 @@ BODY_INIT=$(python3 - <<'PY'
 import json
 start = "#!/bin/sh\necho \"$REDIS_URL\" | sed -E 's#.*default:(rdb_[a-z0-9]+)_.*#\\1#' > where\nexec python -m http.server ${PORT:-8000}\n"
 docker = 'FROM python:3.13-alpine\nWORKDIR /app\nCOPY . .\nCMD ["sh", "start.sh"]\n'
-print(json.dumps({"message": "init", "files": {"Dockerfile": {"content": docker}, "start.sh": {"content": start}, "index.html": {"content": "main"}}}))
+# What previews' screenshots of the service take, in roll apps' own config ([app.previews.screenshots]).
+toml = '[app.previews.screenshots]\n[[app.previews.screenshots.states]]\nname = "apps-tab"\npage = "/"\nsteps = [{ press = "Tab" }]\n'
+print(json.dumps({"message": "init", "files": {"Dockerfile": {"content": docker}, "start.sh": {"content": start}, "index.html": {"content": "main"}, "roll.toml": {"content": toml}}}))
 PY
 )
 api POST /v1/code/repos/acme/web/land "$BODY_INIT" >/dev/null
@@ -126,7 +128,79 @@ until_vars "'FEATURE_FLAG' in n and 'ROLL_PREVIEW_SET' in n"
 ROLL_API_URL="http://$API" "$CLI" preview env "$PV" --unset FEATURE_FLAG >/dev/null
 until_vars "'FEATURE_FLAG' not in n and 'REDIS_URL' in n"
 UNSET="FEATURE_FLAG set, then unset; REDIS_URL kept"
+
+say "a screenshot of the roll apps service (in its instance's network), and main's baseline on roll apps"
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true}}' >/dev/null
+for _ in $(seq 1 240); do
+  [ "$(api GET "/v1/previews/$PV" | jq_ "d.get('screenshot_at') is not None")" = True ] && break
+  sleep 1
+done
+SHOT=$(curl -sS "http://$API/v1/previews/$PV/screenshot" | python3 -c "import sys; b=sys.stdin.buffer.read(); print(f'{len(b)} bytes, PNG' if b[:4]==b'\x89PNG' else 'not a PNG: ' + b[:200].decode('utf-8','replace'))")
+case "$SHOT" in *PNG) ;; *) echo "the roll apps service should be screenshotted: $SHOT"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1;; esac
+# Its state from roll apps' own config ([app.previews.screenshots]), read from the change's tree.
+APPS_STATE=$(api GET "/v1/previews/$PV" | jq_ "[p['path'] for p in d.get('pages', []) if p['path'].startswith('state:')]")
+[ "$APPS_STATE" = "['state:apps-tab']" ] || { echo "the roll apps service's [app.previews.screenshots] state should be taken: $APPS_STATE"; exit 1; }
+LOAD=$(api GET "/v1/previews/$PV" | jq_ "(d.get('page_speed') or {}).get('now', {}).get('load_ms')")
+BASE=""
+for _ in $(seq 1 600); do
+  BASE=$(api GET "/v1/previews/$PV" | jq_ "('%s%% against %s' % (d['base_change']['percent'], d['base_change']['branch'])) if d.get('base_change') else ''")
+  [ -n "$BASE" ] && break
+  sleep 1
+done
+[ -n "$BASE" ] || { echo "main's baseline on roll apps should be compared with the change"; api GET "/v1/previews?project=$PRJ" | jq_ "[(p['branch'], p['state'], p.get('screenshot_at')) for p in d]"; exit 1; }
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":false}}' >/dev/null
+
+say "the feedback button on the roll apps environment, for a visitor through roll (link access)"
+api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
+for _ in $(seq 1 240); do
+  [ "$(api GET "/v1/apps/services/$SVC/environments/$ENV" | jq_ "d.get('feedback')")" = True ] && break
+  sleep 1
+done
+[ "$(api GET "/v1/apps/services/$SVC/environments/$ENV" | jq_ "d.get('feedback')")" = True ] || { echo "the preview should ask roll apps for the feedback button"; exit 1; }
+SHARE=$(api GET "/v1/previews/$PV" | jq_ "d['services'][0]['share_url']")
+JAR="$H/apps-cookies"
+FB_BODY=""
+for _ in $(seq 1 120); do
+  FB_BODY=$(curl -sS -L -c "$JAR" -b "$JAR" -H "Host: $HOSTPART" -H "Sec-Fetch-Dest: document" "http://127.0.0.1:${PORTS}080/?${SHARE#*\?}" --max-time 60)
+  case "$FB_BODY" in *"/__roll/feedback.js"*) break;; esac
+  sleep 1
+done
+case "$FB_BODY" in *"/__roll/feedback.js"*) ;; *) echo "a visitor through roll should get the feedback button: $FB_BODY"; exit 1;; esac
+NOTES=$(curl -sS -b "$JAR" -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/__roll/feedback.json?path=%2F")
+case "$NOTES" in "["*) ;; *) echo "the page's notes should come from roll previews: $NOTES"; exit 1;; esac
+api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"public"}' >/dev/null
+# Public again redeploys the environment (no feedback button, no access check): settled before
+# the promote reads which deployment runs, else the one it saw is replaced meanwhile (a 409).
+for _ in $(seq 1 600); do
+  [ "$(api GET "/v1/apps/services/$SVC/environments/$ENV" | jq_ "not d.get('feedback') and (d.get('latest') or {}).get('status') == 'active' and (d.get('latest') or {}).get('id') == (d.get('active') or {}).get('id')")" = True ] && break
+  sleep 1
+done
 BRANCH=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='redis'][0]")
+
+say "promote the preview's build to production (the sheet's Promote: roll apps' promote, its image, no build)"
+# Production first runs main (its own deploy from the repo).
+for _ in $(seq 1 600); do
+  [ "$(api GET "/v1/apps/services/$SVC/environments/production" | jq_ "(d.get('latest') or {}).get('status','')")" = active ] && break
+  sleep 1
+done
+PROD_HOST=$(api GET "/v1/apps/services/$SVC/environments/production" | jq_ "d.get('url') or ''" | sed -E 's#^https?://##; s#/.*##; s#:.*##')
+PROD_BEFORE=$(curl -sS -H "Host: $PROD_HOST" "http://127.0.0.1:${PORTS}080/" --max-time 120)
+[ "$PROD_BEFORE" = main ] || { echo "production should serve main before the promote: $PROD_BEFORE"; exit 1; }
+# The deployment the sheet showed (`expect`): another one is refused (409), that one promoted.
+SEEN=$(api GET "/v1/apps/services/$SVC/environments/$ENV" | jq_ "(d.get('active') or {}).get('id','')")
+STALE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/apps/services/$SVC/environments/production/promote" -H 'content-type: application/json' -d "{\"from\":\"$ENV\",\"expect\":\"dep_not_what_runs\"}")
+[ "$STALE" = 409 ] || { echo "a promote expecting another deployment should be refused: $STALE"; exit 1; }
+PROMOTE=$(api POST "/v1/apps/services/$SVC/environments/production/promote" "{\"from\":\"$ENV\",\"expect\":\"$SEEN\"}")
+PROMOTED=$(echo "$PROMOTE" | jq_ "d.get('trigger')")
+[ "$PROMOTED" = promote ] || { echo "the promote should be a deploy of its own: $PROMOTE"; exit 1; }
+T5=$(now_ms)
+for _ in $(seq 1 300); do
+  [ "$(api GET "/v1/apps/services/$SVC/environments/production" | jq_ "(d.get('latest') or {}).get('status','')")" = active ] && break
+  sleep 1
+done
+T6=$(now_ms)
+PROD_AFTER=$(curl -sS -H "Host: $PROD_HOST" "http://127.0.0.1:${PORTS}080/" --max-time 120)
+[ "$PROD_AFTER" = "preview of change 1" ] || { echo "production should serve the preview's build after the promote: $PROD_AFTER"; exit 1; }
 say "land"
 api POST "/v1/code/changes/$CHG/land" '{}' >/dev/null
 for _ in $(seq 1 120); do N=$(api GET "/v1/previews?project=$PRJ" | jq_ "len(d)"); [ "$N" = 0 ] && break; sleep 0.5; done
@@ -135,11 +209,14 @@ cat <<EOF
 | What | Measured |
 | --- | --- |
 | Change opened → preview ready (Redis branched, roll apps environment made, deploy queued) | $((T1 - T0)) ms |
+| The roll apps service's screenshot (its instance's network) / load / against main's baseline on roll apps / its [app.previews.screenshots] states | $SHOT / $LOAD ms / $BASE / $APPS_STATE |
+| The feedback button on the roll apps environment (a visitor through roll) / its notes | tagged / $NOTES |
 | … → its deploy active (a Docker build of the change's commit) | $((T2 - T0)) ms |
 | First request through roll apps (cold) | $((T4 - T3)) ms |
 | X-Robots-Tag on the pv- environment's page | $APPS_ROBOTS |
 | Body / the Redis host the service saw / the preview's Redis branch | $BODY / $WHERE / $BRANCH |
 | Variables on the environment | $VARS |
 | A preview's own variable on roll apps | $UNSET |
+| Promoted to production (the preview's image, no build): production serves / took / expecting another deployment | $PROD_AFTER / $((T6 - T5)) ms / HTTP $STALE |
 | After landing: previews left / the environment | $N / HTTP $GONE |
 EOF

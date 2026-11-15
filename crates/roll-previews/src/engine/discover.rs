@@ -50,7 +50,9 @@ impl Engine {
             }
             Err(e) => return Err(e.into()),
         };
-        let repos: Vec<String> = project.resources.iter().filter(|r| r.kind == roll_workspace::Kind::Repo).map(|r| r.r#ref.clone()).collect();
+        // Only repos the project stands for (`Workspace::trusts`): anyone may put any repo on their
+        // own canvas, and a preview runs a change's code with the project's secrets.
+        let repos: Vec<String> = project.resources.iter().filter(|r| r.kind == roll_workspace::Kind::Repo && self.workspace.trusts(&project, r.kind, &r.r#ref)).map(|r| r.r#ref.clone()).collect();
         let now = self.store.now_ms()?;
         let mut open: HashMap<String, ChangeInfo> = HashMap::new();
         let mut heads: HashMap<String, Option<String>> = HashMap::new();

@@ -16,6 +16,8 @@ mod preview;
 mod search;
 mod storage;
 mod redis;
+mod seal;
+mod secrets;
 mod apps;
 
 /// roll — serverless infrastructure.
@@ -97,6 +99,18 @@ enum Cmd {
     /// S3-compatible object storage.
     #[command(subcommand, alias = "s3")]
     Storage(storage::Storage),
+    /// Secrets and environment variables of a project's environments (`ROLL_TOKEN`: a scoped
+    /// secrets token).
+    #[command(alias = "env")]
+    Secrets {
+        #[command(flatten)]
+        at: secrets::AtArgs,
+        #[command(subcommand)]
+        cmd: secrets::Secrets,
+    },
+    /// Run a command with an environment's secrets in its environment, without writing files:
+    /// `roll run -p shop -e production -- npm start`.
+    Run(secrets::Run),
     /// Preview environments: every service and a branch of every data resource of a project,
     /// per change or pull request.
     #[command(subcommand, alias = "previews")]
@@ -107,6 +121,10 @@ enum Cmd {
     /// roll's MCP server: client config, approvals waiting for you, the audit log.
     #[command(subcommand)]
     Mcp(access::Mcp),
+    /// Shell completions for every command and flag: `roll completions zsh > ~/.zfunc/_roll`
+    /// (bash, zsh, fish, powershell, elvish), as `fly completion` and `railway completion`.
+    #[command(visible_alias = "completion")]
+    Completions { shell: clap_complete::Shell },
 }
 
 #[derive(Subcommand)]
@@ -217,6 +235,25 @@ struct Api {
     headers: Vec<(String, String)>,
 }
 
+/// Once a run: the token used expires within a week (`Roll-Token-Expiration`, as GitHub's), so
+/// its holder renews it before scripts start failing.
+fn warn_expiry(h: &reqwest::header::HeaderMap) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let Some(at) = h.get("roll-token-expiration").and_then(|v| v.to_str().ok()).and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok()) else { return };
+    let left = at.with_timezone(&chrono::Utc) - chrono::Utc::now();
+    if left < chrono::Duration::days(7) {
+        WARNED.call_once(|| eprintln!("note: this token expires in {} ({}): roll token edit <id> --expires 30d, or make a new one", human_left(left), at.format("%Y-%m-%d %H:%M UTC")));
+    }
+}
+
+fn human_left(d: chrono::Duration) -> String {
+    match d.num_hours() {
+        h if h >= 48 => format!("{} days", h / 24),
+        h if h >= 1 => format!("{h} hours"),
+        _ => format!("{} minutes", d.num_minutes().max(0)),
+    }
+}
+
 impl Api {
     /// A GET whose body is read as it comes (server-sent events): the response, once its
     /// status is a success.
@@ -254,6 +291,7 @@ impl Api {
         }
         let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
         let status = res.status();
+        warn_expiry(res.headers());
         let text = res.text().await?;
         if !status.is_success() {
             // Errors are `{"error": ...}`, but whatever answered may not be the roll API at all.
@@ -285,9 +323,39 @@ impl Api {
     async fn get(&self, p: &str) -> anyhow::Result<Value> {
         self.call(reqwest::Method::GET, p, None).await
     }
+    /// A `GET` whose answer isn't JSON (an export), as text.
+    async fn get_text(&self, p: &str) -> anyhow::Result<String> {
+        let mut req = self.http.get(format!("{}{p}", self.base));
+        if let Some(k) = &self.key {
+            req = req.bearer_auth(k);
+        }
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            bail!("{}", value["error"].as_str().map(str::to_string).unwrap_or_else(|| format!("{status}")));
+        }
+        Ok(text)
+    }
     async fn post(&self, p: &str, b: Value) -> anyhow::Result<Value> {
         self.call(reqwest::Method::POST, p, Some(b)).await
     }
+}
+
+/// The API as roll secrets is called: with `ROLL_TOKEN` (a scoped secrets token) if it's set,
+/// else a workload identity's login (`ROLL_IDENTITY`), else the operator token.
+async fn secrets_api(api: &Api) -> anyhow::Result<Api> {
+    let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
+    let token = match (env("ROLL_TOKEN"), env("ROLL_IDENTITY")) {
+        (Some(t), _) => Some(t),
+        (None, Some(identity)) => Some(secrets::identity_login(api, identity.trim()).await?),
+        (None, None) => api.key.clone(),
+    };
+    Ok(Api { base: api.base.clone(), http: api.http.clone(), key: token, headers: api.headers.clone() })
 }
 
 fn s(v: &Value) -> String {
@@ -413,6 +481,10 @@ async fn main() -> anyhow::Result<()> {
     let admin = cli.roll_token.filter(|t| !t.trim().is_empty()).or(cli.admin_token.filter(|t| !t.trim().is_empty()));
     let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: admin.clone().or(cli.api_key), headers: Vec::new() };
     let cmd = match cli.cmd {
+        Cmd::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "roll", &mut std::io::stdout());
+            return Ok(());
+        }
         Cmd::Db(cmd) => cmd,
         Cmd::Agent(cmd) => return agent::run(&api.base, cli.json, cmd).await,
         Cmd::Gateway(cmd) => return gateway::run(cli.json, cmd).await,
@@ -442,6 +514,8 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
         Cmd::Search(cmd) => return search::run(&api, cli.json, cmd).await,
         Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
+        Cmd::Secrets { at, cmd } => return secrets::run(&secrets_api(&api).await?, cli.json, at, cmd).await,
+        Cmd::Run(r) => return secrets::run_command(&secrets_api(&api).await?, r).await,
         Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
         Cmd::Token(cmd) => return access::token(&api, cli.json, cmd).await,
         Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,
