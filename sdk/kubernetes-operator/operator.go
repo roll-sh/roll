@@ -173,7 +173,7 @@ func (o *operator) reconcile(ctx context.Context, rs *rollSecret) rollStatus {
 	}
 	if existing != nil && digest == rs.Status.Digest && rs.Status.Error == "" {
 		if rs.Status.PendingRestarts != "" {
-			st.PendingRestarts, st.Error = o.restart(ctx, ns, rs, pending(rs.Spec.RolloutRestart, rs.Status.PendingRestarts))
+			st.PendingRestarts, st.RestartError = o.restart(ctx, ns, rs, pending(rs.Spec.RolloutRestart, rs.Status.PendingRestarts))
 		}
 		return st
 	}
@@ -221,7 +221,7 @@ func (o *operator) reconcile(ctx context.Context, rs *rollSecret) rollStatus {
 		targets = rs.Spec.RolloutRestart
 	}
 	if len(targets) > 0 {
-		done.PendingRestarts, done.Error = o.restart(ctx, ns, rs, targets)
+		done.PendingRestarts, done.RestartError = o.restart(ctx, ns, rs, targets)
 	}
 	return done
 }
@@ -315,6 +315,9 @@ func (o *operator) pass(ctx context.Context) error {
 		st := o.reconcile(ctx, rs)
 		if st == rs.Status {
 			continue
+		}
+		if st.RestartError != "" {
+			log.Printf("rollsecret %s/%s: %s", rs.Metadata.Namespace, rs.Metadata.Name, st.RestartError)
 		}
 		if st.Error != "" {
 			log.Printf("rollsecret %s/%s: %s", rs.Metadata.Namespace, rs.Metadata.Name, st.Error)

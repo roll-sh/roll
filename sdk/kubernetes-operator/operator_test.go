@@ -207,7 +207,7 @@ func TestTheOperatorKeepsItsSecretsInStepAndTouchesNoOtherSecret(t *testing.T) {
 	if len(kubeAPI.restarted) != 1 || kubeAPI.restarted[0] != "/apis/apps/v1/namespaces/apps/deployments/web" {
 		t.Fatalf("restarted: %v", kubeAPI.restarted)
 	}
-	if st := kubeAPI.status["apps/web"]; st.PendingRestarts != "Deployment/gone,Deployment/admin" || !strings.Contains(st.Error, "doesn't name RollSecret web") {
+	if st := kubeAPI.status["apps/web"]; st.PendingRestarts != "Deployment/gone,Deployment/admin" || !strings.Contains(st.RestartError, "doesn't name RollSecret web") || st.Error != "" {
 		t.Fatalf("pending: %+v", st)
 	}
 	// One comes back: the next pass restarts it, though the data hasn't changed since.

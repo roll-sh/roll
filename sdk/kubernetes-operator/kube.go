@@ -202,6 +202,9 @@ type rollStatus struct {
 	// PendingRestarts are the rolloutRestart targets a change hasn't restarted yet
 	// ("Deployment/web,StatefulSet/db"): retried on every pass until they are.
 	PendingRestarts string `json:"pendingRestarts,omitempty"`
+	// RestartError is why they weren't (kept apart from Error, so an unchanged Secret still
+	// costs one digest per pass while a restart waits).
+	RestartError string `json:"restartError,omitempty"`
 }
 
 type secretObj struct {

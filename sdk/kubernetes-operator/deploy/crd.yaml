@@ -54,3 +54,4 @@ spec:
                 error: { type: string }
                 observedGeneration: { type: integer }
                 pendingRestarts: { type: string }
+                restartError: { type: string }
