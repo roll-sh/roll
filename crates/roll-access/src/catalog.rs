@@ -688,9 +688,10 @@ fn apps_create_action(b: &Value) -> Action {
 
 /// A service's settings that decide what production runs or who reaches it: its source and build
 /// (the next landing deploys them), its start and pre-deploy commands (the pre-deploy runs with
-/// production's variables), its schedule, kind, port and volume, and `run.public` (on the
-/// internet or off it, at once).
-const APPS_DEPLOY_RUN: [&str; 7] = ["public", "start", "pre_deploy", "schedule", "kind", "port", "volume"];
+/// production's variables), its schedule and `schedules` (commands run as jobs of the live
+/// deployment, production's too: a production job is deploy, so one on a timer is), kind, port
+/// and volume, and `run.public` (on the internet or off it, at once).
+const APPS_DEPLOY_RUN: [&str; 8] = ["public", "start", "pre_deploy", "schedule", "schedules", "kind", "port", "volume"];
 
 /// A service's settings: `deploy` when they change what runs or who reaches it
 /// ([`APPS_DEPLOY_RUN`], `source`, `build`); `write` for its size, scale, health checks, alerts and
@@ -1396,6 +1397,7 @@ mod tests {
         assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "public": false } })), Action::Deploy);
         assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "min_instances": 2, "memory_mb": 512 } })), Action::Write);
         assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "pre_deploy": "./migrate" } })), Action::Deploy);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "schedules": [{ "name": "nightly", "schedule": "@daily", "command": "./export" }] } })), Action::Deploy);
         assert_eq!(apps_patch_action(&serde_json::json!({ "source": { "kind": "image", "image": "x" } })), Action::Deploy);
         assert_eq!(bulk_action(b"{\"index\":{\"_id\":\"1\"}}\n{\"title\":\"a\"}\n"), Action::Write);
         assert_eq!(bulk_action(b"{\"index\":{}}\n{\"t\":1}\n{\"delete\":{\"_id\":\"2\"}}\n"), Action::Delete);
