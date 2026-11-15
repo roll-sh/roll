@@ -1419,9 +1419,12 @@ Ranked by what a person notices first. Done so far:
    the same read the promotion is made of (live: a promote expecting another deployment refused).
    It merges into #28 with #26.
 2. **States, pages and hide from a roll apps service's own config**: a repo's `[preview]` carries
-   them for roll's runtime; a service on roll apps is described by `[app]` (apps' config, read
-   from its catalog), so its repo can't yet. Agree with the apps thread on a place
-   (`[app.previews.screenshots]`, say) and read it the same way.
+   them for roll's runtime; a service on roll apps is described by `[app]`, so its repo can't yet.
+   Agreed with the apps thread (2026-11-15): `[app.previews.screenshots]` (pages, hide,
+   `[[…states]]`), which roll apps allows and leaves opaque (`apps_build::app::screenshots`);
+   previews reads it from the tree at the preview's own revision (`<tree>/<source.root>/roll.toml`,
+   never the catalog's default-branch copy), checks it with code_preview's rules, and joins it
+   with the project's. On the stacked branch once apps' commit is on `-next`.
 3. **Dynamic credentials a preview renews** (roll secrets' leases): a preview resolves with
    `dynamic: false` today, so a dynamic link inherited from its base is named as a problem.
    Previews converges every few minutes, so it could hold such a lease itself: resolve the
