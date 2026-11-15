@@ -147,7 +147,7 @@ pub struct Engine {
     shots_failed: Mutex<std::collections::HashSet<(String, String)>>,
     /// What this node did, for rolld's metrics (`Engine::stats`).
     counters: Counters,
-    /// One screenshot at a time.
+    /// Screenshots taken at once on this node ([`screenshot_slots`]).
     shooting: Arc<tokio::sync::Semaphore>,
     /// Services a converge just deployed at a change's new head, woken after the pass (`warm`).
     warm_wanted: Mutex<Vec<(String, String)>>,
@@ -211,7 +211,7 @@ impl Engine {
             shots_wanted: Mutex::new(std::collections::HashSet::new()),
             shots_failed: Mutex::new(std::collections::HashSet::new()),
             counters: Counters::default(),
-            shooting: Arc::new(tokio::sync::Semaphore::new(1)),
+            shooting: Arc::new(tokio::sync::Semaphore::new(screenshot_slots())),
             warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
@@ -457,6 +457,14 @@ impl Engine {
 /// How long a deploy may stay "still going" before the preview fails (a build queue that never
 /// moves, say).
 const DEPLOY_WAIT_MS: i64 = 20 * 60_000;
+
+/// How many screenshots a node takes at once: `ROLL_PREVIEWS_SCREENSHOT_SLOTS` (1 to 8), else one
+/// for every 8 cores, 1 to 4 (a run is two containers of 1 CPU and 1 GiB each: Chromium's and
+/// the other browsers').
+fn screenshot_slots() -> usize {
+    let set = std::env::var("ROLL_PREVIEWS_SCREENSHOT_SLOTS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| (1..=8).contains(n));
+    set.unwrap_or_else(|| (std::thread::available_parallelism().map_or(1, |n| n.get()) / 8).clamp(1, 4))
+}
 
 /// How soon a converge comes back to a deploy that wasn't live yet.
 const DEPLOY_POLL_MS: i64 = 10_000;

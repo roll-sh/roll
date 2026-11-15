@@ -156,6 +156,8 @@ pub struct Runtime {
     /// When building [`BROWSERS_IMAGE`] last failed (a node without npm's registry, say): not
     /// tried again for [`BROWSERS_RETRY`], so screenshots don't each wait on a build that fails.
     browsers_failed: Mutex<Option<std::time::Instant>>,
+    /// One build of [`BROWSERS_IMAGE`] at a time (screenshots may run side by side).
+    browsers_building: tokio::sync::Mutex<()>,
 }
 
 const BROWSERS_RETRY: Duration = Duration::from_secs(3600);
@@ -182,6 +184,7 @@ impl Runtime {
             me: me.clone(),
             live: Mutex::new(HashMap::new()),
             browsers_failed: Mutex::new(None),
+            browsers_building: tokio::sync::Mutex::new(()),
             client: Client::builder(TokioExecutor::new()).build_http(),
         })
     }
@@ -1013,7 +1016,16 @@ impl Runtime {
         // A page state's steps take up to about 25 s more.
         let state_pages = pages.iter().filter(|p| crate::settings::state_entry(p).is_some()).count() as u64;
         let within = Duration::from_secs(90 + 30 * pages.len() as u64 + 25 * state_pages + if endpoints.is_empty() { 0 } else { 25 });
-        let out = match tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)).await {
+        let chromium = std::time::Instant::now();
+        // The other browsers the project asked for, in a run of their own alongside Chromium's (a
+        // container each in the service's network): the slot is held for the longer, not both.
+        let browsers_run = async {
+            let started = std::time::Instant::now();
+            let r = if opts.browsers.is_empty() { None } else { Some(self.other_browsers(name, port, opts).await) };
+            (r, started.elapsed().as_millis() as u64)
+        };
+        let (run, (more, browsers_ms)) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)), browsers_run);
+        let out = match run {
             Ok(Ok(out)) => out,
             // Its container outlives a docker CLI that gave up on it (too much output).
             Ok(Err(e)) => {
@@ -1037,13 +1049,14 @@ impl Runtime {
         anyhow::ensure!(png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX, "the screenshot isn't a PNG of at most {SCREENSHOT_MAX} bytes");
         let phone = b64e.decode(phone.trim()).ok().filter(|p| p.starts_with(b"\x89PNG") && p.len() <= SCREENSHOT_MAX);
         let mut shot = crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed), a11y: crate::PageA11y::parse(speed), text: crate::page_text(speed), links: crate::PageLinks::parse(speed), api: crate::openapi::lines(speed), phone, pages: page_shots(&pages, said, lines) };
-        // The other browsers the project asked for, best effort: Chromium's screenshot stands.
-        if !opts.browsers.is_empty() {
-            match self.other_browsers(name, port, opts).await {
-                Ok(more) => shot.pages.extend(more),
-                Err(e) => tracing::warn!(container = name, error = %e, "previews: other browsers' screenshots"),
-            }
+        // The other browsers', best effort: Chromium's screenshot stands.
+        match more {
+            Some(Ok(more)) => shot.pages.extend(more),
+            Some(Err(e)) => tracing::warn!(container = name, error = %e, "previews: other browsers' screenshots"),
+            None => {}
         }
+        // How long it took, and the other browsers' run within it.
+        tracing::info!(container = name, pages = pages.len(), run_ms = chromium.elapsed().as_millis() as u64, browsers_ms, "previews: screenshot run");
         Ok(shot)
     }
 
@@ -1051,6 +1064,7 @@ impl Runtime {
     /// service's network as Chromium's run is, locked down the same way.
     async fn other_browsers(&self, name: &str, port: u16, opts: &crate::ports::ShotOptions) -> anyhow::Result<Vec<crate::ports::PageShot>> {
         use base64::Engine as _;
+        let building = self.browsers_building.lock().await;
         if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", BROWSERS_IMAGE]).await.is_err() {
             if let Some(at) = *self.browsers_failed.lock() {
                 anyhow::ensure!(at.elapsed() >= BROWSERS_RETRY, "building {BROWSERS_IMAGE} failed {} min ago; tried again within the hour", at.elapsed().as_secs() / 60);
@@ -1067,6 +1081,8 @@ impl Runtime {
             }
             *self.browsers_failed.lock() = None;
         }
+        // Only the build is one at a time: the runs go side by side.
+        drop(building);
         let browsers: Vec<&String> = opts.browsers.iter().filter(|b| crate::settings::BROWSERS.contains(&b.as_str())).collect();
         let hide: Vec<&String> = opts.hide.iter().filter(|s| crate::settings::selector_ok(s)).take(crate::settings::MAX_HIDE).collect();
         let run = format!("roll-previews-browsers-{}", name.trim_start_matches("roll-previews-"));
