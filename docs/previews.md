@@ -853,7 +853,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; browsers?: ("firefox" | "webkit")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -1017,7 +1017,9 @@ type Settings = {
     #open: nothing matched`"), the state taken as it was then (checked by hand in the screenshot
     image: a click opening a cart, typing reaching the page's handler, Escape closing it, a missing
     element named; live: a Tab state compared with main's).
-    Other browsers too (Percy's and Chromatic's browsers; `github.browsers`: `firefox`, `webkit`):
+    Other browsers too (Percy's and Chromatic's browsers; `github.browsers`: `firefox`, `webkit`,
+    and `webkit-phone`, WebKit at 390 × 844 at three times the density as a touch device, mobile
+    Safari's engine):
     the screenshot image ships Playwright's builds of both, but only Playwright drives them, so
     the first time a project asks, rolld builds `roll-previews-shot:<version>` (the screenshot
     image and `playwright-core` of the same version, about 35 s, once per node). After Chromium's

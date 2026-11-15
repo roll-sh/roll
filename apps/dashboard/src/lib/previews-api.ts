@@ -300,7 +300,7 @@ export interface EndpointTime {
 export const endpointSlower = (e: EndpointTime) => e.slower ?? (e.main_ms != null && e.ms * 2 > e.main_ms * 3 && e.ms > e.main_ms + 20);
 
 export const pageLabel = (path: string) =>
-  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path || "/";
+  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
 
 /** "1.2 s" or "380 ms". */
 export const duration = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
@@ -330,7 +330,7 @@ export interface PreviewSettings {
   secrets: { base: string; allow_production: boolean };
   /** A patch replaces the whole map. */
   env: Record<string, string>;
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit")[] };
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). */
   access: "link" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */

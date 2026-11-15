@@ -1,6 +1,7 @@
 // roll previews' other browsers (docs/previews.md, "Surfaces"; `github.browsers`): the first page
-// taken in Firefox and WebKit too (Percy's and Chromatic's browsers), with Playwright's builds in
-// the screenshot image and `playwright-core` in the derived one (`runtime::BROWSERS_IMAGE`).
+// taken in Firefox and WebKit too, and in WebKit at a phone's size (mobile Safari's engine), as
+// Percy and Chromatic do, with Playwright's builds in the screenshot image and `playwright-core`
+// in the derived one (`runtime::BROWSERS_IMAGE`).
 // Stilled as Chromium's capture is (animations and transitions off, the caret hidden, $HIDE
 // blanked). One JSON line per browser on stdout: {browser, errors, png (base64)}; a browser that
 // fails is left out. The page is the preview's code: roll bounds what it reads back.
@@ -19,13 +20,15 @@ const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
 (async () => {
   let browsers = [];
   try {
-    browsers = JSON.parse(process.env.BROWSERS || "[]").filter((b) => b === "firefox" || b === "webkit");
+    browsers = JSON.parse(process.env.BROWSERS || "[]").filter((b) => b === "firefox" || b === "webkit" || b === "webkit-phone");
   } catch {}
   for (const name of browsers) {
     let browser = null;
     try {
-      browser = await pw[name].launch();
-      const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+      // `webkit-phone`: mobile Safari's engine at a phone's size and density, touch on.
+      const phone = name === "webkit-phone";
+      browser = await pw[phone ? "webkit" : name].launch();
+      const page = await browser.newPage(phone ? { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true } : { viewport: { width: 1280, height: 800 } });
       let errors = 0;
       page.on("pageerror", () => errors++);
       page.on("console", (m) => m.type() === "error" && errors++);
