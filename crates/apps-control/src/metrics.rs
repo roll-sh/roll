@@ -60,6 +60,7 @@ impl Minute {
             instances: self.instances_max,
             cold_starts: self.cold_starts,
             cold_start_ms: if self.cold_starts > 0 { self.cold_ms_sum / self.cold_starts as f64 } else { 0.0 },
+            egress_bytes: self.egress_bytes,
         }
     }
 
