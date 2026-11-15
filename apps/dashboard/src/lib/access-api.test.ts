@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
+import { approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -37,6 +37,18 @@ describe("tokens", () => {
     const now = 100 * day;
     const list = [g("later", now + 30 * day), g("soon", now + 3 * day), g("sooner", now + day), g("gone", now - day), g("never", null), g("revoked", now + day, now)];
     expect(expiringSoon(list, now).map((x) => x.name)).toEqual(["sooner", "soon"]);
+  });
+
+  it("filters by every word typed, and a pasted secret finds its own token", () => {
+    const secret = "rlt_abcdefghijklmnopqrstuvwxyz234567wxyz";
+    const g = (name: string, hint: string | null, product: string) => ({ name, id: `tok_${name}`, hint, client: undefined, user: "usr_ada", created_by: "operator", rules: [{ product, resources: "*" as const, actions: {} }] });
+    const list = [g("ci deploy", "rlt_…wxyz", "apps"), g("cursor", "rlt_…a1b2", "postgres")];
+    const names = (typed: string) => list.filter((x) => grantMatches(x, typed)).map((x) => x.name);
+    expect(names("")).toEqual(["ci deploy", "cursor"]);
+    expect(names("POSTGRES")).toEqual(["cursor"]);
+    expect(names("ci apps")).toEqual(["ci deploy"]);
+    expect(names("ci postgres")).toEqual([]);
+    expect(names(secret)).toEqual(["ci deploy"]);
   });
 });
 
