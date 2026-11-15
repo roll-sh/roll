@@ -364,6 +364,24 @@ pub enum Secrets {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
+    /// Back the project up on a schedule into one of its roll buckets, sealed to `--to`: shows the
+    /// schedule with no flags, sets it with `--bucket` and `--to`, stops it with `--off`.
+    #[command(name = "backup-schedule")]
+    BackupSchedule {
+        #[arg(long, requires = "to", conflicts_with = "off")]
+        bucket: Option<String>,
+        /// The recipient's public key (base64url X25519).
+        #[arg(long, requires = "bucket")]
+        to: Option<String>,
+        /// Hours between backups (default 24).
+        #[arg(long, requires = "bucket")]
+        every: Option<u32>,
+        /// How many to keep (default 30).
+        #[arg(long, requires = "bucket")]
+        keep: Option<u32>,
+        #[arg(long)]
+        off: bool,
+    },
     /// Load a backup into this project (which has no secrets yet), opened with the secret key.
     Restore {
         file: std::path::PathBuf,
@@ -2069,6 +2087,31 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     eprintln!("Backed up {} to {}: sealed, only the secret key opens it.", c.project, path.display());
                 }
                 None => println!("{text}"),
+            }
+        }
+        Secrets::BackupSchedule { bucket, to, every, keep, off } => {
+            let path = format!("{}/backup/schedule", c.base());
+            if off {
+                c.call(Method::DELETE, &path, None).await?;
+                println!("Stopped scheduled backups of {} (the ones made stay in the bucket).", c.project);
+                return Ok(());
+            }
+            let v = match (bucket, to) {
+                (Some(bucket), Some(to)) => c.call(Method::PUT, &path, Some(json!({ "bucket": bucket, "recipient": to, "every_hours": every, "keep": keep }))).await?,
+                _ => c.call(Method::GET, &path, None).await?,
+            };
+            if json_out {
+                return print(&v);
+            }
+            if v.is_null() {
+                println!("{} isn't backed up on a schedule.", c.project);
+                return Ok(());
+            }
+            println!("{} backs up to bucket {} every {} h, keeping {}.", c.project, s(&v["bucket"]), v["every_hours"], v["keep"]);
+            match (v["last_key"].as_str(), v["last_error"].as_str()) {
+                (_, Some(e)) => println!("The last attempt failed: {e}"),
+                (Some(k), None) => println!("The last one: {k}"),
+                _ => println!("The first one is due now."),
             }
         }
         Secrets::Restore { file, key } => {
