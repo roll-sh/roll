@@ -107,6 +107,9 @@ async fn variables_and_an_environment_through_the_cli() {
     let pending = t.ok(&["pending", "-s", "web", "-p", "acme"]).await;
     assert!(pending.contains("+ API_KEY") && pending.contains("+ PEM") && !pending.contains("sk-live"), "{pending}");
     assert!(t.ok(&["open", "--print", "-s", "web", "-p", "acme"]).await.trim().starts_with("http"));
+    // Set and put live in one go (Heroku's config:set).
+    let dep = t.json(&["vars", "-s", "web", "-p", "acme", "MODE=live", "--deploy"]).await;
+    assert_eq!(dep["trigger"], "settings", "{dep}");
     let listed = t.ok(&["vars", "-s", "web", "-p", "acme"]).await;
     assert!(listed.lines().any(|l| l.starts_with("API_KEY") && l.ends_with("sealed")) && !listed.contains("sk-live-123"), "{listed}");
     let revealed = t.ok(&["vars", "-s", "web", "-p", "acme", "--reveal"]).await;
@@ -187,6 +190,10 @@ async fn a_local_tree_is_planned_before_anything_is_made() {
     let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).args(["up", "empty", "-p", "acme"]).current_dir(t.work.path()).env("ROLL_API_URL", &t.api).env_remove("ROLL_API_KEY").output().await.unwrap();
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("couldn't tell how to build"), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(t.json(&["list"]).await, serde_json::json!([]), "nothing made");
+    // Every command completes in a shell.
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).args(["completion", "zsh"]).output().await.unwrap();
+    let script = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && script.contains("#compdef roll") && script.contains("routes"), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

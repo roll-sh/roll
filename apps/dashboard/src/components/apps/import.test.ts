@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Link, ProjectImport, Service } from "@/lib/apps-api";
-import { planImport, stepLine } from "./import";
+import { planImport, stepLine, variablesFor } from "./import";
 
 const svc = (name: string, source: Service["source"], run: Partial<Service["run"]> = {}): Service =>
   ({ id: `svc_${name}`, project: "prj_a", name, source, build: { builder: "auto" }, run: { type: "web", min_instances: 0, max_instances: 3, concurrency: 50, cpu: 0.5, memory_mb: 512, ...run }, registry: null, created_at: 1, environments: [] }) as unknown as Service;
@@ -12,9 +12,9 @@ describe("importing a project's file", () => {
       notes: [],
       databases: { db: { kind: "postgres" }, cache: { kind: "redis" } },
       apps: {
-        web: { source: { kind: "image", image: "ghcr.io/acme/web:2" }, branch: null, run: { port: 3000, min_instances: 1 }, links: [{ kind: "postgres", name: "db" }], variables: {} },
-        jobs: { source: { kind: "upload", root: "jobs" }, branch: null, run: { type: "worker" }, links: [{ kind: "redis", name: "cache" }], variables: { MODE: "x" } },
-        api: { source: { kind: "repo", repo: "acme/api", root: null }, branch: "main", run: {}, links: [], variables: {} },
+        web: { source: { kind: "image", image: "ghcr.io/acme/web:2" }, branch: null, run: { port: 3000, min_instances: 1 }, links: [{ kind: "postgres", name: "db" }], variables: {}, generate: [], ask: [] },
+        jobs: { source: { kind: "upload", root: "jobs" }, branch: null, run: { type: "worker" }, links: [{ kind: "redis", name: "cache" }], variables: { MODE: "x" }, generate: [], ask: [] },
+        api: { source: { kind: "repo", repo: "acme/api", root: null }, branch: "main", run: {}, links: [], variables: {}, generate: [], ask: [] },
       },
     };
     const linked: Link[] = [{ kind: "postgres", ref: "pg_1" } as Link];
@@ -35,5 +35,10 @@ describe("importing a project's file", () => {
       "~ link jobs to cache",
       "! api has an image source; the file makes it a repo one: rename one of them",
     ]);
+  });
+
+  it("fills a new service's variables: the file's values, a secret made, a question's answer or its default", () => {
+    const app = { source: { kind: "image" as const, image: "x" }, branch: null, run: {}, links: [], variables: { NODE_ENV: "production" }, generate: ["SESSION_SECRET"], ask: [{ name: "STRIPE_KEY", ask: "Your Stripe key", default: null }, { name: "REGION", ask: "Where", default: "eu" }] };
+    expect(variablesFor(app, { STRIPE_KEY: "sk_test_1" }, () => "made")).toEqual({ NODE_ENV: "production", SESSION_SECRET: "made", STRIPE_KEY: "sk_test_1", REGION: "eu" });
   });
 });

@@ -89,6 +89,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/volume/backups/{{bid}}/restore"), post(restore_volume))
         .route(&format!("{env}/restart"), post(restart))
         .route(&format!("{env}/instances/{{name}}/restart"), post(restart_instance))
+        .route(&format!("{env}/files"), get(read_files).put(write_files).layer(DefaultBodyLimit::max(crate::shell::FILES_MAX)))
         .route(&format!("{env}/sleep"), post(sleep))
         .route(&format!("{env}/wake"), post(wake))
         .route(&format!("{env}/variables"), get(variables).patch(change_variables))
@@ -147,21 +148,40 @@ async fn overview(State(apps): S) -> R {
 /// A project in one file, read (no service made): a roll.toml's `[apps]` and `[databases]`, or
 /// a Compose file turned into them, checked as `roll up --all` checks them. The dashboard's import
 /// plans against the project with it and makes what's missing through the usual routes.
-async fn import(b: Bytes) -> R {
-    use apps_build::project::{compose_to_toml, entry_kind, entry_run, parse_project};
+async fn import(State(apps): S, b: Bytes) -> R {
+    use apps_build::project::{VarSpec, compose_to_toml, entry_kind, entry_run, parse_project};
     let v = body(&b)?;
     let text = |k: &str| v.get(k).and_then(Value::as_str);
     if [text("roll_toml"), text("compose")].into_iter().flatten().any(|t| t.len() > 1 << 20) {
         return Err(Error::BadRequest("the file is at most 1 MiB".into()));
     }
-    let (toml_text, notes) = match (text("roll_toml"), text("compose")) {
-        (Some(t), None) => (t.to_string(), Vec::new()),
+    // A repo's own roll.toml (a "deploy to roll" link): its root's, at a revision or its head.
+    let from_repo = match text("repo") {
+        None => None,
+        Some(repo) => {
+            let sources = apps.deps.sources.clone().ok_or_else(|| Error::BadRequest("roll code isn't on this node".into()))?;
+            let rev = match text("revision") {
+                Some(r) => sources.revision(repo, r).await,
+                None => sources.resolve(repo, None).await,
+            }
+            .map_err(|e| Error::BadRequest(format!("{repo}: {e}")))?;
+            let bytes = sources.read_file(repo, &rev.sha, "roll.toml").await.map_err(|e| Error::BadRequest(format!("{repo}: {e}")))?;
+            let bytes = bytes.ok_or_else(|| Error::BadRequest(format!("{repo} has no roll.toml at its root to deploy from")))?;
+            if bytes.len() > 1 << 20 {
+                return Err(Error::BadRequest("the file is at most 1 MiB".into()));
+            }
+            Some(String::from_utf8(bytes).map_err(|_| Error::BadRequest(format!("{repo}'s roll.toml isn't UTF-8")))?)
+        }
+    };
+    let (toml_text, notes) = match (from_repo, text("roll_toml"), text("compose")) {
+        (Some(t), None, None) => (t, Vec::new()),
+        (None, Some(t), None) => (t.to_string(), Vec::new()),
         // Off the runtime's threads: a large file is a few hundred milliseconds of parsing.
-        (None, Some(c)) => {
+        (None, None, Some(c)) => {
             let c = c.to_string();
             tokio::task::spawn_blocking(move || compose_to_toml(&c)).await.map_err(|e| Error::Internal(e.to_string()))?.map_err(|e| Error::BadRequest(e.to_string()))?
         }
-        _ => return Err(Error::BadRequest("give roll_toml or compose".into())),
+        _ => return Err(Error::BadRequest("give one of roll_toml, compose or repo".into())),
     };
     let f = parse_project(&toml_text).map_err(|e| Error::BadRequest(e.to_string()))?;
     let apps: serde_json::Map<String, Value> = f
@@ -174,7 +194,19 @@ async fn import(b: Bytes) -> R {
                 _ => json!({ "kind": "upload", "root": a.root.as_deref().unwrap_or(".") }),
             };
             let links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "name": l })).collect();
-            (n.clone(), json!({ "source": source, "branch": a.branch, "run": entry_run(a), "links": links, "variables": a.variables }))
+            // What to set as it is, what to make (a secret, once), and what to ask whoever makes it.
+            let mut fixed = serde_json::Map::new();
+            let (mut generate, mut ask) = (Vec::new(), Vec::new());
+            for (k, spec) in &a.variables {
+                match spec {
+                    VarSpec::Value(val) => {
+                        fixed.insert(k.clone(), json!(val));
+                    }
+                    VarSpec::Generate(_) => generate.push(json!(k)),
+                    VarSpec::Ask(q) => ask.push(json!({ "name": k, "ask": q.ask, "default": q.default })),
+                }
+            }
+            (n.clone(), json!({ "source": source, "branch": a.branch, "run": entry_run(a), "links": links, "variables": fixed, "generate": generate, "ask": ask }))
         })
         .collect();
     ok(json!({ "roll_toml": toml_text, "notes": notes, "apps": apps, "databases": f.databases }))
@@ -962,6 +994,30 @@ async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q)
     // Keys and resizes are small: nothing near axum's 64 MiB default is held for a peer.
     let ws = ws.max_message_size(1 << 20).max_frame_size(1 << 20);
     Ok(ws.on_upgrade(move |socket| apps.bridge_shell(socket, target, slot, cols, rows)).into_response())
+}
+
+#[derive(Deserialize)]
+struct FilesQuery {
+    path: String,
+    instance: Option<String>,
+}
+
+/// `GET …/files?path=`: what's at a path in an instance, as a tar. Files can hold anything the
+/// app has (its secrets too): roll secrets' reveal rule, as a shell's.
+async fn read_files(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<FilesQuery>, ext: Extensions) -> R {
+    apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
+    let (name, tar) = apps.read_files(&id, &env, q.instance.as_deref().filter(|s| !s.is_empty()), &q.path).await?;
+    apps.audit("files.read", &id, &env, actor(&ext), json!({ "instance": name, "path": q.path })).await;
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(tar));
+    Ok(([(header::CONTENT_TYPE, "application/x-tar"), (header::HeaderName::from_static("x-roll-instance"), name.as_str())], body).into_response())
+}
+
+/// `PUT …/files?path=` (a tar): its files written under the path in an instance.
+async fn write_files(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<FilesQuery>, ext: Extensions, b: Bytes) -> R {
+    apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
+    let name = apps.write_files(&id, &env, q.instance.as_deref().filter(|s| !s.is_empty()), &q.path, b).await?;
+    apps.audit("files.written", &id, &env, actor(&ext), json!({ "instance": name, "path": q.path })).await;
+    ok(json!({ "instance": name, "path": q.path }))
 }
 
 /// `GET …/tunnel` (a WebSocket): one TCP connection to the service's port; see `crate::tunnel`.

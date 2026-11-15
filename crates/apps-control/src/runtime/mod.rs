@@ -216,6 +216,15 @@ pub trait Runtime: Send + Sync {
     async fn volume_used(&self, _name: &str) -> Option<u64> {
         None
     }
+    /// What's at `path` in instance `name` (a file or a directory), as a tar stream (`roll apps
+    /// cp`, Docker's `docker cp`).
+    async fn copy_from(&self, _name: &str, _path: &str) -> anyhow::Result<VolumeStream> {
+        anyhow::bail!("this runtime can't copy files out of an instance")
+    }
+    /// A tar's files written under `dir` in instance `name`.
+    async fn copy_to(&self, _name: &str, _dir: &str, _tar: VolumeStream) -> anyhow::Result<()> {
+        anyhow::bail!("this runtime can't copy files into an instance")
+    }
     /// A volume's files as a tar stream, read-only (a backup).
     async fn read_volume(&self, _name: &str) -> anyhow::Result<VolumeStream> {
         anyhow::bail!("this runtime has no volume backups")

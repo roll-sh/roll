@@ -466,6 +466,16 @@ async fn a_private_caller_wakes_a_sleeping_service() {
     };
     let live = w.apps.live(&id, "production");
     let state = || async { call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await.1["state"].as_str().unwrap_or("").to_string() };
+    // The answer reaches the caller a moment before the environment's state says running.
+    let running = || async {
+        for _ in 0..50 {
+            if state().await == "running" {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    };
     // Awake: the baseline (an exec and a request).
     assert_eq!(get(&w.public, &host).await.0, StatusCode::OK);
     let (body, awake) = fetch().await;
@@ -477,7 +487,7 @@ async fn a_private_caller_wakes_a_sleeping_service() {
     assert!(!wakers.is_empty(), "asleep, the waker listens");
     let (body, stopped) = fetch().await;
     assert!(body.as_deref().is_ok_and(|b| b.contains("<h1>cold</h1>")), "the first caller gets the app: {body:?}");
-    assert_eq!(state().await, "running");
+    assert!(running().await, "running again");
     // Frozen.
     live.backdate(Duration::from_secs(31));
     live.tick().await;

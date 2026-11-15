@@ -412,6 +412,18 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// Copy files to or from an instance (Fly's `sftp`): `roll apps cp ./seed.db :/data/` puts a
+    /// file (or a directory) under a directory there, `roll apps cp :/app/report.csv .` brings one
+    /// here. `:` marks the instance's side; the instance is the one a shell would get, or
+    /// `--instance`. Up to 100 MiB at a time.
+    Cp {
+        #[command(flatten)]
+        target: Target,
+        src: String,
+        dst: String,
+        #[arg(long)]
+        instance: Option<String>,
+    },
     /// Open the environment's address in a browser (and print it); `--print` only prints it.
     Open {
         #[command(flatten)]
@@ -580,6 +592,10 @@ pub enum AppsCmd {
         /// shell's).
         #[arg(long, value_name = "PATH")]
         from_file: Option<PathBuf>,
+        /// Put them live now: a redeploy of the live image with the new values (Heroku's
+        /// `config:set`), followed until it's live.
+        #[arg(long, conflicts_with = "reveal")]
+        deploy: bool,
     },
     /// Link a roll resource (`postgres <project>`, `redis <db>`): its connection variables go in.
     Link {
@@ -937,13 +953,14 @@ async fn project_id(api: &Api, p: &str) -> anyhow::Result<String> {
     if p.starts_with("prj_") {
         return Ok(p.to_string());
     }
+    find_project(api, p).await?.ok_or_else(|| anyhow::anyhow!("no project named {p} (roll apps puts services in workspace projects)"))
+}
+
+/// The project named `name`, if there's one; an error only when the projects can't be read (a
+/// 401, roll unreachable), never taken for "none".
+async fn find_project(api: &Api, name: &str) -> anyhow::Result<Option<String>> {
     let all = api.get("/v1/workspace/projects").await?;
-    all.as_array()
-        .into_iter()
-        .flatten()
-        .find(|x| x["name"] == p)
-        .map(|x| s(&x["id"]))
-        .ok_or_else(|| anyhow::anyhow!("no project named {p} (roll apps puts services in workspace projects)"))
+    Ok(all.as_array().into_iter().flatten().find(|x| x["name"] == name).map(|x| s(&x["id"])))
 }
 
 /// The service a target names: `--service` (id or name), else this directory's link.
@@ -1544,9 +1561,12 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
             let name = if name.is_empty() { "app".to_string() } else { name };
             let project = match &u.target.project {
                 Some(p) => project_id(api, p).await?,
-                None => match project_id(api, &name).await {
-                    Ok(p) => p,
-                    Err(_) => s(&api.post("/v1/workspace/projects", json!({ "name": name })).await?["id"]),
+                None => match find_project(api, &name).await? {
+                    Some(p) => {
+                        eprintln!("using the project {name} ({p}), named as this directory is (-p puts it in another)");
+                        p
+                    }
+                    None => s(&api.post("/v1/workspace/projects", json!({ "name": name })).await?["id"]),
                 },
             };
             let svc = api.post("/v1/apps/services", json!({ "project": project, "name": name, "source": { "kind": "upload" } })).await?;
@@ -1646,6 +1666,41 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
 /// `web:`); a roll.toml `[app]` isn't applied.
 /// What a build of `dir` would detect in `env`: its roll.toml `[app]` checked (an error before
 /// anything is pushed) and applied, its lines first in the notes.
+/// A new service's variables from its project file: values as they are, `generate = "secret"` as
+/// 32 random bytes in hex (made here, once), and `ask` asked on this terminal (its default on
+/// Enter); without a terminal an asked one is an error naming it.
+fn fill_vars(app: &str, vars: &std::collections::BTreeMap<String, apps_build::project::VarSpec>) -> anyhow::Result<serde_json::Map<String, Value>> {
+    use apps_build::project::VarSpec;
+    use std::io::{BufRead, IsTerminal, Write};
+    let mut out = serde_json::Map::new();
+    for (k, spec) in vars {
+        let value = match spec {
+            VarSpec::Value(v) => v.clone(),
+            VarSpec::Generate(_) => {
+                let mut b = [0u8; 32];
+                getrandom::fill(&mut b).map_err(|e| anyhow::anyhow!("{e}"))?;
+                b.iter().map(|x| format!("{x:02x}")).collect()
+            }
+            VarSpec::Ask(q) => {
+                anyhow::ensure!(std::io::stdin().is_terminal(), "{app}'s {k} is asked ({}): run this on a terminal", q.ask);
+                let hint = q.default.as_deref().map(|d| format!(" [{d}]")).unwrap_or_default();
+                eprint!("{app} {k}: {}{hint}: ", q.ask);
+                std::io::stderr().flush()?;
+                let mut line = String::new();
+                std::io::stdin().lock().read_line(&mut line)?;
+                let line = line.trim_end_matches(['\r', '\n']).to_string();
+                match (line.is_empty(), &q.default) {
+                    (true, Some(d)) => d.clone(),
+                    (true, None) => bail!("{app}'s {k} needs a value"),
+                    _ => line,
+                }
+            }
+        };
+        out.insert(k.clone(), json!(value));
+    }
+    Ok(out)
+}
+
 fn local_plan(dir: &Path, env: &str) -> anyhow::Result<apps_build::Plan> {
     anyhow::ensure!(dir.is_dir(), "{} isn't a directory", dir.display());
     let base = apps_build::Overrides { process: Some("web".into()), ..Default::default() };
@@ -1765,7 +1820,7 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                     body["run"] = Value::Object(run);
                 }
                 if !a.variables.is_empty() {
-                    body["variables"] = json!(a.variables);
+                    body["variables"] = Value::Object(fill_vars(n, &a.variables)?);
                 }
                 let svc = api.post("/v1/apps/services", body).await?;
                 eprintln!("made service {n}");
@@ -2430,6 +2485,59 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
+        AppsCmd::Cp { target, src, dst, instance } => {
+            let svc = service(api, &target).await?;
+            let inst = instance.map(|i| format!("&instance={}", enc(&i))).unwrap_or_default();
+            let url = |path: &str| format!("{}{}/files?path={}{inst}", api.base, env_path(&svc, &target.env), enc(path));
+            let send = |req: reqwest::RequestBuilder| async {
+                let req = match &api.key {
+                    Some(k) => req.bearer_auth(k),
+                    None => req,
+                };
+                let res = req.send().await?;
+                if !res.status().is_success() {
+                    let code = res.status();
+                    let body: Value = res.json().await.unwrap_or(Value::Null);
+                    bail!("{}", body["error"].as_str().map(str::to_string).unwrap_or_else(|| code.to_string()));
+                }
+                Ok(res)
+            };
+            let (out, there) = match (src.strip_prefix(':'), dst.strip_prefix(':')) {
+                (Some(remote), None) => {
+                    let res = send(api.http.get(url(remote))).await?;
+                    let from = res.headers().get("x-roll-instance").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                    let bytes = res.bytes().await?;
+                    let here = PathBuf::from(&dst);
+                    std::fs::create_dir_all(&here)?;
+                    // `unpack` keeps every entry inside `here` (no `..`, no absolute paths).
+                    tar::Archive::new(std::io::Cursor::new(bytes.to_vec())).unpack(&here).with_context(|| format!("unpacking into {}", here.display()))?;
+                    (format!("{from}:{remote} → {}", here.display()), json!({ "instance": from, "from": remote, "to": here }))
+                }
+                (None, Some(remote)) => {
+                    let local = PathBuf::from(&src);
+                    let meta = std::fs::symlink_metadata(&local).with_context(|| local.display().to_string())?;
+                    let name = local.file_name().map(|n| n.to_owned()).ok_or_else(|| anyhow::anyhow!("{src}: name a file or a directory"))?;
+                    let mut b = tar::Builder::new(Vec::new());
+                    b.follow_symlinks(false);
+                    if meta.is_dir() {
+                        b.append_dir_all(&name, &local)?;
+                    } else {
+                        b.append_path_with_name(&local, &name)?;
+                    }
+                    let body = b.into_inner()?;
+                    anyhow::ensure!(body.len() <= 100 << 20, "{src} is more than 100 MiB as a tar");
+                    let res = send(api.http.put(url(remote)).header("content-type", "application/x-tar").body(body)).await?;
+                    let v: Value = res.json().await.unwrap_or(Value::Null);
+                    (format!("{} → {}:{remote}", local.display(), s(&v["instance"])), v)
+                }
+                _ => bail!("one side is the instance's, marked with `:` (roll apps cp ./file :/data/ or roll apps cp :/data/file .)"),
+            };
+            if !json_out {
+                println!("{out}");
+                return Ok(());
+            }
+            there
+        }
         AppsCmd::Open { target, print } => {
             let svc = service(api, &target).await?;
             let e = api.get(&env_path(&svc, &target.env)).await?;
@@ -2668,7 +2776,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Vars { target, set, unset, seal, reveal, from_file } => {
+        AppsCmd::Vars { target, set, unset, seal, reveal, from_file, deploy } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/variables", env_path(&svc, &target.env));
             let mut m = serde_json::Map::new();
@@ -2686,9 +2794,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     m.insert(k.to_string(), v.into());
                 }
                 api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset, "seal": seal }))).await?;
-                if !json_out {
-                    eprintln!("saved; `roll apps redeploy` puts them live (a new deploy or push does too)");
+                if deploy {
+                    let dep = api.post(&format!("{}/redeploy", env_path(&svc, &target.env)), json!({})).await?;
+                    if !json_out {
+                        eprintln!("saved; redeploying with them");
+                        return watch(api, &svc, &target.env, &dep).await;
+                    }
+                    println!("{}", serde_json::to_string_pretty(&dep)?);
+                    return Ok(());
                 }
+                if !json_out {
+                    eprintln!("saved; `roll apps redeploy` (or --deploy) puts them live (a new deploy or push does too)");
+                }
+            } else if deploy {
+                bail!("--deploy goes with variables to set or unset");
             }
             let v = if reveal { api.get(&format!("{base}/values")).await? } else { api.get(&base).await? };
             if !json_out {
@@ -2893,7 +3012,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     println!("{:>7} {:>6} {:>7} {:>7}  route", "req", "5xx", "p50", "p95");
                 }
                 for r in rows.iter().take(30) {
-                    println!("{:>7} {:>6} {:>7} {:>7}  {} {}", r["requests"], r["errors"], format!("{}ms", r["p50_ms"]), format!("{}ms", r["p95_ms"]), s(&r["method"]), s(&r["route"]));
+                    // Numbers, not JSON values: a value's Display ignores the width.
+                    let num = |k: &str| r[k].as_u64().unwrap_or(0);
+                    println!("{:>7} {:>6} {:>7} {:>7}  {} {}", num("requests"), num("errors"), format!("{}ms", num("p50_ms")), format!("{}ms", num("p95_ms")), s(&r["method"]), s(&r["route"]));
                 }
                 if rows.is_empty() {
                     println!("no route to show");

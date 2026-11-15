@@ -63,9 +63,46 @@ pub struct AppEntry {
     /// The port it listens on (an image's; a root's own roll.toml can say it too).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
-    /// Variables it starts with (set when the service is made, never over what it has).
+    /// Variables it starts with (set when the service is made, never over what it has): a value,
+    /// `{ generate = "secret" }` (made once, when it's made) or `{ ask = "what it is" }` (whoever
+    /// makes it says it): Heroku's `app.json` and Render's Blueprints.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub variables: BTreeMap<String, String>,
+    pub variables: BTreeMap<String, VarSpec>,
+}
+
+/// A variable a project file gives its service.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum VarSpec {
+    Value(String),
+    Generate(Generate),
+    Ask(Ask),
+}
+
+/// `{ generate = "secret" }`: 32 random bytes as 64 hex characters, made when the service is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Generate {
+    pub generate: String,
+}
+
+/// `{ ask = "Your Stripe secret key" }`: asked of whoever makes the service, `default` offered.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ask {
+    pub ask: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+impl VarSpec {
+    /// The value, when the file gives one.
+    pub fn value(&self) -> Option<&str> {
+        match self {
+            VarSpec::Value(v) => Some(v),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -107,6 +144,13 @@ pub fn parse_project(text: &str) -> Result<ProjectFile, ProjectError> {
         ensure(a.kind.as_deref().is_none_or(|k| ["web", "worker", "cron"].contains(&k)), || format!("app {n}: type is web, worker or cron"))?;
         for l in &a.links {
             ensure(f.databases.contains_key(l), || format!("app {n} links {l}, which isn't in [databases]"))?;
+        }
+        for (k, v) in &a.variables {
+            match v {
+                VarSpec::Value(_) => {}
+                VarSpec::Generate(g) => ensure(g.generate == "secret", || format!("app {n}: {k}'s generate is \"secret\""))?,
+                VarSpec::Ask(q) => ensure(!q.ask.trim().is_empty() && q.ask.len() <= 200 && q.default.as_ref().is_none_or(|d| d.len() <= 2000), || format!("app {n}: {k}'s ask is what to ask, at most 200 characters"))?,
+            }
         }
     }
     Ok(f)
@@ -361,7 +405,7 @@ mod tests {
         let f = parse_project(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
         let web = &f.apps["web"];
         assert_eq!((web.root.as_deref(), web.port, web.links.clone()), (Some("apps/web"), Some(3000), vec!["db".to_string(), "cache".to_string()]));
-        assert_eq!(web.variables["NODE_ENV"], "production");
+        assert_eq!(web.variables["NODE_ENV"].value(), Some("production"));
         assert_eq!((f.apps["proxy"].image.as_deref(), f.apps["proxy"].port), (Some("nginx:1.27"), Some(80)));
         assert_eq!((f.databases["db"].kind.as_str(), f.databases["cache"].kind.as_str()), ("postgres", "redis"));
         assert!(notes.iter().any(|n| n.starts_with("web: not carried over: volumes")), "{notes:?}");

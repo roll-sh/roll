@@ -16,6 +16,7 @@ import { Route as OwnerRepoRouteRouteImport } from './routes/$owner/$repo/route'
 import { Route as DashboardIndexRouteImport } from './routes/dashboard/index'
 import { Route as DashboardAccountRouteImport } from './routes/dashboard/account'
 import { Route as DashboardDatabasesRouteImport } from './routes/dashboard/databases'
+import { Route as DashboardDeployRouteImport } from './routes/dashboard/deploy'
 import { Route as DashboardStreamsRouteImport } from './routes/dashboard/streams'
 import { Route as DashboardTasksRouteImport } from './routes/dashboard/tasks'
 import { Route as OauthAuthorizeRouteImport } from './routes/oauth/authorize'
@@ -106,6 +107,11 @@ const DashboardAccountRoute = DashboardAccountRouteImport.update({
 const DashboardDatabasesRoute = DashboardDatabasesRouteImport.update({
   id: '/dashboard/databases',
   path: '/dashboard/databases',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardDeployRoute = DashboardDeployRouteImport.update({
+  id: '/dashboard/deploy',
+  path: '/dashboard/deploy',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DashboardStreamsRoute = DashboardStreamsRouteImport.update({
@@ -408,6 +414,7 @@ export interface FileRoutesByFullPath {
   '/$owner/$repo': typeof OwnerRepoRouteRouteWithChildren
   '/dashboard/account': typeof DashboardAccountRoute
   '/dashboard/databases': typeof DashboardDatabasesRoute
+  '/dashboard/deploy': typeof DashboardDeployRoute
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
@@ -472,6 +479,7 @@ export interface FileRoutesByTo {
   '/signin': typeof SigninRoute
   '/dashboard/account': typeof DashboardAccountRoute
   '/dashboard/databases': typeof DashboardDatabasesRoute
+  '/dashboard/deploy': typeof DashboardDeployRoute
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
@@ -538,6 +546,7 @@ export interface FileRoutesById {
   '/$owner/$repo': typeof OwnerRepoRouteRouteWithChildren
   '/dashboard/account': typeof DashboardAccountRoute
   '/dashboard/databases': typeof DashboardDatabasesRoute
+  '/dashboard/deploy': typeof DashboardDeployRoute
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
@@ -605,6 +614,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo'
     | '/dashboard/account'
     | '/dashboard/databases'
+    | '/dashboard/deploy'
     | '/dashboard/streams'
     | '/dashboard/tasks'
     | '/oauth/authorize'
@@ -669,6 +679,7 @@ export interface FileRouteTypes {
     | '/signin'
     | '/dashboard/account'
     | '/dashboard/databases'
+    | '/dashboard/deploy'
     | '/dashboard/streams'
     | '/dashboard/tasks'
     | '/oauth/authorize'
@@ -734,6 +745,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo'
     | '/dashboard/account'
     | '/dashboard/databases'
+    | '/dashboard/deploy'
     | '/dashboard/streams'
     | '/dashboard/tasks'
     | '/oauth/authorize'
@@ -800,6 +812,7 @@ export interface RootRouteChildren {
   OwnerRepoRouteRoute: typeof OwnerRepoRouteRouteWithChildren
   DashboardAccountRoute: typeof DashboardAccountRoute
   DashboardDatabasesRoute: typeof DashboardDatabasesRoute
+  DashboardDeployRoute: typeof DashboardDeployRoute
   DashboardStreamsRoute: typeof DashboardStreamsRoute
   DashboardTasksRoute: typeof DashboardTasksRoute
   OauthAuthorizeRoute: typeof OauthAuthorizeRoute
@@ -895,6 +908,13 @@ declare module '@tanstack/react-router' {
       path: '/dashboard/databases'
       fullPath: '/dashboard/databases'
       preLoaderRoute: typeof DashboardDatabasesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard/deploy': {
+      id: '/dashboard/deploy'
+      path: '/dashboard/deploy'
+      fullPath: '/dashboard/deploy'
+      preLoaderRoute: typeof DashboardDeployRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/dashboard/streams': {
@@ -1345,6 +1365,7 @@ const rootRouteChildren: RootRouteChildren = {
   OwnerRepoRouteRoute: OwnerRepoRouteRouteWithChildren,
   DashboardAccountRoute: DashboardAccountRoute,
   DashboardDatabasesRoute: DashboardDatabasesRoute,
+  DashboardDeployRoute: DashboardDeployRoute,
   DashboardStreamsRoute: DashboardStreamsRoute,
   DashboardTasksRoute: DashboardTasksRoute,
   OauthAuthorizeRoute: OauthAuthorizeRoute,

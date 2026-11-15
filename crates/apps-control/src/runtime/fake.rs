@@ -60,6 +60,8 @@ pub struct Fake {
     pub shared: std::sync::atomic::AtomicBool,
     instances: Mutex<HashMap<String, FakeInstance>>,
     networks: Mutex<Vec<String>>,
+    /// Tars written into instances (`copy_to`), by instance and directory, read back as they were.
+    copied: Mutex<HashMap<(String, String), Vec<u8>>>,
     /// What a volume reports it takes, over its contents' length ([`Fake::set_volume_used`]).
     volume_used: Mutex<HashMap<String, u64>>,
     pub counts: Counts,
@@ -461,6 +463,21 @@ impl Runtime for Fake {
             return Some(*b);
         }
         self.volumes.lock().get(name).map(|v| v.len() as u64)
+    }
+
+    async fn copy_from(&self, name: &str, path: &str) -> anyhow::Result<super::VolumeStream> {
+        anyhow::ensure!(self.state(name) == Some(FakeState::Running), "{name} isn't running");
+        let got = self.copied.lock().get(&(name.to_string(), path.to_string())).cloned();
+        let bytes = got.ok_or_else(|| anyhow::anyhow!("no such file or directory: {path}"))?;
+        Ok(Box::new(std::io::Cursor::new(bytes)))
+    }
+
+    async fn copy_to(&self, name: &str, dir: &str, mut tar: super::VolumeStream) -> anyhow::Result<()> {
+        anyhow::ensure!(self.state(name) == Some(FakeState::Running), "{name} isn't running");
+        let mut buf = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut tar, &mut buf).await?;
+        self.copied.lock().insert((name.to_string(), dir.to_string()), buf);
+        Ok(())
     }
 
     async fn read_volume(&self, name: &str) -> anyhow::Result<super::VolumeStream> {

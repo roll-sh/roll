@@ -1093,6 +1093,10 @@ static ROWS: &[Row] = &[
     // A tunnel reaches the service's port past its allow list, access token and maintenance
     // (a private service's admin page, say): admin, as a shell is.
     row("GET", "/v1/apps/services/{id}/environments/{env}/tunnel", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    // Files in an instance (`roll apps cp`): read, anything the app keeps (its secrets too);
+    // written, anything it runs next: admin, as a shell is.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/files", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("PUT", "/v1/apps/services/{id}/environments/{env}/files", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/shell/sessions", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/keys", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),

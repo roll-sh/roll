@@ -61,6 +61,9 @@ impl Sources for FakeCode {
         }
         Ok(Revision { sha: rev.to_string(), message: format!("at {rev}") })
     }
+    async fn read_file(&self, _repo: &str, _revision: &str, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self.files.lock().get(path).map(|v| v.as_bytes().to_vec()))
+    }
     async fn materialize(&self, _repo: &str, _revision: &str, dir: &Path) -> anyhow::Result<()> {
         for (k, v) in self.files.lock().iter() {
             let p = dir.join(k);
@@ -3608,4 +3611,43 @@ async fn a_volume_filling_up_is_said_once() {
     w.fake.set_volume_used(&volume, 1_050_000_000);
     w.apps.measure_volumes().await;
     assert_eq!(events().await, 2, "again after it had room");
+}
+
+/// Files to and from an instance (`roll apps cp`, Fly's sftp): a tar written under a path reads
+/// back as it was, from the instance a shell would get; a path must be absolute.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn files_go_to_and_from_an_instance() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let files = format!("/v1/apps/services/{id}/environments/production/files");
+    let raw = |method: &str, uri: String, body: Vec<u8>| {
+        let req = Request::builder().method(method).uri(uri).header("content-type", "application/x-tar").body(Body::from(body)).unwrap();
+        w.api.clone().oneshot(req)
+    };
+    let tar = b"a tar's bytes".to_vec();
+    let resp = raw("PUT", format!("{files}?path=/data"), tar.clone()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = raw("GET", format!("{files}?path=/data"), vec![]).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let inst = resp.headers()["x-roll-instance"].to_str().unwrap().to_string();
+    assert!(w.fake.instances(&id).iter().any(|(n, ..)| *n == inst), "{inst}");
+    assert_eq!(resp.into_body().collect().await.unwrap().to_bytes().to_vec(), tar);
+    assert_eq!(raw("GET", format!("{files}?path=data"), vec![]).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    let (_, trail) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
+    assert!(trail.to_string().contains("audit.files.written") && trail.to_string().contains("audit.files.read"), "{trail}");
+}
+
+/// A "deploy to roll" link reads a repo's own roll.toml: what to set, what to make (a secret),
+/// what to ask whoever deploys it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_repos_roll_toml_is_read_for_a_deploy_link() {
+    let w = world().await;
+    w.code.files.lock().insert("roll.toml".into(), "[apps.web]\nrepo = \"acme/site\"\n[apps.web.variables]\nNODE_ENV = \"production\"\nSESSION_SECRET = { generate = \"secret\" }\nSTRIPE_KEY = { ask = \"Your Stripe secret key\" }\n".into());
+    let (st, imp) = call(&w.api, "POST", "/v1/apps/import", Some(json!({"repo": "acme/site"}))).await;
+    assert_eq!(st, StatusCode::OK, "{imp}");
+    let web = &imp["apps"]["web"];
+    assert_eq!((&web["variables"], &web["generate"], &web["ask"][0]["name"]), (&json!({"NODE_ENV": "production"}), &json!(["SESSION_SECRET"]), &json!("STRIPE_KEY")), "{imp}");
+    w.code.files.lock().insert("roll.toml".into(), "[apps.web]\nrepo = \"acme/site\"\n[apps.web.variables]\nX = { generate = \"uuid\" }\n".into());
+    assert_eq!(call(&w.api, "POST", "/v1/apps/import", Some(json!({"repo": "acme/site"}))).await.0, StatusCode::BAD_REQUEST, "only secrets are made");
 }
