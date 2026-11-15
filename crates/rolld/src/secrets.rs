@@ -306,6 +306,10 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
+    // How many reads of values a token or a person makes a minute on this node (0: no limit).
+    if let Ok(n) = std::env::var("ROLL_SECRETS_READS_PER_MINUTE") {
+        secrets.set_reads_per_minute(n.trim().parse().map_err(|_| anyhow::anyhow!("ROLL_SECRETS_READS_PER_MINUTE is a number of reads a minute (0: no limit), not {n:?}"))?);
+    }
     // Where clients reach rolld: a CA's certificates name its CRL there.
     secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
     // A deleted project's secrets go with it.

@@ -279,19 +279,26 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
     Ok(out)
 }
 
-/// Value reads a principal may make in a minute on one node, as Vault's rate-limit quotas: a
-/// token or a person in a loop is told to slow down (429) before it decrypts, audits and issues
-/// without end. roll's own runtimes (apps, previews, checks, syncs) and the operator aren't held to it.
+/// Value reads a principal may make in a minute on one node unless the operator says otherwise
+/// (`ROLL_SECRETS_READS_PER_MINUTE`), as Vault's rate-limit quotas: a token or a person in a loop is
+/// told to slow down (429) before it decrypts, audits and issues without end. roll's own runtimes
+/// (apps, previews, checks, syncs, workload identities' logins) and the operator aren't held to it.
 pub(crate) const READS_PER_MINUTE: u32 = 600;
 
 impl Secrets {
-    /// Count one read of values for `caller`; past [`READS_PER_MINUTE`] in this minute, refused.
+    /// How many reads of values a principal may make in a minute on this node; 0: no limit.
+    pub fn set_reads_per_minute(&self, n: u32) {
+        self.reads_per_minute.store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Count one read of values for `caller`; past the limit in this minute, refused.
     pub(crate) fn read_quota(&self, caller: &Caller) -> Result<()> {
-        if caller.runtime || caller.principal == "operator" {
+        let max = self.reads_per_minute.load(std::sync::atomic::Ordering::Relaxed);
+        if max == 0 || caller.runtime || caller.principal == "operator" {
             return Ok(());
         }
-        if !self.reads.allow(&caller.principal, READS_PER_MINUTE) {
-            return Err(Error::TooMany(format!("more than {READS_PER_MINUTE} reads of values a minute: slow down, or cache them (watches follow the digest)")));
+        if !self.reads.allow(&caller.principal, max) {
+            return Err(Error::TooMany(format!("more than {max} reads of values a minute: slow down, or cache them (watches follow the digest)")));
         }
         Ok(())
     }
