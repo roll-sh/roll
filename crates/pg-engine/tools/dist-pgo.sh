@@ -18,8 +18,9 @@
 # PGO_BUILD_CPUS (taskset of the builds), and pgo-train.sh's PGO_PORT, PGO_SERVER_CPUS,
 # PGO_CLIENT_CPUS; PGO_BREADTH=1 (pgo-train.sh's breadth phase too, merged PGO_BENCH_SHARE to 1:
 # measured, not the default, HANDOFF "Profile-guided build"), PGO_REGRESS_SRC; PGO_LLVM_ARGS
-# (space-separated LLVM options for the optimised build). Plain `cargo build --profile dist` is
-# unchanged: the flags go through RUSTFLAGS of these builds only.
+# (space-separated LLVM options for the optimised build). Both builds also take the shipped
+# builds' flags (tools/dist-flags.sh, as tools/dist.sh): they go through RUSTFLAGS of these
+# builds only.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../../.." && pwd)
@@ -37,6 +38,7 @@ W=${PGO_DIR:-$ROOT/target/pgo}
 OUT=${OUT:-$W/out}
 mkdir -p "$W" "$OUT"; W=$(realpath "$W"); OUT=$(realpath "$OUT")
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+. "$HERE/dist-flags.sh"
 cd "$ROOT"
 REV=$(git rev-parse --short=9 HEAD)
 DIRTY=$(git status --porcelain --untracked-files=no | head -1)
@@ -47,7 +49,7 @@ tb() { [ -n "${PGO_BUILD_CPUS:-}" ] && echo "taskset -c $PGO_BUILD_CPUS" || true
 t() { date +%s; }
 T0=$(t)
 build() { # build <target dir> <rustflags>: the dist roll-engine with these flags
-  RUSTFLAGS=$2 CARGO_TARGET_DIR=$1 $(tb) cargo build --profile dist -p pg-engine --bin roll-engine
+  RUSTFLAGS="$2${DIST_RUSTFLAGS:+ $DIST_RUSTFLAGS}" CARGO_TARGET_DIR=$1 $(tb) cargo build --profile dist -p pg-engine --bin roll-engine
 }
 note() { echo "dist-pgo: $*"; echo "$*" >>"$OUT/BUILD.txt"; }
 : >"$OUT/BUILD.txt"
@@ -99,7 +101,7 @@ T4=$(t)
 # unprofiled; the warnings for each would bury the build log.)
 USE="-Cprofile-use=$PROF -Cllvm-args=-no-pgo-warn-mismatch"
 for a in ${PGO_LLVM_ARGS:-}; do USE="$USE -Cllvm-args=$a"; done
-note "rustflags $USE"
+note "rustflags $USE${DIST_RUSTFLAGS:+ $DIST_RUSTFLAGS}"
 build "$W/t-use" "$USE"
 cp "$W/t-use/dist/roll-engine" "$OUT/roll-engine"
 [ -n "${PGO_KEEP:-}" ] || rm -rf "$W/t-use"

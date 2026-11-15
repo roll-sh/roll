@@ -22,7 +22,8 @@
 # A profile-guided build (tools/dist-pgo.sh; HANDOFF "Profile-guided build"): TRAIN_ENGINE_BIN=
 # <its roll-engine> runs regress, isolation and pg_dump_tap against that binary, and
 # TRAIN_PGO_PROFDATA=<its .profdata> builds crash_random and the power stage with `--profile
-# dist` and -Cprofile-use of it (the engine in-process, as the shipped binary is optimised).
+# dist`, -Cprofile-use of it and tools/dist-flags.sh's flags (the engine in-process, as the
+# shipped binary is optimised).
 # TRAIN_NO_CHECKOUT=1 tests the checkout as it is (the commit the binary was built from).
 set -u
 D=${TRAIN_DIR:?TRAIN_DIR: a scratch directory on disk}
@@ -41,7 +42,8 @@ if [ -n "${TRAIN_ENGINE_BIN:-}" ]; then
 fi
 CRASH="--release"
 if [ -n "${TRAIN_PGO_PROFDATA:-}" ]; then
-  CRASH="--profile dist --config build.rustflags=['-Cprofile-use=$TRAIN_PGO_PROFDATA','-Cllvm-args=-no-pgo-warn-mismatch']"
+  . "$ROOT/crates/pg-engine/tools/dist-flags.sh"
+  CRASH="--profile dist --config build.rustflags=['-Cprofile-use=$TRAIN_PGO_PROFDATA','-Cllvm-args=-no-pgo-warn-mismatch'${DIST_RUSTFLAGS:+,'$DIST_RUSTFLAGS'}]"
 fi
 if [ -z "${TRAIN_NO_CHECKOUT:-}" ] && [ -z "$(git status --porcelain --untracked-files=no)" ]; then
   git fetch -q origin && git checkout -q --detach origin/docs/postgres-architecture-strategy
