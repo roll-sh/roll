@@ -529,6 +529,8 @@ export interface Review {
   source: ReviewSource;
   /** On GitHub, for ingested reviews. */
   url: string | null;
+  /** Its author can't push to the repo (MCP's lockdown withholds it). */
+  outside?: boolean;
   /** It reviewed an older revision. */
   stale: boolean;
   dismissed: boolean;
@@ -552,6 +554,8 @@ export interface ReviewComment {
   /** On comments roll wrote for a finding; null otherwise (and on older servers, absent). */
   finding?: CommentFinding | null;
   source: ReviewSource;
+  /** Its author can't push to the repo (MCP's lockdown withholds it). */
+  outside?: boolean;
   created_at: number;
   updated_at: number;
 }

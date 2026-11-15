@@ -109,7 +109,10 @@ How it works:
 - Products mark records from outside `"outside": true`:
   - roll code's work items from GitHub issues whose author isn't `OWNER`, `MEMBER` or
     `COLLABORATOR` (a missing association counts as outside);
-  - its changes from forks (`!trusted`).
+  - its changes from forks (`!trusted`);
+  - reviews and review comments whose author can't push: from GitHub by the same
+    association, and from roll's own API when the caller may comment but not write (a public
+    repo's reader).
 - In lockdown, every result has the `title`, `body`, `description`, `message` and `text` of those
   records replaced with a notice, wherever they sit in the answer.
 - A tool's text block is then rebuilt from what's left, because a tool set may have written its
@@ -119,7 +122,7 @@ How it works:
 - The flag parses like `?readonly=`: a typo is a 400, never "off".
 - The connect panel has a checkbox for it.
 
-Review comments from people outside the repo aren't marked yet (`## Next`).
+Chat messages that reach an agent aren't marked yet (`## Next`).
 
 ### With OAuth (Claude Code, Claude.ai, Cursor, VS Code, …)
 
@@ -620,11 +623,10 @@ waits on a sibling PR reaching main is last.
    group's offsets), storage (change a bucket, its rules, usage) and queues (health, connections,
    policies). Leave out what only an operator does by hand (keys, accounts, IAM, roles, CDN,
    migrations, rotations): a tool for it is one more thing an agent can be talked into.
-2. **Lockdown, the rest of roll code's outside text:** GitHub reviews and review comments
-   from people who can't push (store each one's `outside`, as work items do; the review import
-   already reads `author_association`), comments on a fork's change, and chat messages that
-   reach an agent. Then make lockdown the default for roll code's own agents and automations
-   that act on issues (the agents thread's call; tell it).
+2. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
+   automations that pick up issues and chat messages (the agents thread's call; tell it), and
+   chat messages that reach an agent marked `outside` (an install's non-members can't drive
+   roll, so mostly members' text).
 3. **MCP tasks, as the 2026-07-28 extension** (`io.modelcontextprotocol/tasks`, SEP-2663: the
    server answers a task handle when a call will take long, `tasks/get` polls with the result in
    it, `tasks/update` carries input, no `tasks/result` or `tasks/list`; 2025-11-25's experimental
@@ -656,7 +658,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: lockdown (`?lockdown=1`: work items from GitHub issues whose author can't push, and changes from forks, are `outside`, and their text is withheld from the model); search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
+Done lately: lockdown (`?lockdown=1`: work items from GitHub issues, reviews and review comments whose author can't push, and changes from forks, are `outside`, and their text is withheld from the model); search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
 revocations were counted as asks: "1 asked" on a token that never made a request; seen in the review
 pack) (#25); ended OAuth connections and their kept clients are forgotten after the audit log's days
 (each `roll login` made one of each, kept forever) (#25); `roll login` checked live against a rolld

@@ -1048,6 +1048,9 @@ async fn reviews_both_ways() {
     assert_eq!(verdict_of("contrib").as_deref(), Some("comment"));
     assert_eq!(verdict_of("unknown").as_deref(), Some("comment"));
     assert_eq!(verdict_of("maintainer").as_deref(), Some("approve"));
+    // And MCP's lockdown withholds what the outsiders wrote: their reviews are `outside`.
+    let outside_of = |login: &str| rs.as_array().unwrap().iter().find(|r| r["reviewer"]["name"] == login).map(|r| r["outside"].clone());
+    assert_eq!([outside_of("drive-by"), outside_of("unknown"), outside_of("maintainer")], [Some(json!(true)), Some(json!(true)), Some(json!(false))]);
     assert_eq!(verdict_of("org-member").as_deref(), Some("request_changes"));
 }
 

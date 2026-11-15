@@ -892,7 +892,7 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
     assert_eq!(got["id"], r["id"]);
     assert_eq!(
         keys(&got),
-        sorted(vec!["id", "change", "revision", "head", "reviewer", "verdict", "body", "source", "url", "stale", "dismissed", "dismissed_by", "dismiss_reason", "created_at", "updated_at", "ai"])
+        sorted(vec!["id", "change", "revision", "head", "reviewer", "verdict", "body", "source", "outside", "url", "stale", "dismissed", "dismissed_by", "dismiss_reason", "created_at", "updated_at", "ai"])
     );
     let got = ev.next("thread").await;
     assert_eq!(got["id"], r["threads"][0]["id"]);

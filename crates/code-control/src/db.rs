@@ -433,6 +433,9 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("automation_runs", "woken", "INTEGER NOT NULL DEFAULT 0"),
     // Work items from before issues said whether their author can push (the next sync says).
     ("work_items", "outside", "INTEGER NOT NULL DEFAULT 0"),
+    // Reviews and comments from before they said whether their author can push.
+    ("reviews", "outside", "INTEGER NOT NULL DEFAULT 0"),
+    ("review_comments", "outside", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 impl Db {

@@ -246,6 +246,7 @@ own reviewer all leave the same records.
 Reviewer = {kind: "user" | "agent" | "app" | "roll", name, app: string | null /* the review app's id */}
 Review   = {id /* rv_… */, change, revision /* the change revision it reviewed */, head, reviewer: Reviewer,
             verdict: "approve" | "request_changes" | "comment", body, source: "roll" | "github", url: string | null,
+            outside: bool /* its author can't push to the repo (GitHub's author_association, or a roll caller without write access); MCP's lockdown withholds it */,
             stale: bool /* reviewed an older revision */, dismissed: bool, dismissed_by: string | null,
             dismiss_reason: string | null, created_at, updated_at,
             ai: null | ReviewAi /* roll's reviewer only, see "roll's reviewer" */,
@@ -256,7 +257,7 @@ Thread   = {id /* th_… */, change, review: string | null, path, side: "new" | 
             outdated: bool /* its lines changed in a later revision */, resolved: bool, resolved_by: string | null,
             resolved_at: number | null, source: "roll" | "github", created_at, updated_at, comments: Comment[]}
 Comment  = {id /* cm_… */, thread, author: Reviewer, body, suggestion: string | null /* a ```suggestion block's lines */,
-            source, created_at, updated_at,
+            source, outside: bool /* as on Review */, created_at, updated_at,
             finding: null | {severity, title, confidence: number | null} /* roll's finding comments, see "roll's reviewer" */}
 ReviewSummary = {state: "approved" | "changes_requested" | "pending" | "auto_approved", approvals /* that count */, required}
 ReviewStatus  = {state, required, approvals: [{reviewer, review, stale, counted: bool, reason: string | null}],
