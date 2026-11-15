@@ -597,7 +597,8 @@ pub enum AppsCmd {
         #[arg(long, conflicts_with = "reveal")]
         deploy: bool,
     },
-    /// Link a roll resource (`postgres <project>`, `redis <db>`): its connection variables go in.
+    /// Link a roll resource (`postgres <project>`, `redis <db>`, `search <cluster>`): its
+    /// connection variables go in (a search cluster's are an API key of the link's own).
     Link {
         kind: String,
         r#ref: String,
@@ -1534,10 +1535,10 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
     };
     let dir = std::fs::canonicalize(&dir).with_context(|| format!("{}", dir.display()))?;
     // A roll.toml the build would refuse is refused here, before anything is made or uploaded.
-    if !u.all {
-        if let Some(app) = apps_build::app::read(&dir).map_err(|e| anyhow::anyhow!("{e}"))? {
-            app.check_all().map_err(|e| anyhow::anyhow!("{e}"))?;
-        }
+    if !u.all
+        && let Some(app) = apps_build::app::read(&dir).map_err(|e| anyhow::anyhow!("{e}"))?
+    {
+        app.check_all().map_err(|e| anyhow::anyhow!("{e}"))?;
     }
     if u.all {
         return up_all(api, json_out, &dir, &u).await;

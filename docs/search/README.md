@@ -415,8 +415,10 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `ELASTICSEARCH_URL` + `ELASTICSEARCH_API_KEY`; on an OpenSearch-flavor cluster an internal
    user of OpenSearch Security with a data-only role of its own, `OPENSEARCH_URL` with
    `<user>@<cluster>:<password>@`; never the cluster's password or security);
-   rolld's `RollResources` glue goes on apps' `Resources::link` / `unlink` with whichever of #29
-   and #26 reaches main second. Secrets' link provider (#20) asks for `access: "data"` keys; on
+   rolld's `RollResources` glue is done (feature/search-app-links, after #29): apps'
+   `LinkKind::Search` mints on `Resources::link` and revokes on `unlink`, and on a fleet
+   `Control::call` sends the control plane's own requests to the cluster's owner
+   (`cluster::to_owner`), so a link made on any node gets its key there. Secrets' link provider (#20) asks for `access: "data"` keys; on
    OpenSearch-flavor clusters the keys route mints an internal user (`{username, password}`
    instead of `api_key`; secrets' side is #51, checked live once both are in one rolld). A
    flavor switch doesn't carry keys across (an API key isn't an OpenSearch user): links made

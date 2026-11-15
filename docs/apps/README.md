@@ -681,9 +681,11 @@ every deployment is immutable with instant rollback.
   - Not on the fleet yet (Cloud Map, in `## Next`). A second caller arriving while the app
     starts from stopped is refused (the waker holds one); the app's port must listen on
     loopback too (`0.0.0.0` or `::`, as every generated start command does).
-- **roll databases**: a service links to the project's Postgres, Redis, buckets, streams,
-  queues and NoSQL. A link injects the resource's connection variables (`DATABASE_URL`,
-  `REDIS_URL`, `S3_*`, `KAFKA_*`, `AMQP_URL`, `CASSANDRA_*`), named with the resource's prefix
+- **roll databases**: a service links to the project's Postgres, Redis, search clusters,
+  buckets, streams, queues and NoSQL. A link injects the resource's connection variables
+  (`DATABASE_URL`, `REDIS_URL`, `ELASTICSEARCH_URL` and `ELASTICSEARCH_API_KEY` or an
+  OpenSearch-flavor cluster's `OPENSEARCH_URL`, `S3_*`, `KAFKA_*`, `AMQP_URL`, `CASSANDRA_*`),
+  named with the resource's prefix
   when a service links two of a kind (`ORDERS_DATABASE_URL`). Locally the URLs are rewritten for
   the container (`host.docker.internal`); on the fleet they're the public edge names over TLS,
   as previews use, so there's no path from a task into the fleet's network.
@@ -701,7 +703,11 @@ every deployment is immutable with instant rollback.
   setting the link's prefix again keeps the same credential. Unlinking, or deleting the service,
   revokes it (`Resources::unlink`; a revoke that fails is logged, and the link is gone either
   way). A link that can't be stored revokes what it just made. Kinds that don't (Postgres and
-  Redis today) read the resource's variables fresh at each deploy.
+  Redis today) read the resource's variables fresh at each deploy. A `search` link is one: rolld's
+  glue is `search_control::Control::mint_link` (an API key with a data-only role, or on an
+  OpenSearch-flavor cluster an internal user with a data-only role of its own; kept `key:<id>` or
+  `osuser:<name>`) and `revoke_link`. On a fleet they run on the cluster's owner, wherever the
+  service's owner is. roll.toml can't declare one, so `roll apps export` names it in its notes.
 
 ### Secrets and environments
 
@@ -1839,7 +1845,7 @@ a Dockerfile, each answering through roll (55 s for the three from a warm cache,
   be 0600). Builds' secrets a stopped node left in Secrets Manager are swept at start (two days
   old) and tasks' environment files every ten minutes (`Runtime::sweep`); the bucket's `builds/`
   zips, and every object's noncurrent versions, wait for the stack's lifecycle rule.
-- Links: Postgres and Redis are wired; buckets, streams, queues and NoSQL answer "not wired yet".
+- Links: Postgres, Redis and search are wired; buckets, streams, queues and NoSQL answer "not wired yet".
 - roll secrets isn't on main yet: `NoSecrets` stands in, and service variables are the env store.
 - Private networking is a Docker network per project and environment; it isn't reachable from
   the host's own roll databases on hosts whose firewall drops container-to-host traffic.
@@ -1941,10 +1947,11 @@ feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pair
     already scaling on a stream).
 - **roll-search** (#22 on main; #29 follows): its conflicts with apps are additions side by side
   (`Product`/`Kind` arrays grow). A link to a search cluster gets its own API key through
-  apps' `Resources::link`/`unlink` (#26): whichever of #29 and #26 reaches main second
-  adds `LinkKind::Search` (`ALL`, `as_str`, `parse`) and, in rolld's `RollResources`, `link` as
+  apps' `Resources::link`/`unlink` (#26). Done on feature/search-app-links (after #29):
+  `LinkKind::Search` (`ALL`, `as_str`, `parse`) and, in rolld's `RollResources`, `link` as
   `search_control::Control::mint_link(ref, service)` into `Minted { vars, kept }` and `unlink`
-  as `revoke_link(ref, kept)`. The key is data-only (no security privileges), its variables
+  as `revoke_link(ref, kept)`; roll-access's `link_target` maps `search` to search's `cluster`
+  (a link needs `reveal` on it). The key is data-only (no security privileges), its variables
   `ELASTICSEARCH_URL` and `ELASTICSEARCH_API_KEY` (kept `key:<id>`); an OpenSearch cluster's is an
   internal user with a data-only role, `OPENSEARCH_URL` (kept `osuser:<name>`; revoking removes
   the user and its role). The glue injects whatever variables `mint_link` returns.

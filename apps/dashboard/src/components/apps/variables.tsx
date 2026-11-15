@@ -17,9 +17,8 @@ const SOURCE_TONE: Record<VariableSource, string> = {
   reference: "border-line-2 text-muted",
 };
 
-/** Workspace kinds a service can link to, by their link kind. */
-/** What a service can link to today: rolld wires Postgres and Redis (buckets, streams and NoSQL come as roll secrets links, docs/apps/README.md "Next"). */
-export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", service: "service" };
+/** What a service can link to today, by workspace kind: rolld wires Postgres, Redis and search (buckets, streams and NoSQL come as roll secrets links, docs/apps/README.md "Next"). */
+export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", search: "search", service: "service" };
 
 type Edit = { name: string; value: string; seal?: boolean };
 
@@ -414,7 +413,7 @@ function Links({ service, project, runner, onChange }: { service: string; projec
     <section className={panel}>
       <div className="flex min-h-14 items-center justify-between gap-3 border-b border-line px-5 py-3">
         <h2 className="text-[15px] font-medium">Links</h2>
-        <span className="text-[12px] text-subtle">A link adds a database's connection variables, or another service's URLs.</span>
+        <span className="text-[12px] text-subtle">A link adds a resource's connection variables, or another service's URLs.</span>
       </div>
       <ul className="divide-y divide-line">
         {links?.length === 0 && <li className="px-5 py-4 text-[13px] text-muted">Nothing linked.</li>}

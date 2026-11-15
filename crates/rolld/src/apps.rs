@@ -4,11 +4,12 @@
 //! Fargate tasks and CodeBuild builds with `ROLL_APPS_RUNTIME=fargate`.
 //!
 //! What roll apps needs from the other products is adapted here: trees and the land log from
-//! roll code, connection variables from roll postgres and roll redis, custom domains'
+//! roll code, connection variables from roll postgres and roll redis, a link's own API key from
+//! roll search, custom domains'
 //! certificates from the edge (`ROLL_APPS_TLS`: Cloudflare for SaaS, or the active domains
 //! handed to the edge's HTTP-01 orders and their state handed back).
 
-use apps_control::integrations::{DomainTls, Doh, EdgeTls, Landing, NoSecrets, NoTls, Resources, Revision, Sources};
+use apps_control::integrations::{DomainTls, Doh, EdgeTls, Landing, Minted, NoSecrets, NoTls, Resources, Revision, Sources};
 use apps_control::model::{LinkKind, TlsStatus};
 use apps_control::store::{Sealer, Store};
 use apps_control::{Apps, AppsConfig, Deps};
@@ -320,6 +321,9 @@ impl Sources for CodeSources {
 struct RollResources {
     postgres: Option<Arc<pg_control::Control>>,
     redis: Option<Arc<redis_control::Control>>,
+    /// A search link's credential is made on the cluster's owner (`Control::mint_link` sends its
+    /// requests there on a fleet).
+    search: Option<Arc<search_control::Control>>,
     /// rolld's own API (its address and the operator's token): a stream's routes answer there
     /// on any node, forwarded to the stream's owner on a fleet.
     api: (String, Option<String>, reqwest::Client),
@@ -372,8 +376,29 @@ impl Resources for RollResources {
                 })
                 .await
             }
+            LinkKind::Search => anyhow::bail!("a search link's variables are minted with the link"),
             other => anyhow::bail!("links to {} aren't wired on this node yet", other.as_str()),
         }
+    }
+
+    /// A search cluster's link gets a data-only credential of its own: an API key
+    /// (`ELASTICSEARCH_URL`, `ELASTICSEARCH_API_KEY`), or an internal user on an OpenSearch-flavor
+    /// cluster (`OPENSEARCH_URL`), never the cluster's password.
+    async fn link(&self, kind: LinkKind, r#ref: &str, service: &str) -> anyhow::Result<Option<Minted>> {
+        if kind != LinkKind::Search {
+            return Ok(None);
+        }
+        let c = self.search.as_ref().ok_or_else(|| anyhow::anyhow!("roll search isn't on this node"))?;
+        let m = c.mint_link(r#ref, service).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(Some(Minted { vars: m.vars, kept: m.kept }))
+    }
+
+    async fn unlink(&self, kind: LinkKind, r#ref: &str, kept: &str) -> anyhow::Result<()> {
+        if kind != LinkKind::Search {
+            return Ok(());
+        }
+        let c = self.search.as_ref().ok_or_else(|| anyhow::anyhow!("roll search isn't on this node"))?;
+        c.revoke_link(r#ref, kept).await.map_err(|e| anyhow::anyhow!("{e}"))
     }
 }
 
@@ -412,6 +437,7 @@ pub async fn start(
     code: Option<Arc<code_control::Code>>,
     postgres: Option<Arc<pg_control::Control>>,
     redis: Option<Arc<redis_control::Control>>,
+    search: Option<Arc<search_control::Control>>,
 ) -> anyhow::Result<AppsNode> {
     let a = &args.apps;
     let single = cluster.backend_name() == "memory";
@@ -498,6 +524,7 @@ pub async fn start(
         resources: Arc::new(RollResources {
             postgres,
             redis,
+            search,
             api: {
                 let ip = if args.api.ip().is_unspecified() { std::net::IpAddr::from([127, 0, 0, 1]) } else { args.api.ip() };
                 let token = std::env::var("ROLL_ADMIN_TOKEN").ok().filter(|t| !t.trim().is_empty());

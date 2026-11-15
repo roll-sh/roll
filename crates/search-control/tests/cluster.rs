@@ -99,6 +99,15 @@ async fn a_cluster_runs_on_its_owner_and_moves_on_a_drain() {
     // A wrong password is refused on the owner, wherever it came in.
     let (s, _) = call(&http, reqwest::Method::GET, format!("{}/items/_count", other.rest), Some(("shop", "nope")), None).await;
     assert_eq!(s, 401);
+    // An app's link made through the other node (apps' glue runs wherever the service does): its
+    // key is made on the owner, works, and stops working once revoked.
+    let cred = other.control.mint_link("shop", "svc_1").await.unwrap();
+    assert!(other.control.node.loaded().is_empty(), "made on the owner");
+    let api_key = cred.vars.iter().find(|(k, _)| k == "ELASTICSEARCH_API_KEY").map(|(_, v)| format!("ApiKey {v}")).unwrap();
+    let count = || http.get(format!("{}/items/_count", other.rest)).header("Authorization", &api_key).send();
+    assert_eq!(count().await.unwrap().status(), 200);
+    other.control.revoke_link("shop", &cred.kept).await.unwrap();
+    assert_eq!(count().await.unwrap().status(), 401, "revoked");
 
     // The owner drains: the other node takes the cluster with every acknowledged document.
     owner.cluster.drain(Duration::from_secs(20)).await;
