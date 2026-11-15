@@ -1896,6 +1896,7 @@ impl Store {
         if png.len() > CROP_MAX || !png.starts_with(b"\x89PNG") {
             return Ok(());
         }
+        use base64::Engine as _;
         let now = self.now_ms()?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(png);
         self.db.write(|c| {
@@ -1917,6 +1918,7 @@ impl Store {
     }
 
     pub fn note_crop(&self, id: &str, note: &str) -> Result<Option<Vec<u8>>> {
+        use base64::Engine as _;
         let row: Option<String> = self.db.read(|c| c.query_row("SELECT png FROM note_crops WHERE preview_id = ? AND note_id = ?", [id, note], |r| r.get(0)).optional())?;
         Ok(row.and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok()))
     }
