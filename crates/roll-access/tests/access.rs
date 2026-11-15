@@ -981,6 +981,10 @@ async fn changes_are_in_the_audit_log() {
     let hers = hers["grant"]["id"].as_str().unwrap().to_string();
     let log = d.audit_until(&format!("/v1/access/audit?grant={hers}"), |l| !story(l).is_empty()).await;
     assert_eq!(story(&log), [("create".to_string(), "usr_alice".to_string())], "{log}");
+    // A change to a token isn't something it did: its last day's activity stays empty.
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/tokens", None).await;
+    let row = list.as_array().unwrap().iter().find(|g| g["id"] == hers.as_str()).unwrap().clone();
+    assert_eq!(row["activity"], json!({ "allowed": 0, "denied": 0, "asked": 0 }), "{row}");
 
     // A grant that manages tokens: its request is the gate's row, not a second one.
     let (admin, admin_id) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "admin": "allow" } }]), json!({})).await;

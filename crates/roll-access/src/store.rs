@@ -1519,7 +1519,9 @@ impl Store {
         let since = code_sql::now_ms() - 24 * 3600 * 1000;
         let rows = self.db.read(|c| {
             c.query(
-                "SELECT grant_id, decision, COUNT(*) FROM audit WHERE at >= ? AND grant_id IS NOT NULL GROUP BY grant_id, decision",
+                // The token's own requests: a change to it (`access`) or roll's act on it (`leak`,
+                // `workload`) is about it, not something it did.
+                "SELECT grant_id, decision, COUNT(*) FROM audit WHERE at >= ? AND grant_id IS NOT NULL AND source IN ('api', 'mcp') GROUP BY grant_id, decision",
                 [since],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
             )
@@ -1530,7 +1532,8 @@ impl Store {
             match d.as_str() {
                 "allow" => e.0 += n,
                 "deny" => e.1 += n,
-                _ => e.2 += n,
+                "ask" => e.2 += n,
+                _ => {}
             }
         }
         Ok(out)
