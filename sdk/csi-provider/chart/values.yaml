@@ -3,6 +3,11 @@ image:
   tag: ""   # the chart's appVersion when empty
   pullPolicy: IfNotPresent
 
+# The roll API URLs SecretProviderClasses may name (empty: any https:// one), and whether a plain
+# http:// one is allowed (a cluster-local rolld only: pods' tokens otherwise go only over TLS).
+apis: []
+allowHttp: false
+
 # The Secrets Store CSI Driver's provider directory on each node (its chart's
 # linux.providersDir): the provider's socket goes there as roll.sock.
 providersDir: /var/run/secrets-store-csi-providers

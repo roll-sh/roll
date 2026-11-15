@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/roll-sh/roll/sdk/go/secrets"
 )
@@ -25,6 +26,11 @@ import (
 type provider struct {
 	http    *http.Client
 	version string
+	// apis are the API URLs a SecretProviderClass may name (the provider's -api); empty: any.
+	apis []string
+	// allowHTTP lets them be plain http:// (-allow-http, for a cluster-local rolld only): a pod's
+	// token otherwise goes only over TLS.
+	allowHTTP bool
 }
 
 // params are a SecretProviderClass's `parameters` (docs/secrets.md, "Kubernetes").
@@ -45,6 +51,20 @@ var (
 	keyName  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,255}$`)
 	fileName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,254}$|^\.[A-Za-z0-9_][A-Za-z0-9._-]{0,253}$`)
 )
+
+func (s *provider) parse(attrs map[string]string) (params, error) {
+	p, err := parse(attrs)
+	if err != nil {
+		return p, err
+	}
+	if !s.allowHTTP && !strings.HasPrefix(p.api, "https://") {
+		return p, errors.New("parameters.api is https:// (a pod's token goes only over TLS; the provider's -allow-http allows a cluster-local http:// rolld)")
+	}
+	if len(s.apis) > 0 && !contains(s.apis, p.api) {
+		return p, fmt.Errorf("parameters.api %s isn't one this provider serves (its -api)", p.api)
+	}
+	return p, nil
+}
 
 func parse(attrs map[string]string) (params, error) {
 	p := params{
@@ -139,10 +159,13 @@ func (s *provider) Mount(ctx context.Context, req *mountRequest) (*mountResponse
 		}
 		mode = int32(m)
 	}
-	p, err := parse(attrs)
+	p, err := s.parse(attrs)
 	if err != nil {
 		return nil, err
 	}
+	// The login and the read together, bounded (the driver's own deadline may be longer).
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	c, err := s.client(ctx, p, attrs, secretsRef)
 	if err != nil {
 		return nil, err

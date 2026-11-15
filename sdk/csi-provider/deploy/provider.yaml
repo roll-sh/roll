@@ -21,6 +21,7 @@ spec:
       containers:
         - name: provider
           image: ghcr.io/roll-sh/roll-secrets-csi-provider:0.1.0
+          # -api=https://api.roll.example pins the APIs SecretProviderClasses may name.
           args: ["-endpoint=/provider/roll.sock"]
           securityContext: { runAsUser: 0, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
           resources:

@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -24,6 +25,8 @@ var version = "dev"
 
 func main() {
 	endpoint := flag.String("endpoint", "/provider/roll.sock", "the unix socket the driver connects to (in its provider directory)")
+	apis := flag.String("api", "", "the roll API URLs SecretProviderClasses may name, comma-separated (empty: any https:// one)")
+	allowHTTP := flag.Bool("allow-http", false, "let SecretProviderClasses name a plain http:// API (a cluster-local rolld only)")
 	flag.Parse()
 	if err := os.MkdirAll(filepath.Dir(*endpoint), 0o755); err != nil {
 		log.Fatalf("roll-csi-provider: %v", err)
@@ -36,7 +39,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("roll-csi-provider: %v", err)
 	}
-	srv := serve(l, &provider{http: &http.Client{Timeout: 30 * time.Second}, version: version})
+	p := &provider{http: &http.Client{Timeout: 30 * time.Second}, version: version, allowHTTP: *allowHTTP}
+	for _, a := range strings.Split(*apis, ",") {
+		if a = strings.TrimRight(strings.TrimSpace(a), "/"); a != "" {
+			p.apis = append(p.apis, a)
+		}
+	}
+	srv := serve(l, p)
 	log.Printf("roll-csi-provider %s listening on %s", version, *endpoint)
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)

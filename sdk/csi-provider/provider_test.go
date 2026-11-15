@@ -71,7 +71,7 @@ func driver(t *testing.T) (invoke, func(ctx context.Context, req *mountRequest) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := serve(l, &provider{http: http.DefaultClient, version: "test"})
+	srv := serve(l, &provider{http: http.DefaultClient, version: "test", allowHTTP: true})
 	t.Cleanup(func() { srv.Close() })
 	protocols := new(http.Protocols)
 	protocols.SetUnencryptedHTTP2(true)
@@ -207,5 +207,19 @@ func TestAMountWithoutAWholeAnswerFails(t *testing.T) {
 		if err != nil && strings.Contains(err.Error(), "s3cret") {
 			t.Errorf("%s: a value in an error: %v", c.name, err)
 		}
+	}
+}
+
+// A pod's token goes only over TLS, and only to the APIs the provider's operator allows.
+func TestTheAPIIsHTTPSAndOneTheProviderServes(t *testing.T) {
+	p := &provider{http: http.DefaultClient, apis: []string{"https://api.roll.example"}}
+	if _, err := p.parse(map[string]string{"api": "http://api.roll.example", "environment": "production"}); err == nil || !strings.Contains(err.Error(), "https://") {
+		t.Fatalf("plain http: %v", err)
+	}
+	if _, err := p.parse(map[string]string{"api": "https://elsewhere.example", "environment": "production"}); err == nil || !strings.Contains(err.Error(), "isn't one this provider serves") {
+		t.Fatalf("another API: %v", err)
+	}
+	if _, err := p.parse(map[string]string{"api": "https://api.roll.example/", "environment": "production"}); err != nil {
+		t.Fatalf("its own API: %v", err)
 	}
 }

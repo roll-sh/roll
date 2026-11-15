@@ -188,7 +188,9 @@ Three ways, as the best products offer:
   ```
   Install the driver with `tokenRequests[0].audience=<the API's URL>`, then the provider
   (`sdk/csi-provider/chart`, or `deploy/provider.yaml`): a DaemonSet that writes `roll.sock` into
-  the driver's provider directory. It needs no Kubernetes permissions.
+  the driver's provider directory. It needs no Kubernetes permissions. A pod's token goes only to
+  an `https://` API (`-allow-http` for a cluster-local rolld), and `-api` (the chart's `apis`) pins
+  which APIs SecretProviderClasses may name; a mount, login and read together, takes 30 s at most.
 - **Pull (`sdk/kubernetes-operator`)**: a `RollSecret` names an environment and a folder (and a
   project or an identity, when not the operator's own), and the operator keeps a Secret beside it
   in step. It logs in with its own service account token through a workload identity, so roll
