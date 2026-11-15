@@ -187,8 +187,10 @@ impl Spawned {
     /// other than our own SIGKILL the wait returns also counts as a crash.
     pub async fn stop(mut self) -> Option<(std::process::ExitStatus, PathBuf)> {
         let mut exited = self.child.try_wait().ok().flatten();
+        // A cluster that no longer accepts connections is going down: give its exit time to
+        // arrive (a loaded host takes seconds) before killing it would hide that it crashed.
         if exited.is_none() && !self.accepts_connections().await {
-            exited = tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await.ok().and_then(Result::ok);
+            exited = tokio::time::timeout(Duration::from_secs(10), self.child.wait()).await.ok().and_then(Result::ok);
         }
         self.kill_group();
         let waited = self.child.wait().await.ok();
