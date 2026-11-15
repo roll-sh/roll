@@ -676,7 +676,8 @@ fn secrets_import_sources(b: &Value) -> Sources {
 /// a Slack or Discord one answers none, so `write`.
 fn apps_notification_action(b: &Value) -> Action {
     match b["kind"].as_str() {
-        Some("slack" | "discord") => Action::Write,
+        // An email target is the project owner's own address: no URL, no secret in the answer.
+        Some("slack" | "discord" | "email") => Action::Write,
         _ => Action::Reveal,
     }
 }
