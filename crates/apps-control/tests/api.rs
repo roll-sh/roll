@@ -732,10 +732,13 @@ async fn variables_are_sealed_masked_and_revealed_only_on_their_route() {
     // Never in the database in the clear.
     let raw = std::fs::read(w.apps.cfg.home.join("apps.db")).unwrap();
     assert!(!raw.windows(14).any(|x| x == b"sk-very-secret"));
-    // Given at creation, they're in production before its first deploy.
-    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "early", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80}, "variables": {"DATABASE_URL": "postgres://x"} }))).await;
+    // Given at creation, they're in production before its first deploy (a template's made
+    // secret sealed from the start).
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "early", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80}, "variables": {"DATABASE_URL": "postgres://x", "APP_SECRET": "made-here"}, "sealed": ["APP_SECRET"] }))).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let sid = svc["id"].as_str().unwrap();
+    let (_, values) = call(&w.api, "GET", &format!("/v1/apps/services/{sid}/environments/production/variables/values"), None).await;
+    assert!(values.get("APP_SECRET").is_none() && values["DATABASE_URL"] == "postgres://x", "{values}");
     settled(&w, sid, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{sid}/environments/production"), None).await;
     assert_eq!(env["needs_deploy"], false, "the first deploy had them: {env}");
@@ -3750,4 +3753,26 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let d2 = settled(&w, &id, "production", &started[0]).await;
     assert_eq!((d2["status"].as_str(), d2["revision"].as_str(), d2["trigger"].as_str()), (Some("active"), Some(second.as_str()), Some("push")), "{d2}");
     assert!(w.apps.watch_git().await.is_empty(), "deployed: nothing more to do");
+}
+
+/// The dashboard's starter templates (apps/dashboard/src/lib/templates) read as the import reads
+/// them, on public images only, with run settings a service takes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_starter_template_imports() {
+    let w = world().await;
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/dashboard/src/lib/templates");
+    let mut n = 0;
+    for f in std::fs::read_dir(&dir).unwrap() {
+        let path = f.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let (st, imp) = call(&w.api, "POST", "/v1/apps/import", Some(json!({ "roll_toml": text }))).await;
+        assert_eq!(st, StatusCode::OK, "{}: {imp}", path.display());
+        for (name, app) in imp["apps"].as_object().unwrap() {
+            assert_eq!(app["source"]["kind"], "image", "{name}: a template runs a public image");
+            // Merged as creation merges it: every setting checked.
+            apps_control::model::Run::default().merged(Some(&app["run"])).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+        n += 1;
+    }
+    assert!(n >= 5, "{n} templates in {}", dir.display());
 }

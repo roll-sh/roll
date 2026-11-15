@@ -409,7 +409,7 @@ impl Apps {
     pub async fn create_service(self: &Arc<Self>, body: Value, actor: Option<String>) -> Result<Service> {
         let o = body.as_object().ok_or_else(|| Error::BadRequest("the body is an object".into()))?;
         for k in o.keys() {
-            if !["project", "name", "source", "build", "run", "variables", "registry", "links", "branch", "x", "y"].contains(&k.as_str()) {
+            if !["project", "name", "source", "build", "run", "variables", "sealed", "registry", "links", "branch", "x", "y"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -435,6 +435,12 @@ impl Apps {
                 Some(Value::Object(m.clone()))
             }
             Some(_) => return Err(Error::BadRequest("variables is an object of names to values".into())),
+        };
+        // Which of them are sealed from the start (a template's generated secrets).
+        let sealed: Vec<Value> = match o.get("sealed") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(a)) if a.iter().all(|n| n.as_str().is_some_and(|n| variables.as_ref().is_some_and(|v| v.get(n).is_some()))) => a.clone(),
+            Some(_) => return Err(Error::BadRequest("sealed is an array of names in variables".into())),
         };
         // The project's databases (and other resources) to link before the first deploy:
         // `[{kind, ref, prefix?}]`, `PUT …/links/{kind}/{ref}`'s.
@@ -508,7 +514,7 @@ impl Apps {
         }
         self.ensure_environment(&row, PRODUCTION, Some(branch.as_deref()), Some(false), &pname).await?;
         if let Some(set) = variables {
-            self.change_variables(&row.id, PRODUCTION, json!({ "set": set })).await?;
+            self.change_variables(&row.id, PRODUCTION, json!({ "set": set, "seal": sealed })).await?;
         }
         for (kind, r, body) in links {
             // A link that doesn't check out makes no service: nothing to clean up by hand.

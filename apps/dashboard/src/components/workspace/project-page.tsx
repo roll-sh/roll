@@ -21,6 +21,7 @@ import { spendOf, useWorkspace, workspace, type WorkspaceState } from "@/lib/wor
 import { useProjectServices } from "../apps/live";
 import { appsApi } from "@/lib/apps-api";
 import { FolderDeploy } from "../apps/folder-deploy";
+import { TemplateList } from "../apps/deploy-repo";
 import { NewServiceSheet } from "../apps/new-service";
 import { AppShell } from "../app-shell";
 import { Board, type Card } from "./board";
@@ -240,6 +241,7 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
                 />
               ) : null
             }
+            templates={ws.kinds.has("service") ? <TemplateList project={project.id} className="grid grid-cols-2 gap-2 sm:grid-cols-3" /> : null}
           />
         )}
         <ProjectAgents open={agentsOpen} repos={repos} onClose={() => setAgentsOpen(false)} />
@@ -326,7 +328,7 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
   );
 }
 
-function Empty({ name, kinds, onPick, drop }: { name: string; kinds: ResourceKind[]; onPick: (k: ResourceKind) => void; drop?: ReactNode }) {
+function Empty({ name, kinds, onPick, drop, templates }: { name: string; kinds: ResourceKind[]; onPick: (k: ResourceKind) => void; drop?: ReactNode; templates?: ReactNode }) {
   return (
     <div className="pointer-events-none absolute inset-0 grid place-items-center p-4">
       <div className="rise pointer-events-auto w-full max-w-[460px] text-center">
@@ -346,6 +348,12 @@ function Empty({ name, kinds, onPick, drop }: { name: string; kinds: ResourceKin
           ))}
         </div>
         {drop && <div className="mt-3 text-left">{drop}</div>}
+        {templates && (
+          <div className="mt-5 text-left">
+            <div className="mb-2 text-[11.5px] font-medium text-subtle">Or start from a template</div>
+            {templates}
+          </div>
+        )}
       </div>
     </div>
   );

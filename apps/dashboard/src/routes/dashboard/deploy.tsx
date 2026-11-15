@@ -5,7 +5,7 @@ import { pageHead } from "@/lib/head";
 export const Route = createFileRoute("/dashboard/deploy")({
   head: () => pageHead({ title: "Deploy to roll" }),
   component: function DeployRoute() {
-    const { repo } = Route.useSearch() as { repo?: string };
-    return <DeployRepo repo={repo} />;
+    const { repo, template, project } = Route.useSearch() as { repo?: string; template?: string; project?: string };
+    return <DeployRepo repo={repo} template={template} project={project} />;
   },
 });

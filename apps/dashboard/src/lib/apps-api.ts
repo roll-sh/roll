@@ -170,6 +170,8 @@ export interface NewService {
   run?: Partial<Run>;
   /** Production's variables, set before its first deploy. */
   variables?: Record<string, string>;
+  /** Which of those are sealed from the start: never shown again. */
+  sealed?: string[];
   /** An image source's private registry login, before its first pull. */
   registry?: { username: string; password: string; server?: string };
   /** Resources to link before the first deploy (their variables are in it). */

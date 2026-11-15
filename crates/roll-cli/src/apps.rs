@@ -1848,7 +1848,18 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                     body["run"] = Value::Object(run);
                 }
                 if !a.variables.is_empty() {
-                    body["variables"] = Value::Object(fill_vars(n, &a.variables)?);
+                    let vars = fill_vars(n, &a.variables)?;
+                    // Secrets made for it, and names that read as secrets, sealed from the start
+                    // (as the dashboard's import seals them); a reference reads as what it reads.
+                    let sealed: Vec<&String> = vars
+                        .iter()
+                        .filter(|(k, v)| matches!(a.variables.get(*k), Some(apps_build::project::VarSpec::Generate(_))) || (looks_secret(k) && !v.as_str().unwrap_or("").contains("${{")))
+                        .map(|(k, _)| k)
+                        .collect();
+                    if !sealed.is_empty() {
+                        body["sealed"] = json!(sealed);
+                    }
+                    body["variables"] = Value::Object(vars);
                 }
                 let svc = api.post("/v1/apps/services", body).await?;
                 eprintln!("made service {n}");

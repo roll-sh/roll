@@ -1,6 +1,8 @@
 import { FileUp } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { appsApi, type Link, type ProjectImport, type Service } from "@/lib/apps-api";
+import { appsApi, type Link, type ProjectImport, type Service, type Source } from "@/lib/apps-api";
+import { looksSecret } from "@/lib/secret-names";
+import type { Template } from "@/lib/templates";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { redisApi } from "@/lib/redis-api";
 import { api } from "@/lib/roll-api";
@@ -134,8 +136,23 @@ export function variablesFor(app: ProjectImport["apps"][string], answers: Record
   return out;
 }
 
-/** `repo`: its own roll.toml (a "deploy to roll" link), read at once, with no file to paste. */
-export function ImportPane({ project, spot, onDone, repo }: { project: WorkspaceProject; spot: { x: number; y: number }; onDone: (made: Service[]) => void; repo?: string }) {
+/**
+ * Which of a new service's variables are sealed from the start: the secrets made for it, and any
+ * whose name reads as a secret (as New variable pre-checks it). A reference stays as it is: it
+ * reads as sealed when what it reads is.
+ */
+export function sealedFor(app: ProjectImport["apps"][string], variables: Record<string, string>): string[] {
+  const made = new Set(app.generate ?? []);
+  return Object.entries(variables)
+    .filter(([k, v]) => made.has(k) || (looksSecret(k) && !v.includes("${{")))
+    .map(([k]) => k);
+}
+
+/**
+ * `repo`: its own roll.toml (a "deploy to roll" link), or `template`: a starter's; either read at
+ * once, with no file to paste.
+ */
+export function ImportPane({ project, spot, onDone, repo, template }: { project: WorkspaceProject; spot: { x: number; y: number }; onDone: (made: Service[]) => void; repo?: string; template?: Template }) {
   const [answers, setAnswers] = useState<Record<string, Record<string, string>>>({});
   const [text, setText] = useState("");
   const [filename, setFilename] = useState("");
@@ -152,7 +169,7 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
     setBusy("reading");
     setError(null);
     try {
-      const imp = await appsApi.importProject(repo ? { repo } : fileOf(text, filename));
+      const imp = await appsApi.importProject(repo ? { repo } : template ? { roll_toml: template.rollToml } : fileOf(text, filename));
       const services = new Map<string, { service: Service; links: Link[] }>();
       for (const s of await appsApi.services(project.id)) services.set(s.name, { service: s, links: await appsApi.links(s.id) });
       // Its databases are the ones on its canvas (another project's `db` is never this one's),
@@ -206,9 +223,18 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
           setStep(`Making ${name}…`);
           const at = taken.length === project.resources.length + 1 ? spot : freeSpot(taken);
           taken.push(at);
-          const source = a.source.kind === "repo" ? { kind: "repo" as const, repo: a.source.repo, ...(a.source.root ? { root: a.source.root } : {}) } : a.source.kind === "image" ? { kind: "image" as const, image: a.source.image } : { kind: "upload" as const };
+          const root = "root" in a.source && a.source.root ? { root: a.source.root } : {};
+          const source: Source =
+            a.source.kind === "repo"
+              ? { kind: "repo", repo: a.source.repo, ...root }
+              : a.source.kind === "git"
+                ? { kind: "git", url: a.source.url, ...root }
+                : a.source.kind === "image"
+                  ? { kind: "image", image: a.source.image }
+                  : { kind: "upload" };
           const variables = variablesFor(a, answers[name] ?? {});
-          const s = await appsApi.create({ project: project.id, name, source, ...(Object.keys(a.run).length ? { run: a.run } : {}), ...(Object.keys(variables).length ? { variables } : {}), ...(links.length ? { links } : {}), ...(a.branch ? { branch: a.branch } : {}), ...at });
+          const sealed = sealedFor(a, variables);
+          const s = await appsApi.create({ project: project.id, name, source, ...(Object.keys(a.run).length ? { run: a.run } : {}), ...(Object.keys(variables).length ? { variables } : {}), ...(sealed.length ? { sealed } : {}), ...(links.length ? { links } : {}), ...(a.branch ? { branch: a.branch } : {}), ...at });
           workspace.added(project.id, serviceView(s), at.x, at.y);
           made.push(s);
           continue;
@@ -242,11 +268,12 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
     }
   };
 
-  // A repo's file is read at once: nothing to paste.
+  // A repo's or a template's file is read at once: nothing to paste.
+  const given = repo ?? template?.id;
   useEffect(() => {
-    if (repo) void look();
-    // Once per repo.
-  }, [repo]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (given) void look();
+    // Once per repo or template.
+  }, [given]); // eslint-disable-line react-hooks/exhaustive-deps
   // Questions for the services it makes (one already here keeps its variables).
   const asks = read ? Object.entries(read.imp.apps).filter(([n]) => !read.have.services.has(n)).flatMap(([n, a]) => (a.ask ?? []).map((q) => ({ app: n, ...q }))) : [];
   const madeSecrets = read ? Object.entries(read.imp.apps).filter(([n]) => !read.have.services.has(n)).flatMap(([n, a]) => (a.generate ?? []).map((g) => `${n}: ${g}`)) : [];
@@ -260,6 +287,11 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
         <p className="text-[12px] text-muted">
           <span className="font-mono text-fg">{repo}</span>'s roll.toml, read by rolld; nothing is made until you apply.
         </p>
+      ) : template ? (
+        <details className="text-[12px] text-muted">
+          <summary className="cursor-pointer select-none">The {template.name} template's roll.toml: nothing is made until you apply</summary>
+          <pre className="mt-2 overflow-x-auto rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-[11.5px] leading-relaxed text-fg">{template.rollToml}</pre>
+        </details>
       ) : (
       <>
       <Label>
@@ -306,7 +338,7 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
       </div>
       </>
       )}
-      {repo && busy === "reading" && <p className="mt-2 text-[12px] text-subtle"><span className="shimmer">Reading it…</span></p>}
+      {given && busy === "reading" && <p className="mt-2 text-[12px] text-subtle"><span className="shimmer">Reading it…</span></p>}
       {error && <p className="mt-2 text-[11.5px] text-danger">{error}</p>}
       {read && (
         <div className="rise mt-3">
@@ -343,6 +375,7 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
                       onChange={(e) => setAnswers((all) => ({ ...all, [q.app]: { ...all[q.app], [q.name]: e.target.value } }))}
                       spellCheck={false}
                       autoComplete="off"
+                      type={looksSecret(q.name) ? "password" : "text"}
                       aria-label={`${q.name} for ${q.app}`}
                       className="mt-1 h-8 w-full rounded-md border border-line-2 bg-canvas px-2 font-mono text-[12px] outline-none focus:border-accent/60"
                     />
@@ -352,7 +385,7 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
             </div>
           )}
           {madeSecrets.length > 0 && <p className="mt-2 text-[11px] text-subtle">Made for you, once, never shown: {madeSecrets.join(", ")}</p>}
-          {!repo && "compose" in fileOf(text, filename) && (
+          {!given && "compose" in fileOf(text, filename) && (
             <a
               href={`data:text/plain;charset=utf-8,${encodeURIComponent(read.imp.roll_toml)}`}
               download="roll.toml"

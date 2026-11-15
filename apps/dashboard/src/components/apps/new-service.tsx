@@ -10,6 +10,7 @@ import { LINKABLE } from "./variables";
 import { CopyField, Head, Label, Rows } from "../workspace/inspector";
 import { KindTile } from "../workspace/kind";
 import { FolderDeploy } from "./folder-deploy";
+import { TemplateList } from "./deploy-repo";
 
 type From = "repo" | "image" | "upload" | "file";
 
@@ -307,7 +308,11 @@ export function NewServiceSheet({
           </>
         )}
         {from === "file" ? (
-          <ImportPane project={project} spot={spot} onDone={onImported} />
+          <>
+            <Label>A template</Label>
+            <TemplateList project={project.id} className="grid grid-cols-2 gap-1.5" />
+            <ImportPane project={project} spot={spot} onDone={onImported} />
+          </>
         ) : from === "upload" ? (
           <>
             <Label>A folder, from here</Label>
