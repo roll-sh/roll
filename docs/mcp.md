@@ -148,8 +148,7 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
 | dynamic client registration (public clients only), or a client ID metadata document | `POST /v1/access/oauth/register`; the client's own URL | RFC 7591; MCP 2025-11-25 |
 | authorization: the dashboard's consent screen | `GET <dashboard>/oauth/authorize` | OAuth 2.1 §4.1 |
 | tokens: `authorization_code` (PKCE `S256` required) and `refresh_token` | `POST /v1/access/oauth/token` | OAuth 2.1, RFC 7636, RFC 8707 |
-| revocation (a refresh token's revokes its connection) | `POST /v1/access/oauth/revoke` | RFC 7009 |
-| device authorization: a device with no browser gets a code its person enters at `<dashboard>/oauth/device`, then polls the token endpoint with `urn:ietf:params:oauth:grant-type:device_code` | `POST /v1/access/oauth/device_authorization` | RFC 8628 |
+| revocation | `POST /v1/access/oauth/revoke` | RFC 7009 |
 
 - The issuer is the API's origin, and the resource is `<api>/v1/mcp`. The token endpoint checks
   `resource` against the one the code was issued for (RFC 8707), so a roll token is never accepted
@@ -517,22 +516,15 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **MCP tasks for calls that wait for a person** (2025-11-25, experimental): a `tools/call` with
-   `task` answers a task at once (`input_required` while an approval waits, the approval page in
-   its status), and `tasks/get`/`tasks/result` follow it, instead of holding a request 55 s and
-   answering `approval_pending`. It needs a durable task store on the system database (a fleet's
-   poll lands on another node), results sealed with `ROLL_SECRET_KEY` (a reveal's answer is a
-   credential), each task bound to its grant and looked up on every call, caps per caller, and
-   audit rows; and only once a client people use sends `task` (today URL elicitation and progress
-   during the wait cover the same need).
-2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+1. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25), and compare each product's routes with its tools
-   (an everyday route with no tool is a gap: apps' were found this way); conflicts agreed with a
-   sibling are resolved by `known-conflicts.py` (apps' export row: theirs kept). Keep
-   **`feature/mcp-on-landing`** (#25 with secrets' `feature/roll-secrets-landing-access`; it
-   replaces `feature/mcp-on-secrets`) merged after either side moves: roll-access, roll-mcp and
-   roll-secrets tests, rolld's route test and clippy before each push.
+   (an everyday route with no tool is a gap: apps' were found this way).
+2. *Waits on secrets' `feature/roll-secrets-landing-access` (landing #62 plus #30, a branch of its own so #62 lands without #25; they'll send its head once their suites and rolld's route check pass):* rebuild the integration branch as #25 plus that (landing's 86 catalogue rows merge cleanly; 14 roll-secrets files conflict between #30's swap and landing, which are theirs). Until then: **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+   lands after #20, #25 and #30): kept merged both ways (secrets' head of 2026-11-14 merged: a
+   forgotten project's credentials revoked first and retried by the sweeper, with the integration's
+   `identity_logins` kept in what's forgotten). The canvas check costs nothing measurable
+   (`gate_latency`, release, pinned, A/B twice: 83–115 µs p50 with it, 105–116 µs without).
 3. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
    `.index("name")` on the per-key routes and `Scope.key` in their own check (`GrantGrants` sets
    `id` since #30's fix). The tools and the builder's key picker are in; check both live once the
@@ -545,33 +537,74 @@ waits on a sibling PR reaching main is last.
 5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
-Considered and left out: keeping `roll login`'s tokens in the OS keychain (gh and Doppler do): the `keyring` crate brings a D-Bus stack for the Secret Service, this server has neither a Secret Service nor a Keychain to test it on, and the `security` and `secret-tool` commands take the secret on argv on macOS; a 0600 file in a 0700 directory, refreshed hourly and revoked by `roll logout`, is gh's own fallback, and an untested credential store is worse; a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset, or search-then-call meta-tools (see Toolsets: clients handle long lists or have a picker, and meta-tools would hide each tool's hints); a connection narrowed to one project (Supabase's `project_ref`): their
+Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset, or search-then-call meta-tools (see Toolsets: clients handle long lists or have a picker, and meta-tools would hide each tool's hints); a connection narrowed to one project (Supabase's `project_ref`): their
 tokens are account-wide; a roll token's rules already name projects, and the builder's presets
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: a scoped token's row shows what its secret looks like (`rlt_…a1b2`, Stripe's last four), in the dashboard, `roll token list` and the API, so a token found in a config can be matched to its row (#25); the seventeenth review (#25's device flow, `roll login`, the change audit and the mails; nothing high), all fixed: past the wrong-code limit every code answers 429, a right one too (a hit still answered 200, so guessing went on); `roll login` checks the server's issuer is the address it was pointed at and its endpoints are on that origin, and never follows a redirect (a crafted `ROLL_API_URL` could have a real token kept and sent elsewhere); the device mail names the network the device asked from (it named the approver's, a phished victim's own) and the page warns when the networks differ; only redirect-less clients use the device grant; a stray callback doesn't end a login and a silent connection doesn't stall it; the token file is a fresh random file, never through a symlink; a client's own revoke is audited and a person doesn't see an admin's address; an allowed device never collected has its grant revoked (#25); a person is mailed at once when a token, MCP client or device is added to their account (GitHub's "a new personal access token was added": what it may do, from which network, where to revoke it; a phished device code reaches its victim) (#25); changes to tokens and access are audited (GitHub's `personal_access_token.create`, Stripe's key history): who made, changed, rotated, revoked or approved a token, connected a client or set the policy, from one layer on `/v1/access`, and the audit page shows who made each change (it showed the token changed) (#25); `roll token whoami` names the credential that runs and where it came from, and each one set that loses to it (`gh auth status`; exits 1 with none) (#25); `/oauth/device` checked in a browser against a live rolld, wide and at phone width (`users-live/device-shot.mjs`: the code entry, a wrong code, a request with its network and age, allowing it and the poll taking tokens, refusing one and the poll hearing `access_denied`; the wrong-code page said "start connecting again from your MCP client", now its own words) (#25); `roll login` signs in with a code where there's no browser (RFC 8628's device flow, `gh auth login`'s: `/oauth/device` on any device, the consent screen's form, the asking network shown against device-code phishing, ten wrong codes a minute; over SSH by default) (#25); `apps_set_environment` takes `held` (apps #26's rollback hold) (#24); `apps_export_project` (apps #26: a project as a roll.toml, variables by name only; pairs with `apps_import`) (#24); `roll login` and `roll logout` (#25): the CLI signs in through the browser (`gh auth login`'s flow: RFC 7591 registration, a loopback redirect, PKCE, `state` and `iss` checked, `--no-browser` to paste the answer back), keeps the login 0600 per API URL, uses it only when no credential is set, refreshes it under a lock, and logout revokes it; revoking a refresh token now revokes its connection (RFC 7009 2.1: a client's sign-out left the grant listed as live with no secrets) (#25); the integration with secrets' landing branch built as `feature/mcp-on-landing` (#25 + 43cb35162) and every sibling head route-checked with #25; approving or denying a person's token is audited and keeps who decided (`decided_by`; GitHub's `personal_access_token.request_approved`), and the token row says "approved … by …" (#25); a waiting token answers 403 `pending_approval`, not 401 (a 401 sent an OAuth MCP client
-back through sign-in and consent for a connection that was only waiting) (#25); a person is told
-before making a token or connecting a client that it will wait for an admin (GitHub's "this token
-will require approval"; `approve_people` in `GET /v1/access`) (#25); the sixteenth review's #25
-findings fixed: a person's OAuth connection past the policy waits too (it didn't), a waiting token's
-rules are frozen until an admin decides (an approval took whatever it had become), widening and
-waiting again are one transaction, admins' mail is cleaned names and once an hour per token, and
-tokens made before the policy show as `unapproved` in an admin's checkup; the approval of people's
-tokens checked live with accounts and mail (`users-live/approval.sh`: waits, 401 `pending_approval`,
-the admin mailed, approved from the CLI, the person mailed, then 200); a person's pending token
-leads an admin's checkup ("Needs attention": approve or deny), and stays out of the person's own
-(#25); admins are mailed when a person's token waits for them (who asked, what it may do, the link
-to decide; `Sessions::admins`, accounts' list) (#25); `roll token list --pending` and `roll token
-approve|deny <id>` (#25); people's tokens past the policy wait for an admin (#25; GitHub's
-organization approval: `approve_people`, 401 `pending_approval`, approve or deny on the access page,
-the person mailed, widening waits again); the ninth review's findings (people's mail in roll's words
-only: names as words, an approval's mail without its resource, a leak's without where, one approval
-mail per token per ten minutes and 20 a person an hour; workload tokens capped per owner and a
-person's listed before the limit; a refresh token's retry within its grace audited; apps settings
-that change what production runs, its source, build, start and pre-deploy commands, schedule, kind,
-port, volume and `run.public`, are deploy; `create_grant` refuses extensions that name no caller;
-the expiry digest leaves out tokens made for a day or less); `secrets_set`, `secrets_delete` and
+Done lately: a scoped token's row shows what its secret looks like (`rlt_…a1b2`, Stripe's last
+four), in the dashboard, `roll token list` and the API, so a token found in a config can be matched
+to its row (#25); the seventeenth review (#25's device flow, `roll login`, the change audit and the
+mails; nothing high), all fixed: past the wrong-code limit every code answers 429, a right one too
+(a hit still answered 200, so guessing went on); `roll login` checks the server's issuer is the
+address it was pointed at and its endpoints are on that origin, and never follows a redirect (a
+crafted `ROLL_API_URL` could have a real token kept and sent elsewhere); the device mail names the
+network the device asked from (it named the approver's, a phished victim's own) and the page warns
+when the networks differ; only redirect-less clients use the device grant; a stray callback doesn't
+end a login and a silent connection doesn't stall it; the token file is a fresh random file, never
+through a symlink; a client's own revoke is audited and a person doesn't see an admin's address; an
+allowed device never collected has its grant revoked (#25); a person is mailed at once when a token,
+MCP client or device is added to their account (GitHub's "a new personal access token was added":
+what it may do, from which network, where to revoke it; a phished device code reaches its victim)
+(#25); changes to tokens and access are audited (GitHub's `personal_access_token.create`, Stripe's
+key history): who made, changed, rotated, revoked or approved a token, connected a client or set the
+policy, from one layer on `/v1/access`, and the audit page shows who made each change (it showed the
+token changed) (#25); `roll token whoami` names the credential that runs and where it came from, and
+each one set that loses to it (`gh auth status`; exits 1 with none) (#25); `/oauth/device` checked
+in a browser against a live rolld, wide and at phone width (`users-live/device-shot.mjs`: the code
+entry, a wrong code, a request with its network and age, allowing it and the poll taking tokens,
+refusing one and the poll hearing `access_denied`; the wrong-code page said "start connecting again
+from your MCP client", now its own words) (#25); `roll login` signs in with a code where there's no
+browser (RFC 8628's device flow, `gh auth login`'s: `/oauth/device` on any device, the consent
+screen's form, the asking network shown against device-code phishing, ten wrong codes a minute; over
+SSH by default) (#25); `apps_set_environment` takes `held` (apps #26's rollback hold) (#24);
+`apps_export_project` (apps #26: a project as a roll.toml, variables by name only; pairs with
+`apps_import`) (#24); `roll login` and `roll logout` (#25): the CLI signs in through the browser
+(`gh auth login`'s flow: RFC 7591 registration, a loopback redirect, PKCE, `state` and `iss`
+checked, `--no-browser` to paste the answer back), keeps the login 0600 per API URL, uses it only
+when no credential is set, refreshes it under a lock, and logout revokes it; revoking a refresh
+token now revokes its connection (RFC 7009 2.1: a client's sign-out left the grant listed as live
+with no secrets) (#25); the integration with secrets' landing branch built as
+`feature/mcp-on-landing` (#25 + 43cb35162) and every sibling head route-checked with #25; approving
+or denying a person's token is audited and keeps who decided (`decided_by`; GitHub's
+`personal_access_token.request_approved`), and the token row says "approved … by …" (#25); a waiting
+token answers 403 `pending_approval`, not 401 (a 401 sent an OAuth MCP client back through sign-in
+and consent for a connection that was only waiting) (#25); a person is told before making a token or
+connecting a client that it will wait for an admin (GitHub's "this token will require approval";
+`approve_people` in `GET /v1/access`) (#25); the sixteenth review's #25 findings fixed: a person's
+OAuth connection past the policy waits too (it didn't), a waiting token's rules are frozen until an
+admin decides (an approval took whatever it had become), widening and waiting again are one
+transaction, admins' mail is cleaned names and once an hour per token, and tokens made before the
+policy show as `unapproved` in an admin's checkup; the approval of people's tokens checked live with
+accounts and mail (`users-live/approval.sh`: waits, 401 `pending_approval`, the admin mailed,
+approved from the CLI, the person mailed, then 200); a person's pending token leads an admin's
+checkup ("Needs attention": approve or deny), and stays out of the person's own (#25); admins are
+mailed when a person's token waits for them (who asked, what it may do, the link to decide;
+`Sessions::admins`, accounts' list) (#25); `roll token list --pending` and `roll token approve|deny
+<id>` (#25); people's tokens past the policy wait for an admin (#25; GitHub's organization approval:
+`approve_people`, 401 `pending_approval`, approve or deny on the access page, the person mailed,
+widening waits again); the ninth review's findings (people's mail in roll's words only: names as
+words, an approval's mail without its resource, a leak's without where, one approval mail per token
+per ten minutes and 20 a person an hour; workload tokens capped per owner and a person's listed
+before the limit; a refresh token's retry within its grace audited; apps settings that change what
+production runs, its source, build, start and pre-deploy commands, schedule, kind, port, volume and
+`run.public`, are deploy; `create_grant` refuses extensions that name no caller; the expiry digest
+leaves out tokens made for a day or less); setting a service's `run.schedules` (apps-next: commands
+run as jobs of the live deployment on a timer) is deploy, as a production job is (it was write: a
+token that couldn't run one production job could schedule one every minute), and
+`apps_update_service` says how to set it; `secrets_get_values` (one reveal for an environment, not
+one per key), `secrets_list_leases` and `secrets_end_lease`, and the secrets tools' descriptions
+brought up to date (secrets' seventeenth review) (#24); `secrets_set`, `secrets_delete` and
 `secrets_propose` take `if_version` (Vault's check-and-set: an agent can't silently overwrite a
 person's edit; 409 `stale`; secrets #62); this round's gate additions cost nothing measurable
 (`gate_latency`, release, pinned, eight alternating runs each at load ~44: CPU 2.88 s against 2.96
