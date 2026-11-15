@@ -12,7 +12,7 @@
 
 import { Table2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, formatMs, type Deployment, type Metrics as MetricsData } from "@/lib/apps-api";
+import { appsApi, formatMs, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats } from "@/lib/apps-api";
 import { formatBytes } from "@/lib/roll-api";
 import { btn, CopyButton, panel, useCopy } from "../ui";
 import { usePageVisible } from "./live";
@@ -183,11 +183,81 @@ function Chart({
   );
 }
 
+type RouteSort = "requests" | "errors" | "p95_ms";
+const ROUTE_SORTS: { key: RouteSort; label: string }[] = [
+  { key: "requests", label: "busiest" },
+  { key: "errors", label: "most 5xx" },
+  { key: "p95_ms", label: "slowest" },
+];
+
+/** Errors and latency by route (Vercel's Observability): the last hour's access log, ids folded. */
+function Routes({ stats }: { stats: RouteStats }) {
+  const [sort, setSort] = useState<RouteSort>("requests");
+  const rows = useMemo(() => {
+    const keep = (r: RouteStat) => (sort === "errors" ? r.errors > 0 : sort === "p95_ms" ? r.requests >= 5 : true);
+    return stats.routes.filter(keep).sort((a, b) => b[sort] - a[sort] || b.requests - a.requests).slice(0, 15);
+  }, [stats, sort]);
+  return (
+    <section className={`${panel} overflow-hidden`} aria-label="Routes">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2.5">
+        <p className="text-[12px] text-muted">
+          Routes, the last hour <span className="text-subtle">· {count(stats.requests)} requests{stats.cut ? ", the newest read" : ""}; ids folded as :id</span>
+        </p>
+        <div className="flex rounded-lg border border-line p-0.5" role="radiogroup" aria-label="Sort routes">
+          {ROUTE_SORTS.map((s) => (
+            <button
+              key={s.key}
+              role="radio"
+              aria-checked={sort === s.key}
+              onClick={() => setSort(s.key)}
+              className={`h-6 rounded-md px-2 text-[11.5px] ${sort === s.key ? "bg-fg/[0.08] text-fg" : "text-muted hover:text-fg"}`}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {rows.length === 0 ? (
+        <p className="px-4 py-3 text-[12.5px] text-subtle">{stats.requests ? (sort === "errors" ? "No route answered a 5xx." : "No route had 5 requests yet.") : "No requests in the last hour."}</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full font-mono text-[11.5px] tabular-nums">
+            <thead className="text-left text-subtle">
+              <tr>
+                {["route", "req", "5xx", "4xx", "p50", "p95"].map((h, i) => (
+                  <th key={h} className={`px-4 py-1.5 font-normal ${i ? "text-right" : ""}`}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={`${r.method} ${r.route}`} className="border-t border-line">
+                  <td className="max-w-[28rem] truncate px-4 py-1" title={`${r.method} ${r.route}`}>
+                    <span className="text-subtle">{r.method}</span> {r.route}
+                  </td>
+                  <td className="px-4 py-1 text-right">{count(r.requests)}</td>
+                  <td className={`px-4 py-1 text-right ${r.errors ? "text-danger" : "text-subtle"}`}>{r.errors ? count(r.errors) : "—"}</td>
+                  <td className="px-4 py-1 text-right text-muted">{r.client_errors ? count(r.client_errors) : "—"}</td>
+                  <td className="px-4 py-1 text-right text-muted">{formatMs(r.p50_ms)}</td>
+                  <td className="px-4 py-1 text-right">{formatMs(r.p95_ms)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** Requests, errors, latency, CPU, memory, instances and cold starts over the last hour, day or week. */
 export function MetricsTab({ service, env, memoryMb }: { service: string; env: string; /** Its memory limit, MB. */ memoryMb?: number }) {
   const [range, setRange] = useState<Range>(RANGES[0]);
   const [raw, setM] = useState<MetricsData | null>(null);
   const [deploys, setDeploys] = useState<Deployment[]>([]);
+  const [routes, setRoutes] = useState<RouteStats | null>(null);
   const size = raw ? Math.max(1, Math.ceil(raw.minutes.length / MAX_POINTS)) : 1;
   const m = useMemo(() => (raw ? bucketed(raw, size) : null), [raw, size]);
   const per = size === 1 ? "min" : `${size} min`;
@@ -204,10 +274,11 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
     const load = async () => {
       try {
         // The deploys only mark the charts: metrics still show without them.
-        const [next, deps] = await Promise.all([appsApi.metrics(service, env, range.minutes), appsApi.deploys(service, env).catch(() => null)]);
+        const [next, deps, byRoute] = await Promise.all([appsApi.metrics(service, env, range.minutes), appsApi.deploys(service, env).catch(() => null), appsApi.routes(service, env).catch(() => null)]);
         if (alive) {
           setM(next);
           if (deps) setDeploys(deps);
+          if (byRoute) setRoutes(byRoute);
           setError(null);
         }
       } catch (e) {
@@ -334,6 +405,7 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
           {marks.length > 6 && <p className="mt-0.5">and {marks.length - 6} earlier (the table has every one)</p>}
         </div>
       )}
+      {routes && <Routes stats={routes} />}
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-subtle">
         <span>For a scraper:</span>
         <code className="min-w-0 truncate font-mono text-[11.5px] text-muted">{scrape}</code>

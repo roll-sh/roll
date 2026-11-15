@@ -3434,3 +3434,29 @@ async fn a_rollback_holds_the_next_push_until_deploys_resume() {
     w.code.push("d4d4d4d4d4d4", "fourth", &[("server.js", "// v4")]);
     get_until(&w.api, &format!("{base}/deploys"), |d| d.as_array().is_some_and(|a| a.iter().any(|x| x["revision"] == "d4d4d4d4d4d4"))).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn errors_and_latency_read_by_route() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let h = host(&svc["environments"][0]["url"]);
+    for p in ["/users/1", "/users/2?tab=a", "/users/3"] {
+        assert_eq!(visit(&w, &h, p).await.0, StatusCode::OK);
+    }
+    let (inst, ..) = w.fake.instances(&id).into_iter().next().unwrap();
+    w.fake.sicken(&inst);
+    assert_eq!(visit(&w, &h, "/checkout").await.0, StatusCode::INTERNAL_SERVER_ERROR);
+    // Ids folded, the query dropped, the failing route counted as one.
+    let mut v = Value::Null;
+    for _ in 0..100 {
+        v = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/routes?minutes=15"), None).await.1;
+        if v["requests"].as_u64() >= Some(4) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let route = |r: &str| v["routes"].as_array().unwrap().iter().find(|x| x["route"] == r).cloned().unwrap_or_else(|| panic!("{v}"));
+    assert_eq!((route("/users/:id")["requests"].as_u64(), route("/users/:id")["errors"].as_u64()), (Some(3), Some(0)), "{v}");
+    assert_eq!((route("/checkout")["requests"].as_u64(), route("/checkout")["errors"].as_u64(), route("/checkout")["method"].as_str()), (Some(1), Some(1), Some("GET")), "{v}");
+}

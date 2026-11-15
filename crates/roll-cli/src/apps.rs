@@ -619,6 +619,17 @@ pub enum AppsCmd {
         #[arg(long)]
         range: Option<String>,
     },
+    /// Errors and latency by route over the last minutes (5–60): the access log grouped by method
+    /// and route, ids folded (`/users/:id`).
+    Routes {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, default_value_t = 60)]
+        minutes: i64,
+        /// `requests`, `errors` (5xx) or `p95`.
+        #[arg(long, default_value = "requests")]
+        sort: String,
+    },
     /// Who changed what in the service (settings, variables by name, domains, links), newest
     /// first.
     Activity {
@@ -2786,6 +2797,32 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 v
             }
+        }
+        AppsCmd::Routes { target, minutes, sort } => {
+            let key = match sort.as_str() {
+                "requests" => "requests",
+                "errors" | "5xx" => "errors",
+                "p95" | "slowest" => "p95_ms",
+                other => bail!("--sort is requests, errors or p95, not {other}"),
+            };
+            let svc = service(api, &target).await?;
+            let v = api.get(&format!("{}/routes?minutes={minutes}", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                let mut rows: Vec<&Value> = v["routes"].as_array().into_iter().flatten().filter(|r| key != "errors" || r["errors"].as_u64() > Some(0)).collect();
+                rows.sort_by_key(|r| std::cmp::Reverse(r[key].as_u64().unwrap_or(0)));
+                println!("{} requests in the last {} minutes{}", v["requests"], v["minutes"], if v["cut"] == true { " (the newest read)" } else { "" });
+                if !rows.is_empty() {
+                    println!("{:>7} {:>6} {:>7} {:>7}  route", "req", "5xx", "p50", "p95");
+                }
+                for r in rows.iter().take(30) {
+                    println!("{:>7} {:>6} {:>7} {:>7}  {} {}", r["requests"], r["errors"], format!("{}ms", r["p50_ms"]), format!("{}ms", r["p95_ms"]), s(&r["method"]), s(&r["route"]));
+                }
+                if rows.is_empty() {
+                    println!("no route to show");
+                }
+                return Ok(());
+            }
+            v
         }
         AppsCmd::Activity { target } => {
             let svc = service(api, &target).await?;

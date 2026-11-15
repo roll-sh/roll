@@ -96,6 +96,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/variables/values"), get(reveal))
         .route(&format!("{env}/logs"), get(env_logs))
         .route(&format!("{env}/metrics"), get(metrics))
+        .route(&format!("{env}/routes"), get(routes))
         .route(&format!("{env}/usage"), get(usage))
         .route(&format!("{env}/runs"), get(runs).post(run_now))
         .route(&format!("{env}/runs/{{run}}"), get(get_run))
@@ -923,6 +924,11 @@ async fn metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(
         return Ok(([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], text).into_response());
     }
     ok(apps.metrics(&id, &env, w.minutes.unwrap_or(60)).await?)
+}
+
+/// `GET …/routes?minutes=`: errors and latency by route, from the access log (`crate::traffic`).
+async fn routes(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
+    ok(apps.routes(&id, &env, w.minutes.unwrap_or(60)).await?)
 }
 
 async fn usage(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {

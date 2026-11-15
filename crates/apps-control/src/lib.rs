@@ -42,6 +42,7 @@ pub mod runtime;
 pub mod shell;
 pub mod spend;
 pub mod store;
+pub mod traffic;
 
 use integrations::{DomainTls, Resolver, Resources, SecretSource, Sources};
 use live::{EnvLive, LiveConfig};

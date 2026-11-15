@@ -84,6 +84,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[], seal?: string[]}` (set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed) | `Variables` | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&before=&instance=&deployment=&stream=&level=&q=&http=&status=&min_ms=&by=` | | `LogLine[]` or SSE; `before` (unix ms) reads back to a time (not followed), `instance`/`deployment`/`stream` narrow it (followed too), `level` keeps lines at that level or worse (a line that says none isn't; 400 for another word), `X-Roll-Search-Truncated: 1` when a read back stopped short; `http=1`: the proxy's access log (`stream: "http"`, text `AccessLine`), `status` (`500`, `5xx`, `400-499`), `min_ms` and `by` (one reason, or `any`: every answer roll gave itself) filtering it | read |
 | `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=&format=` | | `Metrics`; `format=prometheus`: the last finished minute as Prometheus text (`roll_apps_requests_per_minute`, `…_errors_per_minute`, `…_latency_ms{quantile}`, `…_cpu_seconds_per_minute`, `…_memory_bytes`, `…_instances`, `…_cold_starts_per_minute`, `…_cold_start_ms`, labelled `service`, `service_id`, `environment`) | read |
+| `GET /v1/apps/services/{id}/environments/{env}/routes?minutes=` | | `RouteStats` (the last 5–60 minutes, default 60): the access log grouped by method and route, id-like segments `:id` and no query; the busiest, the most 5xx and the slowest (5 requests or more), each at most 50 | read |
 | `GET /v1/apps/services/{id}/environments/{env}/usage?days=` | | `Usage` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/runs` | | `CronRun[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/runs` | | 202 `CronRun` (run now) | deploy* |
@@ -443,6 +444,9 @@ type Variables = { vars: { name: string; masked: string; source: "service" | "se
 // the project is a 400.
 
 type LogLine = { t: number; stream: "stdout" | "stderr" | "build" | "system"; instance: string | null; deployment: string | null; text: string; level?: "trace" | "debug" | "info" | "warn" | "error" | "fatal" /* what the app's own line says (JSON's level/severity/lvl/log.level, a name or pino's number; logfmt's level=; an upper-case level word among its first three); absent when it says none */ };
+
+type RouteStat = { method: string; route: string; requests: number; errors: number /* 5xx */; client_errors: number /* 4xx */; p50_ms: number; p95_ms: number; max_ms: number };
+type RouteStats = { minutes: number; requests: number; cut: boolean /* only the newest 50,000 requests read */; routes: RouteStat[] };
 
 type Metrics = {
   minutes: number[];         // unix minute of each point, oldest first

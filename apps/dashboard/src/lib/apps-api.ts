@@ -543,6 +543,29 @@ export const LOG_LEVELS: LogLevel[] = ["trace", "debug", "info", "warn", "error"
 /** At `min` or worse: a line that says no level isn't. */
 export const atLeast = (l: LogLine, min: LogLevel | "") => !min || (!!l.level && LOG_LEVELS.indexOf(l.level) >= LOG_LEVELS.indexOf(min));
 
+/** One route's last minutes, from the access log: ids folded (`/users/:id`), no query. */
+export interface RouteStat {
+  method: string;
+  route: string;
+  requests: number;
+  /** 5xx */
+  errors: number;
+  /** 4xx */
+  client_errors: number;
+  p50_ms: number;
+  p95_ms: number;
+  max_ms: number;
+}
+
+export interface RouteStats {
+  minutes: number;
+  requests: number;
+  /** Read only the newest 50,000 requests: the counts are theirs. */
+  cut: boolean;
+  /** The busiest, the most 5xx and the slowest (5 requests or more), each at most 50. */
+  routes: RouteStat[];
+}
+
 export interface Metrics {
   minutes: number[];
   requests: number[];
@@ -818,6 +841,8 @@ export const appsApi = {
     return { lines: data as LogLine[], truncated: res.headers.get("x-roll-search-truncated") === "1" };
   },
   metrics: (id: string, e: string, minutes = 60) => call<Metrics>("GET", `${env(id, e)}/metrics${qs({ minutes })}`),
+  /** Errors and latency by route over the last `minutes` (5–60). */
+  routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   usage: (id: string, e: string, days = 30) => call<Usage>("GET", `${env(id, e)}/usage${qs({ days })}`),
 
   runs: (id: string, e: string) => call<CronRun[]>("GET", `${env(id, e)}/runs`),
