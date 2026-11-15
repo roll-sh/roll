@@ -2239,36 +2239,52 @@ fn est_entries(
     ctx: &ExecCtx,
 ) -> Result<Vec<(u32, u128, usize, bool)>> {
     let mut out = Vec::new();
-    let any = {
-        let rf = ctx.sess.db.relfiles.of(t.oid).read();
-        !rf.est_btrees.is_empty() && indexes.iter().any(|b| rf.est_btrees.contains_key(&b.index.oid))
-    };
-    if !any {
+    if !indexes.iter().any(|b| b.index.method == "btree") {
         return Ok(out);
     }
+    let have: Vec<bool> = {
+        let rf = ctx.sess.db.relfiles.of(t.oid).read();
+        if rf.est_btrees.is_empty() {
+            return Ok(out);
+        }
+        indexes.iter().map(|b| rf.est_btrees.contains_key(&b.index.oid)).collect()
+    };
     let fmt = ctx.fmt();
     let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
+    let null = Value::Null;
     let mut sort = Vec::new();
     for (i, bix) in indexes.iter().enumerate() {
-        if bix.index.method != "btree" {
+        if !have[i] || bix.index.method != "btree" {
             continue;
         }
-        let v = match vals {
-            Some(k) => k.get(i).cloned().flatten(),
-            None => index_values(bix, row, ctx)?,
-        };
-        let Some(mut v) = v else { continue };
         sort.clear();
-        for x in &v {
-            encode_value(&mut sort, x, false);
+        let mut size = relsize::IndexTupleSize::default();
+        // (An index of plain columns, the usual one: its key and size from the row's values,
+        // nothing evaluated or copied.)
+        let plain = bix.predicate.is_none() && bix.keys.iter().all(|k| matches!(k, Expr::Col(..)));
+        if plain {
+            for k in &bix.keys {
+                let Expr::Col(c, _) = k else { unreachable!() };
+                let v = row.get(*c).unwrap_or(&null);
+                encode_value(&mut sort, v, false);
+                size.push(v, &k.ty(), &text);
+            }
+        } else {
+            let v = match vals {
+                Some(k) => k.get(i).cloned().flatten(),
+                None => index_values(bix, row, ctx)?,
+            };
+            let Some(v) = v else { continue };
+            for (x, k) in v.iter().zip(&bix.keys) {
+                encode_value(&mut sort, x, false);
+                size.push(x, &k.ty(), &text);
+            }
         }
-        let key = btest::key_prefix(&sort);
-        let mut types: Vec<DataType> = bix.keys.iter().map(|k| k.ty()).collect();
-        types.extend(bix.index.include.iter().map(|&c| t.columns[c].ty.clone()));
-        v.extend(bix.index.include.iter().map(|&c| row.get(c).cloned().unwrap_or(Value::Null)));
-        let size = relsize::index_tuple(&types, &v, &text);
+        for &c in &bix.index.include {
+            size.push(row.get(c).unwrap_or(&null), &t.columns[c].ty, &text);
+        }
         let dup = old.is_some_and(|o| columns_unchanged(bix, o, row));
-        out.push((bix.index.oid, key, size, dup));
+        out.push((bix.index.oid, btest::key_prefix(&sort), size.size(), dup));
     }
     Ok(out)
 }

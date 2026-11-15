@@ -11,7 +11,6 @@
 //! interpolated, and an insert's key is the first 16 bytes of its sort key (`key_prefix`).
 //! The model proper (`btsim`) holds every entry; this costs a few dozen bytes a leaf.
 use crate::catalog::relsize::{self, BT_USABLE, LevelFill};
-use std::collections::BTreeMap;
 
 const ITEM_ID: f64 = 4.0;
 /// nbtree's leaf fillfactor (BTREE_DEFAULT_FILLFACTOR): a rightmost split leaves that much
@@ -38,11 +37,14 @@ struct Leaf {
     keys: f64,
 }
 
-/// One btree's leaves (`btest`'s summary), by their low key (and an order among leaves
-/// of one key).
+/// One btree's leaves (`btest`'s summary): their low keys (and an order among leaves of one
+/// key) in key order, searched by halving, each with its leaf's place in `store` (a split
+/// moves 28 bytes a leaf, not the leaves).
 #[derive(Clone, Debug)]
 pub struct BtEst {
-    leaves: BTreeMap<(u128, u64), Leaf>,
+    lows: Vec<(u128, u64)>,
+    slots: Vec<u32>,
+    store: Vec<Leaf>,
     /// Deduplication (a non-unique index of equal-image types).
     dedup: bool,
     /// A plain tuple's size (MAXALIGNed), and a pivot's (high keys, downlinks).
@@ -103,12 +105,15 @@ impl EstBuilder {
         let n = self.leaves.len();
         let base = if self.base_n > 0.0 { self.base_sum / self.base_n } else { 16.0 };
         let pivot = if n > 0 { self.pivot_sum / n as f64 } else { base };
-        let mut leaves = BTreeMap::new();
+        let (mut lows, mut store) = (Vec::with_capacity(n), Vec::with_capacity(n));
         for (i, (lo, l)) in self.leaves.into_iter().enumerate() {
-            leaves.insert((lo, (i as u64) << 24), l);
+            lows.push((lo, (i as u64) << 24));
+            store.push(l);
         }
         let mut e = BtEst {
-            leaves,
+            lows,
+            slots: (0..n as u32).collect(),
+            store,
             dedup: self.dedup,
             base,
             pivot,
@@ -132,19 +137,23 @@ impl BtEst {
         let n = leaves.len();
         let (plain, tuples): (usize, usize) = leaves.iter().fold((0, 0), |a, l| (a.0 + l.plain, a.1 + l.tuples));
         let base = if tuples > 0 { plain as f64 / tuples as f64 } else { 16.0 };
-        let mut map = BTreeMap::new();
+        let (mut lows, mut store) = (Vec::with_capacity(n), Vec::with_capacity(n));
         for (i, l) in leaves.into_iter().enumerate() {
-            let leaf = Leaf {
+            store.push(Leaf {
                 max: key_prefix(&l.last),
                 used: l.used as f64,
                 tuples: l.tuples as f64,
                 tids: l.tids as f64,
                 keys: l.keys as f64,
-            };
-            map.insert((key_prefix(&l.first), (i as u64) << 24), leaf);
+            });
+            // (Low keys kept in order: an empty leaf's is its predecessor's.)
+            let lo = key_prefix(&l.first).max(lows.last().map_or(0, |p: &(u128, u64)| p.0));
+            lows.push((lo, (i as u64) << 24));
         }
         let mut e = BtEst {
-            leaves: map,
+            lows,
+            slots: (0..n as u32).collect(),
+            store,
             dedup,
             base,
             pivot: base,
@@ -172,7 +181,7 @@ impl BtEst {
 
     /// Index entries (heap TIDs) it holds, dead ones included.
     pub fn entries(&self) -> f64 {
-        self.leaves.values().map(|l| l.tids).sum()
+        self.slots.iter().map(|&s| self.store[s as usize].tids).sum()
     }
 
     /// Inner pages above `leaves` leaves filled as a build fills them.
@@ -183,7 +192,7 @@ impl BtEst {
     }
 
     fn note_blocks(&mut self) {
-        let n = self.leaves.len();
+        let n = self.lows.len();
         let inner = (self.inner_built + self.inner_for(n)).saturating_sub(self.inner_base);
         let pages = (1 + n.max(1) + inner + self.free + self.stuck) as u32;
         self.blocks = self.blocks.max(pages);
@@ -223,20 +232,19 @@ impl BtEst {
     /// index already (an UPDATE's new version, the indexed columns unchanged).
     pub fn insert(&mut self, key: u128, size: usize, dup: bool) {
         let need = size as f64 + ITEM_ID;
-        let at = match self.leaves.range(..=(key, u64::MAX)).next_back() {
-            Some((k, _)) => *k,
-            None => match self.leaves.keys().next() {
-                Some(k) => *k,
-                None => {
-                    self.leaves.insert((key, 0), Leaf { max: key, used: 0.0, tuples: 0.0, tids: 0.0, keys: 0.0 });
-                    (key, 0)
-                }
-            },
-        };
-        let rightmost = self.leaves.range((std::ops::Bound::Excluded(at), std::ops::Bound::Unbounded)).next().is_none();
+        if self.lows.is_empty() {
+            self.lows.push((key, 0));
+            self.slots.push(self.store.len() as u32);
+            self.store.push(Leaf { max: key, used: 0.0, tuples: 0.0, tids: 0.0, keys: 0.0 });
+        }
+        // (The last leaf whose low key is at or before the key's: a new entry goes after
+        // its key's others, its heap TID being the greatest.)
+        let i = self.lows.partition_point(|lo| lo.0 <= key).saturating_sub(1);
+        let rightmost = i + 1 == self.lows.len();
         let room = self.room(rightmost);
         let dedup = self.dedup;
-        let l = self.leaves.get_mut(&at).expect("a leaf");
+        let slot = self.slots[i] as usize;
+        let l = &self.store[slot];
         // (A row's key in a leaf of distinct keys is a new one; in a leaf whose keys have
         // two TIDs or more each, one of its keys again: such an index's values repeat.)
         let new_key = if dup {
@@ -248,24 +256,23 @@ impl BtEst {
         };
         // PageGetFreeSpace leaves room for one more line pointer.
         if room - l.used - ITEM_ID >= need {
-            Self::add(l, key, need, new_key);
+            Self::add(&mut self.store[slot], key, need, new_key);
             return;
         }
         // A full leaf is deduplicated first (_bt_dedup_pass), when that makes room.
         if dedup && l.tids > l.keys {
-            let (keys, tids) = (l.keys, l.tids);
-            let merged = self.merged(keys, tids);
-            let l = self.leaves.get_mut(&at).expect("a leaf");
+            let merged = self.merged(l.keys, l.tids);
+            let l = &mut self.store[slot];
             if merged < l.used {
                 l.used = merged;
-                l.tuples = keys;
+                l.tuples = l.keys;
                 if room - l.used - ITEM_ID >= need {
                     Self::add(l, key, need, new_key);
                     return;
                 }
             }
         }
-        self.split(at, rightmost, key, need, new_key);
+        self.split(i, rightmost, key, need, new_key);
     }
 
     fn add(l: &mut Leaf, key: u128, need: f64, new_key: f64) {
@@ -279,9 +286,11 @@ impl BtEst {
     /// _bt_split of leaf `at` for an entry under `key` (nbtsplitloc): a rightmost leaf
     /// taking a key past its last splits at the fillfactor (the left page keeps 90%), any
     /// other evenly by bytes; the split key is where that share of the leaf's range ends.
-    fn split(&mut self, at: (u128, u64), rightmost: bool, key: u128, need: f64, new_key: f64) {
+    fn split(&mut self, i: usize, rightmost: bool, key: u128, need: f64, new_key: f64) {
         let room = self.room(rightmost);
-        let mut l = self.leaves.remove(&at).expect("a leaf");
+        let at = self.lows[i];
+        let slot = self.slots[i] as usize;
+        let mut l = self.store[slot].clone();
         let lo = at.0;
         let total = l.used + need;
         let append = rightmost && key >= l.max;
@@ -304,7 +313,7 @@ impl BtEst {
         l.tids -= right.tids;
         l.keys -= right.keys;
         // (The right page's low key: after the left's, before the next leaf's.)
-        let next = self.leaves.range((std::ops::Bound::Excluded(at), std::ops::Bound::Unbounded)).next().map(|(k, _)| *k);
+        let next = self.lows.get(i + 1).copied();
         let below_next = |k: (u128, u64)| next.is_none_or(|n| k < n);
         let mut right_at = if cut > lo { (cut, 0) } else { (lo, at.1 + (u64::MAX - at.1) / 2) };
         if !below_next(right_at) {
@@ -320,7 +329,7 @@ impl BtEst {
             l.keys += right.keys;
             Self::add(&mut l, key, need, new_key);
             l.used = l.used.min(room);
-            self.leaves.insert(at, l);
+            self.store[slot] = l;
             self.stuck += 1;
             self.note_blocks();
             return;
@@ -334,8 +343,10 @@ impl BtEst {
         } else {
             Self::add(&mut l, key, need, new_key);
         }
-        self.leaves.insert(at, l);
-        self.leaves.insert(right_at, right);
+        self.store[slot] = l;
+        self.lows.insert(i + 1, right_at);
+        self.slots.insert(i + 1, self.store.len() as u32);
+        self.store.push(right);
         // (A deleted page is reused before the file grows.)
         self.free = self.free.saturating_sub(1);
         self.note_blocks();
@@ -351,23 +362,26 @@ impl BtEst {
         }
         let keep = (live / total).clamp(0.0, 1.0);
         if keep < 1.0 {
-            let n = self.leaves.len();
-            let mut gone = Vec::new();
+            let n = self.lows.len();
             let dedup = self.dedup;
-            for (i, (k, l)) in self.leaves.iter_mut().enumerate() {
+            let mut gone = 0;
+            let mut at = 0;
+            for i in 0..n {
+                let l = &mut self.store[self.slots[i] as usize];
                 if l.tids * keep < 0.5 && i + 1 < n {
-                    gone.push(*k);
+                    gone += 1;
                     continue;
                 }
                 l.used *= keep;
                 l.tuples *= keep;
                 l.tids *= keep;
                 l.keys = if dedup { (l.keys * keep).max(l.tids.min(1.0)) } else { l.keys * keep };
+                (self.lows[at], self.slots[at]) = (self.lows[i], self.slots[i]);
+                at += 1;
             }
-            for k in &gone {
-                self.leaves.remove(k);
-            }
-            self.free += gone.len();
+            self.lows.truncate(at);
+            self.slots.truncate(at);
+            self.free += gone;
             self.note_blocks();
         }
         self.blocks
