@@ -353,7 +353,9 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 [ -n "$MAINPV" ] || { echo "roll should keep a preview of main once screenshots are on (github.baseline)"; exit 1; }
-for _ in $(seq 1 120); do
+# (Screenshots take one slot a node: main's, then this one, each with its pages, states and
+# other browsers.)
+for _ in $(seq 1 360); do
   [ "$(api GET "/v1/previews/$PV" | jq_ "d.get('screenshot_at') is not None")" = True ] && break
   sleep 0.5
 done
