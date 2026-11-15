@@ -424,7 +424,7 @@ measure the same paths; lane A was shared with agents 229, 230, 232, 233 and 235
 | cell | build | instr/op | cycles/op | CPU/op | ops/s |
 |---|---|---|---|---|---|
 | point select, 8 clients | s002 | -1.1% (pairs -2.0..-0.2) | -2.3% | -2.6% | +3.3% |
-| | s003 | POINT8_S003 | | | |
+| | s003 | +1.0% (pairs -0.7, -0.1, +1.7, +2.7; one more flagged at +1.0) | +1.9% | -2.3% | -0.5% |
 | point select, 1 client | s002 | -0.3% | -0.7% | +1.9% | -3.9% |
 | | s003 | (every pair over 1.0 foreign core: not counted) | | | |
 | point select, 32 clients | s002 | -0.2% | +4.9% (pairs -4.5..+15.7; two disturbed) | 0.0% | -0.8% |
@@ -436,6 +436,11 @@ measure the same paths; lane A was shared with agents 229, 230, 232, 233 and 235
 | range read (100 rows), 8 clients | s002 | -0.3% | -1.3% | +1.1% | -3.4% |
 | | s003 | -1.5% | +0.2% | +2.5% | -1.8% |
 
+Point select at 8 clients is the one cell at the gate's limit: s003 +1.0% at the median against
+base, s002 -1.1%, though their cached read path is the same code on the same bytes (s003 only
+copies a block's entries when it is read from its file); one s002 / s003 pair read 43,830
+against 45,105 instructions an operation. Not resolved at this load (more pairs were queued and
+had not finished): a lead for the next point-read round.
 Short transactions vary by +-5% a run of one binary (agent 221's figure) and more at this load:
 their cells show no change beyond that. Footprint (fresh server, cgroup anon+shmem 25 s into 100
 idle sessions, lane B): base 37.6 / 37.5 / 37.6 MB, s003 36.3 / 37.4 / 37.4; fresh data directory
