@@ -335,12 +335,7 @@ impl Secrets {
                     return Err(Error::BadRequest(format!("{} {} has no credential to rotate", link.kind, link.r#ref)));
                 }
                 // Every folder that links it live reads a new value now: their digests move.
-                self.db.write(|c| {
-                    c.execute(
-                        "INSERT INTO source_generations (kind, ref, generation) VALUES (?, ?, 1) ON CONFLICT (kind, ref) DO UPDATE SET generation = source_generations.generation + 1",
-                        [link.kind.as_str(), link.r#ref.as_str()],
-                    )
-                })?;
+                self.source_changed(&link.kind, &link.r#ref)?;
                 self.audit_now(project, caller, "secrets.rotate", Some(slug), Some(&path), &[key.to_string()], &format!("rotated {} {}'s credential", link.kind, link.r#ref));
                 Ok(Applied { change: None, items: vec![], warnings: vec![], request: None })
             }

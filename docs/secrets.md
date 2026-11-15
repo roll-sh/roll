@@ -647,6 +647,14 @@ the product's own HTTP API in process. `roll-secrets` has no list of kinds: a pr
 resources linkable by registering a provider. That is how roll search, roll apps and future
 products join without changes here.
 
+A live link's value changes however its credential does: roll rotating it, a password reset or
+restore through the product, `ALTER ROLE` over SQL. Watches, syncs, roll apps' redeploys and
+conditional reads follow the folder's digest, so the digest counts each live value's keyed
+fingerprint as the product answers, read at most every 10 seconds (only the fingerprint is kept,
+never the value). It moves at once, on every node, when roll rotates the credential and when a
+product's own password, reset or restore route succeeds (rolld tells roll secrets:
+`Secrets::source_changed`).
+
 ```rust
 pub trait LinkProvider: Send + Sync {
     fn kind(&self) -> &str;                                   // "postgres", "search", …
@@ -2275,10 +2283,10 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
-| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`); with `digest=1` or `If-None-Match` an `ETag` (the digest), and `If-None-Match` with the digest still current is a 304 that decrypts and issues nothing, and writes one `secrets.revalidate` row a day per caller and folder (so health and insights still see the folder read) (never for a folder holding a dynamic credential unless `dynamic=false`: a lease ends without moving the digest; never for one that reads a live link: its product can change the credential without roll knowing) |
+| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`); with `digest=1` or `If-None-Match` an `ETag` (the digest), and `If-None-Match` with the digest still current is a 304 that decrypts and issues nothing, and writes one `secrets.revalidate` row a day per caller and folder (so health and insights still see the folder read) (never for a folder holding a dynamic credential unless `dynamic=false`: a lease ends without moving the digest) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, projects it's shared with, folders that import it, readers in 30 days |
-| `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
+| `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would; a live link counts its value's keyed fingerprint as the product answers, read at most every 10 s, and at once when roll rotates it or the product's own password, reset or restore route changes it) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` (`dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`) |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
@@ -2724,7 +2732,7 @@ user's call).
    them): a browser sign-in with PKCE and a loopback redirect, the token kept and refreshed, as
    `doppler login`, `infisical login` and `op signin` do.
 3. **Conditional reads and caching in the SDKs** (#65, on #62): `ETag` and `If-None-Match` on
-   `…/values` (a 304 reads, issues and audits nothing; never for dynamic credentials or live links), and a TTL
+   `…/values` (a 304 reads, issues and audits nothing; never for dynamic credentials), and a TTL
    cache in the TypeScript, Go and Python clients that revalidates with it.
 4. **Terraform without values in state**: an `ephemeral "roll_secrets_values"` resource and a
    write-only `value_wo` (Vault's, AWS', Infisical's providers have both); resources for CAs, SSH

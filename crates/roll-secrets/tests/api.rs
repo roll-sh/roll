@@ -882,10 +882,18 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     api.set("development", "NEW_FLAG", "on").await;
     let (s, moved) = get("development", "", tag.clone()).await;
     assert!(s == StatusCode::OK && moved.is_some() && moved != tag);
-    // A folder with a live link always reads again: its product may change the credential (a
-    // password reset) without the digest moving.
+    // A live link counts its value as the product answers: unchanged, a 304; changed by the product
+    // itself (a password reset through it), the digest moves once the fingerprint is read again
+    // (within seconds), and at once when the product says so.
     let (_, production) = get("production", "digest=1", None).await;
-    assert_eq!(get("production", "", production).await.0, StatusCode::OK, "it reads a live link");
+    assert_eq!(get("production", "", production.clone()).await.0, StatusCode::NOT_MODIFIED, "the live value is as it was");
+    *api.fake.password.lock().unwrap() += 1;
+    api.secrets.forget_live_fingerprints();
+    let (s, reset) = get("production", "", production.clone()).await;
+    assert!(s == StatusCode::OK && reset != production, "a password reset in the product moves it");
+    *api.fake.password.lock().unwrap() += 1;
+    api.secrets.source_changed("bucket", "assets").unwrap();
+    assert_eq!(get("production", "", reset).await.0, StatusCode::OK, "a product that says so moves it at once");
     let (_, staging) = get("staging", "dynamic=false&digest=1", None).await;
     assert_eq!(get("staging", "", staging.clone()).await.0, StatusCode::OK, "it holds a dynamic key");
     assert_eq!(get("staging", "dynamic=false", staging.clone()).await.0, StatusCode::NOT_MODIFIED);

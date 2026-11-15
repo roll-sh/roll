@@ -548,8 +548,11 @@ async fn run() -> anyhow::Result<()> {
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }
-    router = router.merge(roll_secrets::router(secrets));
+    router = router.merge(roll_secrets::router(secrets.clone()));
     products_api.set(router.clone());
+    // A product's own credential changes (a password reset, a restore) move live links' digests
+    // at once. Layered after the copy above: roll secrets' own rotations say so themselves.
+    router = router.layer(axum::middleware::from_fn_with_state(secrets, secrets::source_changes));
     // apps' deploy hooks found leaked (`rlk_`) stop working, like tokens.
     if let Some(a) = &apps {
         let apps = a.apps.clone();
