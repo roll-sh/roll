@@ -193,6 +193,13 @@ func TestTheOperatorKeepsItsSecretsInStepAndTouchesNoOtherSecret(t *testing.T) {
 	if len(kubeAPI.restarted) != 1 || kubeAPI.restarted[0] != "/apis/apps/v1/namespaces/apps/deployments/web" {
 		t.Fatalf("restarted: %v", kubeAPI.restarted)
 	}
+	// The digest moving with the same values (a key rewritten as it was) restarts nothing.
+	rolld.mu.Lock()
+	rolld.digest = "d3"
+	rolld.mu.Unlock()
+	if err := o.pass(ctx); err != nil || len(kubeAPI.restarted) != 1 {
+		t.Fatalf("restarted on unchanged data: %v (%v)", kubeAPI.restarted, err)
+	}
 }
 
 // Outside the operator's own namespaces a RollSecret logs in as a service account of its own

@@ -209,13 +209,27 @@ func (o *operator) reconcile(ctx context.Context, rs *rollSecret) rollStatus {
 	if err != nil {
 		return fail(err)
 	}
-	// A changed Secret restarts what reads it (a new one has no readers yet that started before it).
-	if existing != nil {
+	// A changed Secret restarts what reads it: only when its data changed (not a pass that clears an
+	// earlier error, or a key rewritten with the same value), and never a new one (nothing read it).
+	if existing != nil && !sameData(existing.Data, data) {
 		if err := o.restart(ctx, ns, rs.Spec.RolloutRestart); err != nil {
 			return rollStatus{Digest: digest, SyncedAt: o.now().UTC().Format(time.RFC3339), Keys: len(data), ObservedGeneration: rs.Metadata.Generation, Error: err.Error()}
 		}
 	}
 	return rollStatus{Digest: digest, SyncedAt: o.now().UTC().Format(time.RFC3339), Keys: len(data), ObservedGeneration: rs.Metadata.Generation}
+}
+
+// sameData is whether a Secret's data is as it was.
+func sameData(a, b map[string][]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if w, ok := b[k]; !ok || string(v) != string(w) {
+			return false
+		}
+	}
+	return true
 }
 
 // restartKinds are the workloads a RollSecret may restart, by their API resource.
