@@ -19,6 +19,8 @@ import {
 } from "@/lib/workspace-resources";
 import { spendOf, useWorkspace, workspace, type WorkspaceState } from "@/lib/workspace-store";
 import { useProjectServices } from "../apps/live";
+import { appsApi } from "@/lib/apps-api";
+import { FolderDeploy } from "../apps/folder-deploy";
 import { NewServiceSheet } from "../apps/new-service";
 import { AppShell } from "../app-shell";
 import { Board, type Card } from "./board";
@@ -218,7 +220,28 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
         >
           {overlay && <PreviewsOverlay projectId={project.id} placed={project.resources} />}
         </Board>}
-        {canvas && cards.length === 0 && ws.status === "ready" && <Empty name={project.name} kinds={CREATABLE.filter((k) => ws.kinds.has(k))} onPick={stage} />}
+        {canvas && cards.length === 0 && ws.status === "ready" && (
+          <Empty
+            name={project.name}
+            kinds={CREATABLE.filter((k) => ws.kinds.has(k))}
+            onPick={stage}
+            drop={
+              ws.kinds.has("service") ? (
+                <FolderDeploy
+                  compact
+                  env="production"
+                  make={(name) => appsApi.create({ project: project.id, name, source: { kind: "upload" }, x: 48, y: 48 })}
+                  onDeployed={(_, s) => {
+                    if (!s) return;
+                    workspace.added(project.id, serviceView(s), 48, 48);
+                    live.refresh();
+                    void navigate({ to: "/dashboard/apps/$id", params: { id: s.id } });
+                  }}
+                />
+              ) : null
+            }
+          />
+        )}
         <ProjectAgents open={agentsOpen} repos={repos} onClose={() => setAgentsOpen(false)} />
         <AddMenu open={canvas && adding} ws={ws} onClose={() => setAdding(false)} onNew={stage} onAttach={attach} />
         {error && (
@@ -303,7 +326,7 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
   );
 }
 
-function Empty({ name, kinds, onPick }: { name: string; kinds: ResourceKind[]; onPick: (k: ResourceKind) => void }) {
+function Empty({ name, kinds, onPick, drop }: { name: string; kinds: ResourceKind[]; onPick: (k: ResourceKind) => void; drop?: ReactNode }) {
   return (
     <div className="pointer-events-none absolute inset-0 grid place-items-center p-4">
       <div className="rise pointer-events-auto w-full max-w-[460px] text-center">
@@ -322,6 +345,7 @@ function Empty({ name, kinds, onPick }: { name: string; kinds: ResourceKind[]; o
             </button>
           ))}
         </div>
+        {drop && <div className="mt-3 text-left">{drop}</div>}
       </div>
     </div>
   );

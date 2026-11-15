@@ -9,6 +9,7 @@ import { ImportPane } from "./import";
 import { LINKABLE } from "./variables";
 import { CopyField, Head, Label, Rows } from "../workspace/inspector";
 import { KindTile } from "../workspace/kind";
+import { FolderDeploy } from "./folder-deploy";
 
 type From = "repo" | "image" | "upload" | "file";
 
@@ -279,6 +280,12 @@ export function NewServiceSheet({
           <ImportPane project={project} spot={spot} onDone={onImported} />
         ) : from === "upload" ? (
           <>
+            <Label>A folder, from here</Label>
+            <FolderDeploy
+              env="production"
+              make={(name) => appsApi.create({ project: project.id, name, source: { kind: "upload" }, ...spot })}
+              onDeployed={(_, s) => s && onCreated(s)}
+            />
             <Label>From the app's directory</Label>
             <CopyField shown={`roll up --project ${shellQuote(project.name)}`} value={`roll up --project ${shellQuote(project.name)}`} />
             <p className="mt-2 text-[11.5px] leading-relaxed text-muted">
