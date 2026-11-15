@@ -26,10 +26,16 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/access/oauth/register", access: Access::Public("OAuth dynamic client registration (public clients, PKCE)") },
     Rule { route: "/v1/access/oauth/token", access: Access::Public("OAuth token endpoint: codes and refresh tokens are the credentials") },
     Rule { route: "/v1/access/oauth/revoke", access: Access::Public("OAuth token revocation") },
+    Rule { route: "/v1/access/oauth/device_authorization", access: Access::Public("OAuth device authorization (RFC 8628): a device asks for the code its person enters") },
     Rule { route: "/v1/access/leaks/github", access: Access::Public("GitHub's secret scanning reports: GitHub's signature is the credential") },
     // roll's MCP server answers 401 itself, naming the OAuth metadata; grants are decided by the
     // evaluator before it, and each tool call goes through the gate again.
     Rule { route: "/v1/mcp", access: Access::Product("MCP: 401 with OAuth discovery without a token") },
+    // Scoped tokens: the operator's, and each signed-in user's own (the routes check which).
+    Rule { route: "/v1/access", access: Access::User("access: a user's own tokens, approvals and audit") },
+    // …except where approvals are posted and where the audit log streams: the operator's.
+    Rule { route: "/v1/access/notify", access: Access::Operator },
+    Rule { route: "/v1/access/audit/sinks", access: Access::Operator },
     // Health: load balancers and the dashboard's status; nothing a tenant owns.
     Rule { route: "/v1/health", access: Access::Public("health: Postgres control plane version and status") },
     Rule { route: "/v1/code/health", access: Access::Public("health: load balancers") },
@@ -70,7 +76,10 @@ pub const RULES: &[Rule] = &[
     // A one-time share's link: the value is encrypted with a key only the link holds, and opens
     // a few times at most (docs/secrets.md, "Sharing a value once").
     Rule { route: "/v1/secrets/shares", access: Access::Public("a one-time share's link: ciphertext only, the key stays in the link") },
+    Rule { route: "/v1/secrets/ocsp", access: Access::Public("a project CA's OCSP responder, which anyone checking its certificates asks") },
+    Rule { route: "/v1/secrets/crl", access: Access::Public("a project CA's certificate revocation list, which anyone checking its certificates fetches") },
     Rule { route: "/v1/secrets/login", access: Access::Public("a workload's OIDC token is the credential (workload identities)") },
+    Rule { route: "/v1/secrets/oidc", access: Access::Public("roll's OIDC issuer: its discovery document and public keys, which GCP and Azure fetch anonymously") },
     // Tasks: its own token (ROLL_TASKS_TOKEN) and API keys.
     Rule { route: "/v1/tasks", access: Access::Credential("a tasks token or API key") },
     // Hosted tenants (`/t/<tenant>/v1/tasks`) take only their own API keys; the tasks token

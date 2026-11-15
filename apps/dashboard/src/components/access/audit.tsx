@@ -1,6 +1,6 @@
 import { ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { accessApi, ACTIONS, productName, type AuditEvent, type AuditFilter } from "@/lib/access-api";
+import { accessApi, ACTIONS, auditWhat, auditWho, productName, type AuditEvent, type AuditFilter } from "@/lib/access-api";
 import { btn, Connecting, EmptyPanel, ErrorNote, input } from "../ui";
 import { AccessShell, relative } from "./shell";
 import { Sinks } from "./sinks";
@@ -73,9 +73,10 @@ export function Audit({ grant }: { grant?: string }) {
             <option value="deny">Denied</option>
           </select>
           <select value={filter.source ?? ""} onChange={set("source")} className={input}>
-            <option value="">API and MCP</option>
+            <option value="">Everything</option>
             <option value="mcp">MCP tool calls</option>
             <option value="api">API requests</option>
+            <option value="access">Changes to tokens and access</option>
           </select>
           <button onClick={() => void download("csv")} className={`${btn} ml-auto`} title="The newest 1,000 matching events, a row each, for a spreadsheet">
             Export CSV
@@ -113,18 +114,18 @@ export function Audit({ grant }: { grant?: string }) {
   );
 }
 
-const DECISION: Record<AuditEvent["decision"], string> = { allow: "text-muted", ask: "text-accent", deny: "text-danger" };
+const DECISION: Record<string, string> = { allow: "text-muted", ask: "text-accent", deny: "text-danger", revoke: "text-danger" };
 
 function Row({ e, onResource }: { e: AuditEvent; onResource: (resource: string) => void }) {
   const [open, setOpen] = useState(false);
-  const what = e.tool ?? `${e.method} ${e.route}`;
+  const what = auditWhat(e);
   return (
     <li>
       <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex w-full items-center gap-3 px-4 py-2 text-left text-[12px] hover:bg-white/[0.02]">
         <ChevronRight className={`size-3 shrink-0 text-subtle transition-transform duration-150 ${open ? "rotate-90" : ""}`} />
         <span className="w-16 shrink-0 text-subtle">{relative(e.at)}</span>
-        <span className={`w-12 shrink-0 ${DECISION[e.decision]}`}>{e.decision}</span>
-        <span className="w-28 shrink-0 truncate">{e.grant_name ?? "operator"}</span>
+        <span className={`w-16 shrink-0 truncate ${DECISION[e.decision] ?? "text-subtle"}`}>{e.decision}</span>
+        <span className="w-28 shrink-0 truncate">{auditWho(e)}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{what}</span>
         <span className="hidden w-40 shrink-0 truncate text-muted sm:block">
           {e.product ? productName(e.product) : ""} {e.resource ?? ""}

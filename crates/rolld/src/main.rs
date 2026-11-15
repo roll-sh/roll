@@ -436,6 +436,7 @@ async fn run() -> anyhow::Result<()> {
     // Workspace projects: always on (docs/workspace.md); roll apps places its services there.
     let workspace = workspace::open(&args, &home)?;
     // roll apps: services built and run on this host's Docker, each on its lease's holder.
+    let apps_secrets = secrets::ForApps::default();
     let apps = match on.on(Product::Apps) {
         true => Some(
             apps::start(
@@ -447,6 +448,7 @@ async fn run() -> anyhow::Result<()> {
                 code.as_ref().map(|c| c.code.clone()),
                 postgres.as_ref().map(|p| p.control.clone()),
                 redis.as_ref().map(|r| r.control.clone()),
+                apps_secrets.clone(),
             )
             .await?,
         ),
@@ -508,7 +510,8 @@ async fn run() -> anyhow::Result<()> {
     // Accounts and sign-in: always on; the gate resolves their session cookies. (Before the
     // evaluator joins the gate: setting sessions makes the gate anew.)
     let accounts = accounts::open(&args, &home, code.as_ref().map(|c| c.code.clone()), !auth.enforcing()).await?;
-    auth.sessions(accounts.sessions(), &accounts.config().api_url);
+    let sessions = accounts.sessions();
+    auth.sessions(sessions.clone(), &accounts.config().api_url);
     // roll apps emails a project's owner what needs them, through their account.
     if let Some(a) = &apps {
         a.apps.set_mailbox(std::sync::Arc::new(apps::AccountsMail(accounts.clone())));
@@ -546,6 +549,8 @@ async fn run() -> anyhow::Result<()> {
         workspace.clone(),
     )?;
     router = router.merge(roll_access::api::router(access.clone()));
+    // Users' own tokens act as them, as they are now (docs/permissions.md, "Users' own tokens").
+    let _ = access.people.set(sessions);
     // A grant's rate is shared among the nodes serving requests (each enforces its share).
     let nodes = cluster.clone();
     let _ = access.nodes.set(Box::new(move || nodes.nodes().len()));
@@ -561,6 +566,7 @@ async fn run() -> anyhow::Result<()> {
     let grants: std::sync::Arc<dyn roll_auth::Grants> = access.clone();
     let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), Some(grants), people)?;
     code_secrets.set(secrets.clone(), workspace.clone());
+    apps_secrets.set(secrets.clone(), workspace.clone());
     let _ = secrets_envs.0.set(secrets.clone());
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));

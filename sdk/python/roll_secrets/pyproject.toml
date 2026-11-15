@@ -1,0 +1,18 @@
+[project]
+name = "roll-secrets"
+version = "0.1.0"
+description = "A client for roll secrets: values, sealed resolves, digests and watching for changes"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+# Sealed resolves (X25519, HKDF-SHA256, AES-256-GCM); everything else is the standard library.
+seal = ["cryptography>=42"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

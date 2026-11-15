@@ -1,8 +1,9 @@
 import { HorizonMark } from "@roll/brand";
 import { ExternalLink, LucideProvider } from "lucide-react";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import {
   accessApi,
+  catalogFor,
   denyRedirect,
   describeRule,
   EXPIRIES,
@@ -10,18 +11,17 @@ import {
   presetFor,
   parseRate,
   presetRules,
+  type Allowed,
   type AuthorizeRequest,
   type Catalog,
   type Me,
-  type OAuthClient,
   type Rule,
+  waitsForAdmin,
 } from "@/lib/access-api";
 import { requestSignIn, subscribeToken } from "@/lib/code-token";
 import { SignIn } from "../code/sign-in";
 import { btn, Connecting, ErrorNote, input, primary } from "../ui";
 import { Builder } from "./builder";
-
-type Loaded = { me: Me; catalog: Catalog; client: OAuthClient };
 
 /**
  * `/oauth/authorize`: roll's OAuth consent screen for MCP clients (docs/mcp.md, "Authorization").
@@ -56,86 +56,162 @@ export function clientIdentity(id: string): string {
   return "Any app can register under any name: check the address it returns to below, and that you started this from that app.";
 }
 
-function Problem({ text }: { text: string }) {
+/** Why a page can't go on: a connection request's problem by default, or the caller's own words. */
+export function Problem({ text, title = "This connection request can't be used", next = "Start connecting again from your MCP client." }: { text: string; title?: string; next?: string }) {
   return (
     <section className="rise rounded-xl border border-line bg-panel p-6">
       <HorizonMark state="error" size={28} />
-      <h1 className="mt-4 text-[15px] font-medium">This connection request can&apos;t be used</h1>
-      <p className="mt-1 text-[13px] text-muted">{text} Start connecting again from your MCP client.</p>
+      <h1 className="mt-4 text-[15px] font-medium">{title}</h1>
+      <p className="mt-1 text-[13px] text-muted">
+        {text.charAt(0).toUpperCase() + text.slice(1)}
+        {next ? ` ${next}` : ""}
+      </p>
     </section>
   );
 }
 
 function Ask({ req }: { req: AuthorizeRequest }) {
-  const [loaded, setLoaded] = useState<Loaded | null>(null);
-  const [signedOut, setSignedOut] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [rules, setRules] = useState<Rule[]>([]);
-  const [name, setName] = useState("");
-  const [expiry, setExpiry] = useState(2);
-  const [rateText, setRateText] = useState("");
-  const [askOtherwise, setAskOtherwise] = useState(false);
-  const rate = parseRate(rateText);
-  const [busy, setBusy] = useState(false);
+  const loaded = useSignedInLoad(() => accessApi.client(req.client_id), [req.client_id]);
+  if (loaded.state !== "ready") return <LoadState loaded={loaded} what="connect this client" />;
+  const { me, catalog, value: client } = loaded;
+  if (!client.redirect_uris.includes(req.redirect_uri)) return <Problem text="The redirect isn't one this client registered." />;
+  const back = new URL(req.redirect_uri);
+  return (
+    <AllowForm
+      me={me}
+      catalog={catalog}
+      clientName={client.name}
+      scope={req.scope}
+      onAllow={async (a) => {
+        const { redirect } = await accessApi.authorize({
+          ...a,
+          client_id: req.client_id,
+          redirect_uri: req.redirect_uri,
+          code_challenge: req.code_challenge,
+          code_challenge_method: req.code_challenge_method,
+          state: req.state,
+          resource: req.resource,
+        });
+        window.location.assign(redirect);
+      }}
+      onDeny={() => window.location.assign(denyRedirect(req.redirect_uri, req.state))}
+      head={(busy) => (
+        <section className="flex items-start gap-4">
+          <HorizonMark state={busy ? "thinking" : "idle"} size={36} interactive />
+          <div className="min-w-0">
+            <h1 className="text-xl font-semibold tracking-[-0.04em]">{client.name} wants to use roll</h1>
+            <p className="mt-1 text-[12px] text-subtle">{clientIdentity(client.id)}</p>
+            <p className="mt-1 text-[13px] text-muted">
+              It will act on your behalf through roll&apos;s MCP server, and can do only what you allow below. You can narrow it now and
+              revoke it any time in MCP &amp; access.
+            </p>
+            <p className="mt-2 flex flex-wrap items-center gap-1 font-mono text-[11px] text-subtle">
+              <ExternalLink className="size-3" /> returns to {back.protocol}//{back.host}
+              {client.uri ? ` · ${client.uri}` : ""} · client {client.id}
+            </p>
+          </div>
+        </section>
+      )}
+    />
+  );
+}
 
+export type Loaded<T> = { state: "loading" } | { state: "signed-out" } | { state: "error"; error: string } | { state: "ready"; me: Me; catalog: Catalog; value: T };
+
+/**
+ * What a consent page needs, loaded as the signed-in person: who they are, the catalogue they
+ * may build from, and the page's own thing (the client, the device). Signed out, it asks them
+ * to sign in and loads again once they have.
+ */
+export function useSignedInLoad<T>(load: () => Promise<T>, deps: unknown[]): Loaded<T> {
+  const [loaded, setLoaded] = useState<Loaded<T>>({ state: "loading" });
   useEffect(() => {
-    const load = async () => {
+    const run = async () => {
       try {
-        const [me, catalog, client] = await Promise.all([accessApi.me(), accessApi.catalog(), accessApi.client(req.client_id)]);
-        setSignedOut(false);
-        setLoaded({ me, catalog, client });
-        setName(client.name);
-        const preset = presetFor(req.scope, catalog.presets);
-        if (preset) setRules(presetRules(preset));
+        const [me, catalog, value] = await Promise.all([accessApi.me(), accessApi.catalog(), load()]);
+        setLoaded({ state: "ready", me, catalog: catalogFor(catalog, me), value });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (/token|401|unauthori/i.test(msg)) {
-          setSignedOut(true);
+          setLoaded({ state: "signed-out" });
           requestSignIn();
-        } else setError(msg);
+        } else setLoaded({ state: "error", error: msg });
       }
     };
-    void load();
-    return subscribeToken(() => void load());
-  }, [req.client_id, req.scope]);
+    void run();
+    return subscribeToken(() => void run());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+  return loaded;
+}
 
-  if (signedOut) {
+/** A consent page that isn't ready: signing in, loading, or what went wrong. */
+export function LoadState({ loaded, what }: { loaded: Exclude<Loaded<unknown>, { state: "ready" }>; what: string }) {
+  if (loaded.state === "signed-out") {
     return (
       <section className="rise rounded-xl border border-line bg-panel p-6">
         <HorizonMark state="sleep" size={28} />
-        <h1 className="mt-4 text-[15px] font-medium">Sign in to roll to connect this client</h1>
-        <p className="mt-1 text-[13px] text-muted">Use roll&apos;s operator token. The request waits here.</p>
+        <h1 className="mt-4 text-[15px] font-medium">Sign in to roll to {what}</h1>
+        <p className="mt-1 text-[13px] text-muted">The request waits here.</p>
         <button onClick={requestSignIn} className={`${primary} mt-4`}>
           Sign in
         </button>
       </section>
     );
   }
-  if (!loaded) return error ? <Problem text={error} /> : <Connecting />;
-  const { me, catalog, client } = loaded;
-  if (me.kind !== "operator") return <Problem text="Only roll's operator can connect clients, and you're signed in with a token." />;
-  if (!client.redirect_uris.includes(req.redirect_uri)) return <Problem text="The redirect isn't one this client registered." />;
+  return loaded.state === "error" ? <Problem text={loaded.error} /> : <Connecting />;
+}
 
-  const back = new URL(req.redirect_uri);
+/**
+ * What a person allows a client, the same on the consent screen and for a device: the rules
+ * (starting from the preset its `scope` asks for), a name, an end, a rate, and asking for the
+ * rest. `onAllow` throws to show an error.
+ */
+export function AllowForm({
+  me,
+  catalog,
+  clientName,
+  scope,
+  onAllow,
+  onDeny,
+  head,
+}: {
+  me: Me;
+  catalog: Catalog;
+  clientName: string;
+  scope?: string | null;
+  onAllow: (a: Allowed) => Promise<void>;
+  onDeny: () => void | Promise<void>;
+  head: (busy: boolean) => ReactNode;
+}) {
+  const [rules, setRules] = useState<Rule[]>(() => {
+    const preset = presetFor(scope ?? undefined, catalog.presets);
+    return preset ? presetRules(preset) : [];
+  });
+  const [name, setName] = useState(clientName);
+  const [expiry, setExpiry] = useState(2);
+  const [rateText, setRateText] = useState("");
+  const [askOtherwise, setAskOtherwise] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const rate = parseRate(rateText);
+  if (me.kind !== "operator" && me.kind !== "user") return <Problem text="Connect clients signed in to your account, not with a token." />;
+
   const allow = async () => {
     setBusy(true);
     setError(null);
     try {
       const ms = EXPIRIES[expiry].ms;
-      const { redirect } = await accessApi.authorize({
-        client_id: req.client_id,
-        redirect_uri: req.redirect_uri,
-        code_challenge: req.code_challenge,
-        code_challenge_method: req.code_challenge_method,
-        state: req.state,
-        resource: req.resource,
-        name: name.trim() || client.name,
-        rules,
-        expires_at: ms === null ? null : Date.now() + ms,
-        rate_per_minute: rate.rate,
-        ask_otherwise: askOtherwise,
-      });
-      window.location.assign(redirect);
+      await onAllow({ name: name.trim() || clientName, rules, expires_at: ms === null ? null : Date.now() + ms, rate_per_minute: rate.rate, ask_otherwise: askOtherwise });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+  const deny = async () => {
+    setBusy(true);
+    try {
+      await onDeny();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
@@ -144,23 +220,7 @@ function Ask({ req }: { req: AuthorizeRequest }) {
 
   return (
     <div className="rise space-y-6">
-      <section className="flex items-start gap-4">
-        <HorizonMark state={busy ? "thinking" : "idle"} size={36} interactive />
-        <div className="min-w-0">
-          <h1 className="text-xl font-semibold tracking-[-0.04em]">
-            {client.name} wants to use roll
-          </h1>
-          <p className="mt-1 text-[12px] text-subtle">{clientIdentity(client.id)}</p>
-          <p className="mt-1 text-[13px] text-muted">
-            It will act on your behalf through roll&apos;s MCP server, and can do only what you allow below. You can narrow it now and
-            revoke it any time in MCP &amp; access.
-          </p>
-          <p className="mt-2 flex flex-wrap items-center gap-1 font-mono text-[11px] text-subtle">
-            <ExternalLink className="size-3" /> returns to {back.protocol}//{back.host}
-            {client.uri ? ` · ${client.uri}` : ""} · client {client.id}
-          </p>
-        </div>
-      </section>
+      {head(busy)}
 
       <section className="rounded-xl border border-line bg-panel p-5">
         <Builder catalog={catalog} rules={rules} onChange={(r) => setRules(r)} />
@@ -190,7 +250,7 @@ function Ask({ req }: { req: AuthorizeRequest }) {
           <input type="checkbox" checked={askOtherwise} onChange={(e) => setAskOtherwise(e.target.checked)} className="mt-0.5" />
           <span>
             Ask me for anything else
-            <span className="block text-[12px] text-muted">What these rules don't allow waits for your approval instead of being refused.</span>
+            <span className="block text-[12px] text-muted">What these rules don&apos;t allow waits for your approval instead of being refused.</span>
           </span>
         </label>
       </section>
@@ -206,12 +266,15 @@ function Ask({ req }: { req: AuthorizeRequest }) {
           ))
         )}
       </div>
+      {waitsForAdmin(me, rules, askOtherwise) && (
+        <p className="text-[12px] text-accent">It reaches what an admin approves first: {clientName} connects now, and works once an admin approves it (they&apos;re mailed).</p>
+      )}
       <ErrorNote error={error} />
       <div className="flex gap-3">
         <button onClick={allow} disabled={busy || rules.length === 0 || Boolean(rate.problem)} className={primary}>
-          {busy ? <span className="shimmer">Connecting…</span> : `Allow ${client.name}`}
+          {busy ? <span className="shimmer">Connecting…</span> : `Allow ${clientName}`}
         </button>
-        <button onClick={() => window.location.assign(denyRedirect(req.redirect_uri, req.state))} disabled={busy} className={btn}>
+        <button onClick={deny} disabled={busy} className={btn}>
           Deny
         </button>
       </div>
