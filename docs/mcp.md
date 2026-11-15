@@ -393,6 +393,9 @@ previews are listed once those products are on.
 | `storage_list_trash` | A bucket's deleted objects. | `GET /v1/storage/buckets/{name}/trash` |
 | `storage_restore_object` | An object back from the trash. | `POST /v1/storage/buckets/{name}/trash/restore` |
 | `storage_usage` | A bucket's usage. | `GET /v1/storage/buckets/{bucket}/usage` |
+| `storage_usage_all` | Storage and requests across every bucket. | `GET /v1/storage/usage` |
+| `storage_update_bucket` | Change a bucket's versioning, lifecycle rules, CORS, trash days, tags or whether it's public: what's left out stays. | `PATCH /v1/storage/buckets/{bucket}` |
+| `storage_delete_objects` | Delete these keys, or every object under a prefix (to the trash). | `POST /v1/storage/buckets/{bucket}/delete` |
 | `streams_list` | Kafka-compatible streams. | `GET /v1/streams` |
 | `streams_get` | A stream's bootstrap address, topics and throughput. | `GET /v1/streams/{stream}` |
 | `streams_create` | A new stream (its first API key needs reveal to see). | `POST /v1/streams` |
@@ -432,6 +435,14 @@ previews are listed once those products are on.
 | `queues_purge_queue` | Drop every message in a queue. | `POST /v1/queues/vhosts/{vhost}/queues/{queue}/purge` |
 | `queues_peek` | Messages in a queue, without consuming them. | `GET /v1/queues/vhosts/{vhost}/queues/{queue}/messages` |
 | `queues_publish` | Publish to an exchange with a routing key. | `POST /v1/queues/vhosts/{vhost}/publish` |
+| `queues_list_connections` | Open client connections: who, from where, and their channels. | `GET /v1/queues/connections` |
+| `queues_close_connection` | Close a client's connection (it may reconnect). | `DELETE /v1/queues/connections/{id}` |
+| `queues_list_channels` | Open channels with their prefetch and unacknowledged messages. | `GET /v1/queues/channels` |
+| `queues_list_policies` | Policies (message TTL, dead-lettering, length limits) and the queues they match. | `GET /v1/queues/policies` |
+| `queues_set_policy` | Create or replace a policy: a pattern of queue or exchange names and what applies to them. | `PUT /v1/queues/policies/{vhost}/{name}` |
+| `queues_delete_policy` | Delete a policy. | `DELETE /v1/queues/policies/{vhost}/{name}` |
+| `queues_rates` | Publish, deliver and ack rates over the last minutes. | `GET /v1/queues/rates` |
+| `queues_usage` | Messages and storage by day. | `GET /v1/queues/usage` |
 | `tasks_publish` | Deliver an HTTP request to a URL, topic or queue, now or later, with retries. | `POST /v1/tasks/publish` |
 | `tasks_list_messages` | Messages by state, queue or topic. | `GET /v1/tasks/messages` |
 | `tasks_get_message` | A message and its delivery attempts. | `GET /v1/tasks/messages/{id}` |
