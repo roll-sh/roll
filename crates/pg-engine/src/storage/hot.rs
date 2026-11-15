@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use hashbrown::HashMap;
 use std::ops::Bound;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// A relation's key prefix: table and index (`keys::index_prefix`).
 pub(super) const PREFIX: usize = 8;
@@ -134,6 +134,42 @@ pub(super) struct Hot {
     /// Scans in ranges not kept (negative: refused, counting up to a retry), and how often
     /// each was refused.
     seen: Mutex<HashMap<Prefix, (i32, u32)>>,
+}
+
+const MASK_WORDS: usize = 4;
+
+/// A prefix's word and bit in a `PrefixBits`.
+#[inline]
+fn bit(p: &Prefix) -> (usize, u64) {
+    let h = (u64::from_ne_bytes(*p).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as usize;
+    (h / 64 % MASK_WORDS, 1 << (h % 64))
+}
+
+/// Relation prefixes as bits, read without a lock: a prefix whose bit is clear is not in the
+/// set (a set bit: it may be; 256 bits, so a few prefixes rarely share one).
+#[derive(Default)]
+pub(super) struct PrefixBits([AtomicU64; MASK_WORDS]);
+
+impl PrefixBits {
+    /// Whether the relation of key `k` (its first `PREFIX` bytes) may be in the set: true for
+    /// a key shorter than a prefix.
+    #[inline]
+    pub(super) fn may_hold(&self, k: &[u8]) -> bool {
+        let Some(p) = k.get(..PREFIX).and_then(|p| Prefix::try_from(p).ok()) else { return true };
+        let (w, b) = bit(&p);
+        self.0[w].load(Ordering::Acquire) & b != 0
+    }
+
+    /// Add the relation of key `k` (none for a key shorter than a prefix).
+    #[inline]
+    pub(super) fn add(&self, k: &[u8]) {
+        if let Some(p) = k.get(..PREFIX).and_then(|p| Prefix::try_from(p).ok()) {
+            let (w, b) = bit(&p);
+            if self.0[w].load(Ordering::Relaxed) & b == 0 {
+                self.0[w].fetch_or(b, Ordering::Release);
+            }
+        }
+    }
 }
 
 /// The prefix of a scan of [start, end) that reads one whole relation's range.

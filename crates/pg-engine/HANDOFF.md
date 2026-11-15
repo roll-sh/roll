@@ -3361,6 +3361,107 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - Item 2's batches past the scan (joined rows from batches, the probe hits aggregated from
       columns), item 4 (streaming merge joins) and item 5 (work_mem for hash tables and sorts)
       are not started.
+- **Executor, round 17: storage sources found by binary search, memtables skipped by relation,
+  numeric hash keys without allocation, one statement-start clock reading** (agent 232; BENCH.md
+  "Executor, round 17"). Lane C, all three servers at max_parallel_workers_per_gather 2,
+  max_parallel_workers 8 and a 2 GB cache, the host at load 15-40 (other agents' trains and
+  builds): TPC-H SF1 14.22 -> 13.49 s against PostgreSQL's 18.11 and pgrust's 11.85 (CPU 37.08 -> 35.35 s against 46.47 and 19.17; user instructions -2.0 to -2.4% in six rounds; engine peak 1,692-1,700 -> 1,692-1,703
+  MB). Point selects at 8 clients: the clock change -5.3% user instructions a read (every pair
+  -3.9 to -6.8%), the storage changes -3.9% more; roll 80,440 ops/s against pgrust's 76,212 and
+  PostgreSQL's 46,527 (plain dist).
+  - **A merging scan's L1 files by two binary searches** (`storage::l1_in`, used by `sources`
+    and `same_sources`): every `Scan::new` and every `Scan::reseek` tested each L1 file's
+    first and last key against the range (two memcmps a file, SF1's bench database has 76
+    files), and a worker's lookup scan is sought on for every outer row (`Lookup::entries`,
+    agent 212's reseek). The level is in key order and no file overlaps another, so the files
+    of a range are a slice: `partition_point` on the last keys, then on the first keys (debug
+    builds compare it with the filter). User instructions q03 -5.4 / -6.3 / -6.2, q07 -5.5 /
+    -5.8 / -5.6, q20 -5.4 / -5.6 / -5.7, q21 -3.7 / -3.4 / -3.2, q04 -3.4 / -3.3 / -3.3, q22
+    and q05 -2.4 to -3.7.
+  - **A memtable's relations as bits** (`Memtable::prefixes`, `hot::PrefixBits`: 256 bits of
+    the 8-byte relation prefixes it holds keys of, set before an entry goes in, read without a
+    lock): a point read (`mem_get`), a unique probe's first key (`smallest_key`) and a merging
+    scan's memtable cursor (`Cursor::fill`) of a relation the memtable holds no key of leave
+    the skip list alone (no epoch pin, no search). After a load the memtable holds the catalog's
+    and the statistics' writes, so every lookup of TPC-H's tables searched it. q07 -3.7 x3,
+    q08 -3.1 / -3.1 / -3.4, q03 / q09 -2 to -4.4.
+  - **A numeric hash key without allocating** (`pghash::hash_numeric_small`): hash_numeric made
+    the value's base-10000 digits through `DecInt` vectors (abs, mul_pow10, base10000, the
+    digits, the bytes: five allocations a row); a value of up to 19 digits at a scale of up to
+    16 has them on the stack, the same hash (unit test against the general path over 4,000
+    values). q02's hash on ps_supplycost: -4.6 / -4.5 / -4.6%, own-run wall 3 of 3 pairs.
+  - **One statement-start clock reading per message** (`Session::message_starts`, read at
+    Query, Parse, Bind, Execute and a fastpath call, as SetCurrentStatementStartTimestamp):
+    pg_stat_activity's query_start and state_change, `statement_timestamp()`, an implicit
+    transaction's start (`now()`, xact_start: the first message since the last transaction
+    ended, `xact_from`, as start_xact_command's StartTransaction), BEGIN's, log_duration's
+    start (`duration_logged` reads the clock only when a duration may be logged), and
+    pg_prepared_statements' / pg_cursors' times share it. Besides: no planning timer without
+    pg_stat_statements tracking, no auto_explain timer without auto_explain, no
+    `Database::touch` per statement (a database with sessions is never idle; a transaction's
+    end touches it at most once a millisecond a session), lock holds ordered by the time stamp
+    counter on x86-64 (`locks::hold_clock`), the unused `Txn::started` gone. 25 clock reads a
+    point select at one client (perf uprobe on clock_gettime; 6.6 of them the read's spin) ->
+    5.7-7.0 (16.5-21 before). Behaviour: checked against PostgreSQL 18.6 (a232-pgref) with a raw-protocol
+    probe, messages 20 ms apart. PostgreSQL: statement_timestamp() = query_start for the
+    backend's own row in every case; now() = query_start for a one-statement transaction (and
+    the second statement of a two-statement Query); now() < statement_timestamp() in a block
+    and in the extended protocol (the transaction begins at the Parse, or at the Bind of a
+    prepared statement); query_start <= state_change. roll before: statement_timestamp() =
+    query_start false everywhere, now() < statement_timestamp() even for one statement, and
+    query_start after state_change in the extended protocol. Now all as PostgreSQL's
+    (`tests/wire.rs` `statement_timestamps_follow_the_messages`). Left: PostgreSQL's
+    pg_stat_activity is a snapshot per transaction (two Executes in one implicit transaction:
+    the second sees the first's query_start); roll reads the live row.
+  - Dropped (patches with numbers in `~/.cache/a232/patches/`):
+    - Lead 1, the hot ranges' lock off the read path (`Hot::mask`, the kept prefixes as bits,
+      `get` / `scan` skip the `RwLock` for a relation no range keeps): user instructions -0.6%
+      on q07 (the bar is 3%), cycles -1.9 / -5.6% over the 22 queries in the two clean rounds,
+      own-run wall q07 3 of 3 (-1 to -6%), q08 3 of 3. A cycles-only win; it lands if the gate
+      admits cycles.
+    - Lead 4, nested loops that rescan (`NestLoopNode::rescan`: the outer side rescanned or
+      opened again, an unparameterized inner side's node kept and rescanned) and an Aggregate
+      opening again only an input that can't rescan (q17's bitmap heap scan): q02 -2.2 / -2.3
+      / -2.3%, q17 flat. q02's SubPlan is 7.4% of its instructions afterwards, 6.0 of it the
+      kept tree's index scans; q17's per-run cost is the bitmap scan's open, which a kept
+      Aggregate doesn't save.
+    - Tuple sizes of a hash join's rows (an ASCII char(n)'s characters not counted again, a
+      numeric's digit count in u64): q02 -3.5 / -2.7 / -3.1 (two rounds above 1.0 foreign
+      core).
+  - Measured, not changed:
+    - q02 (0.6 s against PostgreSQL's 0.25): 65% is the hash build of 158,720 nested-loop rows
+      (the partsupp index scan's 1,984 runs of 80 random row fetches through a merging scan
+      each, `get_sorted`; the rows' decode; `concat_rows`; the 8 batches' spill and reload),
+      the SubPlan 7-13%.
+    - q07 / q05 / q08's workers' lookups: `Store::get_with` 35% of q07's cycles, 60% of its own
+      the row's first byte (a cache miss), `block_with` 8% (the block cache's shard mutex and
+      `Arc`), `Block::seek` 12% (misses on restarts and entries); in instructions the point
+      path is spread thin (seek 4.7%, read 3.2%, memcmp 9%).
+    - Clock reads left in a point select: the message's (2: Bind and Execute), the Sync's
+      state change (1), pgstat's flush check at the transaction's end (1), and the read's spin.
+  - Tests: two verification trains (`tools/verification-train.sh`, `TRAIN_NO_CHECKOUT=1`). First
+    on every commit of the round on `eccaa9b8f` (`a13671c43`): release crate tests pass, Clippy
+    20 warnings (none in a changed file), crash_random seeds 1-30 x 4, power_cut 4 passed, the
+    power and async power crash rounds pass, debug crate tests pass (crash_bulk's
+    `kill_during_compactions_after_deletes` too, on agent 228's 64 MB thread), the regression
+    suite 51,148 / 51,150 units with none newly differing, isolation 1,647 / 1,648 permutations
+    (intra-grant-inplace, as on the other trains), pg_dump TAP 14,609 passed. The L1 search, the
+    memtable bits and the numeric hash then landed on agent 229's commits (`db44d835f` ..
+    `c6845b8fa`, files of theirs untouched) after the targeted release set on that tree (lib,
+    wire, golden, parallel_scan, query_spill, heap_order_scan, big_tables, txn_spill,
+    kept_plans, the storage tests, twophase, crash_random 1-30): all pass but
+    `wire::parallel_workers_seen_by_others` once (a wait event sampled under load; 3 of 3 alone).
+    Second, the clock commit rebased onto that head (`25865c3ea`; agent 229 had changed BEGIN's
+    path in `session/mod.rs`): the same, but the debug crate tests' `wire::
+    big_bytea_values_go_out_in_linear_time` took 23.6 s against its 20 s bound at load 30
+    (17.4 and 19.2 s alone). Unit tests: `pghash::small_numeric_hash_is_hash_numeric`; `l1_in`
+    is checked against the per-file filter on every call in debug builds.
+  - Next steps (largest first): q02's hash build (the inner index scan's random row fetches:
+    a batched sorted multi-get over the 80 keys of a run, prefetching the next block; the
+    rows' decode into `Value`s and their copy into joined rows); the point read's cache misses
+    (prefetch for a chunk's sorted keys, a block cache without a mutex and reference count per
+    lookup); q17's bitmap heap scan rescan; the hot-range lock (above) if the gate takes
+    cycles.
 - **Executor, round 16: SubPlan trees rescanned, behaviour fixes, q13's customer hash in the
   workers** (agent 227; BENCH.md "Executor, round 16"). Lane C, all three servers at
   max_parallel_workers_per_gather 2, max_parallel_workers 8 and a 2 GB cache, the host loaded
@@ -10116,6 +10217,138 @@ from `perf record` of c1; round 1's figures from agent 220's table):
   5. Memory (lead 5 of the brief) not started: the engine 1,675 MB against PostgreSQL's 1,651
      and pgrust's 1,871 at 2 GB caches.
 
+### Batch aggregation, round 3 (agent 234; BENCH.md "Batch aggregation, round 3")
+
+The bulk script's `count(*), sum(c)` (c float8) went the row path: `AggPlan::compile` gives up
+on the whole scan as soon as one aggregate has no batch kernel, and float aggregates
+(`Partial::Floats`), `sum(int2 / int4)` (`Partial::SumInt`) and min / max (`Partial::Best`) had
+none. Base `count_after` profile: `partial_row` 29%, `LazyBuf::read` 12%, `skip_value` /
+`decode_value` 9%, `FloatStats::push` 7% (the executor's checked serial sum). Three commits:
+
+- **Float aggregates and integer sums in the batch path** (`vector::AggArg::Float`,
+  `Partials::batch_run` / `run_sums` / `run_commit`). A float4 / float8 column argument of avg,
+  variance or stddev, or of sum over float8 (sum(float4), `SumF4`, has no partial state; the
+  first commit's message says float4 too), is decoded as the batch's `F64` column and its
+  live, non-NULL values are appended to the group's `Floats` in row order (keyless: one
+  `extend`; grouped: by each row's group). The executor still sums each part's values in the serial order, so the results
+  are the row path's bit for bit. `sum(int2 / int4)` (`SumInt`, which raises at the row whose
+  running sum leaves an int8) is taken when the lane's bound times the batch's rows is under
+  2^62 and, per group, the state's magnitude plus the bound times the group's rows stays inside
+  an int8, so no running sum can overflow (values and words groups); else the batch goes the row
+  way, which raises where it did. `batch_row` takes a float column too (its bits through `vals`).
+- **A float part merged in one pass** (`FloatStats::push_all`): `FloatAgg::merge` sums a part's
+  values in a plain loop (with Sxx for avg / variance / stddev: `push`'s arithmetic, step for
+  step) and keeps the result when Sx (and Sxx) end finite: an infinite or NaN sum stays so, so a
+  finite end means no step overflowed. Otherwise nothing is kept and the checked `push` runs
+  value by value, raising at the same value as before.
+- **min / max, and count(*) alone** (`AggArg::Best`, `best_rows`; `Pre::decode_none`). min / max
+  of an int2, int4, int8, date, float4 or float8 column (no bpchar or tid: those keep the old
+  value on a tie): each group's best row of the batch by the row path's rule (`float_cmp` for
+  floats; a later row equal to the best replaces it, as the X_larger / X_smaller transitions keep
+  the new value, so 0 and -0 tell), then one `Best::add` of that row's value, which applies the
+  rule against the state. A plan that reads no column and has no filter (count(*), constants) no
+  longer walks every row's header (`decode_none`). Both are functions of their own
+  (`#[inline(never)]`, chosen by `partial_chunk`): written inside `Pre::decode` and `run_sums`
+  (builds n003 / n004) they cost q01 +5.2 / +0.8% and q06 +5.8 / +0.5% user instructions, every
+  scan's decode loop compiled differently.
+
+Results: `~/.cache/a234/bench/dump.sql` (sums, averages, variances, min / max of float and integer
+columns, keyless and by a text key, filtered; 763 lines) gives the same bytes on base and on
+every build of the round, on the bulk table after its UPDATE / DELETE / VACUUM. Those float sums
+are not PostgreSQL's on this table, before or after this round: past the heap model's limit the
+engine reads in key order, PostgreSQL's serial scan in heap order (the UPDATE's new versions at
+the end): `sum(c)` 54035714.28571466 against 54035714.285715684. Tables the heap model covers read
+in PostgreSQL's order and don't reach the batch path (`Source::Rows`).
+
+Measured (BENCH.md has the tables; lane C, the bulk table at 750,000 rows after the script's
+DELETE; G user instructions of the server's cgroup):
+
+- Plain dist, base against the three commits, 5 alternating pairs: `count(*), sum(c)` 1.346 ->
+  0.495 (-63.2% in every pair); the whole script with its background steps 61.62 -> 60.55 (-1.2 to
+  -2.7% a pair); every other step of the script within +-0.5% but DELETE and its compaction (+-5
+  to 17% both ways, as in round 14). Extra steps on the same table: avg(c) -60.1%, `GROUP BY b`
+  (1,000 text keys, count, sum(c)) -37.0%, count(b) +0.2%. Without the two indexes (single runs):
+  count(*) 0.350 -> 0.251, sum(a) 0.665 -> 0.446, min(a), max(a) 1.403 -> 0.443.
+- PGO builds (`tools/dist-pgo.sh` of each commit, same checkout), 3 pairs: `count(*), sum(c)`
+  1.012 -> 0.482 (-52.4%), the script 52.06 -> 51.26 (-0.9 to -2.7%); COPY in +0.4%, VACUUM +0.7%,
+  ANALYZE +0.9% (the profile's shifts), avg(c) -46.9%, `GROUP BY b` -24.9%.
+- Same day, same lane and settings: PostgreSQL 18.6 the script 52.33, `count(*), sum(c)` 0.489;
+  pgrust 44.61 and 0.168. Roll (plain dist) 60.55 = 1.16x PostgreSQL, 1.36x pgrust (base 1.18x,
+  1.38x); PGO 51.26 = 0.98x, 1.15x. `count(*), sum(c)`: 1.01x PostgreSQL, 2.9x pgrust (base 2.75x,
+  8.0x).
+- TPC-H q01 / q06 (3 alternating pairs, 5 runs a pass): plain dist user instructions +0.02 /
+  +0.03%; PGO -2.0 / -0.15%. Cycles are worse: plain dist q01 +4 to +6% (base 5.85-5.98 G, the
+  round's builds 6.07-6.38 G at 0.3-0.8 foreign cores, n002 as much as n005), q06 noisier (base
+  itself 4.63-5.01 G); PGO q06 +7 to +11%, q01 mixed. Same instructions, so placement: a cycles
+  profile of q06 has `Pre::decode` (its source unchanged) at +36% cycles, the other functions
+  +5-12% (that pass's load), and its hottest instructions moved from the start of a 64-byte line
+  (`...5c0`, `...5d4`) to its middle and across it (`...8f7` to `...924`). The host is a Xeon
+  W-2295 (Cascade Lake: the JCC erratum, a jump crossing or ending on a 32-byte boundary is not
+  cached in the decoded-uop cache). Built with LLVM's padding for it
+  (`-Cllvm-args=-x86-branches-within-32B-boundaries`, both commits, plain dist), the round's q01
+  / q06 cycles are base's: +1.9 / -3.5 / +0.8% and +1.8 / -1.3 / +2.6% in 3 pairs (instructions
+  +0.9 / +0.1%: the padding differs). The padding also makes base itself cheaper in cycles (q01
+  5.38-5.73 G against 5.85-5.98, q06 4.22-4.57 against 4.63-4.71) for +3.8 / +4.5% instructions.
+- Point reads (lane A, pgbench select-only prepared at 8 clients, scale 10, 5 alternating pairs):
+  43,990 -> 43,968 user instructions a transaction (-0.05%; pairs -0.24 to +0.04%).
+- Foreign load on lane C was 1.8-3.9 cores in every bulk run (other sessions' unpinned builds),
+  so no bulk pair is under 1.0; the server cgroup's instruction counts don't see it (each build's
+  `count(*), sum(c)` within 0.1% from run to run). The TPC-H passes ran at 0.3-1.2.
+
+Measured, not changed:
+- With the script's indexes the engine plans `count(*)` and `sum(a)` as a Parallel Index Only Scan
+  of `bulk_a` (2.0 G) where PostgreSQL runs a Parallel Seq Scan (0.28 G): the engine costs the
+  whole index at 15,878 against PostgreSQL's 20,490 (`Index Only Scan using bulk_a`, the min /
+  max InitPlans' paths), its btree model smaller than PostgreSQL's index after the UPDATE, DELETE
+  and VACUUM. A plan difference (EXPLAIN differs): for the btree size model's owners.
+- `GROUP BY a, b` (750,000 groups) stays serial in both (HashAggregate; the engine models its
+  spill, `may_spill`), 2.38 G against PostgreSQL's 1.35 and pgrust's 1.15.
+- `GROUP BY b` after the round (1.45 G against PostgreSQL's 1.36, pgrust's 0.59): a parallel
+  scan's chunks (`CHUNKS_PER_WORKER`, 64 a worker) each send their own part with every group
+  (1,000 a part: each group's key values, states and float vector made, then freed on the
+  executor's thread: 12% of its samples in the allocator, 5% in the executor's merge), and a
+  text key past 8 bytes is hashed as bytes per row (`batch_key`, `bidx`: 12%). Order-dependent states (floats, min / max) can't
+  share a part across chunks unless each group's values keep their chunk's place.
+- count(*)'s floor after the round (0.251 G, 335 instructions a row; pgrust 0.055): the store's
+  read path is about 60% of it (0.15 G: in base's profile `Block::read` 16%, `fill_batch_with`
+  15%, `RowBatch::push_in` 14% of 0.35 G; every entry's key rebuilt and copied into the batch); with columns, `Pre::decode` walks every value up
+  to the last one read (about 240 instructions a row for the 4th column: the format's tags).
+
+Dropped: n003 / n004 (the same changes written inside the hot functions; numbers above;
+`~/.cache/a234/patches/n003.patch`, `n004.patch`).
+
+Next (largest first):
+1. Code placement of the scan loops: `-Cllvm-args=-x86-branches-within-32B-boundaries` in the
+   dist and PGO builds (the build's owners: every workload measured, cycles first, as it adds
+   3-5% instructions of padding); measured here on q01 / q06 only: 2-8% fewer cycles, and the
+   placement swings gone (without it a change anywhere in the executor moves q01 / q06 cycles
+   5-10% with the same instructions).
+2. The store's read path for scans (keys copied per entry, the block entry decode).
+3. `GROUP BY` parts: one part per worker across its chunks for order-dependent states (each
+   group's float values tagged with their chunk), and a key cache for text keys.
+4. The btree size model after bulk UPDATE / DELETE / VACUUM (the plan difference above).
+
+Commits as pushed (rebased onto origin's `c6845b8fa`, no conflict): `3715e3cc7`, `a3e6c1df2`,
+`8d29a561b` (measured and trained as `067603ccb`, `d2cf6e02b`, `df19df4ee` on `2947ce5a4`; on the
+rebased head release lib tests 223 passed, parallel_scan 13, golden 3).
+
+Verification: release build, release lib `storage::cols` tests, `parallel_scan` (13 passed;
+`vector_batches_match_rows` now also draws float aggregates over a float8 column with NULLs and
+signed zeros, integer sums and min / max of int2 / int4 / date / float8 columns), release Clippy
+with no warning in a changed file. The verification train on `df19df4ee` (the three commits on
+origin's `2947ce5a4`, `TRAIN_NO_CHECKOUT=1`): release crate tests pass; Clippy 20 warnings, none
+in the changed code; crash_random seeds 1-30 x 4; the power stage (power_cut 4 passed, seeds 1-30
+x 4 with `CRASH_POWER=1`, with and without `CRASH_ASYNC=1`); debug crate tests pass; isolation
+1647 / 1648 permutations (intra-grant-inplace, as before); pg_dump_tap 14,609 passed, 0 failed.
+The regression suite gave 51,075 / 51,150 with 73 newly differing units in copy, copyencoding,
+misc, psql, subscription and largeobject, every one the reference's: its server-side COPY TO /
+lo_export failed with "Permission denied" because the reference container (`a234-rref`) ran as
+uid 1000 and the harness makes its results directory inside the container for the image's
+postgres user. Those six files after test_setup against a reference started as the image's own
+user (`a234-rref2`): 1,881 / 1,881 units, newly differing 0, i.e. 51,148 / 51,150 as the baseline.
+Run regress references as the image's user, not `--user 1000:1000`. No planner change: the
+difftest guard was not run.
+
 ## Point reads, round 5 (agent 230)
 
 BENCH.md "Point reads, round 5" has the measurements (lane A, two cores, plain dist: prepared point
@@ -11176,7 +11409,8 @@ Not done, for the next round (BENCH.md has the profiles):
 - count(*) (2.7x PostgreSQL, 7.8x pgrust): the batch aggregation path (agent 226's) takes no
   float8 sum: `sum(c)` is collected row by row (`Partial::Floats`) and summed in row order on
   the executor's thread; a float8 lane that keeps each chunk's values in row order for that sum
-  would let count(*) and sum(float8) take the batch path.
+  would let count(*) and sum(float8) take the batch path. (Done by agent 234: "Batch
+  aggregation, round 3", 1.346 -> 0.495 G.)
 
 Commits: `d23bfde2d` (compaction's L1 inputs), `7c8da4c1b` (the policy), `3647b3556` (one-run
 index builds). No format change: the files and the manifest are written as before
@@ -12408,12 +12642,18 @@ with them. The exploratory probes (raw protocol, Python: 774 cases, 461 differin
   body of a SQL function the planner evaluates is bound with its PL/pgSQL calls left
   (`Binder::skip_procs`): they run once, when the function runs (its custom plan folds them),
   as they do in PostgreSQL (two NOTICEs before). CREATE / ALTER TABLE's CHECK is analyzed
-  without running them (they ran at CREATE TABLE). A FROM function call that fails stays in the
+  without running them (they ran at CREATE TABLE); an index's expressions and predicate keep
+  their calls (`Clause::IndexExpr`, `IndexPredicate`): the build runs them as the table's
+  owner in a security-restricted operation, row by row (the first train found CREATE INDEX
+  running them as the caller while binding: privileges.sql's `sro_ifun` units). A FROM function call that fails stays in the
   plan for planning to raise (it was run twice at bind and again by the scan).
   Still differs: a CTE nothing reads and an output of a view or sub-select nothing reads are
   bound, so their calls run (a NOTICE PostgreSQL doesn't raise; no error, the pending error is
   dropped with them); a catalog change unrelated to the statement replans a named statement,
-  running its calls again (PostgreSQL's invalidation is by dependency).
+  running its calls again (PostgreSQL's invalidation is by dependency); an index expression's
+  calls run per row where PostgreSQL folds them once (the build at CREATE INDEX, as the owner,
+  and an INSERT's executor once a statement: two NOTICEs for a two-row INSERT, none at CREATE
+  INDEX, where PostgreSQL has two and one). DEFAULT and generated columns match (probe `t3`).
 - **Unknown parameter type oids, every statement shape** (`session/badparams.rs` rewritten):
   the model now follows INSERT (VALUES rows, a source query, ON CONFLICT, RETURNING), UPDATE
   (FROM, WHERE, RETURNING before SET), DELETE (USING, WHERE, RETURNING), MERGE (source, ON,
@@ -12471,6 +12711,41 @@ fset(0)` with an empty t0 (PostgreSQL's plan runs the function scan, the engine'
 the two "savepoint does not exist" and three "column ... of relation ... does not exist"
 routines aren't told apart (pg-engine location); date / timestamp / interval overflow
 routines (date_pli, timestamp_pl_interval, ... many sites).
+
+Verification (agent 233): release wire (73; `protocol_cases` 207, recorded again from
+PostgreSQL with `P` and `W`: 36 of them differ on the base, none now) and golden (in-process,
+wire, shuffled) on the release build of `97d327795`. Lane A, plain dist builds, base
+`2947ce5a4` against these commits (`0f59c9ded`; `8b0eaf4db` only collapses an `if` and a
+`to_vec` clippy found), 8 clients, alternating pairs: point reads +0.26% user instructions per
+read at the median of the 6 pairs with at most 0.84 cores of foreign load (-0.73% to +1.30%;
+medians of the raw counts -0.21%), cycles -1.2%, CPU per read -1.5%; four more pairs had 1.2
+to 2.3 cores of foreign load and are left out. An earlier round on `97d327795` (before custom
+plans read the PL/pgSQL flag with the plan counters instead of locking the statement's binding)
+had +0.4% and +5.4% in its two clean pairs, which led to that change. Short transactions at 8
+clients didn't resolve (8 of 10 pairs over a core of foreign load; one binary's instructions
+per transaction moved by up to 15% between runs); at 1 client, 8 pairs, 5 under a core of
+foreign load: +1.0% at their median (-5.6% to +2.5%), cycles -2.0%, CPU -0.4%. An
+instructions:u profile of a run of each build (`~/.cache/a233/runs/gP`, `gP8`) explains the
+noise: 13% of a transaction's user instructions are the connection's idle-read polling and
+another 10% clock reads, which grow with the time spent waiting, not with the work; outside
+them the new build ran -11.6% (1 client) and -2.9% (8 clients) instructions per transaction,
+and of the functions this change touches only `Session::bound_as` shows (453 / 441 and 516 /
+488 instructions a transaction, base / new). Nothing on either path does
+more than a load and a test (Bind reads `proc_deferred` with the plan counters it already
+locks; `bound_as` one flag of the binding it already holds); the error paths' routine names are
+`#[cold]` functions on the error side of a `Result`.
+The machine's build-cleanup timer (emergency mode above 85% disk) twice removed `target/`
+mid-build although the train's processes were in the checkout; the train ran with
+`CARGO_TARGET_DIR=.test-build/target` (git-ignored, not a `target/` the timer sweeps).
+Verification train on `8b0eaf4db` (`TRAIN_NO_CHECKOUT=1`): release, clippy (20 warnings, the
+base's; the first run's two in these files fixed), crash, power-cut, crash-power (sync and
+async), debug all 0; regress 51,131 of 51,150, 17 newly differing units, all privileges.sql's
+`sro_ifun` index units (CREATE INDEX ran the index expressions' immutable PL/pgSQL call while
+binding them, as the caller; fixed by `6272ff37b`, index expressions keep their calls);
+isolation 1647/1648 (intra-grant-inplace as before); pg_dump 14609 passed. On `6272ff37b`, the
+steps that change can reach: regress 51,148 of 51,150, newly differing 0 (privileges 1477 of
+1477 alone); isolation 1647/1648; pg_dump 14609 passed (a first try's engine couldn't bind its
+port: run again); release wire (73), golden (3), kept_plans (11), twophase (4) all passing.
 
 - **Scroll cursors after page splits**: not built; the design note is sharper. The model
   already counts its page allocations: `Btree::sizes` (`SizeGen`) is bumped by every split

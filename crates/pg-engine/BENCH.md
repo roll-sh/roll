@@ -285,6 +285,227 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Executor, round 17 (2026-11-14, agent 232)
+
+HANDOFF "Executor, round 17" has what changed: a merging scan's L1 files found by binary
+search, a memtable's relations kept as bits so lookups of other relations skip its skip list,
+numeric hash keys hashed without allocating, one statement-start clock reading per client
+message (and statement_timestamp / query_start / now() as PostgreSQL 18.6 has them). **b000** is
+`eccaa9b8f` (origin's head at the start); `c001`..`c007` the steps, each against the build before
+(below); **fin0** the landed commits on `eccaa9b8f` (the clock, the L1 search, the memtable
+bits, the numeric hash, the wire test; not `c001`, `c005`, `c007`). Plain dist builds (fat LTO,
+line tables) of one checkout and one target dir, equal-length binary paths
+(`~/.cache/a232/bin/<4 letters>`).
+
+Lane C: each server in its own container on CPUs 14,15,32,33 (`--memory 8g`, host network), the
+client on 16,17,34,35, every pass under `~/.cache/lane-c.lock` (shared with agent 231). All three
+servers at `max_parallel_workers_per_gather = 2`, `max_parallel_workers = 8` and a 2 GB cache
+(roll `--cache-mb 2048`; PostgreSQL 18.6 and pgrust `shared_buffers = 2GB`, set on pgrust at
+start and checked with SHOW). TPC-H SF1 from `bench tpch-load --sf 1`, the engine's data
+directory restored before every start. A gate pass: a fresh engine, a warm-up pass, then per
+query three runs inside one `perf stat -e instructions:u,cycles:u` window; each pass waited up
+to 60 s for the lane to fall under 30% busy and records its foreign load (busy jiffies of the
+server CPUs that weren't the engine's, in cores: `FOREIGN`). The host ran at load 15-40 (other
+agents' trains and builds on every other core).
+
+### TPC-H SF1, PostgreSQL, base (`b000`), head (`fin0`) and pgrust (medians; engines six alternating rounds, PostgreSQL and pgrust three passes each just before)
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pg s | 3.15 | 0.28 | 0.57 | 0.20 | 0.45 | 0.61 | 0.54 | 0.26 | 1.79 | 0.83 | 0.11 | 0.82 | 1.03 | 0.24 | 0.56 | 0.44 | 1.17 | 3.92 | 0.09 | 0.12 | 0.76 | 0.18 | 18.11 |
+| b000 s | 0.63 | 0.68 | 0.67 | 0.33 | 0.51 | 0.50 | 0.65 | 0.34 | 1.56 | 0.76 | 0.22 | 0.55 | 1.16 | 0.25 | 0.48 | 0.42 | 0.95 | 2.19 | 0.08 | 0.35 | 0.78 | 0.14 | 14.22 |
+| fin0 s | 0.59 | 0.63 | 0.56 | 0.29 | 0.50 | 0.50 | 0.62 | 0.32 | 1.45 | 0.76 | 0.21 | 0.53 | 1.10 | 0.23 | 0.46 | 0.40 | 0.93 | 2.08 | 0.09 | 0.36 | 0.76 | 0.13 | 13.49 |
+| pgrust s | 0.63 | 0.18 | 0.38 | 0.17 | 0.24 | 0.56 | 0.50 | 0.19 | 1.83 | 1.00 | 0.06 | 0.96 | 0.57 | 0.08 | 0.30 | 0.28 | 0.67 | 2.44 | 0.04 | 0.14 | 0.58 | 0.06 | 11.85 |
+| pg CPU, s | 9.17 | 0.40 | 1.52 | 0.58 | 1.23 | 1.50 | 1.54 | 0.70 | 4.69 | 2.19 | 0.11 | 2.49 | 2.74 | 0.58 | 1.36 | 0.94 | 1.27 | 10.42 | 0.22 | 0.13 | 2.24 | 0.45 | 46.47 |
+| b000 CPU, s | 1.83 | 0.67 | 1.90 | 0.95 | 1.18 | 1.41 | 1.85 | 0.67 | 4.46 | 2.17 | 0.23 | 1.63 | 2.95 | 0.53 | 1.33 | 1.15 | 1.90 | 7.02 | 0.22 | 0.36 | 2.29 | 0.41 | 37.08 |
+| fin0 CPU, s | 1.73 | 0.62 | 1.58 | 0.84 | 1.16 | 1.37 | 1.74 | 0.64 | 4.22 | 2.13 | 0.21 | 1.60 | 2.77 | 0.50 | 1.30 | 1.11 | 1.94 | 6.75 | 0.23 | 0.36 | 2.18 | 0.38 | 35.35 |
+| pgrust CPU, s | 1.29 | 0.23 | 0.74 | 0.37 | 0.47 | 1.15 | 1.00 | 0.34 | 3.54 | 1.10 | 0.06 | 1.63 | 1.15 | 0.18 | 0.57 | 0.47 | 0.72 | 2.65 | 0.08 | 0.14 | 1.16 | 0.13 | 19.17 |
+
+- The head against PostgreSQL: wall 13.49 s against 18.11 (0.74x), CPU 35.35 against 46.47 s;
+  against pgrust 1.14x wall, 1.84x CPU. PostgreSQL's and pgrust's passes ran in the half hour
+  before the engines' (the lane's, one after another), at a load like the engines' (PostgreSQL's
+  sum is 11% over agent 227's 16.38 s: the host was busier). Base -> head 14.22 -> 13.49 s,
+  CPU 37.08 -> 35.35 s.
+- User instructions, base -> head, the 22 queries: -1.96 / -2.11 / -1.96 / -2.43 / -2.10 /
+  -2.01% (six rounds); per query in every round q07 -8.7 to -10.5, q03 -7.9 to -8.9, q20 -5.9 to
+  -6.3, q02 -4.0 to -6.2, q21 -4.4 to -4.7, q04 -4.0 to -4.7, q05 -3.3 to -4.9, q09 -3.0 to
+  -7.0, q22 -3.3 to -6.2, q08 -3.2 to -3.4; none over +1% but q16 once (+2.2; -0.9 to +0.3 the
+  others). Cycles -2.82 / -6.37 / -2.03 / -2.91 / -3.35 / +0.50%. Rounds 1 and 2 had passes of
+  1.04-1.21 foreign cores.
+- Still slower than PostgreSQL here: q02 (0.63 / 0.28), q20 (0.36 / 0.12), q11 (0.21 / 0.11),
+  q04 (0.29 / 0.20), q08 (0.32 / 0.26), q07 (0.62 / 0.54), q05 (0.50 / 0.45), q13 (1.10 /
+  1.03); level: q21, q19, q03 (0.56 / 0.57); faster: the rest.
+- Peak memory: the engine's VmHWM over a pass 1,692-1,700 MB base, 1,692-1,703 head; container
+  peaks (anon + shmem, largest of the passes) PostgreSQL 1,644, base 1,667, head 1,669, pgrust
+  1,865 MB.
+- All 22 result hashes equal PostgreSQL's in every pass of every build.
+
+### The changes, gated (user instructions a run, % against the build before, per round; walls from own runs, 5 reps, alternating pairs)
+
+Rounds whose pass had more than 1.0 foreign core on the server CPUs are marked `*` and not
+counted.
+
+| change | targets, instructions % | others | 22-query instructions | own-run wall medians | kept |
+|---|---|---|---|---|---|
+| `c001` hot ranges' lock off the read path (against `b000`) | q07 -0.6 / -0.4 / -0.9, q08 -0.4 / -0.3 / -0.5, q05 -0.2 / 0.0 / -0.2 (cycles q07 -3.3 / -16.6* / -14.1) | none over +1% | -0.11 / +0.09* / -0.26% (cycles -1.90 / -5.14* / -5.57%) | q07 0.577/0.570, 0.571/0.535, 0.579/0.543; q08 0.344/0.302, 0.293/0.263, 0.294/0.291; q05 2 of 3 | no: under the instruction bar |
+| `c003` L1 files by binary search (against `c002`) | q03 -5.4 / -6.3 / -6.2*, q07 -5.5 / -5.8 / -5.6*, q20 -5.4 / -5.6 / -5.7*, q21 -3.7 / -3.4 / -3.2*, q04 -3.4 / -3.3 / -3.3* (q22 -3.7 / -2.7, q05 -2.4 / -2.9) | q09 +1.6 once | -1.07 / -1.08 / -1.28%* | q03 0.513 -> 0.494 (5 pairs; 3 earlier pairs 0.512 -> 0.568), q04 0.302 -> 0.279, q07 0.547 -> 0.527, q20 0.317 -> 0.295 (8 pairs, 7 won), q21 0.667 -> 0.662 | yes |
+| `c004` memtable relations as bits (against `c003`) | q07 -3.7 x3, q08 -3.1 / -3.1 / -3.4 (q03 -1.8 / -3.6 / -3.8, q09 -2.9 / -4.4 / -2.2) | none over +1.2% | -0.69 / -0.93 / -0.72% | q07 0.559 -> 0.535 (3 pairs), q08 0.286 -> 0.284 (8 pairs: 0.268/0.271, 0.268/0.270, 0.263/0.265, then 5 at 0.301 -> 0.290), q03 0.496 -> 0.478, q09 1.384 -> 1.279 | yes |
+| `c005` nested loop rescans, Aggregate reopening its input (against `c004`) | q02 -2.2* / -2.3* / -2.3, q17 -0.7* / +0.7* / -1.0 | none over +1% | +0.09* / +0.10* / +0.05% | - | no: under the bar |
+| `c006` numeric hash keys without allocating (against `c005`) | q02 -4.6 / -4.5 / -4.6 | q03 +2.2 once | -0.14 / -0.16 / -0.19% | q02 0.681/0.679, 0.688/0.609, 0.747/0.621 (3 of 3) | yes |
+| `c007` tuple sizes without char counts, numeric digits in u64 (against `c006`) | q02 -3.5 / -2.7* / -3.1* | q22 +2.3 once | -0.25 / -0.15* / -0.10%* | - | no: one round under the bar, two unclear |
+
+Dropped patches with their numbers: `~/.cache/a232/patches/dropped-c001-hot-prefix-bits.*`,
+`dropped-c005-nestloop-rescan.*`, `dropped-c007-tuple-sizes.*`.
+
+### The clock change on lane A (`c02b`, the clock commit on `c001`, against `c001`; plain dist)
+
+Lane A: the server in its own container on CPUs 6,7,24,25 (8 GiB), the client on 8,9,26,27,
+every run under `~/.cache/lane-a.lock` (shared with agents 229 and 231), a fresh server and
+100,000-row fixture each run, 10 s runs, user instructions and cycles of the server's threads
+over 8 s (agent 230's harness); alternating pairs, each waiting up to an hour for quiet CPUs.
+
+| set | pairs | user instr / op (median; per pair) | user cycles / op | ops/s | CPU / op |
+|---|---:|---|---:|---:|---:|
+| point selects, 8 clients | 5 | 42.5k -> 40.5k, -5.3% (-3.9, -5.3, -6.8, -5.5, -5.0) | -2.2% | +3.2% | -1.7% |
+| point selects, 1 client | 3 (one flagged, 1.61 foreign cores) | -3.4% (+0.7, -3.4, -8.5*) | -2.6% | +3.1% | -1.6% |
+| point selects, 32 clients | 3 | -5.9% (-5.7, -9.7, -5.9) | -5.8% | +10.4% | -10.4% |
+| range reads (100 rows), 8 clients | 3 | +0.2% (-0.3, +0.9, +0.2) | +0.7% | +3.1% | -0.8% |
+| short transactions, 8 clients | 6 | -2.2% (-5.5, -0.9, +0.3, +3.9, -6.3, -3.5) | -2.0% | +10.0% | -4.5% |
+
+At one client the read's spin (the server polling the socket for the next message) is part of
+an operation's instructions and moves with the client's pace; the 8-client pairs are the gate.
+Clock reads a point select at one client (uprobe on libc's clock_gettime over 3 s of a 6 s
+run): `b000` 16.5-21, `fin0` 5.7-7.0 (the spin's among them).
+
+### The storage changes on lane A (`fin0` against `c02b`: the L1 search, the memtable bits and the numeric hash on the clock commit; plain dist)
+
+| set | pairs | user instr / op (median; per pair) | user cycles / op | ops/s | CPU / op |
+|---|---:|---|---:|---:|---:|
+| point selects, 8 clients | 5 | 40.5k -> 38.5k, -3.9% (-4.9, -3.9, -3.5, -1.3, -5.4) | -4.9% | +9.7% | -6.3% |
+| point selects, 1 client | 3 (two flagged, 1.13 / 1.64 foreign cores) | -2.7% in the clean pair (+1.1*, +7.4*) | -7.8% | +9.3% | -5.8% |
+| point selects, 32 clients | 3 | -3.6% (-7.7, -3.1, -3.6) | +2.0% | -2.0% | +4.4% |
+| range reads (100 rows), 8 clients | 3 (one flagged, 2.51) | -1.1% in the clean pairs (-1.8, -0.4) | -3.7% | -1.8%, -35% (the clean pairs, at 0.41 / 0.95 foreign cores) | +13.7% |
+| short transactions, 8 clients | 6 (one flagged, 1.44) | -1.7% in the clean pairs (-6.1, -5.2, -0.7, +5.0, -1.7) | -1.4% | +11.4% | -3.8% |
+
+None over the +0.5% instruction bar at the median; the point reads gain as well (the L1 search
+and the memtable bits are on their probe's and fetch's paths). The lane was busy through these runs (agents 229 and 231
+on it between pairs, the host at load 25-35): the range and 32-client ops/s moved by up to 35%
+between the two runs of a pair, with instructions within 2%.
+
+### Point selects, roll (`fin0`, plain dist), PostgreSQL 18.6 and pgrust (one run each, 10 s, lane A, prepared, binary results)
+
+| clients | roll ops/s | PostgreSQL | pgrust | roll CPU µs / op | PostgreSQL | pgrust | roll user instr / op |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 20,917 | 5,339* | 14,294* | 43.9 | 76.6 | 37.0 | 60.1k |
+| 8 | 80,440 | 46,527 | 76,212 | 40.3 | 68.2 | 39.1 | 38.7k |
+| 32 | 60,846 | 45,868 | 96,421 | 53.4 | 78.6 | 38.9 | 40.4k |
+
+`*`: runs with 2.4-3.1 foreign cores on the server CPUs (not comparable). At 8 clients roll's
+plain dist build is 1.06x pgrust's throughput (0.82x in agent 230's round 5) at the same CPU a
+read; at 32 clients 0.63x (roll's latency tail: p99 5.2 ms against 1.0, the lane busy).
+## Batch aggregation, round 3 (2026-11-14, agent 234)
+
+HANDOFF "Batch aggregation, round 3" has what changed. **base** is `2947ce5a4` (origin's head
+at the round's start), **n005** the round's three commits on it (`067603ccb`, `d2cf6e02b`,
+`df19df4ee`; pushed rebased as `3715e3cc7`, `a3e6c1df2`, `8d29a561b`). Plain dist builds with line tables (one target dir in the checkout); **pbas** and
+**pn05** the same two commits built by `tools/dist-pgo.sh` in the same checkout. Method as round
+14's (agent 228's harness, copied to `~/.cache/a234/bench/bulk2.sh`): lane C, each server a fresh
+container on CPUs 14,15,32,33 (8 GiB, `--cpu-shares 2`, host network), psql in a234-cli on
+16,17,34,35, `perf stat` of the server's cgroup from a234-perf (roll-perf-tools with file
+capabilities on perf, run as uid 1000), 1M rows, autovacuum off, settled steps (`bg_` steps
+counted). After the script's steps the same table also takes `count(*)`, `count(b)`, `sum(a)`,
+`avg(c)`, `min(a), max(a)` and `b, count(*), sum(c) GROUP BY b` (`gate.steps`). Five alternating
+pairs of base / n005, three of pbas / pn05, two runs each of PostgreSQL 18.6 and pgrust
+(PostgreSQL's settings, `io_method=sync`), all on 2026-11-14. Other sessions' unpinned builds
+ran on the lane all day: 1.8-3.9 foreign cores in every bulk run, which the server cgroup's
+instruction counts don't see (a build's `count_after` repeats within 0.1%); the gate reads
+instructions.
+
+### The step table (G user instructions, medians)
+
+| step | pg | pgrust | base | n005 | pbas | pn05 | n005 /PG, /pgrust | pn05 /PG, /pgrust |
+|---|---|---|---|---|---|---|---|---|
+| copy_in | 6.476 | 4.921 | 10.227 | 10.227 | 8.374 | 8.408 | 1.58, 2.08 | 1.30, 1.71 |
+| create_index | 3.131 | 2.790 | 6.170 | 6.170 | 5.962 | 5.943 | 1.97, 2.21 | 1.90, 2.13 |
+| create_unique_index | 2.246 | 1.782 | 4.371 | 4.374 | 4.151 | 4.139 | 1.95, 2.45 | 1.84, 2.32 |
+| copy_out | 3.210 | 1.978 | 3.113 | 3.113 | 2.512 | 2.515 | 0.97, 1.57 | 0.78, 1.27 |
+| insert_select | 4.312 | 4.310 | 7.033 | 7.028 | 5.643 | 5.643 | 1.63, 1.63 | 1.31, 1.31 |
+| update_half | 27.496 | 22.768 | 13.433 | 13.406 | 11.110 | 11.052 | 0.49, 0.59 | 0.40, 0.49 |
+| delete_quarter | 1.668 | 1.500 | 6.719 | 6.715 | 4.961 | 4.902 | 4.03, 4.48 | 2.94, 3.27 |
+| bg after DELETE (compaction) | 0.001 | 0.043 | 6.769 | 6.266 | 6.178 | 6.087 | | |
+| vacuum | 2.528 | 3.052 | 2.051 | 2.051 | 1.656 | 1.667 | 0.81, 0.67 | 0.66, 0.55 |
+| analyze | 0.502 | 0.747 | 0.529 | 0.529 | 0.456 | 0.460 | 1.05, 0.71 | 0.92, 0.62 |
+| count_after | 0.489 | 0.168 | 1.346 | 0.495 | 1.012 | 0.482 | 1.01, 2.95 | 0.99, 2.87 |
+| count_star | 0.284 | 0.054 | 2.015 | 2.005 | 1.819 | 1.805 | 7.05, 36.79 | 6.34, 33.12 |
+| count_b | 0.416 | 0.102 | 0.450 | 0.451 | 0.441 | 0.438 | 1.08, 4.42 | 1.05, 4.29 |
+| sum_a | 0.394 | 0.098 | 1.594 | 1.594 | 1.406 | 1.406 | 4.05, 16.27 | 3.57, 14.35 |
+| avg_c | 0.520 | 0.208 | 1.222 | 0.487 | 0.900 | 0.478 | 0.94, 2.34 | 0.92, 2.30 |
+| minmax_a | 0.009 | 0.020 | 0.008 | 0.010 | 0.007 | 0.008 | 1.11, 0.50 | 0.89, 0.40 |
+| group_b | 1.360 | 0.593 | 2.305 | 1.453 | 1.919 | 1.442 | 1.07, 2.45 | 1.06, 2.43 |
+| truncate | 0.023 | 0.029 | 0.004 | 0.004 | 0.004 | 0.004 | 0.17, 0.14 | 0.17, 0.14 |
+| drop_table | 0.035 | 0.038 | 0.002 | 0.002 | 0.002 | 0.002 | 0.06, 0.05 | 0.06, 0.05 |
+
+`count_after` is the script's `count(*), sum(c)`. With the script's two indexes the engine plans
+`count(*)` and `sum(a)` as a Parallel Index Only Scan of `bulk_a` where PostgreSQL scans the
+table (HANDOFF: the btree size model), so those two rows compare different plans; on the table
+without indexes (single runs, same day): count(*) PostgreSQL 0.284, pgrust 0.065, base 0.350,
+n005 0.251; sum(a) 0.393, 0.097, 0.665, 0.446; min(a), max(a) 0.443, 0.107, 1.403, 0.443; avg(c)
+0.519, 0.207, 1.222, 0.487; count(b) 0.416, 0.102, 0.450, 0.451; `GROUP BY a, b` (serial, 750,000
+groups) 1.353, 1.146, 2.379, 2.379. Wall / CPU s, medians: `count_after` PostgreSQL 0.171 /
+0.163, pgrust 0.114 / 0.048, base 0.187 / 0.244, n005 0.154 / 0.108, pbas 0.197 / 0.198, pn05
+0.156 / 0.101; `GROUP BY b` 0.204 / 0.292, 0.178 / 0.166, 0.271 / 0.484, 0.195 / 0.328, 0.276 /
+0.483, 0.211 / 0.301.
+
+### The gate (per pair %, user instructions, new against base)
+
+| step | plain dist (5 pairs) | PGO (3 pairs) |
+|---|---|---|
+| count_after | -63.2 x5 | -52.4 x3 |
+| avg(c) | -60.1 x5 | -46.9 x3 |
+| `GROUP BY b` | -37.0 x5 | -24.9 x3 |
+| count(b) | +0.2 x5 | -0.7 / -0.7 / -0.9 |
+| COPY in | +0.0 x5 | +0.4 x3 |
+| VACUUM / ANALYZE | +0.0 | +0.7 / +0.9 x3 |
+| DELETE and its compaction | +7.7 / +2.0 / -4.5 / -3.2 / +5.7 and -7.0 / -0.4 / +3.2 / -5.8 / -16.6 | -1.8 / -1.5 / -1.2 and -13.3 / -1.5 / +2.3 |
+| every other step | within +-0.5 | within +-0.9 |
+| all steps with bg | -1.5 / -1.2 / -1.5 / -2.4 / -2.7 (61.62 -> 60.55) | -2.7 / -1.6 / -0.9 (52.06 -> 51.26) |
+
+Dropped builds: n003 and n004 (min / max and count(*)'s shortcut inside `run_sums` and
+`decode_cols` / `Pre::decode`): TPC-H q01 +5.2 / +0.8%, q06 +5.8 / +0.5% user instructions.
+
+### TPC-H q01 and q06 (own runs: a fresh engine, a warm-up, 5 runs in one perf window; 3 alternating pairs)
+
+| | q01 G ins | q01 G cycles | q01 median s | q06 G ins | q06 G cycles | q06 median s |
+|---|---|---|---|---|---|---|
+| base | 11.364 / 11.365 / 11.365 | 5.98 / 5.85 / 5.95 | 0.527 / 0.535 / 0.540 | 8.260 / 8.259 / 8.261 | 4.65 / 4.63 / 4.71 | 0.440 / 0.426 / 0.471 |
+| n005 | 11.368 / 11.366 / 11.367 | 6.29 / 6.38 / 6.24 | 0.589 / 0.583 / 0.589 | 8.261 / 8.263 / 8.262 | 5.15 / 5.49 / 5.04 | 0.500 / 0.515 / 0.487 |
+| pbas | 11.788 / 11.787 / 11.787 | 6.59 / 6.53 / 6.53 | 0.636 / 0.599 / 0.601 | 7.856 / 7.858 / 7.858 | 4.39 / 4.28 / 4.35 | 0.459 / 0.420 / 0.407 |
+| pn05 | 11.554 / 11.552 / 11.554 | 7.06 / 6.46 / 7.17 | 0.756 / 0.638 / 0.716 | 7.844 / 7.845 / 7.845 | 4.89 / 4.69 / 4.57 | 0.549 / 0.497 / 0.452 |
+
+Foreign load 0.33-0.78 cores in the plain passes, 0.46-1.16 in the PGO ones (pn05's three the
+higher). Two more rounds of base, n002, n004 and n005 (plain, 0.29-0.50 foreign): q01 cycles
+5.87 / 5.85 against 6.17 / 6.22, 6.08 / 6.07 and 6.14 / 6.15; q06 5.01 / 4.67 against 4.97 /
+4.94, 4.71 / 4.75 and 5.11 / 5.02. Cycle profiles of q06 (base / n005, 5 runs each):
+`Pre::decode` 4.11 / 5.60 G (+36%, its source unchanged), the next functions +5 to +12%; q01:
+`Pre::decode` +26%, `batch_run` +19%, the store's functions +6 to +13%.
+
+Both commits built with LLVM's JCC-erratum padding (`-Cllvm-args=-x86-branches-within-32B-boundaries`,
+plain dist; **jbas**, **jn05**), 3 alternating pairs (foreign 0.56-1.15):
+
+| | q01 G ins | q01 G cycles | q01 median s | q06 G ins | q06 G cycles | q06 median s |
+|---|---|---|---|---|---|---|
+| jbas | 11.796 / 11.796 / 11.797 | 5.38 / 5.58 / 5.73 | 0.510 / 0.564 / 0.593 | 8.628 / 8.628 / 8.630 | 4.44 / 4.22 / 4.57 | 0.471 / 0.432 / 0.528 |
+| jn05 | 11.900 / 11.901 / 11.901 | 5.48 / 5.38 / 5.77 | 0.525 / 0.516 / 0.577 | 8.639 / 8.635 / 8.637 | 4.52 / 4.17 / 4.69 | 0.477 / 0.440 / 0.512 |
+
+(One more jbas / base pass: q01 5.73 against 5.87 G cycles, q06 4.26 against 4.64.)
+
+### Point reads (lane A: server 6,7,24,25, pgbench in a234-cli-a on 8,9,26,27)
+
+pgbench scale 10, select-only prepared, 8 clients, 20 s, a fresh engine each run, 5 alternating
+pairs: user instructions a transaction base 44,019 / 43,990 / 43,937 / 43,964 / 44,074, n005
+43,914 / 44,008 / 43,893 / 43,968 / 43,972 (median -0.05%); tps base 76,660-89,908, n005
+83,345-92,263.
+
 ## Analytic path, round 2 (2026-11-13, agent 226)
 
 HANDOFF "Analytic path, round 2" has what changed and the phase study. **b1** is `66fb5dc38`

@@ -8476,8 +8476,11 @@ impl Binder<'_, '_> {
         // its value is a constant of the plan, its NOTICEs come then (once per plan), and
         // one that fails stays a call that fails the statement if planning still has it
         // (`fold_failed`). A statement only analyzed leaves it for when it is planned.
+        // (Not an index's expressions: its build runs them as the table's owner, in a
+        // security-restricted operation, as it reads each row.)
         if !self.unplanned
             && !self.skip_procs
+            && !matches!(self.clause(), Clause::IndexExpr | Clause::IndexPredicate)
             && let Expr::Subquery(s) = &sub
             && super::fold::proc_call(s).is_some()
         {

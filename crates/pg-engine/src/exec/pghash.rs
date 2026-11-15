@@ -29,6 +29,9 @@ fn hash_float8(d: f64) -> u32 {
 fn hash_numeric(n: &crate::types::numeric::Numeric) -> u32 {
     match n {
         crate::types::numeric::Numeric::Finite { int, scale } => {
+            if let Some(h) = hash_numeric_small(int, *scale) {
+                return h;
+            }
             let (digits, weight) = crate::types::binary::numeric_digits(int, *scale);
             if digits.is_empty() {
                 return u32::MAX;
@@ -38,6 +41,39 @@ fn hash_numeric(n: &crate::types::numeric::Numeric) -> u32 {
         }
         _ => 0,
     }
+}
+
+/// `hash_numeric` of a value whose digits fit in a u64 at a scale of up to 16, without
+/// allocating (`numeric_digits` makes its base-10000 digits in vectors: a hash join on a
+/// numeric key hashed every row so). None: another value.
+fn hash_numeric_small(int: &crate::types::decint::DecInt, scale: u32) -> Option<u32> {
+    let v = u64::try_from(int.to_i128()?.unsigned_abs()).ok()?;
+    let pad = (4 - scale % 4) % 4;
+    if scale + pad > 16 || v > u64::MAX / 1000 {
+        return None;
+    }
+    if v == 0 {
+        return Some(u32::MAX);
+    }
+    // Base-10000 digits of v * 10^pad, least significant first.
+    let mut x = v * 10u64.pow(pad);
+    let mut g = [0u16; 6];
+    let mut n = 0;
+    while x > 0 {
+        g[n] = (x % 10_000) as u16;
+        x /= 10_000;
+        n += 1;
+    }
+    let weight = n as i64 - ((scale + pad) / 4) as i64 - 1;
+    // (Trailing zero digits stripped; the most significant one isn't zero.)
+    let lo = g[..n].iter().position(|&d| d != 0)?;
+    let mut bytes = [0u8; 12];
+    let mut len = 0;
+    for &d in g[lo..n].iter().rev() {
+        bytes[len..len + 2].copy_from_slice(&(d as i16).to_le_bytes());
+        len += 2;
+    }
+    Some(hash_bytes(&bytes[..len]) ^ (weight as i16 as i32 as u32))
 }
 
 /// jsonb_hash.
@@ -904,6 +940,37 @@ const PRESORTED_MAX: usize = 4096;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The allocation-free numeric hash is the general one wherever it answers.
+    #[test]
+    fn small_numeric_hash_is_hash_numeric() {
+        let mut cases: Vec<String> = ["0", "0.00", "1", "-1", "771.64", "0.0001", "0.00001", "10000", "9999.9999", "123456789.123", "-0.5"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for i in 0..2000u64 {
+            let x = i.wrapping_mul(2654435761) % 1_000_000_007;
+            cases.push(format!("{}.{:0w$}", x / 1000, x % 1000, w = (i % 7) as usize + 1));
+            cases.push(format!("-{}", x * 10u64.pow((i % 9) as u32)));
+        }
+        let mut small = 0;
+        for c in &cases {
+            let n: crate::types::numeric::Numeric = c.parse().unwrap();
+            let crate::types::numeric::Numeric::Finite { int, scale } = &n else { unreachable!() };
+            if let Some(h) = hash_numeric_small(int, *scale) {
+                let (digits, weight) = crate::types::binary::numeric_digits(int, *scale);
+                let general = if digits.is_empty() {
+                    u32::MAX
+                } else {
+                    let bytes: Vec<u8> = digits.iter().flat_map(|d| d.to_le_bytes()).collect();
+                    hash_bytes(&bytes) ^ (weight as i32 as u32)
+                };
+                assert_eq!(h, general, "{c}");
+                small += 1;
+            }
+        }
+        assert!(small > 3000);
+    }
 
     /// nodeAgg's bucket counts for tables PostgreSQL 18.6 built (work_mem 4MB: hash_mem
     /// 8MB), and the simplehash sizes they make.

@@ -1802,13 +1802,13 @@ fn statement_done_activity(act: &Act, s: &Session) {
     let app = &settings.hot().application_name;
     let idle = s.status() == TxnStatus::Idle;
     let (xid, xmin) = s.activity_xids();
-    let now = crate::types::datetime::Clock::system().now;
     set_activity(act, |a| {
         let state = activity_state(s);
         if a.state != state {
             a.state.clear();
             a.state.push_str(state);
-            a.state_change = Some(now);
+            // (The clock read only when the state changes.)
+            a.state_change = Some(crate::types::datetime::Clock::system().now);
         }
         if idle {
             a.xact_start = None;
@@ -1821,10 +1821,11 @@ fn statement_done_activity(act: &Act, s: &Session) {
     });
 }
 
-/// pg_stat_activity as a statement (or a fastpath call) starts: `state`, its transaction's
-/// start (now, outside a transaction block), and the xmin a snapshot taken now has.
-fn start_activity(act: &Act, s: &Session, state: &str, sql: Option<&str>) {
-    let now = crate::types::datetime::Clock::system().now;
+/// pg_stat_activity as a statement (or a fastpath call) starts at `now`, its message's
+/// statement timestamp (`Session::message_starts`): `state`, query_start, its
+/// transaction's start (now, outside a transaction block), and the xmin a snapshot taken
+/// now has.
+fn start_activity(act: &Act, s: &Session, state: &str, sql: Option<&str>, now: i64) {
     // pgstat_report_activity keeps track_activity_query_size - 1 bytes of the text, cut at a
     // character boundary (pg_mbcliplen): pgAdmin's dashboard shows the clipped text.
     let sql = sql.map(|q| {
@@ -1839,8 +1840,10 @@ fn start_activity(act: &Act, s: &Session, state: &str, sql: Option<&str>) {
         if a.state != state {
             a.state.clear();
             a.state.push_str(state);
-            a.state_change = Some(now);
         }
+        // (Every report's time, as pgstat_report_activity writes st_state_start_timestamp
+        // whether the state changed or not.)
+        a.state_change = Some(now);
         // (Copied only when it changed: a prepared statement's Bind and Execute name the same.)
         if let Some(q) = sql
             && a.query != q
@@ -1955,7 +1958,7 @@ fn message_loop(
                         continue;
                     }
                 };
-                start_activity(&act, s, "active", Some(sql));
+                start_activity(&act, s, "active", Some(sql), s.message_starts());
                 s.start_xact_command();
                 if let Some(mode) = c.repl
                     && (crate::repl::cmd::is_command(sql) || mode == crate::repl::walsender::Mode::Physical)
@@ -2002,12 +2005,12 @@ fn message_loop(
             b'P' => {
                 let mut b = Body::new(body);
                 last_stmt = b.cstr().ok().and_then(|_| b.cstr().ok()).map(str::to_string);
-                extended_activity(&act, s, t, body);
+                extended_activity(&act, s, t, body, s.message_starts());
                 s.start_xact_command();
                 guard(c, s, |c, s| parse_msg(c, s, body))
             }
             b'B' => {
-                extended_activity(&act, s, t, body);
+                extended_activity(&act, s, t, body, s.message_starts());
                 s.start_xact_command();
                 guard(c, s, |c, s| bind_msg(c, s, body))
             }
@@ -2016,7 +2019,7 @@ fn message_loop(
                 guard(c, s, |c, s| describe_msg(c, s, body))
             }
             b'E' => {
-                extended_activity(&act, s, t, body);
+                extended_activity(&act, s, t, body, s.message_starts());
                 s.start_xact_command();
                 guard(c, s, |c, s| execute_msg(c, s, body))
             }
@@ -2049,7 +2052,7 @@ fn message_loop(
             // Copy messages outside COPY are ignored, as Postgres does.
             b'd' | b'c' | b'f' => continue,
             b'F' => {
-                start_activity(&act, s, "fastpath function call", None);
+                start_activity(&act, s, "fastpath function call", None, s.message_starts());
                 let r = guard(c, s, |c, s| fastpath_msg(c, s, body));
                 send_notices(c, s);
                 if let Err(e) = r {
@@ -2094,7 +2097,7 @@ fn message_loop(
 /// pg_stat_activity while extended-protocol messages run (pgstat_report_activity in
 /// exec_parse_message / exec_bind_message / exec_execute_message): active, with the
 /// statement's text, until the Sync's ReadyForQuery.
-fn extended_activity(act: &Act, s: &Session, t: u8, body: &[u8]) {
+fn extended_activity(act: &Act, s: &Session, t: u8, body: &[u8], now: i64) {
     let mut b = Body::new(body);
     let sql = match t {
         b'P' => b.cstr().ok().and_then(|_| b.cstr().ok()),
@@ -2108,7 +2111,7 @@ fn extended_activity(act: &Act, s: &Session, t: u8, body: &[u8]) {
             .ok()
             .and_then(|portal| s.portals.get(portal).map(|p| p.stmt.sql.as_str())),
     };
-    start_activity(act, s, "active", sql);
+    start_activity(act, s, "active", sql, now);
 }
 
 /// Run one message's work so that an engine panic becomes an ERROR (XX000) for this
@@ -2694,7 +2697,6 @@ fn command_complete(c: &mut Conn, tag: &str) {
 }
 
 fn simple_query(c: &mut Conn, s: &mut Session, sql: &str) -> std::io::Result<()> {
-    let start = std::time::Instant::now();
     let stmts = match s.parse(sql) {
         Ok(v) => v,
         Err(e) => {
@@ -2724,7 +2726,7 @@ fn simple_query(c: &mut Conn, s: &mut Session, sql: &str) -> std::io::Result<()>
     s.finish_xact_command();
     // check_log_duration (not for a statement that failed).
     if c.errors == errors
-        && let Some((ms, with_stmt)) = s.duration_logged(start.elapsed(), logged)
+        && let Some((ms, with_stmt)) = s.duration_logged(logged)
     {
         if with_stmt {
             let detail = s.execute_detail(&stmts);
@@ -2904,11 +2906,10 @@ fn parse_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     if name.is_empty() {
         s.close_statement("");
     }
-    let start = std::time::Instant::now();
     s.parse_message(&name, &sql, &oids)
         .map_err(|e| e.in_chars(&sql))?;
     // exec_parse_message's duration line.
-    if let Some((ms, with_stmt)) = s.duration_logged(start.elapsed(), false) {
+    if let Some((ms, with_stmt)) = s.duration_logged(false) {
         let what = if name.is_empty() { "<unnamed>" } else { name.as_str() };
         let text = if with_stmt { format!("duration: {ms} ms  parse {what}: {sql}") } else { format!("duration: {ms} ms") };
         s.log_message(&text, None);
@@ -2940,11 +2941,10 @@ fn bind_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     for _ in 0..nr {
         result_formats.push(b.i16()?);
     }
-    let start = std::time::Instant::now();
     // (What's left over fails the Bind after its parameters are read: `trailing`.)
     s.bind_message_in(portal, stmt, &params, &formats, result_formats, b.end().is_err())?;
     // exec_bind_message's duration line (with the parameters, as errdetail_params).
-    if let Some((ms, with_stmt)) = s.duration_logged(start.elapsed(), false) {
+    if let Some((ms, with_stmt)) = s.duration_logged(false) {
         if with_stmt && let Some((what, detail, p)) = s.portal_log(portal) {
             s.log_message(&format!("duration: {ms} ms  bind {what}: {}", p.sql), detail.as_deref());
         } else {
@@ -3034,7 +3034,6 @@ fn execute_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     }
     send_notices(c, s);
     // exec_execute_message's log_statement and duration lines.
-    let start = std::time::Instant::now();
     s.set_ps_portal(&portal);
     let info = if s.state.settings.borrow().logs_statements() { s.portal_log(&portal) } else { None };
     let logged = info.as_ref().is_some_and(|(_, _, p)| s.statement_logged(std::slice::from_ref(p)));
@@ -3052,7 +3051,7 @@ fn execute_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     if r.is_ok() {
         s.note_executed();
         if let Some((what, detail, _)) = &info
-            && let Some((ms, with_stmt)) = s.duration_logged(start.elapsed(), logged)
+            && let Some((ms, with_stmt)) = s.duration_logged(logged)
         {
             if with_stmt {
                 s.log_message(&format!("duration: {ms} ms  execute {what}: {sql}"), detail.as_deref());

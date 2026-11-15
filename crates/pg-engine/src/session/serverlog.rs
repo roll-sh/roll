@@ -103,6 +103,7 @@ impl Session {
     pub fn finish_xact_command(&self) {
         if self.txn.is_none() && self.status == super::TxnStatus::Idle {
             self.state.proc.end();
+            self.xact_from.set(None);
         }
     }
 
@@ -230,7 +231,9 @@ impl Session {
     /// check_log_duration: Some((ms, with_statement)) when the statement's duration goes to
     /// the log (with its text when log_min_duration_statement / sampling chose it and
     /// log_statement didn't already log it).
-    pub fn duration_logged(&self, elapsed: std::time::Duration, was_logged: bool) -> Option<(String, bool)> {
+    /// (The duration from the message's statement timestamp to now, as check_log_duration
+    /// takes it: the clock read only when a duration may be logged.)
+    pub fn duration_logged(&self, was_logged: bool) -> Option<(String, bool)> {
         let st = self.state.settings.borrow();
         if !st.logs_statements() {
             return None;
@@ -241,7 +244,7 @@ impl Session {
         if !duration && min < 0 && sample < 0 {
             return None;
         }
-        let us = elapsed.as_micros() as i64;
+        let us = (Self::now() - self.statement_time()).max(0);
         let ms = us / 1000;
         let exceeded = min == 0 || (min > 0 && ms >= min);
         let rate: f64 = st.get_str("log_statement_sample_rate").and_then(|v| v.parse().ok()).unwrap_or(1.0);

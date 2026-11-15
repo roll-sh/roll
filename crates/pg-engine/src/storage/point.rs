@@ -134,7 +134,7 @@ impl PointReader {
         from.extend_from_slice(start);
         let mut tries = 0;
         Ok(loop {
-            if !smallest_key(&self.view, from, held, pos, cand)? {
+            if !smallest_key(&self.view, from, end, held, pos, cand)? {
                 break First::None;
             }
             if !end.is_empty() && cand.as_slice() >= end {
@@ -185,7 +185,7 @@ const FIRST_TRIES: u32 = 4;
 
 /// The smallest user key at or after `from` that any source of `view` holds a version of,
 /// into `out` (false: none).
-fn smallest_key(view: &View, from: &[u8], held: &mut [Held], pos: &mut BlockPos, out: &mut Vec<u8>) -> Result<bool> {
+fn smallest_key(view: &View, from: &[u8], end: &[u8], held: &mut [Held], pos: &mut BlockPos, out: &mut Vec<u8>) -> Result<bool> {
     let mut found = false;
     let mut take = |k: &[u8]| {
         let k = user_key(k);
@@ -195,7 +195,9 @@ fn smallest_key(view: &View, from: &[u8], held: &mut [Held], pos: &mut BlockPos,
             found = true;
         }
     };
-    for m in view.memtables() {
+    // (A key past `end` is no answer: a memtable without keys of the range's relation isn't
+    // read.)
+    for m in view.memtables().filter(|m| m.may_hold_range(from, end)) {
         if let Some(e) = m.map.range::<[u8], _>((Bound::Included(from), Bound::Unbounded)).next() {
             take(e.key());
         }
@@ -299,7 +301,7 @@ pub(super) fn newest(
 }
 
 fn mem_get(m: &Memtable, key: &[u8], seek: &[u8]) -> Option<Version> {
-    if m.is_empty() {
+    if m.is_empty() || !m.may_hold(key) {
         return None;
     }
     m.map

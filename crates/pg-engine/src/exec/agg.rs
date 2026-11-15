@@ -362,6 +362,33 @@ impl FloatStats {
         self.not_neg_zero |= !(x == 0.0 && x.is_sign_negative());
         Ok(())
     }
+
+    /// `push` of each of `xs` in order (the same arithmetic), when Sx and Sxx end finite
+    /// (true): an infinite or NaN Sx or Sxx stays so (Sxx only grows), so finite ones never
+    /// overflowed on the way. False: nothing changed (`push` decides each value).
+    fn push_all(&mut self, xs: &[f64], sxx_too: bool) -> bool {
+        let (mut n, mut sx, mut sxx, mut nz) = (self.n, self.sx, self.sxx, false);
+        for &x in xs {
+            let n1 = n + 1.0;
+            sx += x;
+            if sxx_too {
+                if n > 0.0 {
+                    let tmp = x * n1 - sx;
+                    sxx += tmp * tmp / (n1 * n);
+                } else if !x.is_finite() {
+                    sxx = f64::NAN;
+                }
+            }
+            n = n1;
+            nz |= x.to_bits() != (-0.0f64).to_bits();
+        }
+        if !sx.is_finite() || (sxx_too && !sxx.is_finite()) {
+            return false;
+        }
+        (self.n, self.sx, self.sxx) = (n, sx, sxx);
+        self.not_neg_zero |= nz;
+        true
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -390,6 +417,9 @@ impl Accum for FloatAgg {
     fn merge(&mut self, p: Partial) -> Result<()> {
         if let Partial::Floats(xs) = p {
             let sxx = !matches!(self.kind, StatKind::Sum);
+            if self.st.push_all(&xs, sxx) {
+                return Ok(());
+            }
             for x in xs {
                 self.st.push(x, sxx)?;
             }
