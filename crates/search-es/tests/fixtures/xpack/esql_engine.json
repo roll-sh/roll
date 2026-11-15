@@ -1,0 +1,5103 @@
+{
+  "description" : "ES|QL engine: functions (arity, types, warnings), commands (DISSECT, GROK, ENRICH, LOOKUP JOIN, INLINE STATS, STATS .. WHERE, BUCKET), parser errors",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-emp",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "name" : {
+              "type" : "keyword"
+            },
+            "dept" : {
+              "type" : "keyword"
+            },
+            "salary" : {
+              "type" : "long"
+            },
+            "rate" : {
+              "type" : "double"
+            },
+            "hired" : {
+              "type" : "date"
+            },
+            "active" : {
+              "type" : "boolean"
+            },
+            "tags" : {
+              "type" : "keyword"
+            },
+            "ip" : {
+              "type" : "ip"
+            },
+            "msg" : {
+              "type" : "text"
+            },
+            "v" : {
+              "type" : "version"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-emp"
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-emp/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"1\"}}\n{\"name\": \"alice\", \"dept\": \"eng\", \"salary\": 120, \"rate\": 1.5, \"hired\": \"2020-01-15T10:00:00Z\", \"active\": true, \"tags\": [\"a\", \"b\"], \"ip\": \"10.0.0.1\", \"msg\": \"hello world\", \"v\": \"1.2.3\"}\n{\"index\": {\"_id\": \"2\"}}\n{\"name\": \"bob\", \"dept\": \"eng\", \"salary\": 100, \"rate\": 2.25, \"hired\": \"2021-06-01T00:00:00Z\", \"active\": false, \"tags\": \"c\", \"ip\": \"10.0.0.2\", \"msg\": \"quick brown fox\", \"v\": \"1.10.0\"}\n{\"index\": {\"_id\": \"3\"}}\n{\"name\": \"carol\", \"dept\": \"ops\", \"salary\": 90, \"hired\": \"2019-03-20T12:30:00Z\", \"active\": true, \"tags\": [\"b\", \"c\", \"a\"], \"ip\": \"192.168.1.1\", \"msg\": \"hello fox\", \"v\": \"2.0.0\"}\n{\"index\": {\"_id\": \"4\"}}\n{\"name\": \"dave\", \"dept\": \"ops\", \"rate\": 3.0, \"hired\": \"2022-11-11T11:11:11Z\", \"active\": true, \"ip\": \"::1\", \"msg\": \"lazy dog\", \"v\": \"0.9\"}\n{\"index\": {\"_id\": \"5\"}}\n{\"name\": \"eve\", \"salary\": 150, \"rate\": 0.5, \"hired\": \"2018-07-04T00:00:00Z\", \"active\": false, \"tags\": [], \"msg\": \"world peace\", \"v\": \"1.2.3\"}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-enr",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "dept" : {
+              "type" : "keyword"
+            },
+            "floor" : {
+              "type" : "integer"
+            },
+            "head" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-enr"
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-enr/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\":{}}\n{\"dept\":\"eng\",\"floor\":3,\"head\":\"zed\"}\n{\"index\":{}}\n{\"dept\":\"ops\",\"floor\":1,\"head\":\"yan\"}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "PUT /_enrich/policy/compat-xpack-dept",
+      "body" : {
+        "match" : {
+          "indices" : "compat-xpack-enr",
+          "match_field" : "dept",
+          "enrich_fields" : [
+            "head",
+            "floor"
+          ]
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_enrich/policy/compat-xpack-dept/_execute?filter_path=status",
+      "status" : 200,
+      "response" : {
+        "status" : {
+          "phase" : "COMPLETE"
+        }
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-lk",
+      "body" : {
+        "settings" : {
+          "index.mode" : "lookup"
+        },
+        "mappings" : {
+          "properties" : {
+            "dept" : {
+              "type" : "keyword"
+            },
+            "budget" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-lk"
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-lk/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\":{}}\n{\"dept\":\"eng\",\"budget\":10}\n{\"index\":{}}\n{\"dept\":\"eng\",\"budget\":20}\n{\"index\":{}}\n{\"dept\":\"ops\",\"budget\":5}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | SORT name | LIMIT 3"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "active",
+            "type" : "boolean"
+          },
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          },
+          {
+            "name" : "hired",
+            "type" : "date"
+          },
+          {
+            "name" : "ip",
+            "type" : "ip"
+          },
+          {
+            "name" : "msg",
+            "type" : "text"
+          },
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "rate",
+            "type" : "double"
+          },
+          {
+            "name" : "salary",
+            "type" : "long"
+          },
+          {
+            "name" : "tags",
+            "type" : "keyword"
+          },
+          {
+            "name" : "v",
+            "type" : "version"
+          }
+        ],
+        "values" : [
+          [
+            true,
+            "eng",
+            "2020-01-15T10:00:00.000Z",
+            "10.0.0.1",
+            "hello world",
+            "alice",
+            1.5,
+            120,
+            [
+              "a",
+              "b"
+            ],
+            "1.2.3"
+          ],
+          [
+            false,
+            "eng",
+            "2021-06-01T00:00:00.000Z",
+            "10.0.0.2",
+            "quick brown fox",
+            "bob",
+            2.25,
+            100,
+            "c",
+            "1.10.0"
+          ],
+          [
+            true,
+            "ops",
+            "2019-03-20T12:30:00.000Z",
+            "192.168.1.1",
+            "hello fox",
+            "carol",
+            null,
+            90,
+            [
+              "a",
+              "b",
+              "c"
+            ],
+            "2.0.0"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | KEEP name, salary | SORT salary DESC NULLS LAST"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "salary",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            "eve",
+            150
+          ],
+          [
+            "alice",
+            120
+          ],
+          [
+            "bob",
+            100
+          ],
+          [
+            "carol",
+            90
+          ],
+          [
+            "dave",
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | KEEP name, salary | SORT salary ASC NULLS FIRST"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "salary",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            "dave",
+            null
+          ],
+          [
+            "carol",
+            90
+          ],
+          [
+            "bob",
+            100
+          ],
+          [
+            "alice",
+            120
+          ],
+          [
+            "eve",
+            150
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS c = COUNT(*), s = SUM(salary), a = AVG(salary), mn = MIN(salary), mx = MAX(salary)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "s",
+            "type" : "long"
+          },
+          {
+            "name" : "a",
+            "type" : "double"
+          },
+          {
+            "name" : "mn",
+            "type" : "long"
+          },
+          {
+            "name" : "mx",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            5,
+            460,
+            115.0,
+            90,
+            150
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS c = COUNT(salary) BY dept | SORT dept"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            2,
+            "eng"
+          ],
+          [
+            1,
+            "ops"
+          ],
+          [
+            1,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS COUNT(*) BY dept, active | SORT dept, active"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "COUNT(*)",
+            "type" : "long"
+          },
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          },
+          {
+            "name" : "active",
+            "type" : "boolean"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            "eng",
+            false
+          ],
+          [
+            1,
+            "eng",
+            true
+          ],
+          [
+            2,
+            "ops",
+            true
+          ],
+          [
+            1,
+            null,
+            false
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL x = salary * 2, y = rate + 1 | KEEP name, x, y | SORT name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "x",
+            "type" : "long"
+          },
+          {
+            "name" : "y",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            240,
+            2.5
+          ],
+          [
+            "bob",
+            200,
+            3.25
+          ],
+          [
+            "carol",
+            180,
+            null
+          ],
+          [
+            "dave",
+            null,
+            4.0
+          ],
+          [
+            "eve",
+            300,
+            1.5
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE salary > 95 AND active | KEEP name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "alice"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE dept IS NULL | KEEP name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "eve"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE dept IN (\"eng\", \"x\") | KEEP name | SORT name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "alice"
+          ],
+          [
+            "bob"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE name LIKE \"*e*\" | KEEP name | SORT name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "alice"
+          ],
+          [
+            "dave"
+          ],
+          [
+            "eve"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE name RLIKE \"[a-c].*\" | KEEP name | SORT name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "alice"
+          ],
+          [
+            "bob"
+          ],
+          [
+            "carol"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | DROP msg, tags | SORT name | LIMIT 1"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "active",
+            "type" : "boolean"
+          },
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          },
+          {
+            "name" : "hired",
+            "type" : "date"
+          },
+          {
+            "name" : "ip",
+            "type" : "ip"
+          },
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "rate",
+            "type" : "double"
+          },
+          {
+            "name" : "salary",
+            "type" : "long"
+          },
+          {
+            "name" : "v",
+            "type" : "version"
+          }
+        ],
+        "values" : [
+          [
+            true,
+            "eng",
+            "2020-01-15T10:00:00.000Z",
+            "10.0.0.1",
+            "alice",
+            1.5,
+            120,
+            "1.2.3"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | RENAME name AS n | KEEP n | SORT n | LIMIT 2"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "n",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "alice"
+          ],
+          [
+            "bob"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | KEEP n* , s* | SORT name | LIMIT 2"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "salary",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            120
+          ],
+          [
+            "bob",
+            100
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL t = MV_COUNT(tags), f = MV_FIRST(tags), mx = MV_MAX(tags) | KEEP name, t, f, mx | SORT name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "t",
+            "type" : "integer"
+          },
+          {
+            "name" : "f",
+            "type" : "keyword"
+          },
+          {
+            "name" : "mx",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            2,
+            "a",
+            "b"
+          ],
+          [
+            "bob",
+            1,
+            "c",
+            "c"
+          ],
+          [
+            "carol",
+            3,
+            "a",
+            "c"
+          ],
+          [
+            "dave",
+            null,
+            null,
+            null
+          ],
+          [
+            "eve",
+            null,
+            null,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL d = DATE_TRUNC(1 year, hired) | STATS c = COUNT(*) BY d | SORT d"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "d",
+            "type" : "date"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            "2018-01-01T00:00:00.000Z"
+          ],
+          [
+            1,
+            "2019-01-01T00:00:00.000Z"
+          ],
+          [
+            1,
+            "2020-01-01T00:00:00.000Z"
+          ],
+          [
+            1,
+            "2021-01-01T00:00:00.000Z"
+          ],
+          [
+            1,
+            "2022-01-01T00:00:00.000Z"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL y = DATE_EXTRACT(\"year\", hired) | KEEP name, y | SORT y"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "y",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            "eve",
+            2018
+          ],
+          [
+            "carol",
+            2019
+          ],
+          [
+            "alice",
+            2020
+          ],
+          [
+            "bob",
+            2021
+          ],
+          [
+            "dave",
+            2022
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL s = DATE_FORMAT(\"yyyy-MM-dd\", hired) | KEEP s | SORT s"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "2018-07-04"
+          ],
+          [
+            "2019-03-20"
+          ],
+          [
+            "2020-01-15"
+          ],
+          [
+            "2021-06-01"
+          ],
+          [
+            "2022-11-11"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS b = BUCKET(hired, 1 year) BY dept | SORT dept"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:35: can only use grouping function [BUCKET(hired, 1 year)] as part of the BY clause"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:35: can only use grouping function [BUCKET(hired, 1 year)] as part of the BY clause"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS c = COUNT(*) BY b = BUCKET(salary, 50) | SORT b"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "b",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            50.0
+          ],
+          [
+            2,
+            100.0
+          ],
+          [
+            1,
+            150.0
+          ],
+          [
+            1,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE CIDR_MATCH(ip, \"10.0.0.0/8\") | KEEP name, ip | SORT name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "ip",
+            "type" : "ip"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            "10.0.0.1"
+          ],
+          [
+            "bob",
+            "10.0.0.2"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | SORT v | KEEP name, v"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "v",
+            "type" : "version"
+          }
+        ],
+        "values" : [
+          [
+            "dave",
+            "0.9"
+          ],
+          [
+            "alice",
+            "1.2.3"
+          ],
+          [
+            "eve",
+            "1.2.3"
+          ],
+          [
+            "bob",
+            "1.10.0"
+          ],
+          [
+            "carol",
+            "2.0.0"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL c = CONCAT(name, \"-\", dept) | KEEP c | SORT c"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "alice-eng"
+          ],
+          [
+            "bob-eng"
+          ],
+          [
+            "carol-ops"
+          ],
+          [
+            "dave-ops"
+          ],
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL l = LENGTH(name), u = TO_UPPER(name), s = SUBSTRING(name, 2, 2) | KEEP l, u, s | SORT u"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "l",
+            "type" : "integer"
+          },
+          {
+            "name" : "u",
+            "type" : "keyword"
+          },
+          {
+            "name" : "s",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            5,
+            "ALICE",
+            "li"
+          ],
+          [
+            3,
+            "BOB",
+            "ob"
+          ],
+          [
+            5,
+            "CAROL",
+            "ar"
+          ],
+          [
+            4,
+            "DAVE",
+            "av"
+          ],
+          [
+            3,
+            "EVE",
+            "ve"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL r = ROUND(rate), r1 = ROUND(rate, 1), c = CEIL(rate), f = FLOOR(rate) | KEEP name, r, r1, c, f | SORT name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "r",
+            "type" : "double"
+          },
+          {
+            "name" : "r1",
+            "type" : "double"
+          },
+          {
+            "name" : "c",
+            "type" : "double"
+          },
+          {
+            "name" : "f",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            2.0,
+            1.5,
+            2.0,
+            1.0
+          ],
+          [
+            "bob",
+            2.0,
+            2.3,
+            3.0,
+            2.0
+          ],
+          [
+            "carol",
+            null,
+            null,
+            null,
+            null
+          ],
+          [
+            "dave",
+            3.0,
+            3.0,
+            3.0,
+            3.0
+          ],
+          [
+            "eve",
+            1.0,
+            0.5,
+            1.0,
+            0.0
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL x = CASE(salary > 100, \"high\", salary > 50, \"mid\", \"none\") | KEEP name, x | SORT name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "x",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            "high"
+          ],
+          [
+            "bob",
+            "mid"
+          ],
+          [
+            "carol",
+            "mid"
+          ],
+          [
+            "dave",
+            "none"
+          ],
+          [
+            "eve",
+            "high"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS v = VALUES(dept) | EVAL v = MV_SORT(v)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "v",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            [
+              "eng",
+              "ops"
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS cd = COUNT_DISTINCT(dept), med = MEDIAN(salary), p = PERCENTILE(salary, 50)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "cd",
+            "type" : "long"
+          },
+          {
+            "name" : "med",
+            "type" : "double"
+          },
+          {
+            "name" : "p",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            2,
+            110.0,
+            110.0
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE MATCH(msg, \"hello\") | KEEP name | SORT name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "alice"
+          ],
+          [
+            "carol"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE msg : \"fox\" | KEEP name | SORT name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "bob"
+          ],
+          [
+            "carol"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp METADATA _id, _index | KEEP _id, _index, name | SORT _id"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "_id",
+            "type" : "keyword"
+          },
+          {
+            "name" : "_index",
+            "type" : "keyword"
+          },
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "1",
+            "compat-xpack-emp",
+            "alice"
+          ],
+          [
+            "2",
+            "compat-xpack-emp",
+            "bob"
+          ],
+          [
+            "3",
+            "compat-xpack-emp",
+            "carol"
+          ],
+          [
+            "4",
+            "compat-xpack-emp",
+            "dave"
+          ],
+          [
+            "5",
+            "compat-xpack-emp",
+            "eve"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | LIMIT 0"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "active",
+            "type" : "boolean"
+          },
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          },
+          {
+            "name" : "hired",
+            "type" : "date"
+          },
+          {
+            "name" : "ip",
+            "type" : "ip"
+          },
+          {
+            "name" : "msg",
+            "type" : "text"
+          },
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "rate",
+            "type" : "double"
+          },
+          {
+            "name" : "salary",
+            "type" : "long"
+          },
+          {
+            "name" : "tags",
+            "type" : "keyword"
+          },
+          {
+            "name" : "v",
+            "type" : "version"
+          }
+        ],
+        "values" : [ ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE salary / 0 > 1 | KEEP name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [ ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL x = salary / 0 | KEEP x | LIMIT 1"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "x",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL x = 1 / 2, y = 1.0 / 2, z = 7 % 3 | KEEP x, y, z | LIMIT 1"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "x",
+            "type" : "integer"
+          },
+          {
+            "name" : "y",
+            "type" : "double"
+          },
+          {
+            "name" : "z",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            0,
+            0.5,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS m = MAX(hired), n = MIN(hired)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "m",
+            "type" : "date"
+          },
+          {
+            "name" : "n",
+            "type" : "date"
+          }
+        ],
+        "values" : [
+          [
+            "2022-11-11T11:11:11.000Z",
+            "2018-07-04T00:00:00.000Z"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL x = TO_STRING(salary), y = TO_DOUBLE(salary), z = TO_LONG(rate) | KEEP x, y, z | SORT x"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "x",
+            "type" : "keyword"
+          },
+          {
+            "name" : "y",
+            "type" : "double"
+          },
+          {
+            "name" : "z",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            "100",
+            100.0,
+            2
+          ],
+          [
+            "120",
+            120.0,
+            2
+          ],
+          [
+            "150",
+            150.0,
+            1
+          ],
+          [
+            "90",
+            90.0,
+            null
+          ],
+          [
+            null,
+            null,
+            3
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | DISSECT msg \"%{a} %{b}\" | KEEP name, a, b | SORT name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "a",
+            "type" : "keyword"
+          },
+          {
+            "name" : "b",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            "hello",
+            "world"
+          ],
+          [
+            "bob",
+            "quick",
+            "brown fox"
+          ],
+          [
+            "carol",
+            "hello",
+            "fox"
+          ],
+          [
+            "dave",
+            "lazy",
+            "dog"
+          ],
+          [
+            "eve",
+            "world",
+            "peace"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | GROK msg \"%{WORD:w1} %{WORD:w2}\" | KEEP name, w1, w2 | SORT name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "w1",
+            "type" : "keyword"
+          },
+          {
+            "name" : "w2",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            "hello",
+            "world"
+          ],
+          [
+            "bob",
+            "quick",
+            "brown"
+          ],
+          [
+            "carol",
+            "hello",
+            "fox"
+          ],
+          [
+            "dave",
+            "lazy",
+            "dog"
+          ],
+          [
+            "eve",
+            "world",
+            "peace"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | MV_EXPAND tags | KEEP name, tags | SORT name, tags"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "tags",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            "a"
+          ],
+          [
+            "alice",
+            "b"
+          ],
+          [
+            "bob",
+            "c"
+          ],
+          [
+            "carol",
+            "a"
+          ],
+          [
+            "carol",
+            "b"
+          ],
+          [
+            "carol",
+            "c"
+          ],
+          [
+            "dave",
+            null
+          ],
+          [
+            "eve",
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | ENRICH nope ON name"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:32: cannot find enrich policy [nope]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:32: cannot find enrich policy [nope]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | KEEP nope"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:30: Unknown column [nope]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:30: Unknown column [nope]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE nope > 1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:31: Unknown column [nope], did you mean [name]?"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:31: Unknown column [nope], did you mean [name]?"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS c = COUNT(*) BY nope"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:47: Unknown column [nope]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:47: Unknown column [nope]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | SORT name | KEEP name | LIMIT 2 | EVAL x = 1"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "x",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            1
+          ],
+          [
+            "bob",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1, b = \"x\", c = null, d = [1, 2], e = 1.5, f = true"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "b",
+            "type" : "keyword"
+          },
+          {
+            "name" : "c",
+            "type" : "null"
+          },
+          {
+            "name" : "d",
+            "type" : "integer"
+          },
+          {
+            "name" : "e",
+            "type" : "double"
+          },
+          {
+            "name" : "f",
+            "type" : "boolean"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            "x",
+            null,
+            [
+              1,
+              2
+            ],
+            1.5,
+            true
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = a + 1, c = b * 2"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "b",
+            "type" : "integer"
+          },
+          {
+            "name" : "c",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            2,
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = \"2023-01-01T00:00:00Z\" | EVAL d = TO_DATETIME(a)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "keyword"
+          },
+          {
+            "name" : "d",
+            "type" : "date"
+          }
+        ],
+        "values" : [
+          [
+            "2023-01-01T00:00:00Z",
+            "2023-01-01T00:00:00.000Z"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 5 | WHERE a > 10"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          }
+        ],
+        "values" : [ ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "SHOW INFO"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "version",
+            "type" : "keyword"
+          },
+          {
+            "name" : "date",
+            "type" : "keyword"
+          },
+          {
+            "name" : "hash",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "9.5.5",
+            "2026-09-30T22:12:03.984586187Z",
+            "48acba663b09e70b115dd879329141506c377890"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM nope"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Unknown index [nope]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Unknown index [nope]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-*,nope | LIMIT 1 | KEEP name"
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "nope",
+              "index_uuid" : "_na_",
+              "index" : "nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "nope",
+          "index_uuid" : "_na_",
+          "index" : "nope"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 |"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:12: mismatched input '<EOF>' expecting {'change_point', 'enrich', 'completion', 'dissect', 'eval', 'grok', 'limit', 'rerank', 'sample', 'sort', STATS, 'where', 'uri_parts', 'metrics_info', 'registered_domain', 'ts_info', 'user_agent', 'ts_collapse', 'ip_location', 'fork', 'fuse', 'inline', 'inlinestats', 'lookup', 'mmr', 'mv_expand', 'drop', 'keep', 'rename'}"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:12: mismatched input '<EOF>' expecting {'change_point', 'enrich', 'completion', 'dissect', 'eval', 'grok', 'limit', 'rerank', 'sample', 'sort', STATS, 'where', 'uri_parts', 'metrics_info', 'registered_domain', 'ts_info', 'user_agent', 'ts_collapse', 'ip_location', 'fork', 'fuse', 'inline', 'inlinestats', 'lookup', 'mmr', 'mv_expand', 'drop', 'keep', 'rename'}",
+          "caused_by" : {
+            "type" : "input_mismatch_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | FOO"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:13: mismatched input 'FOO' expecting {'change_point', 'enrich', 'completion', 'dissect', 'eval', 'grok', 'limit', 'rerank', 'sample', 'sort', STATS, 'where', 'uri_parts', 'metrics_info', 'registered_domain', 'ts_info', 'user_agent', 'ts_collapse', 'ip_location', 'fork', 'fuse', 'inline', 'inlinestats', 'lookup', 'mmr', 'mv_expand', 'drop', 'keep', 'rename'}"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:13: mismatched input 'FOO' expecting {'change_point', 'enrich', 'completion', 'dissect', 'eval', 'grok', 'limit', 'rerank', 'sample', 'sort', STATS, 'where', 'uri_parts', 'metrics_info', 'registered_domain', 'ts_info', 'user_agent', 'ts_collapse', 'ip_location', 'fork', 'fuse', 'inline', 'inlinestats', 'lookup', 'mmr', 'mv_expand', 'drop', 'keep', 'rename'}",
+          "caused_by" : {
+            "type" : "input_mismatch_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = UNKNOWN_FN(a)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:22: Unknown function [UNKNOWN_FN]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:22: Unknown function [UNKNOWN_FN]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = a + \"x\""
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:22: second argument of [a + \"x\"] must be [date_nanos, datetime, numeric or dense_vector], found value [\"x\"] type [keyword]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:22: second argument of [a + \"x\"] must be [date_nanos, datetime, numeric or dense_vector], found value [\"x\"] type [keyword]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 9223372036854775807 | EVAL b = a + 1"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "long"
+          },
+          {
+            "name" : "b",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            9223372036854775807,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 2147483647 | EVAL b = a + 1"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "b",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            2147483647,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = [3, 1, 2] | EVAL s = MV_SORT(a, \"desc\"), m = MV_MIN(a), avg = MV_AVG(a), med = MV_MEDIAN(a)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "s",
+            "type" : "integer"
+          },
+          {
+            "name" : "m",
+            "type" : "integer"
+          },
+          {
+            "name" : "avg",
+            "type" : "double"
+          },
+          {
+            "name" : "med",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            [
+              3,
+              1,
+              2
+            ],
+            [
+              3,
+              2,
+              1
+            ],
+            1,
+            2.0,
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW s = \"a,b,c\" | EVAL p = SPLIT(s, \",\")"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "keyword"
+          },
+          {
+            "name" : "p",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "a,b,c",
+            [
+              "a",
+              "b",
+              "c"
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW s = \"  x  \" | EVAL t = TRIM(s), l = LTRIM(s), r = RTRIM(s)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "keyword"
+          },
+          {
+            "name" : "t",
+            "type" : "keyword"
+          },
+          {
+            "name" : "l",
+            "type" : "keyword"
+          },
+          {
+            "name" : "r",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "  x  ",
+            "x",
+            "x  ",
+            "  x"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL g = GREATEST(1, 5, 3), l = LEAST(4, 2)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "g",
+            "type" : "integer"
+          },
+          {
+            "name" : "l",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            5,
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW d = TO_DATETIME(\"2024-02-29T12:00:00Z\") | EVAL x = d + 1 day, y = d - 1 month"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "d",
+            "type" : "date"
+          },
+          {
+            "name" : "x",
+            "type" : "date"
+          },
+          {
+            "name" : "y",
+            "type" : "date"
+          }
+        ],
+        "values" : [
+          [
+            "2024-02-29T12:00:00.000Z",
+            "2024-03-01T12:00:00.000Z",
+            "2024-01-29T12:00:00.000Z"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW x = 10 | STATS s = SUM(x)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            10
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW x = 1 | EVAL y = x::double, z = \"5\"::integer"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "x",
+            "type" : "integer"
+          },
+          {
+            "name" : "y",
+            "type" : "double"
+          },
+          {
+            "name" : "z",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            1.0,
+            5
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = \"abc\" | EVAL r = REVERSE(a), s = STARTS_WITH(a, \"ab\"), e = ENDS_WITH(a, \"bc\"), rp = REPLACE(a, \"b\", \"X\")"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "keyword"
+          },
+          {
+            "name" : "r",
+            "type" : "keyword"
+          },
+          {
+            "name" : "s",
+            "type" : "boolean"
+          },
+          {
+            "name" : "e",
+            "type" : "boolean"
+          },
+          {
+            "name" : "rp",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "abc",
+            "cba",
+            true,
+            true,
+            "aXc"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = TO_BOOLEAN(\"true\"), c = TO_IP(\"1.2.3.4\"), d = TO_VERSION(\"1.2\")"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "b",
+            "type" : "boolean"
+          },
+          {
+            "name" : "c",
+            "type" : "ip"
+          },
+          {
+            "name" : "d",
+            "type" : "version"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            true,
+            "1.2.3.4",
+            "1.2"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | LIMIT 20000"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | SORT a | LIMIT -1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:22: value of [LIMIT -1] must be a non negative integer, found value [-1] type [integer]"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:22: value of [LIMIT -1] must be a non negative integer, found value [-1] type [integer]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = [3, 1, 2, 3] | EVAL s = MV_SORT(a), d = MV_SORT(a, \"DESC\"), sl = MV_SLICE(a, 1, 2), mn = MV_MIN(a), mx = MV_MAX(a), av = MV_AVG(a), md = MV_MEDIAN(a), su = MV_SUM(a), dd = MV_DEDUPE(a), c = MV_COUNT(a)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "s",
+            "type" : "integer"
+          },
+          {
+            "name" : "d",
+            "type" : "integer"
+          },
+          {
+            "name" : "sl",
+            "type" : "integer"
+          },
+          {
+            "name" : "mn",
+            "type" : "integer"
+          },
+          {
+            "name" : "mx",
+            "type" : "integer"
+          },
+          {
+            "name" : "av",
+            "type" : "double"
+          },
+          {
+            "name" : "md",
+            "type" : "integer"
+          },
+          {
+            "name" : "su",
+            "type" : "integer"
+          },
+          {
+            "name" : "dd",
+            "type" : "integer"
+          },
+          {
+            "name" : "c",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            [
+              3,
+              1,
+              2,
+              3
+            ],
+            [
+              1,
+              2,
+              3,
+              3
+            ],
+            [
+              3,
+              3,
+              2,
+              1
+            ],
+            [
+              1,
+              2
+            ],
+            1,
+            3,
+            2.25,
+            2,
+            9,
+            [
+              3,
+              1,
+              2
+            ],
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = [\"x\", \"y\"], b = [\"1\", \"2\", \"3\"] | EVAL z = MV_ZIP(a, b, \"-\"), ap = MV_APPEND(a, b), cc = MV_CONCAT(a, \"/\")"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "keyword"
+          },
+          {
+            "name" : "b",
+            "type" : "keyword"
+          },
+          {
+            "name" : "z",
+            "type" : "keyword"
+          },
+          {
+            "name" : "ap",
+            "type" : "keyword"
+          },
+          {
+            "name" : "cc",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            [
+              "x",
+              "y"
+            ],
+            [
+              "1",
+              "2",
+              "3"
+            ],
+            [
+              "x-1",
+              "y-2",
+              "3"
+            ],
+            [
+              "x",
+              "y",
+              "1",
+              "2",
+              "3"
+            ],
+            "x/y"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = [1.5, 2.5] | EVAL mad = MV_MEDIAN_ABSOLUTE_DEVIATION(a), p = MV_PERCENTILE(a, 50), pw = MV_PSERIES_WEIGHTED_SUM(a, 1.5)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "double"
+          },
+          {
+            "name" : "mad",
+            "type" : "double"
+          },
+          {
+            "name" : "p",
+            "type" : "double"
+          },
+          {
+            "name" : "pw",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            [
+              1.5,
+              2.5
+            ],
+            0.5,
+            2.0,
+            2.3838834764831844
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 10 | EVAL l = LOG(2, a), p = POW(a, 2), s = SQRT(a), h = HYPOT(3, 4), e = E(), pi = PI(), t = TAU(), deg = TO_DEGREES(1), rad = TO_RADIANS(180)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "l",
+            "type" : "double"
+          },
+          {
+            "name" : "p",
+            "type" : "double"
+          },
+          {
+            "name" : "s",
+            "type" : "double"
+          },
+          {
+            "name" : "h",
+            "type" : "double"
+          },
+          {
+            "name" : "e",
+            "type" : "double"
+          },
+          {
+            "name" : "pi",
+            "type" : "double"
+          },
+          {
+            "name" : "t",
+            "type" : "double"
+          },
+          {
+            "name" : "deg",
+            "type" : "double"
+          },
+          {
+            "name" : "rad",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            10,
+            3.321928094887362,
+            100.0,
+            3.1622776601683795,
+            5.0,
+            2.718281828459045,
+            3.141592653589793,
+            6.283185307179586,
+            57.29577951308232,
+            3.141592653589793
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 10 | EVAL c = CLAMP(a, 1, 5), cm = CLAMP_MIN(a, 20), cx = CLAMP_MAX(a, 3)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "c",
+            "type" : "integer"
+          },
+          {
+            "name" : "cm",
+            "type" : "integer"
+          },
+          {
+            "name" : "cx",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            10,
+            5,
+            20,
+            3
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = \"Hello World\" | EVAL md5 = MD5(a), sha1 = SHA1(a), sha256 = SHA256(a), h = HASH(\"md5\", a)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "keyword"
+          },
+          {
+            "name" : "md5",
+            "type" : "keyword"
+          },
+          {
+            "name" : "sha1",
+            "type" : "keyword"
+          },
+          {
+            "name" : "sha256",
+            "type" : "keyword"
+          },
+          {
+            "name" : "h",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "Hello World",
+            "b10a8db164e0754105b7a99be72e3fe5",
+            "0a4d55a8d778e5022fab701977c5d840bbc486d0",
+            "a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e",
+            "b10a8db164e0754105b7a99be72e3fe5"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = \"a\" | EVAL b = TO_BASE64(a), c = FROM_BASE64(\"YQ==\"), u = URL_ENCODE(\"a b&c\"), d = URL_DECODE(\"a%20b\")"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "keyword"
+          },
+          {
+            "name" : "b",
+            "type" : "keyword"
+          },
+          {
+            "name" : "c",
+            "type" : "keyword"
+          },
+          {
+            "name" : "u",
+            "type" : "keyword"
+          },
+          {
+            "name" : "d",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "a",
+            "YQ==",
+            "a",
+            "a+b%26c",
+            "a b"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = \"x\" | EVAL c = CONTAINS(a, \"x\"), m = TO_LOWER(\"ABC\"), u = TO_UPPER(\"abc\")"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "keyword"
+          },
+          {
+            "name" : "c",
+            "type" : "boolean"
+          },
+          {
+            "name" : "m",
+            "type" : "keyword"
+          },
+          {
+            "name" : "u",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "x",
+            true,
+            "abc",
+            "ABC"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW d = TO_DATETIME(\"2024-03-15T10:20:30.123Z\") | EVAL y = DATE_EXTRACT(\"year\", d), dow = DATE_EXTRACT(\"day_of_week\", d), df = DATE_DIFF(\"day\", d, TO_DATETIME(\"2024-04-01\")), t = DATE_TRUNC(1 month, d), f = DATE_FORMAT(d), p = DATE_PARSE(\"yyyy-MM-dd\", \"2024-01-02\")"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "d",
+            "type" : "date"
+          },
+          {
+            "name" : "y",
+            "type" : "long"
+          },
+          {
+            "name" : "dow",
+            "type" : "long"
+          },
+          {
+            "name" : "df",
+            "type" : "integer"
+          },
+          {
+            "name" : "t",
+            "type" : "date"
+          },
+          {
+            "name" : "f",
+            "type" : "keyword"
+          },
+          {
+            "name" : "p",
+            "type" : "date"
+          }
+        ],
+        "values" : [
+          [
+            "2024-03-15T10:20:30.123Z",
+            2024,
+            5,
+            16,
+            "2024-03-01T00:00:00.000Z",
+            "2024-03-15T10:20:30.123Z",
+            "2024-01-02T00:00:00.000Z"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW d = TO_DATETIME(\"2024-03-15T10:20:30.123Z\") | EVAL dn = DAY_NAME(d), mn = MONTH_NAME(d)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "d",
+            "type" : "date"
+          },
+          {
+            "name" : "dn",
+            "type" : "keyword"
+          },
+          {
+            "name" : "mn",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "2024-03-15T10:20:30.123Z",
+            "Friday",
+            "March"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW d = TO_DATETIME(\"2024-03-15T10:20:30.123Z\") | EVAL x = TO_LONG(d), s = TO_STRING(d), n = TO_DATE_NANOS(d)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "d",
+            "type" : "date"
+          },
+          {
+            "name" : "x",
+            "type" : "long"
+          },
+          {
+            "name" : "s",
+            "type" : "keyword"
+          },
+          {
+            "name" : "n",
+            "type" : "date_nanos"
+          }
+        ],
+        "values" : [
+          [
+            "2024-03-15T10:20:30.123Z",
+            1710498030123,
+            "2024-03-15T10:20:30.123Z",
+            "2024-03-15T10:20:30.123Z"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = TO_INTEGER(\"12\"), c = TO_LONG(\"1e3\"), d = TO_DOUBLE(\"1.5\"), e = TO_UNSIGNED_LONG(5), f = TO_STRING(true), g = TO_INTEGER(true)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "b",
+            "type" : "integer"
+          },
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "d",
+            "type" : "double"
+          },
+          {
+            "name" : "e",
+            "type" : "unsigned_long"
+          },
+          {
+            "name" : "f",
+            "type" : "keyword"
+          },
+          {
+            "name" : "g",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            12,
+            1000,
+            1.5,
+            5,
+            "true",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = TO_INTEGER(\"abc\")"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "b",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = \"1.2.3\" | EVAL v = TO_VERSION(a), s = TO_STRING(TO_VERSION(a))"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "keyword"
+          },
+          {
+            "name" : "v",
+            "type" : "version"
+          },
+          {
+            "name" : "s",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "1.2.3",
+            "1.2.3",
+            "1.2.3"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = null | EVAL b = COALESCE(a, 2), c = a IS NULL, d = a + 1"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "null"
+          },
+          {
+            "name" : "b",
+            "type" : "integer"
+          },
+          {
+            "name" : "c",
+            "type" : "boolean"
+          },
+          {
+            "name" : "d",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            null,
+            2,
+            true,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 5 | EVAL b = CASE(a > 3, \"big\"), c = CASE(a > 10, 1, 0)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "b",
+            "type" : "keyword"
+          },
+          {
+            "name" : "c",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            5,
+            "big",
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = [1, 2] | WHERE a > 1"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          }
+        ],
+        "values" : [ ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = [1, 2] | EVAL b = a + 1"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "b",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            [
+              1,
+              2
+            ],
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW ip = TO_IP(\"192.168.1.5\") | EVAL m = CIDR_MATCH(ip, \"192.168.0.0/16\", \"10.0.0.0/8\"), p = IP_PREFIX(ip, 24, 0)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "ip",
+            "type" : "ip"
+          },
+          {
+            "name" : "m",
+            "type" : "boolean"
+          },
+          {
+            "name" : "p",
+            "type" : "ip"
+          }
+        ],
+        "values" : [
+          [
+            "192.168.1.5",
+            true,
+            "192.168.1.0"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = \"abc\" | WHERE a LIKE \"a*\" | EVAL b = a RLIKE \"a.c\""
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "keyword"
+          },
+          {
+            "name" : "b",
+            "type" : "boolean"
+          }
+        ],
+        "values" : [
+          [
+            "abc",
+            true
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = \"abc\" | WHERE a NOT LIKE \"x*\" | EVAL b = a NOT IN (\"x\")"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "keyword"
+          },
+          {
+            "name" : "b",
+            "type" : "boolean"
+          }
+        ],
+        "values" : [
+          [
+            "abc",
+            true
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1, b = 2 | STATS s = SUM(a + b), m = MAX(a) + 1, c = COUNT()"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "long"
+          },
+          {
+            "name" : "m",
+            "type" : "integer"
+          },
+          {
+            "name" : "c",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            3,
+            2,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | STATS c = COUNT(*) WHERE a > 0"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = [1,2,3] | STATS s = SUM(a), c = COUNT(a), cd = COUNT_DISTINCT(a), v = VALUES(a)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "long"
+          },
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "cd",
+            "type" : "long"
+          },
+          {
+            "name" : "v",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            6,
+            3,
+            3,
+            [
+              1,
+              2,
+              3
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | INLINE STATS m = MAX(a)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "m",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | LOOKUP JOIN x ON a"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:25: Unknown index [x]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:25: Unknown index [x]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL a = a + 1, a = a * 10"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            20
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1, a = 2"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW `a b` = 1 | EVAL c = `a b` + 1"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a b",
+            "type" : "integer"
+          },
+          {
+            "name" : "c",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = ?"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:22: Not enough actual parameters 0"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:22: Not enough actual parameters 0"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 // comment\n| EVAL /* x */ b = 2"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "b",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = 3 :: string, c = \"true\"::boolean"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "b",
+            "type" : "keyword"
+          },
+          {
+            "name" : "c",
+            "type" : "boolean"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            "3",
+            true
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = \"x\" | EVAL b = a::long"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "keyword"
+          },
+          {
+            "name" : "b",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            "x",
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | KEEP b"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:18: Unknown column [b]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:18: Unknown column [b]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | DROP a"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [ ],
+        "values" : [
+          [ ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | RENAME a AS b, b AS c"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | RENAME c AS b"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:20: Unknown column [c]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:20: Unknown column [c]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | SORT b"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:18: Unknown column [b]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:18: Unknown column [b]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = TOP(a, 1, \"asc\")"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:22: aggregate function [TOP(a, 1, \"asc\")] not allowed outside STATS command"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:22: aggregate function [TOP(a, 1, \"asc\")] not allowed outside STATS command"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | STATS b = ABS(a)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:27: column [a] must appear in the STATS BY clause or be used in an aggregate function"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:27: column [a] must appear in the STATS BY clause or be used in an aggregate function"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | STATS AVG(a) BY a"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "AVG(a)",
+            "type" : "double"
+          },
+          {
+            "name" : "a",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1.0,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | STATS m = MAX(a) BY a | EVAL x = m"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "m",
+            "type" : "integer"
+          },
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "x",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | STATS BY a"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | STATS"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:13: At least one aggregation or grouping expression required in [STATS]"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:13: At least one aggregation or grouping expression required in [STATS]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | WHERE"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:18: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:18: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}",
+          "caused_by" : {
+            "type" : "input_mismatch_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:17: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:17: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}",
+          "caused_by" : {
+            "type" : "input_mismatch_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | LIMIT"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:18: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'null', '?', 'true', '+', '-', NAMED_OR_POSITIONAL_PARAM, '['}"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:18: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'null', '?', 'true', '+', '-', NAMED_OR_POSITIONAL_PARAM, '['}",
+          "caused_by" : {
+            "type" : "input_mismatch_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | SORT"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:17: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:17: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}",
+          "caused_by" : {
+            "type" : "input_mismatch_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | KEEP"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:17: mismatched input '<EOF>' expecting {'?', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', ID_PATTERN}"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:17: mismatched input '<EOF>' expecting {'?', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', ID_PATTERN}",
+          "caused_by" : {
+            "type" : "input_mismatch_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:4: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:4: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}",
+          "caused_by" : {
+            "type" : "input_mismatch_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:5: Unknown column [a]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:5: Unknown column [a]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = "
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:9: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:9: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}",
+          "caused_by" : {
+            "type" : "input_mismatch_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = (1 + 2"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:28: no viable alternative at input '(1 + 2'"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:28: no viable alternative at input '(1 + 2'",
+          "caused_by" : {
+            "type" : "no_viable_alt_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = \"unterminated"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:9: token recognition error at: '\"unterminated'"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:9: token recognition error at: '\"unterminated'",
+          "caused_by" : {
+            "type" : "lexer_no_viable_alt_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = a +"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:25: no viable alternative at input 'a +'"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:25: no viable alternative at input 'a +'",
+          "caused_by" : {
+            "type" : "no_viable_alt_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | WHERE a == 1 AND"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:29: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:29: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}",
+          "caused_by" : {
+            "type" : "input_mismatch_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = LENGTH()"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "ql_illegal_argument_exception",
+              "reason" : "expects exactly one argument"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:22: error building [length]: expects exactly one argument",
+          "caused_by" : {
+            "type" : "ql_illegal_argument_exception",
+            "reason" : "expects exactly one argument"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = LENGTH(1, 2)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "ql_illegal_argument_exception",
+              "reason" : "expects exactly one argument"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:22: error building [length]: expects exactly one argument",
+          "caused_by" : {
+            "type" : "ql_illegal_argument_exception",
+            "reason" : "expects exactly one argument"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = LENGTH(a)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:22: argument of [LENGTH(a)] must be [string], found value [a] type [integer]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:22: argument of [LENGTH(a)] must be [string], found value [a] type [integer]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = SUBSTRING(\"abc\")"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "ql_illegal_argument_exception",
+              "reason" : "expects two or three arguments"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:22: error building [substring]: expects two or three arguments",
+          "caused_by" : {
+            "type" : "ql_illegal_argument_exception",
+            "reason" : "expects two or three arguments"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = ROUND(\"x\")"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:28: Cannot convert string [x] to [DOUBLE], error [Cannot parse number [x]]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:28: Cannot convert string [x] to [DOUBLE], error [Cannot parse number [x]]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = CONCAT(a, \"x\")"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:22: argument of [CONCAT(a, \"x\")] must be [string], found value [a] type [integer]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:22: argument of [CONCAT(a, \"x\")] must be [string], found value [a] type [integer]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | WHERE a"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:19: Condition expression needs to be boolean, found [INTEGER]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:19: Condition expression needs to be boolean, found [INTEGER]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | WHERE \"x\""
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:19: Condition expression needs to be boolean, found [KEYWORD]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:19: Condition expression needs to be boolean, found [KEYWORD]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = a > \"x\""
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:22: first argument of [a > \"x\"] is [numeric] so second argument must also be [numeric] but was [keyword]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:22: first argument of [a > \"x\"] is [numeric] so second argument must also be [numeric] but was [keyword]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | EVAL b = NOT a"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:22: argument of [NOT a] must be [boolean], found value [a] type [integer]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:22: argument of [NOT a] must be [boolean], found value [a] type [integer]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS c = COUNT(*) BY b = BUCKET(salary, 10, 0, 200) | SORT b"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "b",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            50.0
+          ],
+          [
+            2,
+            100.0
+          ],
+          [
+            1,
+            150.0
+          ],
+          [
+            1,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS c = COUNT(*) BY b = BUCKET(hired, 10, \"2018-01-01\", \"2023-01-01\") | SORT b"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "b",
+            "type" : "date"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            "2018-01-01T00:00:00.000Z"
+          ],
+          [
+            1,
+            "2019-01-01T00:00:00.000Z"
+          ],
+          [
+            1,
+            "2020-01-01T00:00:00.000Z"
+          ],
+          [
+            1,
+            "2021-01-01T00:00:00.000Z"
+          ],
+          [
+            1,
+            "2022-01-01T00:00:00.000Z"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS c = COUNT(*) BY b = BUCKET(hired, 100, \"2018-01-01\", \"2023-01-01\") | SORT b"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "b",
+            "type" : "date"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            "2018-07-01T00:00:00.000Z"
+          ],
+          [
+            1,
+            "2019-03-01T00:00:00.000Z"
+          ],
+          [
+            1,
+            "2020-01-01T00:00:00.000Z"
+          ],
+          [
+            1,
+            "2021-06-01T00:00:00.000Z"
+          ],
+          [
+            1,
+            "2022-11-01T00:00:00.000Z"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS c = COUNT(*) BY b = BUCKET(hired, 1 month) | SORT b | LIMIT 2"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "b",
+            "type" : "date"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            "2018-07-01T00:00:00.000Z"
+          ],
+          [
+            1,
+            "2019-03-01T00:00:00.000Z"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | DISSECT msg \"%{b} %{a}\" | KEEP name, a, b | SORT name | LIMIT 1"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "a",
+            "type" : "keyword"
+          },
+          {
+            "name" : "b",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            "world",
+            "hello"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | ENRICH compat-xpack-dept | KEEP name, dept, head, floor | SORT name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          },
+          {
+            "name" : "head",
+            "type" : "keyword"
+          },
+          {
+            "name" : "floor",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            "eng",
+            "zed",
+            3
+          ],
+          [
+            "bob",
+            "eng",
+            "zed",
+            3
+          ],
+          [
+            "carol",
+            "ops",
+            "yan",
+            1
+          ],
+          [
+            "dave",
+            "ops",
+            "yan",
+            1
+          ],
+          [
+            "eve",
+            null,
+            null,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | ENRICH compat-xpack-dept ON dept WITH h = head | KEEP name, h | SORT name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "h",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            "zed"
+          ],
+          [
+            "bob",
+            "zed"
+          ],
+          [
+            "carol",
+            "yan"
+          ],
+          [
+            "dave",
+            "yan"
+          ],
+          [
+            "eve",
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | ENRICH compat-xpack-dept | SORT name | LIMIT 1"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "active",
+            "type" : "boolean"
+          },
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          },
+          {
+            "name" : "hired",
+            "type" : "date"
+          },
+          {
+            "name" : "ip",
+            "type" : "ip"
+          },
+          {
+            "name" : "msg",
+            "type" : "text"
+          },
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "rate",
+            "type" : "double"
+          },
+          {
+            "name" : "salary",
+            "type" : "long"
+          },
+          {
+            "name" : "tags",
+            "type" : "keyword"
+          },
+          {
+            "name" : "v",
+            "type" : "version"
+          },
+          {
+            "name" : "head",
+            "type" : "keyword"
+          },
+          {
+            "name" : "floor",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            true,
+            "eng",
+            "2020-01-15T10:00:00.000Z",
+            "10.0.0.1",
+            "hello world",
+            "alice",
+            1.5,
+            120,
+            [
+              "a",
+              "b"
+            ],
+            "1.2.3",
+            "zed",
+            3
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | ENRICH compat-xpack-dept WITH nope"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:25: Enrich field [nope] not found in enrich policy [compat-xpack-dept]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:25: Enrich field [nope] not found in enrich policy [compat-xpack-dept]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | LOOKUP JOIN compat-xpack-lk ON dept | KEEP name, dept, budget | SORT name, budget"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          },
+          {
+            "name" : "budget",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            "eng",
+            10
+          ],
+          [
+            "alice",
+            "eng",
+            20
+          ],
+          [
+            "bob",
+            "eng",
+            10
+          ],
+          [
+            "bob",
+            "eng",
+            20
+          ],
+          [
+            "carol",
+            "ops",
+            5
+          ],
+          [
+            "dave",
+            "ops",
+            5
+          ],
+          [
+            "eve",
+            null,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | LOOKUP JOIN compat-xpack-emp ON dept"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Lookup Join requires a single lookup mode index; [compat-xpack-emp] resolves to [compat-xpack-emp] in [standard] mode"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Lookup Join requires a single lookup mode index; [compat-xpack-emp] resolves to [compat-xpack-emp] in [standard] mode"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS c = COUNT(*) WHERE salary > 95, s = SUM(salary) WHERE active BY dept | SORT dept"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "s",
+            "type" : "long"
+          },
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            2,
+            120,
+            "eng"
+          ],
+          [
+            0,
+            90,
+            "ops"
+          ],
+          [
+            1,
+            null,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | INLINE STATS m = MAX(salary) BY dept | KEEP name, dept, m | SORT name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          },
+          {
+            "name" : "m",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            "eng",
+            120
+          ],
+          [
+            "bob",
+            "eng",
+            120
+          ],
+          [
+            "carol",
+            "ops",
+            90
+          ],
+          [
+            "dave",
+            "ops",
+            90
+          ],
+          [
+            "eve",
+            null,
+            150
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | INLINE STATS m = MAX(salary) | KEEP name, m | SORT name | LIMIT 2"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "m",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            150
+          ],
+          [
+            "bob",
+            150
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL x = nme"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:34: Unknown column [nme], did you mean [name]?"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:34: Unknown column [nme], did you mean [name]?"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM nope*"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "<no-fields>",
+            "type" : "null"
+          }
+        ],
+        "values" : [ ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM nope, nope2"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Unknown index [nope,nope2]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Unknown index [nope,nope2]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | SORT name | KEEP name, tags"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "tags",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            [
+              "a",
+              "b"
+            ]
+          ],
+          [
+            "bob",
+            "c"
+          ],
+          [
+            "carol",
+            [
+              "a",
+              "b",
+              "c"
+            ]
+          ],
+          [
+            "dave",
+            null
+          ],
+          [
+            "eve",
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS v = VALUES(tags)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "v",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            [
+              "a",
+              "b",
+              "c"
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS m = MIN(v), x = MAX(v)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "m",
+            "type" : "version"
+          },
+          {
+            "name" : "x",
+            "type" : "version"
+          }
+        ],
+        "values" : [
+          [
+            "0.9",
+            "2.0.0"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL t = TO_UPPER(tags) | KEEP t | SORT t | LIMIT 2"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "t",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            [
+              "A",
+              "B"
+            ]
+          ],
+          [
+            [
+              "A",
+              "B",
+              "C"
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "DELETE /_enrich/policy/compat-xpack-dept",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-enr",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-lk",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-emp",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

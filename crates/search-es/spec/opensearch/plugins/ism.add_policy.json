@@ -1,0 +1,54 @@
+{
+  "ism.add_policy": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/im-plugin/ism/api/",
+      "description": "Applies a policy to indices."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ism/add/{index}",
+          "methods": [
+            "POST"
+          ],
+          "parts": {
+            "index": {
+              "type": "list",
+              "description": "index"
+            }
+          }
+        },
+        {
+          "path": "/_opendistro/_ism/add/{index}",
+          "methods": [
+            "POST"
+          ],
+          "parts": {
+            "index": {
+              "type": "list",
+              "description": "index"
+            }
+          }
+        },
+        {
+          "path": "/_plugins/_ism/add",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/_opendistro/_ism/add",
+          "methods": [
+            "POST"
+          ]
+        }
+      ]
+    },
+    "params": {},
+    "body": {
+      "description": "The request",
+      "required": false
+    }
+  }
+}

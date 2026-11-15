@@ -1,0 +1,167 @@
+{
+ "found": {
+  "case": 24,
+  "case_seed": 105000339,
+  "seed": 105
+ },
+ "signature": "POST _search status 200:200 vs 400:search_phase_execution_exception",
+ "steps": [
+  {
+   "body": {
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m14-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m14-a"
+  },
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "comp0": {
+       "type": "completion"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "geo0": {
+       "type": "geo_point"
+      },
+      "int0": {
+       "type": "integer"
+      },
+      "ip0": {
+       "type": "ip"
+      },
+      "irange0": {
+       "type": "integer_range"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kwl0": {
+       "normalizer": "lowercase",
+       "type": "keyword"
+      },
+      "long0": {
+       "type": "long"
+      },
+      "o": {
+       "properties": {
+        "int0": {
+         "type": "integer"
+        },
+        "kw0": {
+         "type": "keyword"
+        }
+       }
+      },
+      "scaled0": {
+       "scaling_factor": 100,
+       "type": "scaled_float"
+      },
+      "short0": {
+       "type": "short"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 3,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m14-b",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m14-b"
+  },
+  {
+   "body": {
+    "rescore": {
+     "query": {
+      "rescore_query": {
+       "range": {
+        "date0": {}
+       }
+      }
+     }
+    },
+    "sort": [
+     {
+      "_script": {
+       "script": {
+        "source": "(doc['int0'].size() == 0 ? 0 : doc['int0'].value)"
+       },
+       "type": "number"
+      }
+     }
+    ],
+    "suggest": {}
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 4,
+      "total": 4
+     },
+     "hits": {
+      "hits": [],
+      "max_score": null,
+      "total": {
+       "relation": "eq",
+       "value": 0
+      }
+     },
+     "timed_out": false,
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m14-*/_search"
+  }
+ ]
+}

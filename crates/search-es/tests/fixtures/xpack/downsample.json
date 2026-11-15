@@ -1,0 +1,828 @@
+{
+  "description" : "indices.downsample: validation, aggregate and last_value sampling, downsampling a downsampled index",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-ds",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0,
+          "index" : {
+            "mode" : "time_series",
+            "routing_path" : [
+              "metricset",
+              "k8s.pod.uid"
+            ],
+            "time_series" : {
+              "start_time" : "2021-04-28T00:00:00Z",
+              "end_time" : "2021-04-29T00:00:00Z"
+            }
+          }
+        },
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "metricset" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            },
+            "k8s" : {
+              "properties" : {
+                "pod" : {
+                  "properties" : {
+                    "uid" : {
+                      "type" : "keyword",
+                      "time_series_dimension" : true
+                    },
+                    "name" : {
+                      "type" : "keyword"
+                    },
+                    "value" : {
+                      "type" : "integer"
+                    },
+                    "network" : {
+                      "properties" : {
+                        "tx" : {
+                          "type" : "long",
+                          "time_series_metric" : "gauge"
+                        },
+                        "rx" : {
+                          "type" : "long",
+                          "time_series_metric" : "gauge"
+                        },
+                        "sent" : {
+                          "type" : "long",
+                          "time_series_metric" : "counter"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-ds"
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ds/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\":{}}\n{\"@timestamp\":\"2021-04-28T18:50:04.467Z\",\"metricset\":\"pod\",\"k8s\":{\"pod\":{\"name\":\"cat\",\"uid\":\"947e4ced\",\"value\":1,\"network\":{\"tx\":2001818691,\"rx\":802133794,\"sent\":10}}}}\n{\"index\":{}}\n{\"@timestamp\":\"2021-04-28T18:50:24.467Z\",\"metricset\":\"pod\",\"k8s\":{\"pod\":{\"name\":\"cat2\",\"uid\":\"947e4ced\",\"value\":2,\"network\":{\"tx\":2005177954,\"rx\":801479970,\"sent\":20}}}}\n{\"index\":{}}\n{\"@timestamp\":\"2021-04-28T20:50:44.467Z\",\"metricset\":\"pod\",\"k8s\":{\"pod\":{\"name\":\"cat\",\"uid\":\"947e4ced\",\"network\":{\"tx\":2006223737,\"rx\":802337279,\"sent\":30}}}}\n{\"index\":{}}\n{\"@timestamp\":\"2021-04-28T18:50:03.142Z\",\"metricset\":\"pod\",\"k8s\":{\"pod\":{\"name\":\"dog\",\"uid\":\"df3145b3\",\"network\":{\"tx\":1434521831,\"rx\":530575198,\"sent\":5}}}}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ds/_downsample/compat-xpack-ds-1h",
+      "body" : {
+        "fixed_interval" : "1h"
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "exception",
+              "reason" : "Downsample requires setting [index.blocks.write = true] for index [compat-xpack-ds]"
+            }
+          ],
+          "type" : "exception",
+          "reason" : "Downsample requires setting [index.blocks.write = true] for index [compat-xpack-ds]"
+        },
+        "status" : 500
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-ds/_settings",
+      "body" : {
+        "index.blocks.write" : true
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ds/_downsample/compat-xpack-ds-1h",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Required [fixed_interval]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Required [fixed_interval]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ds/_downsample/compat-xpack-ds-1h",
+      "body" : {
+        "fixed_interval" : "1x"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [downsample/action/config] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "Failed to build [downsample/action/config] after last required field arrived",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "failed to parse setting [createRounding] with value [1x] as a time value: unit is missing or unrecognized"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ds/_downsample/compat-xpack-ds-1h",
+      "body" : {
+        "fixed_interval" : "1h",
+        "foo" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:24] [downsample/action/config] unknown field [foo]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:24] [downsample/action/config] unknown field [foo]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ds/_downsample/compat-xpack-ds-1h",
+      "body" : {
+        "fixed_interval" : "1h",
+        "sampling_method" : "bogus"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:42] [downsample/action/config] failed to parse field [sampling_method]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:42] [downsample/action/config] failed to parse field [sampling_method]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Sampling method [bogus] is not one of the accepted methods [aggregate, last_value]."
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ds/_downsample/COMPAT-XPACK",
+      "body" : {
+        "fixed_interval" : "1h"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_index_name_exception",
+              "reason" : "Invalid index name [COMPAT-XPACK], must be lowercase",
+              "index_uuid" : "_na_",
+              "index" : "COMPAT-XPACK"
+            }
+          ],
+          "type" : "invalid_index_name_exception",
+          "reason" : "Invalid index name [COMPAT-XPACK], must be lowercase",
+          "index_uuid" : "_na_",
+          "index" : "COMPAT-XPACK"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ds-missing/_downsample/compat-xpack-ds-x",
+      "body" : {
+        "fixed_interval" : "1h"
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [compat-xpack-ds-missing]",
+              "index_uuid" : "_na_",
+              "index" : "compat-xpack-ds-missing"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [compat-xpack-ds-missing]",
+          "index_uuid" : "_na_",
+          "index" : "compat-xpack-ds-missing"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-ds-plain",
+      "body" : {
+        "settings" : {
+          "index.blocks.write" : true
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-ds-plain"
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ds-plain/_downsample/compat-xpack-ds-x",
+      "body" : {
+        "fixed_interval" : "1h"
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "exception",
+              "reason" : "Rollup requires setting [index.mode=time_series] for index [compat-xpack-ds-plain]"
+            }
+          ],
+          "type" : "exception",
+          "reason" : "Rollup requires setting [index.mode=time_series] for index [compat-xpack-ds-plain]"
+        },
+        "status" : 500
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ds/_downsample/compat-xpack-ds-plain",
+      "body" : {
+        "fixed_interval" : "1h"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_already_exists_exception",
+              "reason" : "index [compat-xpack-ds-plain/txD12m4yTC-KitLK-H_J3Q] already exists",
+              "index_uuid" : "txD12m4yTC-KitLK-H_J3Q",
+              "index" : "compat-xpack-ds-plain"
+            }
+          ],
+          "type" : "resource_already_exists_exception",
+          "reason" : "index [compat-xpack-ds-plain/txD12m4yTC-KitLK-H_J3Q] already exists",
+          "index_uuid" : "txD12m4yTC-KitLK-H_J3Q",
+          "index" : "compat-xpack-ds-plain"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ds/_downsample/compat-xpack-ds-1h",
+      "body" : {
+        "fixed_interval" : "1h"
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ds/_downsample/compat-xpack-ds-1h",
+      "body" : {
+        "fixed_interval" : "1h"
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-ds-1h/_mapping",
+      "status" : 200,
+      "response" : {
+        "compat-xpack-ds-1h" : {
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date",
+                "meta" : {
+                  "fixed_interval" : "1h",
+                  "time_zone" : "UTC"
+                }
+              },
+              "k8s" : {
+                "properties" : {
+                  "pod" : {
+                    "properties" : {
+                      "name" : {
+                        "type" : "keyword"
+                      },
+                      "network" : {
+                        "properties" : {
+                          "rx" : {
+                            "type" : "aggregate_metric_double",
+                            "metrics" : [
+                              "min",
+                              "max",
+                              "sum",
+                              "value_count"
+                            ],
+                            "time_series_metric" : "gauge"
+                          },
+                          "sent" : {
+                            "type" : "long",
+                            "time_series_metric" : "counter"
+                          },
+                          "tx" : {
+                            "type" : "aggregate_metric_double",
+                            "metrics" : [
+                              "min",
+                              "max",
+                              "sum",
+                              "value_count"
+                            ],
+                            "time_series_metric" : "gauge"
+                          }
+                        }
+                      },
+                      "uid" : {
+                        "type" : "keyword",
+                        "time_series_dimension" : true
+                      },
+                      "value" : {
+                        "type" : "integer"
+                      }
+                    }
+                  }
+                }
+              },
+              "metricset" : {
+                "type" : "keyword",
+                "time_series_dimension" : true
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-ds-1h/_settings?flat_settings=true",
+      "mask" : [
+        "index.downsample.origin.uuid",
+        "index.downsample.source.uuid"
+      ],
+      "status" : 200,
+      "response" : {
+        "compat-xpack-ds-1h" : {
+          "settings" : {
+            "index.blocks.write" : "true",
+            "index.creation_date" : "1792740326277",
+            "index.downsample.interval" : "1h",
+            "index.downsample.origin.name" : "compat-xpack-ds",
+            "index.downsample.origin.uuid" : "O9yLfyF7TMqWfdjouzWT4w",
+            "index.downsample.sampling_method" : "aggregate",
+            "index.downsample.source.name" : "compat-xpack-ds",
+            "index.downsample.source.uuid" : "O9yLfyF7TMqWfdjouzWT4w",
+            "index.downsample.status" : "success",
+            "index.mode" : "time_series",
+            "index.number_of_replicas" : "0",
+            "index.number_of_shards" : "1",
+            "index.provided_name" : "compat-xpack-ds-1h",
+            "index.refresh_interval" : "-1",
+            "index.routing.allocation.include._tier_preference" : "data_content",
+            "index.routing_path" : [
+              "metricset",
+              "k8s.pod.uid"
+            ],
+            "index.time_series.end_time" : "2021-04-29T00:00:00Z",
+            "index.time_series.start_time" : "2021-04-28T00:00:00Z",
+            "index.uuid" : "NJ_SoikLSx-yvHSE8RgzWA",
+            "index.version.created" : "9111000"
+          }
+        }
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-ds-1h/_search?sort=@timestamp&filter_path=hits.hits._id,hits.hits._source",
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "KCjEJ9R_BgO8TRX2QOd6dpQayKYY--qoyDjs32UNooK3nBPM3xzCiex___6G5ly-_zKhrjc",
+              "_source" : {
+                "@timestamp" : "2021-04-28T18:00:00.000Z",
+                "_doc_count" : 1,
+                "k8s" : {
+                  "pod" : {
+                    "name" : "dog",
+                    "network" : {
+                      "rx" : {
+                        "min" : 5.30575198E8,
+                        "max" : 5.30575198E8,
+                        "sum" : 5.30575198E8,
+                        "value_count" : 1
+                      },
+                      "sent" : 5,
+                      "tx" : {
+                        "min" : 1.434521831E9,
+                        "max" : 1.434521831E9,
+                        "sum" : 1.434521831E9,
+                        "value_count" : 1
+                      }
+                    },
+                    "uid" : "df3145b3"
+                  }
+                },
+                "metricset" : "pod"
+              }
+            },
+            {
+              "_id" : "KCjEJ9R_BgO8TRX2QOd6dpTX1Mw5--qoyAlGlLVqxVrolhr9GVV8wyJ___6G5ly-_wiHErg",
+              "_source" : {
+                "@timestamp" : "2021-04-28T18:00:00.000Z",
+                "_doc_count" : 2,
+                "k8s" : {
+                  "pod" : {
+                    "name" : "cat2",
+                    "network" : {
+                      "rx" : {
+                        "min" : 8.0147997E8,
+                        "max" : 8.02133794E8,
+                        "sum" : 1.603613764E9,
+                        "value_count" : 2
+                      },
+                      "sent" : 10,
+                      "tx" : {
+                        "min" : 2.001818691E9,
+                        "max" : 2.005177954E9,
+                        "sum" : 4.006996645E9,
+                        "value_count" : 2
+                      }
+                    },
+                    "uid" : "947e4ced",
+                    "value" : 2
+                  }
+                },
+                "metricset" : "pod"
+              }
+            },
+            {
+              "_id" : "KCjEJ9R_BgO8TRX2QOd6dpTX1Mw5--qoyAlGlLVqxVrolhr9GVV8wyJ___6G5e7h_wiHErg",
+              "_source" : {
+                "@timestamp" : "2021-04-28T20:00:00.000Z",
+                "_doc_count" : 1,
+                "k8s" : {
+                  "pod" : {
+                    "name" : "cat",
+                    "network" : {
+                      "rx" : {
+                        "min" : 8.02337279E8,
+                        "max" : 8.02337279E8,
+                        "sum" : 8.02337279E8,
+                        "value_count" : 1
+                      },
+                      "sent" : 30,
+                      "tx" : {
+                        "min" : 2.006223737E9,
+                        "max" : 2.006223737E9,
+                        "sum" : 2.006223737E9,
+                        "value_count" : 1
+                      }
+                    },
+                    "uid" : "947e4ced"
+                  }
+                },
+                "metricset" : "pod"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ds-1h/_downsample/compat-xpack-ds-90m",
+      "body" : {
+        "fixed_interval" : "90m"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: Source index is a downsampled index. Downsampling interval [90m] must be a multiple of the source index interval [1h].;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: Source index is a downsampled index. Downsampling interval [90m] must be a multiple of the source index interval [1h].;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ds-1h/_downsample/compat-xpack-ds-30m",
+      "body" : {
+        "fixed_interval" : "30m"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: Source index is a downsampled index. Downsampling interval [30m] must be greater than the source index interval [1h].;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: Source index is a downsampled index. Downsampling interval [30m] must be greater than the source index interval [1h].;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ds-1h/_downsample/compat-xpack-ds-2h",
+      "body" : {
+        "fixed_interval" : "2h"
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-ds-2h/_search?sort=@timestamp&filter_path=hits.hits._id,hits.hits._source",
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "KCjEJ9R_BgO8TRX2QOd6dpQayKYY--qoyDjs32UNooK3nBPM3xzCiex___6G5ly-_zKhrjc",
+              "_source" : {
+                "@timestamp" : "2021-04-28T18:00:00.000Z",
+                "_doc_count" : 1,
+                "k8s" : {
+                  "pod" : {
+                    "name" : "dog",
+                    "network" : {
+                      "rx" : {
+                        "min" : 5.30575198E8,
+                        "max" : 5.30575198E8,
+                        "sum" : 5.30575198E8,
+                        "value_count" : 1
+                      },
+                      "sent" : 5,
+                      "tx" : {
+                        "min" : 1.434521831E9,
+                        "max" : 1.434521831E9,
+                        "sum" : 1.434521831E9,
+                        "value_count" : 1
+                      }
+                    },
+                    "uid" : "df3145b3"
+                  }
+                },
+                "metricset" : "pod"
+              }
+            },
+            {
+              "_id" : "KCjEJ9R_BgO8TRX2QOd6dpTX1Mw5--qoyAlGlLVqxVrolhr9GVV8wyJ___6G5ly-_wiHErg",
+              "_source" : {
+                "@timestamp" : "2021-04-28T18:00:00.000Z",
+                "_doc_count" : 2,
+                "k8s" : {
+                  "pod" : {
+                    "name" : "cat2",
+                    "network" : {
+                      "rx" : {
+                        "min" : 8.0147997E8,
+                        "max" : 8.02133794E8,
+                        "sum" : 1.603613764E9,
+                        "value_count" : 2
+                      },
+                      "sent" : 10,
+                      "tx" : {
+                        "min" : 2.001818691E9,
+                        "max" : 2.005177954E9,
+                        "sum" : 4.006996645E9,
+                        "value_count" : 2
+                      }
+                    },
+                    "uid" : "947e4ced",
+                    "value" : 2
+                  }
+                },
+                "metricset" : "pod"
+              }
+            },
+            {
+              "_id" : "KCjEJ9R_BgO8TRX2QOd6dpTX1Mw5--qoyAlGlLVqxVrolhr9GVV8wyJ___6G5e7h_wiHErg",
+              "_source" : {
+                "@timestamp" : "2021-04-28T20:00:00.000Z",
+                "_doc_count" : 1,
+                "k8s" : {
+                  "pod" : {
+                    "name" : "cat",
+                    "network" : {
+                      "rx" : {
+                        "min" : 8.02337279E8,
+                        "max" : 8.02337279E8,
+                        "sum" : 8.02337279E8,
+                        "value_count" : 1
+                      },
+                      "sent" : 30,
+                      "tx" : {
+                        "min" : 2.006223737E9,
+                        "max" : 2.006223737E9,
+                        "sum" : 2.006223737E9,
+                        "value_count" : 1
+                      }
+                    },
+                    "uid" : "947e4ced"
+                  }
+                },
+                "metricset" : "pod"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-ds-2h/_settings?flat_settings=true&filter_path=*.settings.index.downsample*",
+      "mask" : [
+        "index.downsample.origin.uuid",
+        "index.downsample.source.uuid"
+      ],
+      "status" : 200,
+      "response" : { }
+    },
+    {
+      "req" : "POST /compat-xpack-ds/_downsample/compat-xpack-ds-last",
+      "body" : {
+        "fixed_interval" : "1h",
+        "sampling_method" : "last_value"
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-ds-last/_mapping",
+      "status" : 200,
+      "response" : {
+        "compat-xpack-ds-last" : {
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date",
+                "meta" : {
+                  "fixed_interval" : "1h",
+                  "time_zone" : "UTC"
+                }
+              },
+              "k8s" : {
+                "properties" : {
+                  "pod" : {
+                    "properties" : {
+                      "name" : {
+                        "type" : "keyword"
+                      },
+                      "network" : {
+                        "properties" : {
+                          "rx" : {
+                            "type" : "long",
+                            "time_series_metric" : "gauge"
+                          },
+                          "sent" : {
+                            "type" : "long",
+                            "time_series_metric" : "counter"
+                          },
+                          "tx" : {
+                            "type" : "long",
+                            "time_series_metric" : "gauge"
+                          }
+                        }
+                      },
+                      "uid" : {
+                        "type" : "keyword",
+                        "time_series_dimension" : true
+                      },
+                      "value" : {
+                        "type" : "integer"
+                      }
+                    }
+                  }
+                }
+              },
+              "metricset" : {
+                "type" : "keyword",
+                "time_series_dimension" : true
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-ds-last/_search?sort=@timestamp&filter_path=hits.hits._source",
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_source" : {
+                "@timestamp" : "2021-04-28T18:00:00.000Z",
+                "_doc_count" : 1,
+                "k8s" : {
+                  "pod" : {
+                    "name" : "dog",
+                    "network" : {
+                      "rx" : 530575198,
+                      "sent" : 5,
+                      "tx" : 1434521831
+                    },
+                    "uid" : "df3145b3"
+                  }
+                },
+                "metricset" : "pod"
+              }
+            },
+            {
+              "_source" : {
+                "@timestamp" : "2021-04-28T18:00:00.000Z",
+                "_doc_count" : 2,
+                "k8s" : {
+                  "pod" : {
+                    "name" : "cat2",
+                    "network" : {
+                      "rx" : 801479970,
+                      "sent" : 20,
+                      "tx" : 2005177954
+                    },
+                    "uid" : "947e4ced",
+                    "value" : 2
+                  }
+                },
+                "metricset" : "pod"
+              }
+            },
+            {
+              "_source" : {
+                "@timestamp" : "2021-04-28T20:00:00.000Z",
+                "_doc_count" : 1,
+                "k8s" : {
+                  "pod" : {
+                    "name" : "cat",
+                    "network" : {
+                      "rx" : 802337279,
+                      "sent" : 30,
+                      "tx" : 2006223737
+                    },
+                    "uid" : "947e4ced"
+                  }
+                },
+                "metricset" : "pod"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

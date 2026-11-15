@@ -1,0 +1,249 @@
+return new BigInteger('123456789012345678901234567890').multiply(new BigInteger('-987654321'))
+----
+return new BigInteger('100').add(BigInteger.ONE)
+----
+return new BigInteger('-17').divide(new BigInteger('5'))
+----
+return new BigInteger('-17').remainder(new BigInteger('5'))
+----
+return new BigInteger('-17').mod(new BigInteger('5'))
+----
+return new BigInteger('-17').divideAndRemainder(new BigInteger('5'))[1]
+----
+return new BigInteger('2').pow(100)
+----
+return new BigInteger('12').gcd(new BigInteger('18'))
+----
+return new BigInteger('3').modPow(new BigInteger('200'), new BigInteger('1000007'))
+----
+return new BigInteger('3').modInverse(new BigInteger('11'))
+----
+return new BigInteger('-6').and(new BigInteger('3'))
+----
+return new BigInteger('-6').or(new BigInteger('3'))
+----
+return new BigInteger('-6').xor(new BigInteger('3'))
+----
+return new BigInteger('-6').andNot(new BigInteger('3'))
+----
+return new BigInteger('-6').not()
+----
+return new BigInteger('-5').shiftRight(1)
+----
+return new BigInteger('5').shiftLeft(70)
+----
+return new BigInteger('-128').bitLength()
+----
+return new BigInteger('-128').bitCount()
+----
+return new BigInteger('40').getLowestSetBit()
+----
+return new BigInteger('-6').testBit(1)
+----
+return new BigInteger('6').setBit(70)
+----
+return new BigInteger('-6').clearBit(1)
+----
+return new BigInteger('6').flipBit(0)
+----
+return new BigInteger('-129').toByteArray()[0]
+----
+return new BigInteger('255').toString(16)
+----
+return new BigInteger('-255').toString(2)
+----
+return new BigInteger('ff')
+----
+return new BigInteger('ff', 16)
+----
+return new BigInteger('-zz', 36)
+----
+return new BigInteger('9223372036854775808').longValue()
+----
+return new BigInteger('9223372036854775808').intValue()
+----
+return new BigInteger('9223372036854775808').longValueExact()
+----
+return new BigInteger('300').byteValueExact()
+----
+return new BigInteger('123456789012345678901234567890').doubleValue()
+----
+return new BigInteger('1').divide(BigInteger.ZERO)
+----
+return new BigInteger('1').mod(new BigInteger('-1'))
+----
+return new BigInteger('2').modInverse(new BigInteger('4'))
+----
+return new BigInteger('2').pow(-1)
+----
+return new BigInteger('')
+----
+return new BigInteger('1-2')
+----
+return new BigInteger('5').compareTo(new BigInteger('7'))
+----
+return new BigInteger('5').equals(new BigInteger('5'))
+----
+return new BigInteger('5').hashCode()
+----
+return new BigInteger('-12345678901234567890').hashCode()
+----
+return BigInteger.valueOf(-5L).signum()
+----
+return new BigInteger('5').max(new BigInteger('7'))
+----
+return new BigInteger('5').testBit(-1)
+----
+return new BigDecimal('1.50')
+----
+return new BigDecimal('1E+3')
+----
+return new BigDecimal('0.0000001')
+----
+return new BigDecimal('123.456e-10')
+----
+return new BigDecimal('-0.00')
+----
+return new BigDecimal('1E+3').toPlainString()
+----
+return new BigDecimal('12345E+2').toEngineeringString()
+----
+return new BigDecimal('0.000123').toEngineeringString()
+----
+return new BigDecimal('0E+2').toEngineeringString()
+----
+return BigDecimal.valueOf(0.1)
+----
+return BigDecimal.valueOf(1e20)
+----
+return BigDecimal.valueOf(100.0)
+----
+return new BigDecimal('10').divide(new BigDecimal('4'))
+----
+return new BigDecimal('1').divide(new BigDecimal('3'))
+----
+return new BigDecimal('1').divide(new BigDecimal('3'), MathContext.DECIMAL32)
+----
+return new BigDecimal('2').divide(new BigDecimal('3'), new MathContext(5))
+----
+return new BigDecimal('1.00').divide(new BigDecimal('4'))
+----
+return new BigDecimal('100').divide(new BigDecimal('0.01'))
+----
+return new BigDecimal('1').divide(new BigDecimal('0'))
+----
+return new BigDecimal('0').divide(new BigDecimal('0'))
+----
+return new BigDecimal('0.00').divide(new BigDecimal('3'))
+----
+return new BigDecimal('1.25').setScale(1, RoundingMode.HALF_EVEN)
+----
+return new BigDecimal('1.25').setScale(1, RoundingMode.HALF_UP)
+----
+return new BigDecimal('-1.25').setScale(1, RoundingMode.HALF_DOWN)
+----
+return new BigDecimal('1.21').setScale(1, RoundingMode.CEILING)
+----
+return new BigDecimal('-1.21').setScale(1, RoundingMode.FLOOR)
+----
+return new BigDecimal('1.21').setScale(1, RoundingMode.UP)
+----
+return new BigDecimal('1.29').setScale(1, RoundingMode.DOWN)
+----
+return new BigDecimal('1.25').setScale(1)
+----
+return new BigDecimal('1.25').setScale(4)
+----
+return new BigDecimal('10.5').divideToIntegralValue(new BigDecimal('3'))
+----
+return new BigDecimal('10.5').remainder(new BigDecimal('3'))
+----
+return new BigDecimal('-10.5').divideAndRemainder(new BigDecimal('3'))[1]
+----
+return new BigDecimal('999').round(new MathContext(2))
+----
+return new BigDecimal('1.10').add(new BigDecimal('2.205'))
+----
+return new BigDecimal('1.10').subtract(new BigDecimal('2.205'))
+----
+return new BigDecimal('1.10').multiply(new BigDecimal('2.205'))
+----
+return new BigDecimal('100').stripTrailingZeros()
+----
+return new BigDecimal('0.000').stripTrailingZeros()
+----
+return new BigDecimal('1.5').pow(3)
+----
+return new BigDecimal('1.5').pow(3, new MathContext(2))
+----
+return new BigDecimal('123.45').movePointLeft(3)
+----
+return new BigDecimal('123.45').movePointRight(3)
+----
+return new BigDecimal('123.45').movePointRight(1)
+----
+return new BigDecimal('123.45').scaleByPowerOfTen(3)
+----
+return new BigDecimal('123.45').ulp()
+----
+return new BigDecimal('123.45').precision()
+----
+return new BigDecimal('123.45').scale()
+----
+return new BigDecimal('-123.45').signum()
+----
+return new BigDecimal('123.45').toBigInteger()
+----
+return new BigDecimal('123.45').toBigIntegerExact()
+----
+return new BigDecimal('123.45').intValueExact()
+----
+return new BigDecimal('123').intValueExact()
+----
+return new BigDecimal('99999999999').intValueExact()
+----
+return new BigDecimal('123.45').intValue()
+----
+return new BigDecimal('123.45').doubleValue()
+----
+return new BigDecimal('2.0').equals(new BigDecimal('2.00'))
+----
+return new BigDecimal('2.0').compareTo(new BigDecimal('2.00'))
+----
+return new BigDecimal('2.0').hashCode()
+----
+return new BigDecimal('123456789012345678901234567890.5').hashCode()
+----
+return new BigDecimal('2.0').max(new BigDecimal('2.00'))
+----
+return new BigDecimal('abc')
+----
+return new BigDecimal('1.2.3')
+----
+return new BigDecimal('')
+----
+return new BigDecimal('1e')
+----
+return new BigDecimal('-1.5').abs()
+----
+return new BigDecimal('1.5').negate()
+----
+return new BigDecimal('1.234567').plus(new MathContext(3))
+----
+return new BigDecimal('1.23456', new MathContext(3))
+----
+return MathContext.DECIMAL64
+----
+return new MathContext(5).getRoundingMode()
+----
+return RoundingMode.valueOf('UP')
+----
+return RoundingMode.values().length
+----
+return new MathContext(-1)
+----
+return String.format('%d %x', new def[] {new BigInteger('-123456789012345678901234567890'), new BigInteger('255')})
+----
+return String.format('%.3f %e', new def[] {new BigDecimal('1.23456'), new BigDecimal('12345.678')})
+----
+return [new BigDecimal('2.5'), new BigDecimal('1.5')].stream().sorted().collect(Collectors.toList())

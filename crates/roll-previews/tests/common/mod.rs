@@ -186,6 +186,8 @@ impl Apps for FakeApps {
         if let Some(f) = self.on_deploy.lock().as_ref() {
             f();
         }
+        // What the backend was sent, whatever it answers.
+        self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
         if self.still.load(Ordering::SeqCst) > 0 {
             self.still.fetch_sub(1, Ordering::SeqCst);
             return Err(roll_previews::ports::StillDeploying("building".into()).into());

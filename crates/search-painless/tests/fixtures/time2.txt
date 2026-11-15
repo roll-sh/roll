@@ -1,0 +1,81 @@
+def d = LocalDate.of(2020,12,31); return [d.getLong(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.getLong(IsoFields.WEEK_BASED_YEAR), d.getLong(IsoFields.QUARTER_OF_YEAR), d.getLong(IsoFields.DAY_OF_QUARTER), d.getLong(JulianFields.JULIAN_DAY), d.getLong(JulianFields.MODIFIED_JULIAN_DAY), d.getLong(JulianFields.RATA_DIE), d.getLong(WeekFields.ISO.weekOfWeekBasedYear()), d.getLong(WeekFields.ISO.weekBasedYear()), d.getLong(WeekFields.ISO.weekOfMonth()), d.getLong(WeekFields.ISO.weekOfYear()), d.getLong(WeekFields.ISO.dayOfWeek()), d.getLong(WeekFields.SUNDAY_START.weekOfWeekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekOfYear()), d.getLong(WeekFields.SUNDAY_START.weekOfMonth()), d.getLong(WeekFields.SUNDAY_START.dayOfWeek()), d.getLong(WeekFields.of(DayOfWeek.WEDNESDAY, 3).weekOfYear()), d.getLong(WeekFields.of(Locale.US).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.UK).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.ROOT).weekOfYear()), d.getLong(WeekFields.of(Locale.GERMANY).weekOfYear())]
+----
+def d = LocalDate.of(2021,1,3); return [d.getLong(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.getLong(IsoFields.WEEK_BASED_YEAR), d.getLong(IsoFields.QUARTER_OF_YEAR), d.getLong(IsoFields.DAY_OF_QUARTER), d.getLong(JulianFields.JULIAN_DAY), d.getLong(JulianFields.MODIFIED_JULIAN_DAY), d.getLong(JulianFields.RATA_DIE), d.getLong(WeekFields.ISO.weekOfWeekBasedYear()), d.getLong(WeekFields.ISO.weekBasedYear()), d.getLong(WeekFields.ISO.weekOfMonth()), d.getLong(WeekFields.ISO.weekOfYear()), d.getLong(WeekFields.ISO.dayOfWeek()), d.getLong(WeekFields.SUNDAY_START.weekOfWeekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekOfYear()), d.getLong(WeekFields.SUNDAY_START.weekOfMonth()), d.getLong(WeekFields.SUNDAY_START.dayOfWeek()), d.getLong(WeekFields.of(DayOfWeek.WEDNESDAY, 3).weekOfYear()), d.getLong(WeekFields.of(Locale.US).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.UK).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.ROOT).weekOfYear()), d.getLong(WeekFields.of(Locale.GERMANY).weekOfYear())]
+----
+def d = LocalDate.of(2021,1,4); return [d.getLong(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.getLong(IsoFields.WEEK_BASED_YEAR), d.getLong(IsoFields.QUARTER_OF_YEAR), d.getLong(IsoFields.DAY_OF_QUARTER), d.getLong(JulianFields.JULIAN_DAY), d.getLong(JulianFields.MODIFIED_JULIAN_DAY), d.getLong(JulianFields.RATA_DIE), d.getLong(WeekFields.ISO.weekOfWeekBasedYear()), d.getLong(WeekFields.ISO.weekBasedYear()), d.getLong(WeekFields.ISO.weekOfMonth()), d.getLong(WeekFields.ISO.weekOfYear()), d.getLong(WeekFields.ISO.dayOfWeek()), d.getLong(WeekFields.SUNDAY_START.weekOfWeekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekOfYear()), d.getLong(WeekFields.SUNDAY_START.weekOfMonth()), d.getLong(WeekFields.SUNDAY_START.dayOfWeek()), d.getLong(WeekFields.of(DayOfWeek.WEDNESDAY, 3).weekOfYear()), d.getLong(WeekFields.of(Locale.US).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.UK).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.ROOT).weekOfYear()), d.getLong(WeekFields.of(Locale.GERMANY).weekOfYear())]
+----
+def d = LocalDate.of(2019,12,30); return [d.getLong(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.getLong(IsoFields.WEEK_BASED_YEAR), d.getLong(IsoFields.QUARTER_OF_YEAR), d.getLong(IsoFields.DAY_OF_QUARTER), d.getLong(JulianFields.JULIAN_DAY), d.getLong(JulianFields.MODIFIED_JULIAN_DAY), d.getLong(JulianFields.RATA_DIE), d.getLong(WeekFields.ISO.weekOfWeekBasedYear()), d.getLong(WeekFields.ISO.weekBasedYear()), d.getLong(WeekFields.ISO.weekOfMonth()), d.getLong(WeekFields.ISO.weekOfYear()), d.getLong(WeekFields.ISO.dayOfWeek()), d.getLong(WeekFields.SUNDAY_START.weekOfWeekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekOfYear()), d.getLong(WeekFields.SUNDAY_START.weekOfMonth()), d.getLong(WeekFields.SUNDAY_START.dayOfWeek()), d.getLong(WeekFields.of(DayOfWeek.WEDNESDAY, 3).weekOfYear()), d.getLong(WeekFields.of(Locale.US).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.UK).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.ROOT).weekOfYear()), d.getLong(WeekFields.of(Locale.GERMANY).weekOfYear())]
+----
+def d = LocalDate.of(2016,1,1); return [d.getLong(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.getLong(IsoFields.WEEK_BASED_YEAR), d.getLong(IsoFields.QUARTER_OF_YEAR), d.getLong(IsoFields.DAY_OF_QUARTER), d.getLong(JulianFields.JULIAN_DAY), d.getLong(JulianFields.MODIFIED_JULIAN_DAY), d.getLong(JulianFields.RATA_DIE), d.getLong(WeekFields.ISO.weekOfWeekBasedYear()), d.getLong(WeekFields.ISO.weekBasedYear()), d.getLong(WeekFields.ISO.weekOfMonth()), d.getLong(WeekFields.ISO.weekOfYear()), d.getLong(WeekFields.ISO.dayOfWeek()), d.getLong(WeekFields.SUNDAY_START.weekOfWeekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekOfYear()), d.getLong(WeekFields.SUNDAY_START.weekOfMonth()), d.getLong(WeekFields.SUNDAY_START.dayOfWeek()), d.getLong(WeekFields.of(DayOfWeek.WEDNESDAY, 3).weekOfYear()), d.getLong(WeekFields.of(Locale.US).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.UK).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.ROOT).weekOfYear()), d.getLong(WeekFields.of(Locale.GERMANY).weekOfYear())]
+----
+def d = LocalDate.of(2024,2,29); return [d.getLong(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.getLong(IsoFields.WEEK_BASED_YEAR), d.getLong(IsoFields.QUARTER_OF_YEAR), d.getLong(IsoFields.DAY_OF_QUARTER), d.getLong(JulianFields.JULIAN_DAY), d.getLong(JulianFields.MODIFIED_JULIAN_DAY), d.getLong(JulianFields.RATA_DIE), d.getLong(WeekFields.ISO.weekOfWeekBasedYear()), d.getLong(WeekFields.ISO.weekBasedYear()), d.getLong(WeekFields.ISO.weekOfMonth()), d.getLong(WeekFields.ISO.weekOfYear()), d.getLong(WeekFields.ISO.dayOfWeek()), d.getLong(WeekFields.SUNDAY_START.weekOfWeekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekOfYear()), d.getLong(WeekFields.SUNDAY_START.weekOfMonth()), d.getLong(WeekFields.SUNDAY_START.dayOfWeek()), d.getLong(WeekFields.of(DayOfWeek.WEDNESDAY, 3).weekOfYear()), d.getLong(WeekFields.of(Locale.US).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.UK).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.ROOT).weekOfYear()), d.getLong(WeekFields.of(Locale.GERMANY).weekOfYear())]
+----
+def d = LocalDate.of(2026,10,20); return [d.getLong(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.getLong(IsoFields.WEEK_BASED_YEAR), d.getLong(IsoFields.QUARTER_OF_YEAR), d.getLong(IsoFields.DAY_OF_QUARTER), d.getLong(JulianFields.JULIAN_DAY), d.getLong(JulianFields.MODIFIED_JULIAN_DAY), d.getLong(JulianFields.RATA_DIE), d.getLong(WeekFields.ISO.weekOfWeekBasedYear()), d.getLong(WeekFields.ISO.weekBasedYear()), d.getLong(WeekFields.ISO.weekOfMonth()), d.getLong(WeekFields.ISO.weekOfYear()), d.getLong(WeekFields.ISO.dayOfWeek()), d.getLong(WeekFields.SUNDAY_START.weekOfWeekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekOfYear()), d.getLong(WeekFields.SUNDAY_START.weekOfMonth()), d.getLong(WeekFields.SUNDAY_START.dayOfWeek()), d.getLong(WeekFields.of(DayOfWeek.WEDNESDAY, 3).weekOfYear()), d.getLong(WeekFields.of(Locale.US).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.UK).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.ROOT).weekOfYear()), d.getLong(WeekFields.of(Locale.GERMANY).weekOfYear())]
+----
+def d = LocalDate.of(2010,1,3); return [d.getLong(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.getLong(IsoFields.WEEK_BASED_YEAR), d.getLong(IsoFields.QUARTER_OF_YEAR), d.getLong(IsoFields.DAY_OF_QUARTER), d.getLong(JulianFields.JULIAN_DAY), d.getLong(JulianFields.MODIFIED_JULIAN_DAY), d.getLong(JulianFields.RATA_DIE), d.getLong(WeekFields.ISO.weekOfWeekBasedYear()), d.getLong(WeekFields.ISO.weekBasedYear()), d.getLong(WeekFields.ISO.weekOfMonth()), d.getLong(WeekFields.ISO.weekOfYear()), d.getLong(WeekFields.ISO.dayOfWeek()), d.getLong(WeekFields.SUNDAY_START.weekOfWeekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekOfYear()), d.getLong(WeekFields.SUNDAY_START.weekOfMonth()), d.getLong(WeekFields.SUNDAY_START.dayOfWeek()), d.getLong(WeekFields.of(DayOfWeek.WEDNESDAY, 3).weekOfYear()), d.getLong(WeekFields.of(Locale.US).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.UK).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.ROOT).weekOfYear()), d.getLong(WeekFields.of(Locale.GERMANY).weekOfYear())]
+----
+def d = ZonedDateTime.parse('2021-01-01T10:00:00Z'); return [d.getLong(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.getLong(IsoFields.WEEK_BASED_YEAR), d.getLong(IsoFields.QUARTER_OF_YEAR), d.getLong(IsoFields.DAY_OF_QUARTER), d.getLong(JulianFields.JULIAN_DAY), d.getLong(JulianFields.MODIFIED_JULIAN_DAY), d.getLong(JulianFields.RATA_DIE), d.getLong(WeekFields.ISO.weekOfWeekBasedYear()), d.getLong(WeekFields.ISO.weekBasedYear()), d.getLong(WeekFields.ISO.weekOfMonth()), d.getLong(WeekFields.ISO.weekOfYear()), d.getLong(WeekFields.ISO.dayOfWeek()), d.getLong(WeekFields.SUNDAY_START.weekOfWeekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekOfYear()), d.getLong(WeekFields.SUNDAY_START.weekOfMonth()), d.getLong(WeekFields.SUNDAY_START.dayOfWeek()), d.getLong(WeekFields.of(DayOfWeek.WEDNESDAY, 3).weekOfYear()), d.getLong(WeekFields.of(Locale.US).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.UK).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.ROOT).weekOfYear()), d.getLong(WeekFields.of(Locale.GERMANY).weekOfYear())]
+----
+def d = LocalDateTime.of(2027,1,1,0,0); return [d.getLong(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.getLong(IsoFields.WEEK_BASED_YEAR), d.getLong(IsoFields.QUARTER_OF_YEAR), d.getLong(IsoFields.DAY_OF_QUARTER), d.getLong(JulianFields.JULIAN_DAY), d.getLong(JulianFields.MODIFIED_JULIAN_DAY), d.getLong(JulianFields.RATA_DIE), d.getLong(WeekFields.ISO.weekOfWeekBasedYear()), d.getLong(WeekFields.ISO.weekBasedYear()), d.getLong(WeekFields.ISO.weekOfMonth()), d.getLong(WeekFields.ISO.weekOfYear()), d.getLong(WeekFields.ISO.dayOfWeek()), d.getLong(WeekFields.SUNDAY_START.weekOfWeekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekBasedYear()), d.getLong(WeekFields.SUNDAY_START.weekOfYear()), d.getLong(WeekFields.SUNDAY_START.weekOfMonth()), d.getLong(WeekFields.SUNDAY_START.dayOfWeek()), d.getLong(WeekFields.of(DayOfWeek.WEDNESDAY, 3).weekOfYear()), d.getLong(WeekFields.of(Locale.US).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.UK).weekOfWeekBasedYear()), d.getLong(WeekFields.of(Locale.ROOT).weekOfYear()), d.getLong(WeekFields.of(Locale.GERMANY).weekOfYear())]
+----
+def d = LocalDate.of(2020,12,31); return [d.get(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.range(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.range(IsoFields.DAY_OF_QUARTER), d.range(WeekFields.ISO.weekOfWeekBasedYear()), d.range(WeekFields.SUNDAY_START.weekOfMonth())]
+----
+def d = LocalDate.of(2021,1,3); return [d.get(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.range(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.range(IsoFields.DAY_OF_QUARTER), d.range(WeekFields.ISO.weekOfWeekBasedYear()), d.range(WeekFields.SUNDAY_START.weekOfMonth())]
+----
+def d = LocalDate.of(2021,1,4); return [d.get(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.range(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.range(IsoFields.DAY_OF_QUARTER), d.range(WeekFields.ISO.weekOfWeekBasedYear()), d.range(WeekFields.SUNDAY_START.weekOfMonth())]
+----
+def d = LocalDate.of(2019,12,30); return [d.get(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.range(IsoFields.WEEK_OF_WEEK_BASED_YEAR), d.range(IsoFields.DAY_OF_QUARTER), d.range(WeekFields.ISO.weekOfWeekBasedYear()), d.range(WeekFields.SUNDAY_START.weekOfMonth())]
+----
+return [IsoFields.WEEK_OF_WEEK_BASED_YEAR, IsoFields.WEEK_BASED_YEAR, IsoFields.QUARTER_OF_YEAR, IsoFields.DAY_OF_QUARTER, IsoFields.QUARTER_YEARS, IsoFields.WEEK_BASED_YEARS, JulianFields.JULIAN_DAY, JulianFields.MODIFIED_JULIAN_DAY, JulianFields.RATA_DIE]
+----
+return [WeekFields.ISO, WeekFields.SUNDAY_START, WeekFields.of(Locale.US), WeekFields.of(Locale.UK), WeekFields.of(Locale.ROOT), WeekFields.of(DayOfWeek.FRIDAY, 7), WeekFields.WEEK_BASED_YEARS]
+----
+return [WeekFields.ISO.weekOfYear(), WeekFields.ISO.dayOfWeek(), WeekFields.SUNDAY_START.weekBasedYear(), WeekFields.ISO.getFirstDayOfWeek(), WeekFields.ISO.getMinimalDaysInFirstWeek()]
+----
+return WeekFields.of(DayOfWeek.MONDAY, 0)
+----
+return WeekFields.of(DayOfWeek.MONDAY, 8)
+----
+return LocalDate.of(2020,1,1).get(JulianFields.JULIAN_DAY)
+----
+return LocalTime.of(1,2).get(IsoFields.QUARTER_OF_YEAR)
+----
+return LocalTime.of(1,2).getLong(IsoFields.WEEK_OF_WEEK_BASED_YEAR)
+----
+return [LocalTime.of(1,2).isSupported(IsoFields.QUARTER_OF_YEAR), LocalDate.of(2020,1,1).isSupported(IsoFields.QUARTER_OF_YEAR), YearMonth.of(2020,5).isSupported(IsoFields.QUARTER_OF_YEAR), YearMonth.of(2020,5).isSupported(IsoFields.DAY_OF_QUARTER), Instant.EPOCH.isSupported(IsoFields.WEEK_BASED_YEAR), LocalDate.of(2020,1,1).isSupported(IsoFields.QUARTER_YEARS), LocalTime.NOON.isSupported(IsoFields.QUARTER_YEARS)]
+----
+return YearMonth.of(2020, 8).getLong(IsoFields.QUARTER_OF_YEAR)
+----
+def d = LocalDate.of(2020, 5, 17); return [d.with(IsoFields.QUARTER_OF_YEAR, 4), d.with(IsoFields.DAY_OF_QUARTER, 1), d.with(IsoFields.DAY_OF_QUARTER, 91), d.with(IsoFields.WEEK_OF_WEEK_BASED_YEAR, 1), d.with(IsoFields.WEEK_OF_WEEK_BASED_YEAR, 53), d.with(IsoFields.WEEK_BASED_YEAR, 2021), d.with(JulianFields.JULIAN_DAY, 2459000), d.with(WeekFields.ISO.dayOfWeek(), 1), d.with(WeekFields.SUNDAY_START.dayOfWeek(), 1), d.with(WeekFields.SUNDAY_START.weekOfYear(), 2)]
+----
+return LocalDate.of(2020, 5, 17).with(IsoFields.QUARTER_OF_YEAR, 5)
+----
+return LocalDate.of(2021, 5, 17).with(IsoFields.WEEK_OF_WEEK_BASED_YEAR, 53)
+----
+return LocalDate.of(2020, 2, 17).with(IsoFields.DAY_OF_QUARTER, 92)
+----
+return [LocalDate.of(2020,12,31).with(IsoFields.WEEK_BASED_YEAR, 2021), LocalDate.of(2020,12,28).with(IsoFields.WEEK_BASED_YEAR, 2019)]
+----
+def d = LocalDate.of(2020, 5, 17); return [d.plus(1, IsoFields.QUARTER_YEARS), d.minus(5, IsoFields.QUARTER_YEARS), d.plus(1, IsoFields.WEEK_BASED_YEARS), d.plus(-2, IsoFields.WEEK_BASED_YEARS)]
+----
+def d = LocalDate.of(2020, 5, 17); return [d.until(LocalDate.of(2021, 8, 16), IsoFields.QUARTER_YEARS), d.until(LocalDate.of(2023, 5, 16), IsoFields.WEEK_BASED_YEARS), d.until(LocalDate.of(2023, 5, 18), IsoFields.WEEK_BASED_YEARS), IsoFields.QUARTER_YEARS.between(d, LocalDate.of(2019, 1, 1))]
+----
+return [IsoFields.QUARTER_YEARS.getDuration(), IsoFields.WEEK_BASED_YEARS.getDuration(), IsoFields.QUARTER_YEARS.isDateBased(), IsoFields.QUARTER_YEARS.isTimeBased(), IsoFields.QUARTER_YEARS.isDurationEstimated()]
+----
+return [IsoFields.QUARTER_OF_YEAR.getBaseUnit(), IsoFields.QUARTER_OF_YEAR.getRangeUnit(), IsoFields.WEEK_OF_WEEK_BASED_YEAR.getBaseUnit(), IsoFields.WEEK_OF_WEEK_BASED_YEAR.getRangeUnit(), IsoFields.WEEK_BASED_YEAR.getRangeUnit(), IsoFields.DAY_OF_QUARTER.getRangeUnit(), JulianFields.JULIAN_DAY.getBaseUnit(), JulianFields.JULIAN_DAY.getRangeUnit()]
+----
+return [IsoFields.QUARTER_OF_YEAR.range(), IsoFields.DAY_OF_QUARTER.range(), IsoFields.WEEK_OF_WEEK_BASED_YEAR.range(), IsoFields.WEEK_BASED_YEAR.range(), JulianFields.JULIAN_DAY.range(), WeekFields.ISO.weekOfMonth().range(), WeekFields.ISO.weekOfYear().range()]
+----
+return [IsoFields.QUARTER_OF_YEAR.isDateBased(), IsoFields.QUARTER_OF_YEAR.isTimeBased(), IsoFields.QUARTER_OF_YEAR.getFrom(LocalDate.of(2020,11,1)), IsoFields.QUARTER_OF_YEAR.isSupportedBy(LocalTime.NOON), IsoFields.QUARTER_OF_YEAR.adjustInto(LocalDate.of(2020,11,1), 1)]
+----
+return ZonedDateTime.parse('2021-01-01T10:00:00Z').with(IsoFields.WEEK_OF_WEEK_BASED_YEAR, 1)
+----
+return [WeekFields.ISO.weekOfWeekBasedYear().getBaseUnit(), WeekFields.ISO.weekBasedYear().getBaseUnit(), WeekFields.ISO.dayOfWeek().getRangeUnit()]
+----
+return WeekFields.ISO == WeekFields.of(DayOfWeek.MONDAY, 4)
+----
+return WeekFields.ISO.equals(WeekFields.of(DayOfWeek.MONDAY, 4))
+----
+return IsoFields.QUARTER_OF_YEAR == IsoFields.QUARTER_OF_YEAR
+----
+return LocalDate.of(2020,1,1).get(IsoFields.QUARTER_OF_YEAR) instanceof Integer

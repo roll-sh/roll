@@ -1,0 +1,863 @@
+{
+  "description" : "Index, get, OCC, update, delete, mget and bulk on a 3-shard index",
+  "steps" : [
+    {
+      "req" : "PUT /es-docs-a",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 3,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "title" : {
+              "type" : "text",
+              "fields" : {
+                "raw" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "n" : {
+              "type" : "integer"
+            },
+            "tags" : {
+              "type" : "keyword"
+            },
+            "at" : {
+              "type" : "date"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-a"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-a/_doc/1",
+      "body" : {
+        "title" : "Hello world",
+        "n" : 1,
+        "tags" : [
+          "a",
+          "b"
+        ],
+        "at" : "2024-01-02"
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "PUT /es-docs-a/_doc/2?refresh=true",
+      "body" : {
+        "title" : "Second doc",
+        "n" : "2",
+        "tags" : "b"
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "2",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "PUT /es-docs-a/_create/1",
+      "body" : {
+        "title" : "dup"
+      },
+      "status" : 409,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "version_conflict_engine_exception",
+              "reason" : "[1]: version conflict, document already exists (current version [1])",
+              "index_uuid" : "rSE7oxANS0KSYYpbpylk-w",
+              "shard" : "2",
+              "index" : "es-docs-a"
+            }
+          ],
+          "type" : "version_conflict_engine_exception",
+          "reason" : "[1]: version conflict, document already exists (current version [1])",
+          "index_uuid" : "rSE7oxANS0KSYYpbpylk-w",
+          "shard" : "2",
+          "index" : "es-docs-a"
+        },
+        "status" : 409
+      }
+    },
+    {
+      "req" : "GET /es-docs-a/_doc/1",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "title" : "Hello world",
+          "n" : 1,
+          "tags" : [
+            "a",
+            "b"
+          ],
+          "at" : "2024-01-02"
+        }
+      }
+    },
+    {
+      "req" : "GET /es-docs-a/_doc/1?_source_includes=t*&stored_fields=title",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "title" : "Hello world",
+          "tags" : [
+            "a",
+            "b"
+          ]
+        }
+      }
+    },
+    {
+      "req" : "GET /es-docs-a/_doc/1?_source=false&version=true",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse long parameter [version] with value [true]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse long parameter [version] with value [true]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"true\""
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "HEAD /es-docs-a/_doc/1",
+      "status" : 200
+    },
+    {
+      "req" : "HEAD /es-docs-a/_doc/404",
+      "status" : 404
+    },
+    {
+      "req" : "GET /es-docs-a/_doc/404",
+      "status" : 404,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "404",
+        "found" : false
+      }
+    },
+    {
+      "req" : "GET /es-docs-a/_source/2",
+      "status" : 200,
+      "response" : {
+        "title" : "Second doc",
+        "n" : "2",
+        "tags" : "b"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-a/_doc/1?if_seq_no=9&if_primary_term=1",
+      "body" : {
+        "title" : "x"
+      },
+      "status" : 409,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "version_conflict_engine_exception",
+              "reason" : "[1]: version conflict, required seqNo [9], primary term [1]. current document has seqNo [0] and primary term [1]",
+              "index_uuid" : "rSE7oxANS0KSYYpbpylk-w",
+              "shard" : "2",
+              "index" : "es-docs-a"
+            }
+          ],
+          "type" : "version_conflict_engine_exception",
+          "reason" : "[1]: version conflict, required seqNo [9], primary term [1]. current document has seqNo [0] and primary term [1]",
+          "index_uuid" : "rSE7oxANS0KSYYpbpylk-w",
+          "shard" : "2",
+          "index" : "es-docs-a"
+        },
+        "status" : 409
+      }
+    },
+    {
+      "req" : "PUT /es-docs-a/_doc/1?if_seq_no=0&if_primary_term=1",
+      "body" : {
+        "title" : "Hello again",
+        "n" : 5
+      },
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "1",
+        "_version" : 2,
+        "result" : "updated",
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "PUT /es-docs-a/_doc/7?version=10&version_type=external",
+      "body" : {
+        "title" : "ext"
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "7",
+        "_version" : 10,
+        "result" : "created",
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "PUT /es-docs-a/_doc/7?version=5&version_type=external",
+      "body" : {
+        "title" : "ext older"
+      },
+      "status" : 409,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "version_conflict_engine_exception",
+              "reason" : "[7]: version conflict, current version [10] is higher or equal to the one provided [5]",
+              "index_uuid" : "rSE7oxANS0KSYYpbpylk-w",
+              "shard" : "0",
+              "index" : "es-docs-a"
+            }
+          ],
+          "type" : "version_conflict_engine_exception",
+          "reason" : "[7]: version conflict, current version [10] is higher or equal to the one provided [5]",
+          "index_uuid" : "rSE7oxANS0KSYYpbpylk-w",
+          "shard" : "0",
+          "index" : "es-docs-a"
+        },
+        "status" : 409
+      }
+    },
+    {
+      "req" : "PUT /es-docs-a/_doc/7?version=10&version_type=external_gte",
+      "body" : {
+        "title" : "ext same"
+      },
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "7",
+        "_version" : 10,
+        "result" : "updated",
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 2,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-a/_update/1",
+      "body" : {
+        "doc" : {
+          "n" : 6
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "1",
+        "_version" : 3,
+        "result" : "updated",
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 2,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-a/_update/1",
+      "body" : {
+        "doc" : {
+          "n" : 6
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "1",
+        "_version" : 3,
+        "result" : "noop",
+        "_shards" : {
+          "total" : 0,
+          "successful" : 0,
+          "failed" : 0
+        },
+        "_seq_no" : 2,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-a/_update/1?_source=true",
+      "body" : {
+        "script" : {
+          "source" : "ctx._source.n += params.k",
+          "params" : {
+            "k" : 10
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "1",
+        "_version" : 4,
+        "result" : "updated",
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 3,
+        "_primary_term" : 1,
+        "get" : {
+          "_seq_no" : 3,
+          "_primary_term" : 1,
+          "found" : true,
+          "_source" : {
+            "title" : "Hello again",
+            "n" : 16
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-a/_update/9",
+      "body" : {
+        "doc" : {
+          "n" : 1
+        }
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_missing_exception",
+              "reason" : "[9]: document missing",
+              "index_uuid" : "rSE7oxANS0KSYYpbpylk-w",
+              "shard" : "2",
+              "index" : "es-docs-a"
+            }
+          ],
+          "type" : "document_missing_exception",
+          "reason" : "[9]: document missing",
+          "index_uuid" : "rSE7oxANS0KSYYpbpylk-w",
+          "shard" : "2",
+          "index" : "es-docs-a"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /es-docs-a/_update/9",
+      "body" : {
+        "doc" : {
+          "n" : 1
+        },
+        "doc_as_upsert" : true
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "9",
+        "_version" : 1,
+        "result" : "created",
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 4,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-a/_update/10",
+      "body" : {
+        "script" : {
+          "source" : "ctx._source.n = 3"
+        },
+        "upsert" : {
+          "n" : 0
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "10",
+        "_version" : 1,
+        "result" : "created",
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 5,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-a/_update/10",
+      "body" : {
+        "script" : {
+          "source" : "ctx.op = 'none'"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "10",
+        "_version" : 1,
+        "result" : "noop",
+        "_shards" : {
+          "total" : 0,
+          "successful" : 0,
+          "failed" : 0
+        },
+        "_seq_no" : 5,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-a/_update/10",
+      "body" : {
+        "script" : {
+          "source" : "ctx.op = 'delete'"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "10",
+        "_version" : 2,
+        "result" : "deleted",
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 6,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-a/_doc/1/_update",
+      "body" : {
+        "doc" : { }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : "no handler found for uri [/es-docs-a/_doc/1/_update] and method [POST]"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-a/_doc/3",
+      "body" : {
+        "n" : "not a number"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:6] failed to parse field [n] of type [integer] in document with id '3'. Preview of field's value: 'not a number'"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [n] of type [integer] in document with id '3'. Preview of field's value: 'not a number'",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"not a number\""
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-a/_doc/2",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "2",
+        "_version" : 2,
+        "result" : "deleted",
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 3,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-a/_doc/2",
+      "status" : 404,
+      "response" : {
+        "_index" : "es-docs-a",
+        "_id" : "2",
+        "_version" : 3,
+        "result" : "not_found",
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 4,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "GET /es-docs-a/_mget",
+      "body" : {
+        "ids" : [
+          "1",
+          "2",
+          "9"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "_index" : "es-docs-a",
+            "_id" : "1",
+            "_version" : 4,
+            "_seq_no" : 3,
+            "_primary_term" : 1,
+            "found" : true,
+            "_source" : {
+              "title" : "Hello again",
+              "n" : 16
+            }
+          },
+          {
+            "_index" : "es-docs-a",
+            "_id" : "2",
+            "found" : false
+          },
+          {
+            "_index" : "es-docs-a",
+            "_id" : "9",
+            "_version" : 1,
+            "_seq_no" : 4,
+            "_primary_term" : 1,
+            "found" : true,
+            "_source" : {
+              "n" : 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "GET /_mget",
+      "body" : {
+        "docs" : [
+          {
+            "_index" : "es-docs-a",
+            "_id" : "1",
+            "_source" : [
+              "n"
+            ]
+          },
+          {
+            "_index" : "es-docs-missing",
+            "_id" : "1"
+          },
+          {
+            "_id" : "1"
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: index is missing for doc 2;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: index is missing for doc 2;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_bulk?refresh=true",
+      "raw" : "{\"index\": {\"_index\": \"es-docs-a\", \"_id\": \"b1\"}}\n{\"title\": \"bulk one\", \"n\": 1}\n{\"create\": {\"_index\": \"es-docs-a\", \"_id\": \"b1\"}}\n{\"title\": \"dup\"}\n{\"update\": {\"_index\": \"es-docs-a\", \"_id\": \"b1\"}}\n{\"doc\": {\"n\": 2}}\n{\"delete\": {\"_index\": \"es-docs-a\", \"_id\": \"nope\"}}\n{\"index\": {\"_index\": \"es-docs-a\"}}\n{\"n\": \"bad\"}\n{\"update\": {\"_index\": \"es-docs-a\", \"_id\": \"b2\", \"retry_on_conflict\": 2}}\n{\"doc\": {\"n\": 3}, \"doc_as_upsert\": true}\n",
+      "mask" : [
+        "_id"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : true,
+        "took" : 200,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-a",
+              "_id" : "b1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 5,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "create" : {
+              "_index" : "es-docs-a",
+              "_id" : "b1",
+              "status" : 409,
+              "error" : {
+                "type" : "version_conflict_engine_exception",
+                "reason" : "[b1]: version conflict, document already exists (current version [1])",
+                "index_uuid" : "rSE7oxANS0KSYYpbpylk-w",
+                "shard" : "0",
+                "index" : "es-docs-a"
+              }
+            }
+          },
+          {
+            "update" : {
+              "_index" : "es-docs-a",
+              "_id" : "b1",
+              "_version" : 2,
+              "result" : "updated",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 6,
+              "_primary_term" : 1,
+              "status" : 200
+            }
+          },
+          {
+            "delete" : {
+              "_index" : "es-docs-a",
+              "_id" : "nope",
+              "_version" : 1,
+              "result" : "not_found",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 404
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-a",
+              "_id" : "PTjVYqEBDAqePAikm7L6",
+              "status" : 400,
+              "error" : {
+                "type" : "document_parsing_exception",
+                "reason" : "[1:7] failed to parse field [n] of type [integer] in document with id 'PTjVYqEBDAqePAikm7L6'. Preview of field's value: 'bad'",
+                "caused_by" : {
+                  "type" : "number_format_exception",
+                  "reason" : "For input string: \"bad\""
+                }
+              }
+            }
+          },
+          {
+            "update" : {
+              "_index" : "es-docs-a",
+              "_id" : "b2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 7,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_bulk",
+      "raw" : "{\"index\":{\"_index\":\"es-docs-a\"}}\n{\"a\":\n",
+      "status" : 200,
+      "response" : {
+        "errors" : true,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-a",
+              "_id" : "PjjVYqEBDAqePAiknLI5",
+              "status" : 400,
+              "error" : {
+                "type" : "document_parsing_exception",
+                "reason" : "[1:2] failed to parse: [1:6] Unexpected end of file",
+                "caused_by" : {
+                  "type" : "x_content_e_o_f_exception",
+                  "reason" : "[1:6] Unexpected end of file",
+                  "caused_by" : {
+                    "type" : "json_e_o_f_exception",
+                    "reason" : "Unexpected end-of-input within/between Object entries\n at [Source: (byte[])\"{\"a\":\"; line: 1, column: 6]"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_bulk",
+      "raw" : "{\"foo\":{\"_index\":\"es-docs-a\"}}\n{}\n",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Malformed action/metadata line [1], expected field [create], [delete], [index] or [update] but found [foo]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Malformed action/metadata line [1], expected field [create], [delete], [index] or [update] but found [foo]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /es-docs-a/_count",
+      "status" : 200,
+      "response" : {
+        "count" : 5,
+        "_shards" : {
+          "total" : 3,
+          "successful" : 3,
+          "skipped" : 0,
+          "failed" : 0
+        }
+      }
+    },
+    {
+      "req" : "GET /es-docs-a/_count?q=tags:b",
+      "status" : 200,
+      "response" : {
+        "count" : 0,
+        "_shards" : {
+          "total" : 3,
+          "successful" : 3,
+          "skipped" : 0,
+          "failed" : 0
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-a/_refresh",
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 3,
+          "successful" : 3,
+          "failed" : 0
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-a",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

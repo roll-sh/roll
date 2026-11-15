@@ -1,0 +1,6942 @@
+[
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['l'].value"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+       "doc['l'].value",
+       "        ^---- HERE"
+      ],
+      "script": "doc['l'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 14
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+        "doc['l'].value",
+        "        ^---- HERE"
+       ],
+       "script": "doc['l'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 14
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['l'].size()"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "x": [
+        1
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "x": [
+        1
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "x": [
+        2
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "fields": {
+       "x": [
+        0
+       ]
+      },
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['l']"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "x": [
+        5
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "x": [
+        3
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "x": [
+        1,
+        7
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['d'].value * 2"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Doubles.get(ScriptDocValues.java:213)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Doubles.getValue(ScriptDocValues.java:208)",
+       "doc['d'].value * 2",
+       "        ^---- HERE"
+      ],
+      "script": "doc['d'].value * 2",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 18
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Doubles.get(ScriptDocValues.java:213)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Doubles.getValue(ScriptDocValues.java:208)",
+        "doc['d'].value * 2",
+        "        ^---- HERE"
+       ],
+       "script": "doc['d'].value * 2",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 18
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['k'].value"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.get(ScriptDocValues.java:483)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.getValue(ScriptDocValues.java:478)",
+       "doc['k'].value",
+       "        ^---- HERE"
+      ],
+      "script": "doc['k'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 14
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.get(ScriptDocValues.java:483)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.getValue(ScriptDocValues.java:478)",
+        "doc['k'].value",
+        "        ^---- HERE"
+       ],
+       "script": "doc['k'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 14
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['k'].empty ? 'none' : doc['k'].value"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "x": [
+        "a"
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "x": [
+        "b"
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "x": [
+        "c"
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "fields": {
+       "x": [
+        "none"
+       ]
+      },
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['tags']"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "x": [
+        "x",
+        "y"
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "x": [
+        "y"
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "x": [
+        "x",
+        "z"
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['dt'].value"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Dates.get(ScriptDocValues.java:144)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Dates.getValue(ScriptDocValues.java:139)",
+       "doc['dt'].value",
+       "         ^---- HERE"
+      ],
+      "script": "doc['dt'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 9,
+       "start": 0,
+       "end": 15
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Dates.get(ScriptDocValues.java:144)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Dates.getValue(ScriptDocValues.java:139)",
+        "doc['dt'].value",
+        "         ^---- HERE"
+       ],
+       "script": "doc['dt'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 9,
+        "start": 0,
+        "end": 15
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['dt'].value.getYear()"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Dates.get(ScriptDocValues.java:144)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Dates.getValue(ScriptDocValues.java:139)",
+       "doc['dt'].value.getYear()",
+       "         ^---- HERE"
+      ],
+      "script": "doc['dt'].value.getYear()",
+      "lang": "painless",
+      "position": {
+       "offset": 9,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Dates.get(ScriptDocValues.java:144)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Dates.getValue(ScriptDocValues.java:139)",
+        "doc['dt'].value.getYear()",
+        "         ^---- HERE"
+       ],
+       "script": "doc['dt'].value.getYear()",
+       "lang": "painless",
+       "position": {
+        "offset": 9,
+        "start": 0,
+        "end": 25
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['dt'].value.toInstant().toEpochMilli()"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Dates.get(ScriptDocValues.java:144)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Dates.getValue(ScriptDocValues.java:139)",
+       "doc['dt'].value.toInstant().toEpochMilli()",
+       "         ^---- HERE"
+      ],
+      "script": "doc['dt'].value.toInstant().toEpochMilli()",
+      "lang": "painless",
+      "position": {
+       "offset": 9,
+       "start": 0,
+       "end": 42
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Dates.get(ScriptDocValues.java:144)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Dates.getValue(ScriptDocValues.java:139)",
+        "doc['dt'].value.toInstant().toEpochMilli()",
+        "         ^---- HERE"
+       ],
+       "script": "doc['dt'].value.toInstant().toEpochMilli()",
+       "lang": "painless",
+       "position": {
+        "offset": 9,
+        "start": 0,
+        "end": 42
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['g'].value"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$GeoPoints.get(ScriptDocValues.java:314)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$GeoPoints.getValue(ScriptDocValues.java:285)",
+       "doc['g'].value",
+       "        ^---- HERE"
+      ],
+      "script": "doc['g'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 14
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$GeoPoints.get(ScriptDocValues.java:314)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$GeoPoints.getValue(ScriptDocValues.java:285)",
+        "doc['g'].value",
+        "        ^---- HERE"
+       ],
+       "script": "doc['g'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 14
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['g'].lat"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$GeoPoints.get(ScriptDocValues.java:314)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$GeoPoints.getValue(ScriptDocValues.java:285)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$GeoPoints.getLat(ScriptDocValues.java:289)",
+       "doc['g'].lat",
+       "        ^---- HERE"
+      ],
+      "script": "doc['g'].lat",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 12
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$GeoPoints.get(ScriptDocValues.java:314)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$GeoPoints.getValue(ScriptDocValues.java:285)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$GeoPoints.getLat(ScriptDocValues.java:289)",
+        "doc['g'].lat",
+        "        ^---- HERE"
+       ],
+       "script": "doc['g'].lat",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 12
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['ip'].value"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.get(ScriptDocValues.java:483)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.getValue(ScriptDocValues.java:478)",
+       "doc['ip'].value",
+       "         ^---- HERE"
+      ],
+      "script": "doc['ip'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 9,
+       "start": 0,
+       "end": 15
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.get(ScriptDocValues.java:483)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.getValue(ScriptDocValues.java:478)",
+        "doc['ip'].value",
+        "         ^---- HERE"
+       ],
+       "script": "doc['ip'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 9,
+        "start": 0,
+        "end": 15
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['b'].value"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Booleans.getValue(ScriptDocValues.java:399)",
+       "doc['b'].value",
+       "        ^---- HERE"
+      ],
+      "script": "doc['b'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 14
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Booleans.getValue(ScriptDocValues.java:399)",
+        "doc['b'].value",
+        "        ^---- HERE"
+       ],
+       "script": "doc['b'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 14
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['i'].value + doc['l'].value"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+       "doc['i'].value + doc['l'].value",
+       "        ^---- HERE"
+      ],
+      "script": "doc['i'].value + doc['l'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 31
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+        "doc['i'].value + doc['l'].value",
+        "        ^---- HERE"
+       ],
+       "script": "doc['i'].value + doc['l'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 31
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "params._source.k"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "x": [
+        "a"
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "x": [
+        "b"
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "x": [
+        "c",
+        "d"
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "fields": {
+       "x": [
+        null
+       ]
+      },
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "params._source"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "x": [
+        {
+         "l": 5,
+         "i": 7,
+         "d": 1.5,
+         "f": 0.5,
+         "k": "a",
+         "tags": [
+          "x",
+          "y"
+         ],
+         "t": "hello world",
+         "dt": "2020-01-01T00:00:00Z",
+         "g": "41.12,-71.34",
+         "b": true,
+         "ip": "10.0.0.1",
+         "n": 2,
+         "obj": {
+          "x": 1
+         },
+         "v": [
+          1.0,
+          2.0,
+          3.0
+         ]
+        }
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "x": [
+        {
+         "l": 3,
+         "i": 2,
+         "d": 2.5,
+         "f": 1.25,
+         "k": "b",
+         "tags": [
+          "y"
+         ],
+         "t": "goodbye",
+         "dt": "2021-06-15T12:30:00Z",
+         "g": "40.0,-70.0",
+         "b": false,
+         "ip": "10.0.0.2",
+         "n": 1,
+         "v": [
+          3.0,
+          2.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "x": [
+        {
+         "l": [
+          1,
+          7
+         ],
+         "i": 9,
+         "d": 0.25,
+         "k": [
+          "c",
+          "d"
+         ],
+         "tags": [
+          "x",
+          "z"
+         ],
+         "dt": "2019-12-31T23:59:59.999Z",
+         "n": 3
+        }
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "fields": {
+       "x": [
+        {
+         "tag": "empty"
+        }
+       ]
+      },
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "params['_source']['obj']"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "x": [
+        {
+         "x": 1
+        }
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "x": [
+        null
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "x": [
+        null
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "fields": {
+       "x": [
+        null
+       ]
+      },
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "params._source.missing"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "x": [
+        null
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "x": [
+        null
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "x": [
+        null
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "fields": {
+       "x": [
+        null
+       ]
+      },
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['obj.x'].value"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+       "doc['obj.x'].value",
+       "            ^---- HERE"
+      ],
+      "script": "doc['obj.x'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 12,
+       "start": 0,
+       "end": 18
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+        "doc['obj.x'].value",
+        "            ^---- HERE"
+       ],
+       "script": "doc['obj.x'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 12,
+        "start": 0,
+        "end": 18
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc.containsKey('l')"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "x": [
+        true
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "x": [
+        true
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "x": [
+        true
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "fields": {
+       "x": [
+        true
+       ]
+      },
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['zzz'].value"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+       "doc['zzz'].value",
+       "    ^---- HERE"
+      ],
+      "script": "doc['zzz'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 4,
+       "start": 0,
+       "end": 16
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+        "doc['zzz'].value",
+        "    ^---- HERE"
+       ],
+       "script": "doc['zzz'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 4,
+        "start": 0,
+        "end": 16
+       },
+       "caused_by": {
+        "type": "illegal_argument_exception",
+        "reason": "No field found for [zzz] in mapping"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['t'].value"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.TextFieldMapper$TextFieldType.fielddataBuilder(TextFieldMapper.java:1550)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.IndexFieldDataService.getForField(IndexFieldDataService.java:92)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.IndexService.loadFielddata(IndexService.java:1451)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.query.SearchExecutionContext.lambda$setLookupProviders$5(SearchExecutionContext.java:570)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.getForField(SearchLookup.java:160)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:156)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+       "doc['t'].value",
+       "    ^---- HERE"
+      ],
+      "script": "doc['t'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 4,
+       "start": 0,
+       "end": 14
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.TextFieldMapper$TextFieldType.fielddataBuilder(TextFieldMapper.java:1550)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.IndexFieldDataService.getForField(IndexFieldDataService.java:92)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.IndexService.loadFielddata(IndexService.java:1451)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.query.SearchExecutionContext.lambda$setLookupProviders$5(SearchExecutionContext.java:570)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.getForField(SearchLookup.java:160)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:156)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+        "doc['t'].value",
+        "    ^---- HERE"
+       ],
+       "script": "doc['t'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 4,
+        "start": 0,
+        "end": 14
+       },
+       "caused_by": {
+        "type": "illegal_argument_exception",
+        "reason": "Fielddata is disabled on [t] in [painless-search]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [t] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['l'].get(1)"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfBeyondLength(ScriptDocValues.java:101)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:118)",
+       "doc['l'].get(1)",
+       "        ^---- HERE"
+      ],
+      "script": "doc['l'].get(1)",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 15
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfBeyondLength(ScriptDocValues.java:101)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:118)",
+        "doc['l'].get(1)",
+        "        ^---- HERE"
+       ],
+       "script": "doc['l'].get(1)",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 15
+       },
+       "caused_by": {
+        "type": "index_out_of_bounds_exception",
+        "reason": "A document doesn't have a value for a field at position [1]!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc.size()"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.size(LeafDocLookup.java:186)",
+       "doc.size()",
+       "   ^---- HERE"
+      ],
+      "script": "doc.size()",
+      "lang": "painless",
+      "position": {
+       "offset": 3,
+       "start": 0,
+       "end": 10
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.size(LeafDocLookup.java:186)",
+        "doc.size()",
+        "   ^---- HERE"
+       ],
+       "script": "doc.size()",
+       "lang": "painless",
+       "position": {
+        "offset": 3,
+        "start": 0,
+        "end": 10
+       },
+       "caused_by": {
+        "type": "unsupported_operation_exception",
+        "reason": null
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "field('l').get(-1)"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "x": [
+        5
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "x": [
+        3
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "x": [
+        1
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "fields": {
+       "x": [
+        -1
+       ]
+      },
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "field('k').get('none')"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "x": [
+        "a"
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "x": [
+        "b"
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "x": [
+        "c"
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "fields": {
+       "x": [
+        "none"
+       ]
+      },
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "$('d', -1.0)"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "x": [
+        1.5
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "x": [
+        2.5
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "x": [
+        0.25
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "fields": {
+       "x": [
+        -1.0
+       ]
+      },
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "field('tags').size()"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "x": [
+        2
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "x": [
+        1
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "x": [
+        2
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "fields": {
+       "x": [
+        0
+       ]
+      },
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['v'].vectorValue"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.getCheckedVector(DenseVectorScriptDocValues.java:36)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.getVectorValue(DenseVectorScriptDocValues.java:45)",
+       "doc['v'].vectorValue",
+       "        ^---- HERE"
+      ],
+      "script": "doc['v'].vectorValue",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 20
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.getCheckedVector(DenseVectorScriptDocValues.java:36)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.getVectorValue(DenseVectorScriptDocValues.java:45)",
+        "doc['v'].vectorValue",
+        "        ^---- HERE"
+       ],
+       "script": "doc['v'].vectorValue",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 20
+       },
+       "caused_by": {
+        "type": "illegal_argument_exception",
+        "reason": "A document doesn't have a value for a vector field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['f'].value"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Doubles.get(ScriptDocValues.java:213)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Doubles.getValue(ScriptDocValues.java:208)",
+       "doc['f'].value",
+       "        ^---- HERE"
+      ],
+      "script": "doc['f'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 14
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Doubles.get(ScriptDocValues.java:213)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Doubles.getValue(ScriptDocValues.java:208)",
+        "doc['f'].value",
+        "        ^---- HERE"
+       ],
+       "script": "doc['f'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 14
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "new ArrayList(doc['l'])"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "x": [
+        5
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "x": [
+        3
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "x": [
+        1,
+        7
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['n'].value / 0"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "doc['n'].value / 0",
+       "        ^---- HERE"
+      ],
+      "script": "doc['n'].value / 0",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 18
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "doc['n'].value / 0",
+        "        ^---- HERE"
+       ],
+       "script": "doc['n'].value / 0",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 18
+       },
+       "caused_by": {
+        "type": "arithmetic_exception",
+        "reason": "/ by zero"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "doc['l'].value / 0"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "doc['l'].value / 0",
+       "        ^---- HERE"
+      ],
+      "script": "doc['l'].value / 0",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 18
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "doc['l'].value / 0",
+        "        ^---- HERE"
+       ],
+       "script": "doc['l'].value / 0",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 18
+       },
+       "caused_by": {
+        "type": "arithmetic_exception",
+        "reason": "/ by zero"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "params.x * doc['n'].value"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "params.x * doc['n'].value",
+       "                   ^---- HERE"
+      ],
+      "script": "params.x * doc['n'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 19,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "params.x * doc['n'].value",
+        "                   ^---- HERE"
+       ],
+       "script": "params.x * doc['n'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 19,
+        "start": 0,
+        "end": 25
+       },
+       "caused_by": {
+        "type": "null_pointer_exception",
+        "reason": "Cannot invoke \"Object.getClass()\" because \"left\" is null"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "_score"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "_score",
+       "^---- HERE"
+      ],
+      "script": "_score",
+      "lang": "painless",
+      "position": {
+       "offset": 0,
+       "start": 0,
+       "end": 6
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "_score",
+        "^---- HERE"
+       ],
+       "script": "_score",
+       "lang": "painless",
+       "position": {
+        "offset": 0,
+        "start": 0,
+        "end": 6
+       },
+       "caused_by": {
+        "type": "illegal_argument_exception",
+        "reason": "cannot resolve symbol [_score]"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "params.x * doc['n'].value",
+      "params": {
+       "x": 10
+      }
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+       "params.x * doc['n'].value",
+       "                   ^---- HERE"
+      ],
+      "script": "params.x * doc['n'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 19,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+        "params.x * doc['n'].value",
+        "                   ^---- HERE"
+       ],
+       "script": "params.x * doc['n'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 19,
+        "start": 0,
+        "end": 25
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "script_fields": {
+    "x": {
+     "script": {
+      "source": "params.list.size() + doc['n'].value",
+      "params": {
+       "list": [
+        1,
+        2,
+        3
+       ]
+      }
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+       "params.list.size() + doc['n'].value",
+       "                             ^---- HERE"
+      ],
+      "script": "params.list.size() + doc['n'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 29,
+       "start": 0,
+       "end": 35
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+        "params.list.size() + doc['n'].value",
+        "                             ^---- HERE"
+       ],
+       "script": "params.list.size() + doc['n'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 29,
+        "start": 0,
+        "end": 35
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": [
+    "k"
+   ],
+   "script_fields": {
+    "a": {
+     "script": "doc['n'].value + 1"
+    },
+    "b": {
+     "script": {
+      "source": "params._source.k",
+      "lang": "painless"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+       "doc['n'].value + 1",
+       "        ^---- HERE"
+      ],
+      "script": "doc['n'].value + 1",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 18
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+        "doc['n'].value + 1",
+        "        ^---- HERE"
+       ],
+       "script": "doc['n'].value + 1",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 18
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "_source": false,
+   "sort": [
+    {
+     "_script": {
+      "type": "number",
+      "script": {
+       "source": "doc['n'].size() == 0 ? 100 : doc['n'].value"
+      },
+      "order": "asc"
+     }
+    }
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "sort": [
+       1.0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "sort": [
+       2.0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "sort": [
+       3.0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "sort": [
+       100.0
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "_source": false,
+   "sort": [
+    {
+     "_script": {
+      "type": "number",
+      "script": {
+       "source": "doc['n'].size() == 0 ? 100 : doc['n'].value * -1"
+      },
+      "order": "desc"
+     }
+    }
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "sort": [
+       100.0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "sort": [
+       -1.0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "sort": [
+       -2.0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "sort": [
+       -3.0
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "_source": false,
+   "sort": [
+    {
+     "_script": {
+      "type": "string",
+      "script": {
+       "source": "doc['k'].size() == 0 ? 'zz' : doc['k'].value"
+      },
+      "order": "asc"
+     }
+    }
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "sort": [
+       "a"
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "sort": [
+       "b"
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "sort": [
+       "c"
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "sort": [
+       "zz"
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "_source": false,
+   "sort": [
+    {
+     "_script": {
+      "type": "string",
+      "script": {
+       "source": "doc['k'].value"
+      },
+      "order": "asc"
+     }
+    }
+   ]
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.get(ScriptDocValues.java:483)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.getValue(ScriptDocValues.java:478)",
+       "doc['k'].value",
+       "        ^---- HERE"
+      ],
+      "script": "doc['k'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 14
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.get(ScriptDocValues.java:483)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Strings.getValue(ScriptDocValues.java:478)",
+        "doc['k'].value",
+        "        ^---- HERE"
+       ],
+       "script": "doc['k'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 14
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "_source": false,
+   "sort": [
+    {
+     "_script": {
+      "type": "number",
+      "script": {
+       "source": "doc['d'].size() == 0 ? 0 : doc['d'].value * params.f",
+       "params": {
+        "f": 3
+       }
+      },
+      "order": "asc"
+     }
+    }
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "sort": [
+       0.0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "sort": [
+       0.75
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "sort": [
+       4.5
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "sort": [
+       7.5
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "_source": false,
+   "sort": [
+    {
+     "_script": {
+      "type": "number",
+      "script": {
+       "source": "_score"
+      },
+      "order": "asc"
+     }
+    }
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "sort": [
+       1.0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "sort": [
+       1.0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "sort": [
+       1.0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "sort": [
+       1.0
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "_source": false,
+   "sort": [
+    {
+     "_script": {
+      "type": "string",
+      "script": {
+       "source": "doc['k'].size() == 0 ? null : doc['k'].value"
+      },
+      "order": "asc"
+     }
+    }
+   ]
+  },
+  "status": 500,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "null_pointer_exception",
+      "reason": "Cannot invoke \"java.lang.CharSequence.length()\" because \"text\" is null"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "null_pointer_exception",
+       "reason": "Cannot invoke \"java.lang.CharSequence.length()\" because \"text\" is null"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot invoke \"java.lang.CharSequence.length()\" because \"text\" is null",
+     "caused_by": {
+      "type": "null_pointer_exception",
+      "reason": "Cannot invoke \"java.lang.CharSequence.length()\" because \"text\" is null"
+     }
+    }
+   },
+   "status": 500
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "_source": false,
+   "sort": [
+    {
+     "_script": {
+      "type": "string",
+      "script": {
+       "source": "doc['n'].size()"
+      },
+      "order": "asc"
+     }
+    }
+   ]
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "doc['n'].size()",
+       "        ^---- HERE"
+      ],
+      "script": "doc['n'].size()",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 15
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "doc['n'].size()",
+        "        ^---- HERE"
+       ],
+       "script": "doc['n'].size()",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 15
+       },
+       "caused_by": {
+        "type": "class_cast_exception",
+        "reason": "cannot implicitly cast def [int] to java.lang.String"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "doc['n'].size() == 0 ? 0 : doc['n'].value",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": 3.0,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": 3.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 2.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": 1.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": 0.0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "_score * 2",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": 2.0,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 2.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": 2.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": 2.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": 2.0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "Math.log(2 + (doc['l'].size() == 0 ? 0 : doc['l'].value))",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": 1.9459101,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 1.9459101
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": 1.609438
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": 1.0986123
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": 0.6931472
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "doc['d'].size() == 0 ? 0.1 : doc['d'].value",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": 2.5,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": 2.5
+     },
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 1.5
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": 0.25
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": 0.1
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "saturation(doc['n'].size() == 0 ? 1 : doc['n'].value, 2)",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": 0.6,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": 0.6
+     },
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 0.5
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": 0.33333334
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": 0.33333334
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "sigmoid(doc['n'].size() == 0 ? 1 : doc['n'].value, 2, 3)",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": 0.7714286,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": 0.7714286
+     },
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 0.5
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": 0.11111111
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": 0.11111111
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "decayNumericLinear(2, 1, 0, 0.5, doc['n'].size() == 0 ? 0 : doc['n'].value)",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": 1.0,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 1.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": 0.5
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": 0.5
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": 0.0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "decayDateGauss('2020-01-01', '30d', '0d', 0.5, doc['dt'].size() == 0 ? ZonedDateTime.parse('2000-01-01T00:00:00Z') : doc['dt'].value)",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": 1.0,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 1.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": 1.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": 0.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": 0.0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "doc['v'].size() == 0 ? 0 : cosineSimilarity(params.q, 'v') + 1.0",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": 1.7559289,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 1.7559289
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": 1.7559289
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": 0.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": 0.0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "doc['v'].size() == 0 ? 0 : dotProduct(params.q, 'v')",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": 4.0,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 4.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": 4.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": 0.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": 0.0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "doc['v'].size() == 0 ? 0 : l2norm(params.q, 'v')",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": 2.828427,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 2.828427
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": 2.828427
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": 0.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": 0.0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "doc['v'].size() == 0 ? 0 : l1norm(params.q, 'v')",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": 4.0,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 4.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": 4.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": 0.0
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": 0.0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "-1",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "script_score script returned an invalid score [-1.0] for doc [0]. Must be a non-negative score!"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "script_score script returned an invalid score [-1.0] for doc [0]. Must be a non-negative score!"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "script_score script returned an invalid score [-1.0] for doc [0]. Must be a non-negative score!",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "script_score script returned an invalid score [-1.0] for doc [0]. Must be a non-negative score!"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "doc['n'].value",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+       "doc['n'].value",
+       "        ^---- HERE"
+      ],
+      "script": "doc['n'].value",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 14
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+        "doc['n'].value",
+        "        ^---- HERE"
+       ],
+       "script": "doc['n'].value",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 14
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "Double.NaN",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "script_score script returned an invalid score [NaN] for doc [0]. Must be a non-negative score!"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "script_score script returned an invalid score [NaN] for doc [0]. Must be a non-negative score!"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "script_score script returned an invalid score [NaN] for doc [0]. Must be a non-negative score!",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "script_score script returned an invalid score [NaN] for doc [0]. Must be a non-negative score!"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "params.missing * 2",
+      "params": {
+       "q": [
+        1,
+        0,
+        1
+       ]
+      }
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "params.missing * 2",
+       "      ^---- HERE"
+      ],
+      "script": "params.missing * 2",
+      "lang": "painless",
+      "position": {
+       "offset": 6,
+       "start": 0,
+       "end": 18
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "params.missing * 2",
+        "      ^---- HERE"
+       ],
+       "script": "params.missing * 2",
+       "lang": "painless",
+       "position": {
+        "offset": 6,
+        "start": 0,
+        "end": 18
+       },
+       "caused_by": {
+        "type": "null_pointer_exception",
+        "reason": "Cannot invoke \"Object.getClass()\" because \"left\" is null"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match": {
+       "t": "hello"
+      }
+     },
+     "script": {
+      "source": "_score + 1"
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 1,
+     "relation": "eq"
+    },
+    "max_score": 1.6099696,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 1.6099696
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match": {
+       "t": "hello world"
+      }
+     },
+     "script": {
+      "source": "_termStats.termFreq().getAverage()"
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 1,
+     "relation": "eq"
+    },
+    "max_score": 1.0,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 1.0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match": {
+       "t": "hello world nothing"
+      }
+     },
+     "script": {
+      "source": "_termStats.uniqueTermsCount() + _termStats.matchedTermsCount()"
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 1,
+     "relation": "eq"
+    },
+    "max_score": 5.0,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 5.0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "script_score": {
+     "query": {
+      "match_all": {}
+     },
+     "script": {
+      "source": "randomScore(100, '_seq_no')"
+     }
+    }
+   },
+   "_source": false
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": 0.7915707,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": 0.7915707
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": 0.4623778
+     },
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": 0.35602343
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": 0.23187053
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "bool": {
+     "filter": {
+      "script": {
+       "script": {
+        "source": "doc['n'].size() > 0 && doc['n'].value > 1",
+        "params": {
+         "x": true
+        }
+       }
+      }
+     }
+    }
+   },
+   "_source": false,
+   "sort": [
+    "_doc"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 2,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "bool": {
+     "filter": {
+      "script": {
+       "script": {
+        "source": "doc['k'].size() > 0",
+        "params": {
+         "x": true
+        }
+       }
+      }
+     }
+    }
+   },
+   "_source": false,
+   "sort": [
+    "_doc"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "bool": {
+     "filter": {
+      "script": {
+       "script": {
+        "source": "doc['tags'].contains('x')",
+        "params": {
+         "x": true
+        }
+       }
+      }
+     }
+    }
+   },
+   "_source": false,
+   "sort": [
+    "_doc"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 2,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "bool": {
+     "filter": {
+      "script": {
+       "script": {
+        "source": "doc['l'].value > 2",
+        "params": {
+         "x": true
+        }
+       }
+      }
+     }
+    }
+   },
+   "_source": false,
+   "sort": [
+    "_doc"
+   ]
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+       "doc['l'].value > 2",
+       "        ^---- HERE"
+      ],
+      "script": "doc['l'].value > 2",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 18
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues.throwIfEmpty(ScriptDocValues.java:93)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.get(ScriptDocValues.java:117)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.ScriptDocValues$Longs.getValue(ScriptDocValues.java:112)",
+        "doc['l'].value > 2",
+        "        ^---- HERE"
+       ],
+       "script": "doc['l'].value > 2",
+       "lang": "painless",
+       "position": {
+        "offset": 8,
+        "start": 0,
+        "end": 18
+       },
+       "caused_by": {
+        "type": "illegal_state_exception",
+        "reason": "A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "bool": {
+     "filter": {
+      "script": {
+       "script": {
+        "source": "params.x",
+        "params": {
+         "x": true
+        }
+       }
+      }
+     }
+    }
+   },
+   "_source": false,
+   "sort": [
+    "_doc"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "bool": {
+     "filter": {
+      "script": {
+       "script": {
+        "source": "doc['dt'].size() > 0 && doc['dt'].value.getYear() >= 2020",
+        "params": {
+         "x": true
+        }
+       }
+      }
+     }
+    }
+   },
+   "_source": false,
+   "sort": [
+    "_doc"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 2,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "sort": [
+       1
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "bool": {
+     "filter": {
+      "script": {
+       "script": {
+        "source": "return 1",
+        "params": {
+         "x": true
+        }
+       }
+      }
+     }
+    }
+   },
+   "_source": false,
+   "sort": [
+    "_doc"
+   ]
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return 1",
+       "       ^---- HERE"
+      ],
+      "script": "return 1",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 8
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "query_shard_exception",
+       "reason": "failed to create query: compile error",
+       "index_uuid": "6a7Tel1qQm6lh0igrv4bsQ",
+       "index": "painless-search",
+       "caused_by": {
+        "type": "script_exception",
+        "reason": "compile error",
+        "script_stack": [
+         "return 1",
+         "       ^---- HERE"
+        ],
+        "script": "return 1",
+        "lang": "painless",
+        "position": {
+         "offset": 7,
+         "start": 0,
+         "end": 8
+        },
+        "caused_by": {
+         "type": "class_cast_exception",
+         "reason": "Cannot cast from [int] to [boolean]."
+        }
+       }
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "script_exception",
+     "reason": "compile error",
+     "script_stack": [
+      "return 1",
+      "       ^---- HERE"
+     ],
+     "script": "return 1",
+     "lang": "painless",
+     "position": {
+      "offset": 7,
+      "start": 0,
+      "end": 8
+     },
+     "caused_by": {
+      "type": "class_cast_exception",
+      "reason": "Cannot cast from [int] to [boolean]."
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "size": 0,
+   "aggs": {
+    "m": {
+     "scripted_metric": {
+      "map_script": "state.n += doc['n'].size() == 0 ? 0 : doc['n'].value",
+      "init_script": "state.n = 0",
+      "combine_script": "return state.n",
+      "reduce_script": "double t = 0; for (s in states) { t += s } return t"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "m": {
+     "value": 6.0
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "size": 0,
+   "aggs": {
+    "m": {
+     "scripted_metric": {
+      "map_script": "if (doc['k'].size() > 0) { state.list.add(doc['k'].value) }",
+      "init_script": "state.list = []",
+      "combine_script": "return state.list",
+      "reduce_script": "List all = []; for (s in states) { all.addAll(s) } Collections.sort(all); return all"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "m": {
+     "value": [
+      "a",
+      "b",
+      "c"
+     ]
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "size": 0,
+   "aggs": {
+    "m": {
+     "scripted_metric": {
+      "map_script": "for (t in doc['tags']) { state.m[t] = state.m.getOrDefault(t, 0) + 1 }",
+      "init_script": "state.m = [:]",
+      "combine_script": "return state.m",
+      "reduce_script": "Map r = new TreeMap(); for (s in states) { for (e in s.entrySet()) { r[e.getKey()] = r.getOrDefault(e.getKey(), 0) + e.getValue() } } return r"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "m": {
+     "value": {
+      "x": 2,
+      "y": 2,
+      "z": 1
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "size": 0,
+   "aggs": {
+    "m": {
+     "scripted_metric": {
+      "map_script": "state.c = (state.c ?: 0) + 1",
+      "combine_script": "return state",
+      "reduce_script": "return states"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "m": {
+     "value": [
+      {
+       "c": 4
+      }
+     ]
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "size": 0,
+   "aggs": {
+    "m": {
+     "scripted_metric": {
+      "map_script": "state.s += _score",
+      "init_script": "state.s = 0.0",
+      "combine_script": "return state.s",
+      "reduce_script": "return states[0]"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "m": {
+     "value": 4.0
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "size": 0,
+   "aggs": {
+    "m": {
+     "scripted_metric": {
+      "map_script": "state.x += 1",
+      "init_script": "state.x = params.base",
+      "combine_script": "return state.x",
+      "reduce_script": "return states.stream().mapToInt(x -> x).sum()",
+      "params": {
+       "base": 100
+      }
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "m": {
+     "value": 104
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "size": 0,
+   "aggs": {
+    "m": {
+     "scripted_metric": {
+      "map_script": "state.x += 1",
+      "init_script": "state.x = 1"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "[combine_script] must not be null: [m]"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "[combine_script] must not be null: [m]"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[combine_script] must not be null: [m]",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "[combine_script] must not be null: [m]"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "size": 0,
+   "aggs": {
+    "m": {
+     "scripted_metric": {
+      "map_script": "state.x += 1",
+      "init_script": "state.x = 1",
+      "combine_script": "return state.x"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "[reduce_script] must not be null: [m]"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "[reduce_script] must not be null: [m]"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[reduce_script] must not be null: [m]",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "[reduce_script] must not be null: [m]"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "size": 0,
+   "aggs": {
+    "m": {
+     "scripted_metric": {
+      "map_script": "state.x.foo()",
+      "init_script": "state.x = 1",
+      "combine_script": "return state.x"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "[reduce_script] must not be null: [m]"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "[reduce_script] must not be null: [m]"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[reduce_script] must not be null: [m]",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "[reduce_script] must not be null: [m]"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "size": 0,
+   "aggs": {
+    "m": {
+     "scripted_metric": {
+      "map_script": "state.d.add(doc['dt'].size() == 0 ? null : doc['dt'].value)",
+      "init_script": "state.d = []",
+      "combine_script": "return state.d",
+      "reduce_script": "return states[0].stream().filter(x -> x != null).map(x -> x.getYear()).collect(Collectors.toList())"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "m": {
+     "value": [
+      2020,
+      2021,
+      2019
+     ]
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "runtime_mappings": {
+    "r": {
+     "type": "long",
+     "script": {
+      "source": "if (doc['n'].size() > 0) emit(doc['n'].value * 10)"
+     }
+    }
+   },
+   "fields": [
+    "r"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "r": [
+        20
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "r": [
+        10
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "r": [
+        30
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "runtime_mappings": {
+    "r": {
+     "type": "long",
+     "script": {
+      "source": "for (v in doc['l']) emit(v)"
+     }
+    }
+   },
+   "fields": [
+    "r"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "r": [
+        5
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "r": [
+        3
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "r": [
+        1,
+        7
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "runtime_mappings": {
+    "r": {
+     "type": "double",
+     "script": {
+      "source": "emit(doc['d'].size() == 0 ? -1 : doc['d'].value)"
+     }
+    }
+   },
+   "fields": [
+    "r"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "r": [
+        1.5
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "r": [
+        2.5
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "r": [
+        0.25
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "fields": {
+       "r": [
+        -1.0
+       ]
+      },
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "runtime_mappings": {
+    "r": {
+     "type": "keyword",
+     "script": {
+      "source": "for (t in doc['tags']) emit(t.toUpperCase())"
+     }
+    }
+   },
+   "fields": [
+    "r"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "r": [
+        "X",
+        "Y"
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "r": [
+        "Y"
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "r": [
+        "X",
+        "Z"
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "runtime_mappings": {
+    "r": {
+     "type": "keyword",
+     "script": {
+      "source": "emit(params._source.k == null ? 'nil' : params._source.k.toString())"
+     }
+    }
+   },
+   "fields": [
+    "r"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "r": [
+        "a"
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "r": [
+        "b"
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "r": [
+        "[c, d]"
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "fields": {
+       "r": [
+        "nil"
+       ]
+      },
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "runtime_mappings": {
+    "r": {
+     "type": "boolean",
+     "script": {
+      "source": "emit(doc['n'].size() > 0)"
+     }
+    }
+   },
+   "fields": [
+    "r"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "r": [
+        true
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "r": [
+        true
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "r": [
+        true
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "fields": {
+       "r": [
+        false
+       ]
+      },
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "runtime_mappings": {
+    "r": {
+     "type": "date",
+     "script": {
+      "source": "if (doc['dt'].size() > 0) emit(doc['dt'].value.plusDays(1).toInstant().toEpochMilli())"
+     }
+    }
+   },
+   "fields": [
+    "r"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "r": [
+        "2020-01-02T00:00:00.000Z"
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "r": [
+        "2021-06-16T12:30:00.000Z"
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "r": [
+        "2020-01-01T23:59:59.999Z"
+       ]
+      },
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "runtime_mappings": {
+    "r": {
+     "type": "ip",
+     "script": {
+      "source": "if (doc['ip'].size() > 0) emit(doc['ip'].value)"
+     }
+    }
+   },
+   "fields": [
+    "r"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "r": [
+        "10.0.0.1"
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "r": [
+        "10.0.0.2"
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "runtime_mappings": {
+    "r": {
+     "type": "geo_point",
+     "script": {
+      "source": "if (doc['g'].size() > 0) emit(doc['g'].lat + 1, doc['g'].lon - 1)"
+     }
+    }
+   },
+   "fields": [
+    "r"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 4,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "r": [
+        {
+         "coordinates": [
+          -72.34000004269183,
+          42.1199999647215
+         ],
+         "type": "Point"
+        }
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "r": [
+        {
+         "coordinates": [
+          -71.00000001862645,
+          40.9999999627471
+         ],
+         "type": "Point"
+        }
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "sort": [
+       2
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "4",
+      "_score": null,
+      "sort": [
+       3
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "runtime_mappings": {
+    "r": {
+     "type": "composite",
+     "script": {
+      "source": "emit(['a': doc['n'].size(), 'b': 'x'])"
+     }
+    }
+   },
+   "fields": [
+    "r"
+   ]
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "composite runtime field [r] must declare its [fields]"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "illegal_argument_exception",
+       "reason": "composite runtime field [r] must declare its [fields]"
+      }
+     }
+    ],
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "composite runtime field [r] must declare its [fields]",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "composite runtime field [r] must declare its [fields]"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "match_all": {}
+   },
+   "sort": [
+    "_doc"
+   ],
+   "_source": false,
+   "runtime_mappings": {
+    "r": {
+     "type": "long",
+     "script": {
+      "source": "emit(doc['zzz'].value)"
+     }
+    }
+   },
+   "fields": [
+    "r"
+   ]
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+       "emit(doc['zzz'].value)",
+       "         ^---- HERE"
+      ],
+      "script": "emit(doc['zzz'].value)",
+      "lang": "painless",
+      "position": {
+       "offset": 9,
+       "start": 0,
+       "end": 22
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-search",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+        "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+        "emit(doc['zzz'].value)",
+        "         ^---- HERE"
+       ],
+       "script": "emit(doc['zzz'].value)",
+       "lang": "painless",
+       "position": {
+        "offset": 9,
+        "start": 0,
+        "end": 22
+       },
+       "caused_by": {
+        "type": "illegal_argument_exception",
+        "reason": "No field found for [zzz] in mapping"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "terms_set": {
+     "tags": {
+      "terms": [
+       "x",
+       "y",
+       "z"
+      ],
+      "minimum_should_match_script": {
+       "source": "Math.min(params.num_terms, doc['n'].size() == 0 ? 1 : doc['n'].value)"
+      }
+     }
+    }
+   },
+   "_source": false,
+   "sort": [
+    "_doc"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 2,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "2",
+      "_score": null,
+      "sort": [
+       1
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": {
+   "query": {
+    "terms_set": {
+     "tags": {
+      "terms": [
+       "x",
+       "y",
+       "z"
+      ],
+      "minimum_should_match_script": {
+       "source": "2"
+      }
+     }
+    }
+   },
+   "_source": false,
+   "sort": [
+    "_doc"
+   ]
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 2,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_index": "painless-search",
+      "_id": "1",
+      "_score": null,
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_index": "painless-search",
+      "_id": "3",
+      "_score": null,
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ }
+]

@@ -1,0 +1,957 @@
+{
+ "found": {
+  "case": 39,
+  "case_seed": 104000351,
+  "seed": 104
+ },
+ "signature": "POST _search/scroll .hits.hits[]._id",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "dnanos0": {
+       "type": "date_nanos"
+      },
+      "flt0": {
+       "type": "float"
+      },
+      "int0": {
+       "type": "integer"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "long0": {
+       "type": "long"
+      },
+      "mot0": {
+       "type": "match_only_text"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m15-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m15-a"
+  },
+  {
+   "es": {
+    "body": {
+     "errors": false,
+     "items": [
+      {
+       "index": {
+        "_id": "8",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "12",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 1,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "4",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 2,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      }
+     ],
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": {
+      "_id": "8",
+      "_index": "diff-m15-a"
+     }
+    },
+    {
+     "date0": "2024-05-21T20:00:00Z",
+     "dnanos0": "2024-02-17T01:00:00Z",
+     "flt0": 163.14,
+     "int0": 103,
+     "kw0": [
+      "delta",
+      "pi"
+     ],
+     "kw1": "delta",
+     "long0": 64,
+     "mot0": "ran slow cherry engine"
+    },
+    {
+     "index": {
+      "_id": "12",
+      "_index": "diff-m15-a"
+     }
+    },
+    {
+     "date0": "2024-04-19T16:00:00Z",
+     "dnanos0": "2024-02-19T20:00:00Z",
+     "flt0": 43.0,
+     "int0": 174,
+     "kw0": "Alpha",
+     "long0": -4,
+     "mot0": "jumps Dogs cherry engine banana running",
+     "text0": "ran index"
+    },
+    {
+     "index": {
+      "_id": "4",
+      "_index": "diff-m15-a"
+     }
+    },
+    {
+     "date0": "2024-10-29T21:04:00Z",
+     "dnanos0": 1719431580000,
+     "flt0": 6.37,
+     "int0": null,
+     "kw0": "",
+     "kw1": "Alpha",
+     "long0": [
+      100,
+      40,
+      -16
+     ],
+     "mot0": "and index engine banana running quick",
+     "text0": [
+      "index blue engine ran",
+      "running stream elastic search and jumps",
+      "shard cat elastic over"
+     ]
+    }
+   ],
+   "method": "POST",
+   "path": "/_bulk"
+  },
+  {
+   "es": {
+    "body": {
+     "errors": false,
+     "items": [
+      {
+       "index": {
+        "_id": "17",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 3,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "18",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 4,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "19",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 5,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "20",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 6,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "21",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 7,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "22",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 8,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "23",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 9,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "24",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 10,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "27",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 11,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "28",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 12,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "30",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 13,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "31",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 14,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "33",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 15,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "35",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 16,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "36",
+        "_index": "diff-m15-a",
+        "_primary_term": 1,
+        "_seq_no": 17,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      }
+     ],
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": {
+      "_id": "17",
+      "_index": "diff-m15-a",
+      "routing": "r1"
+     }
+    },
+    {
+     "date0": "2024-06-26",
+     "int0": 41,
+     "kw0": "beta",
+     "kw1": null,
+     "long0": 49,
+     "mot0": "fast fast cats dog dog green",
+     "text0": "stream over data"
+    },
+    {
+     "index": {
+      "_id": "18",
+      "_index": "diff-m15-a"
+     }
+    },
+    {
+     "date0": "2024-03-04T00:00:00Z",
+     "dnanos0": "2024-01-23T14:16:00.313652375Z",
+     "flt0": 148.31,
+     "int0": 59,
+     "kw0": "Alpha",
+     "kw1": "rho",
+     "long0": 8,
+     "mot0": "over",
+     "text0": "jumps and apple running lazy of running blue blue"
+    },
+    {
+     "index": {
+      "_id": "19",
+      "_index": "diff-m15-a"
+     }
+    },
+    {
+     "date0": "2024-01-10T20:13:00Z",
+     "dnanos0": "2024-08-14T05:00:00Z",
+     "flt0": 140.76,
+     "int0": 1,
+     "kw1": "Alpha",
+     "long0": 1980463894,
+     "mot0": "query banana and jumps of",
+     "text0": "green runs cat"
+    },
+    {
+     "index": {
+      "_id": "20",
+      "_index": "diff-m15-a"
+     }
+    },
+    {
+     "dnanos0": "2024-04-29T11:00:00.577925811Z",
+     "flt0": 128.42,
+     "int0": 129,
+     "kw0": "rho",
+     "kw1": "alpha",
+     "long0": [
+      41,
+      -2
+     ],
+     "mot0": "engine over shard data the apple dog cat",
+     "text0": "index and fast roll red"
+    },
+    {
+     "index": {
+      "_id": "21",
+      "_index": "diff-m15-a"
+     }
+    },
+    {
+     "date0": "2025-01-13",
+     "int0": 77,
+     "kw0": "x-1",
+     "kw1": "Alpha",
+     "long0": 96,
+     "mot0": "slow elastic dog brown index over",
+     "text0": "query"
+    },
+    {
+     "index": {
+      "_id": "22",
+      "_index": "diff-m15-a",
+      "routing": "r1"
+     }
+    },
+    {
+     "date0": "2024-12-11T08:00:00Z",
+     "dnanos0": "2024-08-20T11:00:00.905512401Z",
+     "flt0": 129.29,
+     "int0": 108,
+     "kw0": "alpha",
+     "kw1": "alpha",
+     "mot0": "cats blue blue fox red running score the cats",
+     "text0": [
+      "fast banana elastic quick",
+      "red fast apple slow cats apple query",
+      "lazy cats"
+     ]
+    },
+    {
+     "index": {
+      "_id": "23",
+      "_index": "diff-m15-a"
+     }
+    },
+    {
+     "date0": 1712603880000,
+     "dnanos0": "2025-01-25T04:00:00Z",
+     "flt0": 119.09,
+     "int0": [
+      62,
+      77
+     ],
+     "kw0": "",
+     "kw1": [
+      "user@example.com",
+      "x-2"
+     ],
+     "long0": [
+      61,
+      23
+     ],
+     "mot0": "red and runs slow the dog shard fast roll",
+     "text0": [
+      "index over jumps",
+      "Dogs score index fast brown blue search shard dog",
+      "jumps brown query"
+     ]
+    },
+    {
+     "index": {
+      "_id": "24",
+      "_index": "diff-m15-a"
+     }
+    },
+    {
+     "date0": "2024-04-20",
+     "dnanos0": "2024-04-29T00:00:00.325583419Z",
+     "flt0": 48.42,
+     "int0": 173,
+     "kw0": "pi",
+     "kw1": [
+      "x-2",
+      "omega"
+     ],
+     "long0": 14,
+     "mot0": "and fast",
+     "text0": "ran"
+    },
+    {
+     "index": {
+      "_id": "27",
+      "_index": "diff-m15-a"
+     }
+    },
+    {
+     "date0": "2025-01-28",
+     "dnanos0": 1729569600000,
+     "flt0": 98.47,
+     "int0": 16,
+     "kw0": "x-1",
+     "kw1": "user@example.com",
+     "long0": 99,
+     "text0": "ran"
+    },
+    {
+     "index": {
+      "_id": "28",
+      "_index": "diff-m15-a"
+     }
+    },
+    {
+     "date0": null,
+     "dnanos0": "2024-08-14T05:00:00.533020474Z",
+     "flt0": 137.11,
+     "int0": 9,
+     "kw0": "alpha",
+     "kw1": [
+      "omega",
+      "gamma",
+      "gamma"
+     ],
+     "long0": 66,
+     "mot0": "runs of index roll jumps lazy quick running",
+     "text0": "blue fox slow"
+    },
+    {
+     "index": {
+      "_id": "30",
+      "_index": "diff-m15-a"
+     }
+    },
+    {
+     "date0": "2024-03-27T11:00:00Z",
+     "dnanos0": "2024-01-03T13:00:00.745934268Z",
+     "flt0": 170,
+     "int0": 91,
+     "kw0": [
+      "x-2",
+      "x-2"
+     ],
+     "kw1": "alpha",
+     "long0": 31,
+     "mot0": "dog slow cherry over roll quick",
+     "text0": [
+      "runs ran",
+      "quick score lazy score",
+      "ran Dogs dog score score shard apple index"
+     ]
+    },
+    {
+     "index": {
+      "_id": "31",
+      "_index": "diff-m15-a"
+     }
+    },
+    {
+     "date0": "2024-03-12T21:00:00Z",
+     "dnanos0": "2024-07-29T02:00:00Z",
+     "flt0": 65.2,
+     "int0": 53,
+     "kw0": "rho",
+     "long0": [
+      78,
+      0,
+      25
+     ],
+     "text0": "Quick query and elastic green fast the quick"
+    },
+    {
+     "index": {
+      "_id": "33",
+      "_index": "diff-m15-a",
+      "routing": "r1"
+     }
+    },
+    {
+     "date0": "2024-08-11",
+     "dnanos0": "2024-04-01T02:00:00Z",
+     "flt0": -44.15,
+     "int0": 163,
+     "kw0": [
+      "rho",
+      "rho"
+     ],
+     "long0": 56,
+     "text0": "slow lazy slow jumps"
+    },
+    {
+     "index": {
+      "_id": "35",
+      "_index": "diff-m15-a"
+     }
+    },
+    {
+     "date0": [
+      "2024-07-21T08:00:00Z",
+      "2024-11-30T01:18:00Z",
+      "2024-10-07T06:00:00Z"
+     ],
+     "dnanos0": "2024-11-20T20:00:00Z",
+     "flt0": 1.62,
+     "int0": 134,
+     "kw0": "beta",
+     "kw1": "user@example.com",
+     "long0": null,
+     "text0": "index engine green over red elastic"
+    },
+    {
+     "index": {
+      "_id": "36",
+      "_index": "diff-m15-a"
+     }
+    },
+    {
+     "date0": [
+      "2024-12-16",
+      "2024-08-21T10:00:00Z"
+     ],
+     "dnanos0": 1728363600000,
+     "flt0": 136.17,
+     "int0": 162,
+     "kw0": "x-2",
+     "kw1": [
+      "omega",
+      "pi"
+     ],
+     "long0": -1,
+     "mot0": "fox search apple",
+     "text0": "cat Dogs and blue"
+    }
+   ],
+   "method": "POST",
+   "path": "/_bulk"
+  },
+  {
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 1
+     }
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m15-a/_refresh"
+  },
+  {
+   "body": {
+    "query": {
+     "multi_match": {
+      "fields": [
+       "text0",
+       "mot0^2"
+      ],
+      "query": "engine",
+      "type": "phrase_prefix"
+     }
+    },
+    "size": 4
+   },
+   "capture": [
+    [
+     "scroll",
+     "/_scroll_id"
+    ]
+   ],
+   "es": {
+    "body": {
+     "_scroll_id": "FGluY2x1ZGVfY29udGV4dF91dWlkDXF1ZXJ5QW5kRmV0Y2gBFkFHMFM5Z1huUThLV1dldzREWks5V1EAAAAAAADe-BZHVEZ0S1JrTVNpLWxtMHIwUjR6dGJB",
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "35",
+        "_ignored": [
+         "text0.raw"
+        ],
+        "_index": "diff-m15-a",
+        "_score": 2.0050337,
+        "_source": {
+         "date0": [
+          "2024-07-21T08:00:00Z",
+          "2024-11-30T01:18:00Z",
+          "2024-10-07T06:00:00Z"
+         ],
+         "dnanos0": "2024-11-20T20:00:00Z",
+         "flt0": 1.62,
+         "int0": 134,
+         "kw0": "beta",
+         "kw1": "user@example.com",
+         "long0": null,
+         "text0": "index engine green over red elastic"
+        }
+       },
+       {
+        "_id": "8",
+        "_index": "diff-m15-a",
+        "_score": 2.0,
+        "_source": {
+         "date0": "2024-05-21T20:00:00Z",
+         "dnanos0": "2024-02-17T01:00:00Z",
+         "flt0": 163.14,
+         "int0": 103,
+         "kw0": [
+          "delta",
+          "pi"
+         ],
+         "kw1": "delta",
+         "long0": 64,
+         "mot0": "ran slow cherry engine"
+        }
+       },
+       {
+        "_id": "12",
+        "_index": "diff-m15-a",
+        "_score": 2.0,
+        "_source": {
+         "date0": "2024-04-19T16:00:00Z",
+         "dnanos0": "2024-02-19T20:00:00Z",
+         "flt0": 43.0,
+         "int0": 174,
+         "kw0": "Alpha",
+         "long0": -4,
+         "mot0": "jumps Dogs cherry engine banana running",
+         "text0": "ran index"
+        }
+       },
+       {
+        "_id": "4",
+        "_ignored": [
+         "text0.raw"
+        ],
+        "_index": "diff-m15-a",
+        "_score": 2.0,
+        "_source": {
+         "date0": "2024-10-29T21:04:00Z",
+         "dnanos0": 1719431580000,
+         "flt0": 6.37,
+         "int0": null,
+         "kw0": "",
+         "kw1": "Alpha",
+         "long0": [
+          100,
+          40,
+          -16
+         ],
+         "mot0": "and index engine banana running quick",
+         "text0": [
+          "index blue engine ran",
+          "running stream elastic search and jumps",
+          "shard cat elastic over"
+         ]
+        }
+       }
+      ],
+      "max_score": 2.0050337,
+      "total": {
+       "relation": "eq",
+       "value": 5
+      }
+     },
+     "timed_out": false,
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m15-a/_search?scroll=1m"
+  },
+  {
+   "body": {
+    "scroll_id": "${scroll}"
+   },
+   "capture": [
+    [
+     "scroll",
+     "/_scroll_id"
+    ]
+   ],
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "20",
+        "_index": "diff-m15-a",
+        "_score": 2.0,
+        "_source": {
+         "dnanos0": "2024-04-29T11:00:00.577925811Z",
+         "flt0": 128.42,
+         "int0": 129,
+         "kw0": "rho",
+         "kw1": "alpha",
+         "long0": [
+          41,
+          -2
+         ],
+         "mot0": "engine over shard data the apple dog cat",
+         "text0": "index and fast roll red"
+        }
+       }
+      ],
+      "max_score": 2.0050337,
+      "total": {
+       "relation": "eq",
+       "value": 5
+      }
+     },
+     "timed_out": false,
+     "took": 1
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/_search/scroll"
+  }
+ ]
+}

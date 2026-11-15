@@ -1,0 +1,5949 @@
+{
+  "description" : "compat-es round 2: locale date formats (aggregation, docvalue and sort formats in the field locale; ingest date and date_index_name locales, TAI64N, UNIX, errors), runtime fields in bool rewrites, forced synthetic source and vectors. Also aggregate_metric_double, histogram fields, moving_percentiles, top_metrics limits, constant_keyword values and sorts, geo_grid queries.",
+  "steps" : [
+    {
+      "req" : "PUT /es-docs-compat-es-loc",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "d" : {
+              "type" : "date",
+              "format" : "dd MMMM yyyy||EEEE, d. MMM yyyy",
+              "locale" : "de"
+            },
+            "e" : {
+              "type" : "date",
+              "format" : "MMM d, yyyy h:mm a",
+              "locale" : "fr_FR"
+            },
+            "kwd" : {
+              "type" : "keyword"
+            },
+            "n" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-compat-es-loc"
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-loc/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"d\":\"01 März 2020\",\"e\":\"janv. 5, 2021 3:04 PM\",\"kwd\":\"foo\",\"n\":3}\n{\"index\":{\"_id\":\"2\"}}\n{\"d\":\"Sonntag, 1. März 2020\",\"kwd\":\"baz\",\"n\":8}\n{\"index\":{\"_id\":\"3\"}}\n{\"d\":\"12 Dezember 2019\",\"kwd\":\"bar\",\"n\":5}\n",
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-compat-es-loc",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-compat-es-loc",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-compat-es-loc",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-loc/_search",
+      "body" : {
+        "_source" : false,
+        "fields" : [
+          "d",
+          "e"
+        ],
+        "docvalue_fields" : [
+          {
+            "field" : "d",
+            "format" : "EEEE dd MMMM yyyy"
+          }
+        ],
+        "sort" : [
+          {
+            "d" : {
+              "order" : "asc",
+              "format" : "MMMM yyyy"
+            }
+          },
+          {
+            "kwd" : "asc"
+          }
+        ],
+        "query" : {
+          "range" : {
+            "d" : {
+              "gte" : "2019-12-01",
+              "format" : "yyyy-MM-dd"
+            }
+          }
+        },
+        "aggs" : {
+          "h" : {
+            "date_histogram" : {
+              "field" : "d",
+              "calendar_interval" : "month",
+              "format" : "MMMM yyyy"
+            }
+          },
+          "f" : {
+            "date_histogram" : {
+              "field" : "d",
+              "calendar_interval" : "year"
+            }
+          },
+          "e" : {
+            "terms" : {
+              "field" : "e"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 13,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-loc",
+              "_id" : "3",
+              "_score" : null,
+              "fields" : {
+                "d" : [
+                  "12 Dezember 2019"
+                ]
+              },
+              "sort" : [
+                "Dezember 2019",
+                "bar"
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-loc",
+              "_id" : "2",
+              "_score" : null,
+              "fields" : {
+                "d" : [
+                  "01 März 2020"
+                ]
+              },
+              "sort" : [
+                "März 2020",
+                "baz"
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-loc",
+              "_id" : "1",
+              "_score" : null,
+              "fields" : {
+                "d" : [
+                  "01 März 2020"
+                ],
+                "e" : [
+                  "janv. 5, 2021 3:04 PM"
+                ]
+              },
+              "sort" : [
+                "März 2020",
+                "foo"
+              ]
+            }
+          ]
+        },
+        "aggregations" : {
+          "h" : {
+            "buckets" : [
+              {
+                "key_as_string" : "Dezember 2019",
+                "key" : 1575158400000,
+                "doc_count" : 1
+              },
+              {
+                "key_as_string" : "Januar 2020",
+                "key" : 1577836800000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "Februar 2020",
+                "key" : 1580515200000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "März 2020",
+                "key" : 1583020800000,
+                "doc_count" : 2
+              }
+            ]
+          },
+          "f" : {
+            "buckets" : [
+              {
+                "key_as_string" : "01 Januar 2019",
+                "key" : 1546300800000,
+                "doc_count" : 1
+              },
+              {
+                "key_as_string" : "01 Januar 2020",
+                "key" : 1577836800000,
+                "doc_count" : 2
+              }
+            ]
+          },
+          "e" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : 1609859040000,
+                "key_as_string" : "janv. 5, 2021 3:04 PM",
+                "doc_count" : 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-loc/_search",
+      "body" : {
+        "runtime_mappings" : {
+          "ru" : {
+            "type" : "keyword",
+            "script" : {
+              "source" : "emit(doc['kwd'].value.toUpperCase())"
+            }
+          },
+          "half" : {
+            "type" : "double",
+            "script" : "emit(doc['n'].value / 2.0)"
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "kwd"
+        ],
+        "query" : {
+          "bool" : {
+            "filter" : [
+              {
+                "exists" : {
+                  "field" : "half"
+                }
+              },
+              {
+                "prefix" : {
+                  "ru" : "B"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-loc",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                "bar"
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-loc",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                "baz"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-loc/_search",
+      "body" : {
+        "runtime_mappings" : {
+          "ru" : {
+            "type" : "keyword",
+            "script" : {
+              "source" : "emit(doc['kwd'].value.toUpperCase())"
+            }
+          },
+          "half" : {
+            "type" : "double",
+            "script" : "emit(doc['n'].value / 2.0)"
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "kwd"
+        ],
+        "query" : {
+          "bool" : {
+            "filter" : [
+              {
+                "range" : {
+                  "half" : {
+                    "gte" : 3
+                  }
+                }
+              },
+              {
+                "terms" : {
+                  "ru" : [
+                    "FOO",
+                    "BAZ"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 7,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-loc",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                "baz"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-loc/_search",
+      "body" : {
+        "runtime_mappings" : {
+          "ru" : {
+            "type" : "keyword",
+            "script" : {
+              "source" : "emit(doc['kwd'].value.toUpperCase())"
+            }
+          },
+          "half" : {
+            "type" : "double",
+            "script" : "emit(doc['n'].value / 2.0)"
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "kwd"
+        ],
+        "query" : {
+          "bool" : {
+            "filter" : [
+              {
+                "exists" : {
+                  "field" : "ru"
+                }
+              },
+              {
+                "term" : {
+                  "kwd" : "bar"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-loc",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                "bar"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-loc/_search",
+      "body" : {
+        "runtime_mappings" : {
+          "ru" : {
+            "type" : "keyword",
+            "script" : {
+              "source" : "emit(doc['kwd'].value.toUpperCase())"
+            }
+          },
+          "half" : {
+            "type" : "double",
+            "script" : "emit(doc['n'].value / 2.0)"
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "kwd"
+        ],
+        "query" : {
+          "bool" : {
+            "filter" : [
+              {
+                "exists" : {
+                  "field" : "nope"
+                }
+              },
+              {
+                "prefix" : {
+                  "ru" : "B"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "x",
+                "formats" : [
+                  "dd MMMM yyyy"
+                ],
+                "locale" : "es",
+                "output_format" : "EEEE dd MMMM yyyy"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "03 marzo 2021"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "x" : "03 marzo 2021",
+                "@timestamp" : "Wed 03 Mar 2021"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:35.453719615Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "x",
+                "formats" : [
+                  "dd MMMM yyyy"
+                ],
+                "locale" : "{{lc}}",
+                "target_field" : "y"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "03 marzo 2021",
+              "lc" : "es"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "x" : "03 marzo 2021",
+                "y" : "2021-03-03T00:00:00.000Z",
+                "lc" : "es"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:35.457447561Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "x",
+                "formats" : [
+                  "dd MMMM yyyy"
+                ],
+                "locale" : "nope_XX"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "03 marzo 2021"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "unable to parse date [03 marzo 2021]"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "unable to parse date [03 marzo 2021]",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Unknown language: nope",
+                "caused_by" : {
+                  "type" : "missing_resource_exception",
+                  "reason" : "Couldn't find 3-letter language code for nope"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "x",
+                "formats" : [
+                  "dd MMMM yyyy"
+                ],
+                "locale" : "de_XX"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "03 März 2021"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "unable to parse date [03 März 2021]"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "unable to parse date [03 März 2021]",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Unknown country: XX",
+                "caused_by" : {
+                  "type" : "missing_resource_exception",
+                  "reason" : "Couldn't find 3-letter country code for XX"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "x",
+                "formats" : [
+                  "dd MMMM yyyy"
+                ]
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "03 marzo 2021"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "unable to parse date [03 marzo 2021]"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "unable to parse date [03 marzo 2021]",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "failed to parse date field [03 marzo 2021] with format [dd MMMM yyyy]",
+                "caused_by" : {
+                  "type" : "date_time_parse_exception",
+                  "reason" : "Text '03 marzo 2021' could not be parsed at index 3"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "t",
+                "formats" : [
+                  "TAI64N"
+                ]
+              }
+            },
+            {
+              "date" : {
+                "field" : "u",
+                "formats" : [
+                  "TAI64N"
+                ],
+                "timezone" : "Europe/Berlin",
+                "target_field" : "u2"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "t" : "4000000050d506482dbdf024",
+              "u" : "@4000000050d506482dbdf024"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "@timestamp" : "2012-12-22T01:00:46.767Z",
+                "t" : "4000000050d506482dbdf024",
+                "u" : "@4000000050d506482dbdf024",
+                "u2" : "2012-12-22T02:00:46.767+01:00"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:35.471502004Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "x",
+                "formats" : [
+                  "TAI64N"
+                ]
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "zz"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "unable to parse date [zz]"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "unable to parse date [zz]",
+              "caused_by" : {
+                "type" : "string_index_out_of_bounds_exception",
+                "reason" : "Range [1, 16) out of bounds for length 2"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "x",
+                "formats" : [
+                  "TAI64N"
+                ]
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "4000000050d5064zzdbdf024"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "unable to parse date [4000000050d5064zzdbdf024]"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "unable to parse date [4000000050d5064zzdbdf024]",
+              "caused_by" : {
+                "type" : "number_format_exception",
+                "reason" : "For input string: \"000000050d5064z\" under radix 16"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "x",
+                "formats" : [
+                  "TAI64N"
+                ]
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "4000000050d50648"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "unable to parse date [4000000050d50648]"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "unable to parse date [4000000050d50648]",
+              "caused_by" : {
+                "type" : "string_index_out_of_bounds_exception",
+                "reason" : "Range [16, 24) out of bounds for length 16"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "n",
+                "formats" : [
+                  "UNIX"
+                ]
+              }
+            },
+            {
+              "date" : {
+                "field" : "m",
+                "formats" : [
+                  "UNIX_MS"
+                ],
+                "timezone" : "+05:00",
+                "target_field" : "m2"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "n" : " 1.5e9 ",
+              "m" : "1612345678123"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "@timestamp" : "2017-07-14T02:40:00.000Z",
+                "m2" : "2021-02-03T14:47:58.123+05:00",
+                "m" : "1612345678123",
+                "n" : " 1.5e9 "
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:35.483902395Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "x",
+                "formats" : [
+                  "UNIX"
+                ]
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "abc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "unable to parse date [abc]"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "unable to parse date [abc]",
+              "caused_by" : {
+                "type" : "number_format_exception",
+                "reason" : "For input string: \"abc\""
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "x",
+                "formats" : [
+                  "UNIX_MS"
+                ]
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "abc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "unable to parse date [abc]"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "unable to parse date [abc]",
+              "caused_by" : {
+                "type" : "number_format_exception",
+                "reason" : "For input string: \"abc\""
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "x",
+                "formats" : [
+                  "UNIX_MS",
+                  "UNIX"
+                ]
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "1.5"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "x" : "1.5",
+                "@timestamp" : "1970-01-01T00:00:01.500Z"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:35.512150352Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "x",
+                "formats" : [
+                  "ISO8601"
+                ]
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "2021-13-01"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "unable to parse date [2021-13-01]"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "unable to parse date [2021-13-01]",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "failed to parse date field [2021-13-01] with format [iso8601]",
+                "caused_by" : {
+                  "type" : "date_time_parse_exception",
+                  "reason" : "Could not fully parse datetime"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "x",
+                "formats" : [
+                  "yyyy-MM-dd"
+                ],
+                "timezone" : "Nope/Zone"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "2021-01-01"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "unable to parse date [2021-01-01]"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "unable to parse date [2021-01-01]",
+              "caused_by" : {
+                "type" : "zone_rules_exception",
+                "reason" : "Unknown time-zone ID: Nope/Zone"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date" : {
+                "field" : "x",
+                "formats" : [
+                  "yyyy-MM-dd",
+                  "dd/MM/yyyy"
+                ]
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "01-01"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "unable to parse date [01-01]"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "unable to parse date [01-01]",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "failed to parse date field [01-01] with format [yyyy-MM-dd]",
+                "caused_by" : {
+                  "type" : "date_time_parse_exception",
+                  "reason" : "Text '01-01' could not be parsed at index 0"
+                },
+                "suppressed" : [
+                  {
+                    "type" : "illegal_argument_exception",
+                    "reason" : "failed to parse date field [01-01] with format [dd/MM/yyyy]",
+                    "caused_by" : {
+                      "type" : "date_time_parse_exception",
+                      "reason" : "Text '01-01' could not be parsed at index 2"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date_index_name" : {
+                "field" : "x",
+                "date_formats" : [
+                  "dd MMMM yyyy"
+                ],
+                "locale" : "es",
+                "date_rounding" : "M",
+                "index_name_prefix" : "p-"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "03 marzo 2021"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "<p-{2021-03-03||/M{yyyy-MM-dd|UTC}}>",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "x" : "03 marzo 2021"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:35.526175306Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date_index_name" : {
+                "field" : "x",
+                "date_rounding" : "M",
+                "index_name_prefix" : "p-"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "2021-03-03T10:11:12.123+0100"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "<p-{2021-03-03||/M{yyyy-MM-dd|UTC}}>",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "x" : "2021-03-03T10:11:12.123+0100"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:35.529696591Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date_index_name" : {
+                "field" : "x",
+                "date_formats" : [
+                  "dd MMMM yyyy HH:mm"
+                ],
+                "date_rounding" : "M",
+                "locale" : "de",
+                "index_name_format" : "yyyy-MMMM",
+                "timezone" : "Europe/Berlin"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "03 März 2021 10:11"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "<{2021-Mar||/M{yyyy-MMMM|Europe/Berlin}}>",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "x" : "03 März 2021 10:11"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:35.534786655Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date_index_name" : {
+                "field" : "x",
+                "date_rounding" : "M",
+                "locale" : "de_AT"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "2021-03-03T10:11:12.123+0100"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "exception",
+              "reason" : "java.lang.IllegalArgumentException: Invalid language tag specified: de_AT",
+              "processor_type" : "date_index_name"
+            }
+          ],
+          "type" : "exception",
+          "reason" : "java.lang.IllegalArgumentException: Invalid language tag specified: de_AT",
+          "processor_type" : "date_index_name",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Invalid language tag specified: de_AT"
+          }
+        },
+        "status" : 500
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date_index_name" : {
+                "field" : "x",
+                "date_rounding" : "M",
+                "date_formats" : [
+                  "UNIX",
+                  "yyyy"
+                ]
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "2021"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "<{2021-01-01||/M{yyyy-MM-dd|UTC}}>",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "x" : "2021"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:35.552332678Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "date_index_name" : {
+                "field" : "x",
+                "date_rounding" : "M",
+                "date_formats" : [
+                  "yyyy",
+                  "dd/MM"
+                ]
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : "nope"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "unable to parse date [nope]"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "unable to parse date [nope]",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "failed to parse date field [nope] with format [yyyy]",
+                "caused_by" : {
+                  "type" : "date_time_parse_exception",
+                  "reason" : "Text 'nope' could not be parsed at index 0"
+                },
+                "suppressed" : [
+                  {
+                    "type" : "illegal_argument_exception",
+                    "reason" : "failed to parse date field [nope] with format [dd/MM]",
+                    "caused_by" : {
+                      "type" : "date_time_parse_exception",
+                      "reason" : "Text 'nope' could not be parsed at index 0"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-vec",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "name" : {
+              "type" : "keyword"
+            },
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 3,
+              "similarity" : "l2_norm"
+            },
+            "b" : {
+              "type" : "dense_vector",
+              "element_type" : "bit",
+              "dims" : 16,
+              "index" : false
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-compat-es-vec"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-vec/_doc/1?refresh=true",
+      "body" : {
+        "name" : "a",
+        "v" : [
+          1,
+          2,
+          3
+        ],
+        "b" : [
+          3,
+          -4
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-compat-es-vec",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "GET /es-docs-compat-es-vec/_doc/1?force_synthetic_source=true",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-compat-es-vec",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "name" : "a"
+        }
+      }
+    },
+    {
+      "req" : "GET /es-docs-compat-es-vec/_doc/1?force_synthetic_source=true&_source_includes=v",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-compat-es-vec",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "v" : [
+            1.0,
+            2.0,
+            3.0
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-vec/_search?force_synthetic_source=true",
+      "body" : { },
+      "status" : 200,
+      "response" : {
+        "took" : 5,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-vec",
+              "_id" : "1",
+              "_score" : 1.0,
+              "_source" : {
+                "b" : [
+                  3,
+                  -4
+                ],
+                "name" : "a",
+                "v" : [
+                  1.0,
+                  2.0,
+                  3.0
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-vec/_search?force_synthetic_source=true",
+      "body" : {
+        "_source" : {
+          "excludes" : [
+            "b"
+          ]
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-vec",
+              "_id" : "1",
+              "_score" : 1.0,
+              "_source" : {
+                "name" : "a",
+                "v" : [
+                  1.0,
+                  2.0,
+                  3.0
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-compat-es-vec",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-compat-es-loc",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "m" : {
+              "type" : "aggregate_metric_double",
+              "metrics" : [
+                "min",
+                "max",
+                "value_count"
+              ]
+            },
+            "s" : {
+              "type" : "aggregate_metric_double",
+              "metrics" : [
+                "sum",
+                "value_count"
+              ],
+              "ignore_malformed" : true
+            },
+            "one" : {
+              "type" : "aggregate_metric_double",
+              "metrics" : [
+                "max"
+              ]
+            },
+            "h" : {
+              "type" : "histogram"
+            },
+            "ck" : {
+              "type" : "constant_keyword"
+            },
+            "t" : {
+              "type" : "date"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-compat-es-agm"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_doc/bad0",
+      "body" : {
+        "m" : 5
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "Failed to parse object: expecting token of type [START_OBJECT] but found [VALUE_NUMBER]",
+              "line" : 1,
+              "col" : 6
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad0'. Preview of field's value: '5'",
+          "caused_by" : {
+            "type" : "parsing_exception",
+            "reason" : "Failed to parse object: expecting token of type [START_OBJECT] but found [VALUE_NUMBER]",
+            "line" : 1,
+            "col" : 6
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_doc/bad1",
+      "body" : {
+        "m" : {
+          "foo" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:7] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad1'. Preview of field's value: 'null'"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:7] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad1'. Preview of field's value: 'null'",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "No enum constant org.elasticsearch.xpack.aggregatemetric.mapper.AggregateMetricDoubleFieldMapper.Metric.foo"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_doc/bad2",
+      "body" : {
+        "m" : {
+          "sum" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:7] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad2'. Preview of field's value: 'null'"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:7] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad2'. Preview of field's value: 'null'",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Aggregate metric [sum] does not exist in the mapping of field [m]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_doc/bad3",
+      "body" : {
+        "m" : {
+          "min" : "x",
+          "max" : 2,
+          "value_count" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "Failed to parse object: expecting token of type [VALUE_NUMBER] but found [VALUE_STRING]",
+              "line" : 1,
+              "col" : 13
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:13] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad3'. Preview of field's value: 'x'",
+          "caused_by" : {
+            "type" : "parsing_exception",
+            "reason" : "Failed to parse object: expecting token of type [VALUE_NUMBER] but found [VALUE_STRING]",
+            "line" : 1,
+            "col" : 13
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_doc/bad4",
+      "body" : {
+        "m" : {
+          "min" : 1,
+          "max" : 2,
+          "value_count" : 5.5
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:37] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad4'. Preview of field's value: '5.5'"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:37] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad4'. Preview of field's value: '5.5'",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "failed to parse [value_count] sub field: 5.5 cannot be converted to Integer without data loss",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "5.5 cannot be converted to Integer without data loss"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_doc/bad5",
+      "body" : {
+        "m" : {
+          "min" : 3,
+          "max" : 2,
+          "value_count" : 5
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:38] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad5'. Preview of field's value: 'null'"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:38] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad5'. Preview of field's value: 'null'",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Aggregate metric field [m] max value cannot be smaller than min value"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_doc/bad6",
+      "body" : {
+        "m" : {
+          "min" : 1,
+          "max" : 2,
+          "value_count" : -1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:39] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad6'. Preview of field's value: 'null'"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:39] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad6'. Preview of field's value: 'null'",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Aggregate metric [value_count] of field [m] cannot be a negative number"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_doc/bad7",
+      "body" : {
+        "m" : {
+          "min" : 1,
+          "max" : 2
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:22] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad7'. Preview of field's value: 'null'"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:22] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad7'. Preview of field's value: 'null'",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Aggregate metric field [m] must contain all metrics [min, max, value_count]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_doc/bad8",
+      "body" : {
+        "m" : [
+          {
+            "min" : 1,
+            "max" : 2,
+            "value_count" : 1
+          },
+          {
+            "min" : 1,
+            "max" : 2,
+            "value_count" : 1
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:73] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad8'. Preview of field's value: 'null'"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:73] failed to parse field [m] of type [aggregate_metric_double] in document with id 'bad8'. Preview of field's value: 'null'",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Field [m] of type [aggregate_metric_double] does not support indexing multiple values for the same field in the same document"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_doc/bad9",
+      "body" : {
+        "h" : {
+          "values" : [
+            1,
+            0.5
+          ],
+          "counts" : [
+            1,
+            1
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:19] error parsing field [h], [values] values must be in increasing order, got [0.5] but previous value was [1.0]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:19] failed to parse field [h] of type [histogram]",
+          "caused_by" : {
+            "type" : "document_parsing_exception",
+            "reason" : "[1:19] error parsing field [h], [values] values must be in increasing order, got [0.5] but previous value was [1.0]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_doc/bad10",
+      "body" : {
+        "h" : {
+          "values" : [
+            1
+          ],
+          "counts" : [
+            1,
+            2
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:34] error parsing field [h], expected same length from [values] and [counts] but got [1 != 2]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:34] failed to parse field [h] of type [histogram]",
+          "caused_by" : {
+            "type" : "document_parsing_exception",
+            "reason" : "[1:34] error parsing field [h], expected same length from [values] and [counts] but got [1 != 2]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_doc/bad11",
+      "body" : {
+        "h" : {
+          "values" : [
+            1
+          ],
+          "counts" : [
+            -1
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:30] error parsing field [h], [counts] elements must be >= 0 but got -1"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:30] failed to parse field [h] of type [histogram]",
+          "caused_by" : {
+            "type" : "document_parsing_exception",
+            "reason" : "[1:30] error parsing field [h], [counts] elements must be >= 0 but got -1"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_doc/bad12",
+      "body" : {
+        "h" : {
+          "values" : [
+            1
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:19] error parsing field [h], expected field called [counts]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:19] failed to parse field [h] of type [histogram]",
+          "caused_by" : {
+            "type" : "document_parsing_exception",
+            "reason" : "[1:19] error parsing field [h], expected field called [counts]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_doc/bad13",
+      "body" : {
+        "h" : {
+          "foo" : [
+            1
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:7] error parsing field [h], with unknown parameter [foo]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:7] failed to parse field [h] of type [histogram]",
+          "caused_by" : {
+            "type" : "document_parsing_exception",
+            "reason" : "[1:7] error parsing field [h], with unknown parameter [foo]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"0\"}}\n{\"m\": {\"min\": 1, \"max\": 2, \"value_count\": 1}, \"s\": {\"sum\": 10, \"value_count\": 4}, \"one\": {\"max\": 7}, \"h\": {\"values\": [0.1, 0.5, 1], \"counts\": [1, 4, 5]}, \"ck\": \"fixed\", \"t\": \"2017-01-01T05:00:00Z\"}\n{\"index\":{\"_id\":\"1\"}}\n{\"m\": {\"min\": -1.5, \"max\": 20, \"value_count\": 10}, \"s\": {\"sum\": 30, \"value_count\": 4}, \"one\": {\"max\": 3}, \"h\": {\"values\": [0.1, 2, 10], \"counts\": [2, 2, 1]}, \"t\": \"2017-01-02T05:00:00Z\"}\n{\"index\":{\"_id\":\"2\"}}\n{\"s\": {\"sum\": \"x\"}, \"t\": \"2017-01-02T06:00:00Z\"}\n{\"index\":{\"_id\":\"3\"}}\n{\"t\": \"2017-01-03T05:00:00Z\", \"h\": {\"values\": [4], \"counts\": [3]}}\n",
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 200,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "0",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 3,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "GET /es-docs-compat-es-agm/_mapping",
+      "status" : 200,
+      "response" : {
+        "es-docs-compat-es-agm" : {
+          "mappings" : {
+            "properties" : {
+              "ck" : {
+                "type" : "constant_keyword",
+                "value" : "fixed"
+              },
+              "h" : {
+                "type" : "histogram"
+              },
+              "m" : {
+                "type" : "aggregate_metric_double",
+                "metrics" : [
+                  "min",
+                  "max",
+                  "value_count"
+                ]
+              },
+              "one" : {
+                "type" : "aggregate_metric_double",
+                "metrics" : [
+                  "max"
+                ]
+              },
+              "s" : {
+                "type" : "aggregate_metric_double",
+                "ignore_malformed" : true,
+                "metrics" : [
+                  "sum",
+                  "value_count"
+                ]
+              },
+              "t" : {
+                "type" : "date"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "query" : {
+          "exists" : {
+            "field" : "m"
+          }
+        },
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "0",
+              "_score" : 1.0
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "query" : {
+          "term" : {
+            "s" : 2.5
+          }
+        },
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "0",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "query" : {
+          "term" : {
+            "m" : 2
+          }
+        },
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "query" : {
+          "range" : {
+            "one" : {
+              "gte" : 5
+            }
+          }
+        },
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "0",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "query" : {
+          "range" : {
+            "s" : {
+              "gte" : 5
+            }
+          }
+        },
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "query" : {
+          "terms" : {
+            "s" : [
+              2.5,
+              7.5
+            ]
+          }
+        },
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "0",
+              "_score" : 1.0
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "query" : {
+          "exists" : {
+            "field" : "m.min"
+          }
+        },
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 9,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "sort" : [
+          {
+            "s" : "desc"
+          }
+        ],
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 4,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                7.5
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "0",
+              "_score" : null,
+              "sort" : [
+                2.5
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "2",
+              "_score" : null,
+              "_ignored" : [
+                "s"
+              ],
+              "sort" : [
+                "-Infinity"
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                "-Infinity"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "sort" : [
+          {
+            "one" : "asc"
+          }
+        ],
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 4,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "2",
+              "_score" : null,
+              "_ignored" : [
+                "s"
+              ],
+              "sort" : [
+                0.0
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                0.0
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                3.0
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "0",
+              "_score" : null,
+              "sort" : [
+                7.0
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "sort" : [
+          {
+            "m" : "asc"
+          }
+        ],
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Sorting by field [m] of type [aggregate_metric_double] is not supported unless it has configured a single metric or the [sum, value_count] metrics"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-compat-es-agm",
+              "node" : "HAbxDF7VQPaPbiWl_djiZQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Sorting by field [m] of type [aggregate_metric_double] is not supported unless it has configured a single metric or the [sum, value_count] metrics"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Sorting by field [m] of type [aggregate_metric_double] is not supported unless it has configured a single metric or the [sum, value_count] metrics",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Sorting by field [m] of type [aggregate_metric_double] is not supported unless it has configured a single metric or the [sum, value_count] metrics"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "sort" : [
+          {
+            "ck" : "desc"
+          },
+          {
+            "_index" : "asc"
+          },
+          "_doc"
+        ],
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 8,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 4,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "0",
+              "_score" : null,
+              "sort" : [
+                "fixed",
+                "es-docs-compat-es-agm",
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                "fixed",
+                "es-docs-compat-es-agm",
+                1
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "2",
+              "_score" : null,
+              "_ignored" : [
+                "s"
+              ],
+              "sort" : [
+                "fixed",
+                "es-docs-compat-es-agm",
+                2
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                "fixed",
+                "es-docs-compat-es-agm",
+                3
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "aggs" : {
+          "a" : {
+            "avg" : {
+              "field" : "s"
+            }
+          },
+          "b" : {
+            "sum" : {
+              "field" : "s"
+            }
+          },
+          "c" : {
+            "value_count" : {
+              "field" : "m"
+            }
+          },
+          "d" : {
+            "min" : {
+              "field" : "m"
+            }
+          },
+          "e" : {
+            "max" : {
+              "field" : "one"
+            }
+          }
+        },
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 5,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 4,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "0",
+              "_score" : 1.0
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "1",
+              "_score" : 1.0
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "2",
+              "_score" : 1.0,
+              "_ignored" : [
+                "s"
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "3",
+              "_score" : 1.0
+            }
+          ]
+        },
+        "aggregations" : {
+          "a" : {
+            "value" : 5.0
+          },
+          "b" : {
+            "value" : 40.0
+          },
+          "c" : {
+            "value" : 11
+          },
+          "d" : {
+            "value" : -1.5
+          },
+          "e" : {
+            "value" : 7.0
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "aggs" : {
+          "p" : {
+            "percentiles" : {
+              "field" : "h",
+              "percents" : [
+                50,
+                90
+              ]
+            }
+          },
+          "s" : {
+            "sum" : {
+              "field" : "h"
+            }
+          },
+          "v" : {
+            "value_count" : {
+              "field" : "h"
+            }
+          },
+          "hi" : {
+            "histogram" : {
+              "field" : "h",
+              "interval" : 1
+            }
+          }
+        },
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 4,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "0",
+              "_score" : 1.0
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "1",
+              "_score" : 1.0
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "2",
+              "_score" : 1.0,
+              "_ignored" : [
+                "s"
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "3",
+              "_score" : 1.0
+            }
+          ]
+        },
+        "aggregations" : {
+          "p" : {
+            "values" : {
+              "50.0" : 1.0,
+              "90.0" : 4.0
+            }
+          },
+          "s" : {
+            "value" : 33.3
+          },
+          "v" : {
+            "value" : 18
+          },
+          "hi" : {
+            "buckets" : [
+              {
+                "key" : 0.0,
+                "doc_count" : 7
+              },
+              {
+                "key" : 1.0,
+                "doc_count" : 5
+              },
+              {
+                "key" : 2.0,
+                "doc_count" : 2
+              },
+              {
+                "key" : 3.0,
+                "doc_count" : 0
+              },
+              {
+                "key" : 4.0,
+                "doc_count" : 3
+              },
+              {
+                "key" : 5.0,
+                "doc_count" : 0
+              },
+              {
+                "key" : 6.0,
+                "doc_count" : 0
+              },
+              {
+                "key" : 7.0,
+                "doc_count" : 0
+              },
+              {
+                "key" : 8.0,
+                "doc_count" : 0
+              },
+              {
+                "key" : 9.0,
+                "doc_count" : 0
+              },
+              {
+                "key" : 10.0,
+                "doc_count" : 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "aggs" : {
+          "histo" : {
+            "date_histogram" : {
+              "field" : "t",
+              "calendar_interval" : "day"
+            },
+            "aggs" : {
+              "p" : {
+                "percentiles" : {
+                  "field" : "h",
+                  "percents" : [
+                    90
+                  ],
+                  "keyed" : false
+                }
+              },
+              "mp" : {
+                "moving_percentiles" : {
+                  "buckets_path" : "p",
+                  "window" : 2
+                }
+              },
+              "mps" : {
+                "moving_percentiles" : {
+                  "buckets_path" : "p",
+                  "window" : 2,
+                  "shift" : 1
+                }
+              }
+            }
+          }
+        },
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 7,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 4,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "0",
+              "_score" : 1.0
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "1",
+              "_score" : 1.0
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "2",
+              "_score" : 1.0,
+              "_ignored" : [
+                "s"
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "3",
+              "_score" : 1.0
+            }
+          ]
+        },
+        "aggregations" : {
+          "histo" : {
+            "buckets" : [
+              {
+                "key_as_string" : "2017-01-01T00:00:00.000Z",
+                "key" : 1483228800000,
+                "doc_count" : 1,
+                "p" : {
+                  "values" : [
+                    {
+                      "key" : 90.0,
+                      "value" : 1.0
+                    }
+                  ]
+                },
+                "mps" : {
+                  "values" : [
+                    {
+                      "key" : 90.0,
+                      "value" : 1.0
+                    }
+                  ]
+                }
+              },
+              {
+                "key_as_string" : "2017-01-02T00:00:00.000Z",
+                "key" : 1483315200000,
+                "doc_count" : 2,
+                "p" : {
+                  "values" : [
+                    {
+                      "key" : 90.0,
+                      "value" : 6.800000000000001
+                    }
+                  ]
+                },
+                "mp" : {
+                  "values" : [
+                    {
+                      "key" : 90.0,
+                      "value" : 1.0
+                    }
+                  ]
+                },
+                "mps" : {
+                  "values" : [
+                    {
+                      "key" : 90.0,
+                      "value" : 2.0
+                    }
+                  ]
+                }
+              },
+              {
+                "key_as_string" : "2017-01-03T00:00:00.000Z",
+                "key" : 1483401600000,
+                "doc_count" : 1,
+                "p" : {
+                  "values" : [
+                    {
+                      "key" : 90.0,
+                      "value" : 4.0
+                    }
+                  ]
+                },
+                "mp" : {
+                  "values" : [
+                    {
+                      "key" : 90.0,
+                      "value" : 2.0
+                    }
+                  ]
+                },
+                "mps" : {
+                  "values" : [
+                    {
+                      "key" : 90.0,
+                      "value" : 5.799999999999999
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "aggs" : {
+          "histo" : {
+            "date_histogram" : {
+              "field" : "t",
+              "calendar_interval" : "day"
+            },
+            "aggs" : {
+              "p" : {
+                "percentiles" : {
+                  "field" : "h",
+                  "percents" : [
+                    90
+                  ],
+                  "hdr" : {
+                    "number_of_significant_value_digits" : 2
+                  }
+                }
+              },
+              "mp" : {
+                "moving_percentiles" : {
+                  "buckets_path" : "p",
+                  "window" : 3
+                }
+              }
+            }
+          }
+        },
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 361,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 4,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "0",
+              "_score" : 1.0
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "1",
+              "_score" : 1.0
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "2",
+              "_score" : 1.0,
+              "_ignored" : [
+                "s"
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-agm",
+              "_id" : "3",
+              "_score" : 1.0
+            }
+          ]
+        },
+        "aggregations" : {
+          "histo" : {
+            "buckets" : [
+              {
+                "key_as_string" : "2017-01-01T00:00:00.000Z",
+                "key" : 1483228800000,
+                "doc_count" : 1,
+                "p" : {
+                  "values" : {
+                    "90.0" : 1.00732421875
+                  }
+                }
+              },
+              {
+                "key_as_string" : "2017-01-02T00:00:00.000Z",
+                "key" : 1483315200000,
+                "doc_count" : 2,
+                "p" : {
+                  "values" : {
+                    "90.0" : 10.06201171875
+                  }
+                },
+                "mp" : {
+                  "values" : {
+                    "90.0" : 1.00732421875
+                  }
+                }
+              },
+              {
+                "key_as_string" : "2017-01-03T00:00:00.000Z",
+                "key" : 1483401600000,
+                "doc_count" : 1,
+                "p" : {
+                  "values" : {
+                    "90.0" : 4.0
+                  }
+                },
+                "mp" : {
+                  "values" : {
+                    "90.0" : 2.01513671875
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "aggs" : {
+          "mp" : {
+            "moving_percentiles" : {
+              "buckets_path" : "p",
+              "window" : 1
+            }
+          }
+        },
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: No aggregation found for path [p];"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: No aggregation found for path [p];"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "aggs" : {
+          "tm" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "t"
+              },
+              "sort" : {
+                "t" : "desc"
+              },
+              "size" : 20
+            }
+          }
+        },
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[top_metrics.size] must not be more than [10] but was [20]. This limit can be set by changing the [index.top_metrics_max_size] index level setting."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-compat-es-agm",
+              "node" : "HAbxDF7VQPaPbiWl_djiZQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "[top_metrics.size] must not be more than [10] but was [20]. This limit can be set by changing the [index.top_metrics_max_size] index level setting."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[top_metrics.size] must not be more than [10] but was [20]. This limit can be set by changing the [index.top_metrics_max_size] index level setting.",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "[top_metrics.size] must not be more than [10] but was [20]. This limit can be set by changing the [index.top_metrics_max_size] index level setting."
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "runtime_mappings" : {
+          "rk" : {
+            "type" : "keyword",
+            "script" : "emit('x')"
+          }
+        },
+        "aggs" : {
+          "tm" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "rk"
+              },
+              "sort" : {
+                "t" : "desc"
+              }
+            }
+          }
+        },
+        "size" : 10,
+        "_source" : false
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "top_metrics can only collect bytes that have segment ordinals but Field [rk] of type [keyword] does not"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-compat-es-agm",
+              "node" : "HAbxDF7VQPaPbiWl_djiZQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "top_metrics can only collect bytes that have segment ordinals but Field [rk] of type [keyword] does not"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "top_metrics can only collect bytes that have segment ordinals but Field [rk] of type [keyword] does not",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "top_metrics can only collect bytes that have segment ordinals but Field [rk] of type [keyword] does not"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_settings",
+      "body" : {
+        "index" : {
+          "top_metrics_max_size" : 20
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-agm/_search",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "tm" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "t"
+              },
+              "sort" : {
+                "t" : "desc"
+              },
+              "size" : 20
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 4,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "tm" : {
+            "top" : [
+              {
+                "sort" : [
+                  "2017-01-03T05:00:00.000Z"
+                ],
+                "metrics" : {
+                  "t" : "2017-01-03T05:00:00.000Z"
+                }
+              },
+              {
+                "sort" : [
+                  "2017-01-02T06:00:00.000Z"
+                ],
+                "metrics" : {
+                  "t" : "2017-01-02T06:00:00.000Z"
+                }
+              },
+              {
+                "sort" : [
+                  "2017-01-02T05:00:00.000Z"
+                ],
+                "metrics" : {
+                  "t" : "2017-01-02T05:00:00.000Z"
+                }
+              },
+              {
+                "sort" : [
+                  "2017-01-01T05:00:00.000Z"
+                ],
+                "metrics" : {
+                  "t" : "2017-01-01T05:00:00.000Z"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-agm/_doc/ck?refresh=true",
+      "body" : {
+        "ck" : "other"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:7] failed to parse field [ck] of type [constant_keyword] in document with id 'ck'. Preview of field's value: 'other'"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:7] failed to parse field [ck] of type [constant_keyword] in document with id 'ck'. Preview of field's value: 'other'",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[constant_keyword] field [ck] only accepts values that are equal to the value defined in the mappings [fixed], but got [other]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-mf",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "aggregate_metric_double",
+              "metrics" : [
+                "max"
+              ],
+              "fields" : {
+                "k" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "c" : {
+              "type" : "constant_keyword",
+              "value" : "v",
+              "fields" : {
+                "k" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-compat-es-mf"
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-compat-es-mf",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-compat-es-gg",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "location" : {
+              "type" : "geo_point"
+            },
+            "shape" : {
+              "type" : "geo_shape"
+            },
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-compat-es-gg"
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"0\"}}\n{\"location\":\"POINT(4.91235 52.374081)\",\"shape\":\"POINT(4.91235 52.374081)\"}\n{\"index\":{\"_id\":\"1\"}}\n{\"location\":\"POINT(4.901618 52.369219)\",\"shape\":\"POINT(4.901618 52.369219)\"}\n{\"index\":{\"_id\":\"2\"}}\n{\"location\":\"POINT(4.914722 52.371667)\",\"shape\":\"POINT(4.914722 52.371667)\"}\n{\"index\":{\"_id\":\"3\"}}\n{\"location\":\"POINT(4.4052 51.2229)\",\"shape\":\"POINT(4.4052 51.2229)\"}\n{\"index\":{\"_id\":\"4\"}}\n{\"location\":\"POINT(2.336389 48.861111)\",\"shape\":\"POINT(2.336389 48.861111)\"}\n{\"index\":{\"_id\":\"5\"}}\n{\"location\":\"POINT(2.327 48.86)\",\"shape\":\"POINT(2.327 48.86)\"}\n{\"index\":{\"_id\":\"6\"}}\n{\"location\":\"POINT(0.0 0.0)\",\"shape\":\"POINT(0.0 0.0)\"}\n{\"index\":{\"_id\":\"7\"}}\n{\"location\":\"POINT(179.999999 0)\",\"shape\":\"POINT(179.999999 0)\"}\n",
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "0",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 3,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "4",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 4,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "5",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 5,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "6",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 6,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "7",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 7,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "location" : {
+              "geohash" : "u173zt90zc"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "shape" : {
+              "geohash" : "u173zt90zc"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "location" : {
+              "geohash" : "u17"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "0",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                2
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "shape" : {
+              "geohash" : "u17"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "0",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                2
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "location" : {
+              "geohash" : "s"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "6",
+              "_score" : null,
+              "sort" : [
+                6
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "shape" : {
+              "geohash" : "s"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "6",
+              "_score" : null,
+              "sort" : [
+                6
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "location" : {
+              "geotile" : "22/2154259/1378425"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "shape" : {
+              "geotile" : "22/2154259/1378425"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "location" : {
+              "geotile" : "2/2/1"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 6,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "0",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                3
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "4",
+              "_score" : null,
+              "sort" : [
+                4
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "5",
+              "_score" : null,
+              "sort" : [
+                5
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "shape" : {
+              "geotile" : "2/2/1"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 6,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "0",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                3
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "4",
+              "_score" : null,
+              "sort" : [
+                4
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "5",
+              "_score" : null,
+              "sort" : [
+                5
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "location" : {
+              "geotile" : "0/0/0"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 8,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "0",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                3
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "4",
+              "_score" : null,
+              "sort" : [
+                4
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "5",
+              "_score" : null,
+              "sort" : [
+                5
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "6",
+              "_score" : null,
+              "sort" : [
+                6
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "7",
+              "_score" : null,
+              "sort" : [
+                7
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "shape" : {
+              "geotile" : "0/0/0"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 8,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "0",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                3
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "4",
+              "_score" : null,
+              "sort" : [
+                4
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "5",
+              "_score" : null,
+              "sort" : [
+                5
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "6",
+              "_score" : null,
+              "sort" : [
+                6
+              ]
+            },
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "7",
+              "_score" : null,
+              "sort" : [
+                7
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "location" : {
+              "geohex" : "8f1969c9b261656"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 20,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "shape" : {
+              "geohex" : "8f1969c9b261656"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "location" : {
+              "geohex" : "8075fffffffffff"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 23,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "6",
+              "_score" : null,
+              "sort" : [
+                6
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "shape" : {
+              "geohex" : "8075fffffffffff"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-compat-es-gg",
+              "_id" : "6",
+              "_score" : null,
+              "sort" : [
+                6
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "location" : {
+              "geohash" : "u1a!"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unsupported symbol [a] in geohash [u1a!]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unsupported symbol [a] in geohash [u1a!]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "shape" : {
+              "geohash" : "u1a!"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unsupported symbol [a] in geohash [u1a!]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unsupported symbol [a] in geohash [u1a!]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "location" : {
+              "geotile" : "3/9/1"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: Zoom/X/Y combination is not valid: 3/9/1",
+              "index_uuid" : "fuZSH_7RRSaJL4W4ezJOUw",
+              "index" : "es-docs-compat-es-gg"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-compat-es-gg",
+              "node" : "HAbxDF7VQPaPbiWl_djiZQ",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: Zoom/X/Y combination is not valid: 3/9/1",
+                "index_uuid" : "fuZSH_7RRSaJL4W4ezJOUw",
+                "index" : "es-docs-compat-es-gg",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Zoom/X/Y combination is not valid: 3/9/1"
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "shape" : {
+              "geotile" : "3/9/1"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: Zoom/X/Y combination is not valid: 3/9/1",
+              "index_uuid" : "fuZSH_7RRSaJL4W4ezJOUw",
+              "index" : "es-docs-compat-es-gg"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-compat-es-gg",
+              "node" : "HAbxDF7VQPaPbiWl_djiZQ",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: Zoom/X/Y combination is not valid: 3/9/1",
+                "index_uuid" : "fuZSH_7RRSaJL4W4ezJOUw",
+                "index" : "es-docs-compat-es-gg",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Zoom/X/Y combination is not valid: 3/9/1"
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "location" : {
+              "geohex" : "zz"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid h3 address [zz]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid h3 address [zz]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"zz\" under radix 16"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "shape" : {
+              "geohex" : "zz"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid h3 address [zz]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid h3 address [zz]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"zz\" under radix 16"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "k" : {
+              "geohash" : "u17"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "Field [k] is of unsupported type [keyword] for [geo_grid] query",
+              "index_uuid" : "fuZSH_7RRSaJL4W4ezJOUw",
+              "index" : "es-docs-compat-es-gg"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-compat-es-gg",
+              "node" : "HAbxDF7VQPaPbiWl_djiZQ",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "Field [k] is of unsupported type [keyword] for [geo_grid] query",
+                "index_uuid" : "fuZSH_7RRSaJL4W4ezJOUw",
+                "index" : "es-docs-compat-es-gg"
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-compat-es-gg/_search",
+      "body" : {
+        "query" : {
+          "geo_grid" : {
+            "nope" : {
+              "geohash" : "u17"
+            },
+            "ignore_unmapped" : true
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "geo_grid" : {
+                "field" : "cell",
+                "tile_type" : "geotile"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "cell" : "4/8/5"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "cell" : {
+                  "type" : "Envelope",
+                  "coordinates" : [
+                    [
+                      0.0,
+                      55.77657301866769
+                    ],
+                    [
+                      22.5,
+                      40.979898069620134
+                    ]
+                  ]
+                }
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:37.433701986Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "geo_grid" : {
+                "field" : "cell",
+                "tile_type" : "geotile",
+                "target_format" : "wkt"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "cell" : "4/8/5"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "cell" : "BBOX (0.0, 22.5, 55.77657301866769, 40.979898069620134)"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:37.437016894Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "geo_grid" : {
+                "field" : "cell",
+                "tile_type" : "geohash",
+                "target_format" : "wkt"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "cell" : "u0"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "cell" : "BBOX (0.0, 11.25, 50.625, 45.0)"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:37.440937191Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "geo_grid" : {
+                "field" : "cell",
+                "tile_type" : "geohex",
+                "target_format" : "wkt"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "cell" : "811fbffffffffff"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "cell" : "POLYGON ((1.1885095294564962 49.470279179513454, 2.0265689212828875 45.18424864858389, 7.509948452934623 43.786609335802495, 12.6773177459836 46.40695743262768, 12.345747342333198 50.55427505169064, 6.259687012061477 51.964770150370896, 3.6300085578113794 50.610463307239115, 1.1885095294564962 49.470279179513454))"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:37.444690817Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "geo_grid" : {
+                "field" : "cell",
+                "tile_type" : "geotile",
+                "target_format" : "wkt",
+                "parent_field" : "p",
+                "children_field" : "c",
+                "precision_field" : "pr"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "cell" : "0/0/0"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "pr" : 0,
+                "c" : [
+                  "1/0/0",
+                  "1/1/0",
+                  "1/0/1",
+                  "1/1/1"
+                ],
+                "cell" : "BBOX (-180.0, 180.0, 85.0511287798066, -85.0511287798066)"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:37.448223689Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "geo_grid" : {
+                "field" : "cell",
+                "tile_type" : "geohash",
+                "target_field" : "s",
+                "parent_field" : "p",
+                "children_field" : "c",
+                "precision_field" : "pr"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "cell" : "u"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "pr" : 1,
+                "s" : {
+                  "type" : "Envelope",
+                  "coordinates" : [
+                    [
+                      0.0,
+                      90.0
+                    ],
+                    [
+                      45.0,
+                      45.0
+                    ]
+                  ]
+                },
+                "c" : [
+                  "u0",
+                  "u1",
+                  "u2",
+                  "u3",
+                  "u4",
+                  "u5",
+                  "u6",
+                  "u7",
+                  "u8",
+                  "u9",
+                  "ub",
+                  "uc",
+                  "ud",
+                  "ue",
+                  "uf",
+                  "ug",
+                  "uh",
+                  "uj",
+                  "uk",
+                  "um",
+                  "un",
+                  "up",
+                  "uq",
+                  "ur",
+                  "us",
+                  "ut",
+                  "uu",
+                  "uv",
+                  "uw",
+                  "ux",
+                  "uy",
+                  "uz"
+                ],
+                "cell" : "u"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:37.451400008Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "geo_grid" : {
+                "field" : "cell",
+                "tile_type" : "geohex",
+                "target_field" : "s",
+                "target_format" : "wkt",
+                "parent_field" : "p",
+                "children_field" : "c",
+                "non_children_field" : "nc",
+                "precision_field" : "pr"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "cell" : "811fbffffffffff"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "p" : "801ffffffffffff",
+                "pr" : 1,
+                "s" : "POLYGON ((1.1885095294564962 49.470279179513454, 2.0265689212828875 45.18424864858389, 7.509948452934623 43.786609335802495, 12.6773177459836 46.40695743262768, 12.345747342333198 50.55427505169064, 6.259687012061477 51.964770150370896, 3.6300085578113794 50.610463307239115, 1.1885095294564962 49.470279179513454))",
+                "c" : [
+                  "821f87fffffffff",
+                  "821f8ffffffffff",
+                  "821f97fffffffff",
+                  "821f9ffffffffff",
+                  "821fa7fffffffff",
+                  "821faffffffffff",
+                  "821fb7fffffffff"
+                ],
+                "nc" : [
+                  "821ea7fffffffff",
+                  "82186ffffffffff",
+                  "82396ffffffffff",
+                  "821f17fffffffff",
+                  "821e37fffffffff",
+                  "82194ffffffffff"
+                ],
+                "cell" : "811fbffffffffff"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:37.454623398Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "geo_grid" : {
+                "field" : "cell",
+                "tile_type" : "geohex",
+                "target_format" : "wkt",
+                "parent_field" : "p",
+                "non_children_field" : "nc"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "cell" : "8001fffffffffff"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "cell" : "POLYGON ((-34.758418053388596 81.27137177623808, 0.32561028376221657 73.31022367347032, 31.831280440092087 68.92995787784457, 62.3453448805958 69.39359648153186, 94.14309008046985 76.16304280702025, 145.55819761008024 87.36469531897455, 179.99999991618097 86.19672396685601, 179.99999991618097 89.99999995809048, -180.0 89.99999995809048, -180.0 86.19672396685601, -34.758418053388596 81.27137177623808))",
+                "nc" : [
+                  "81033ffffffffff",
+                  "810b7ffffffffff",
+                  "81053ffffffffff",
+                  "81097ffffffffff",
+                  "8107bffffffffff",
+                  "81117ffffffffff"
+                ]
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-24T19:55:37.458055918Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "geo_grid" : {
+                "field" : "cell",
+                "tile_type" : "geotile"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "cell" : "9/1/1/1"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "invalid tile definition"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "invalid tile definition",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Invalid geotile_grid hash string of 9/1/1/1. Must be three integers in a form \"zoom/x/y\"."
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "geo_grid" : {
+                "field" : "cell",
+                "tile_type" : "geohash"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "cell" : "u!"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "invalid tile definition"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "invalid tile definition",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "unsupported symbol [!] in geohash [u!]"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "geo_grid" : {
+                "field" : "cell",
+                "tile_type" : "geohex"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "cell" : "zz"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "invalid tile definition"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "invalid tile definition",
+              "caused_by" : {
+                "type" : "number_format_exception",
+                "reason" : "For input string: \"zz\" under radix 16"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "geo_grid" : {
+                "field" : "cell",
+                "tile_type" : "geotile"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "cell" : 5
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "field [cell] must be a String tile address"
+                }
+              ],
+              "type" : "illegal_argument_exception",
+              "reason" : "field [cell] must be a String tile address"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "geo_grid" : {
+                "field" : "cell",
+                "tile_type" : "geo"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "cell" : "u"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "unordered" : true,
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[tile_type] illegal value [geo], valid values are [GEOHASH, GEOTILE, GEOHEX]",
+              "property_name" : "tile_type",
+              "processor_type" : "geo_grid"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "[tile_type] illegal value [geo], valid values are [GEOHASH, GEOTILE, GEOHEX]",
+          "property_name" : "tile_type",
+          "processor_type" : "geo_grid"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "geo_grid" : {
+                "field" : "cell",
+                "tile_type" : "geohash",
+                "target_format" : "x"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "cell" : "u"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "timestamp"
+      ],
+      "unordered" : true,
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[target_format] illegal value [x], valid values are [WKT, GEOJSON]",
+              "property_name" : "target_format",
+              "processor_type" : "geo_grid"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "[target_format] illegal value [x], valid values are [WKT, GEOJSON]",
+          "property_name" : "target_format",
+          "processor_type" : "geo_grid"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-compat-es-gg",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-compat-es-agm",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

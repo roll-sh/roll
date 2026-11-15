@@ -1,0 +1,268 @@
+#defaults: {"context": "score", "setup": {"index": "painless-docs", "document": {"l": [5, 3], "i": 7, "d": 1.5, "f": 0.1, "dt": "2020-01-02T03:04:05.678Z", "dn": "2020-01-02T03:04:05.123456789Z", "k": ["b", "a"], "g": "41.12,-71.34", "b": [true, false], "ip": "10.0.0.1", "v": [1, 2, 3], "t": "hello world", "tag": "x"}}}
+----
+return doc['dt'].value.getYear() + doc['dt'].value.getMonthValue()
+----
+return doc['dt'].value.toInstant().toEpochMilli()
+----
+return doc['dt'].value.getMillis()
+----
+return doc['dt'].value.plusDays(3).getDayOfMonth()
+----
+return ChronoUnit.DAYS.between(doc['dt'].value, ZonedDateTime.parse('2020-02-01T00:00:00Z'))
+----
+return doc['dt'].value.getDayOfWeek().getValue()
+----
+return doc['dt'].value.getDayOfWeekEnum().getValue()
+----
+return doc['dn'].value.getNano()
+----
+return doc['l'].min() + doc['l'].max()
+----
+return doc['l'].sum() + doc['l'].average()
+----
+return doc['k'].length
+----
+return doc['g'].lat + doc['g'].lon
+----
+return doc['g'].arcDistance(40.0, -70.0)
+----
+return doc['g'].planeDistance(40.0, -70.0)
+----
+return doc['g'].geohashDistance('drm3btev3e86')
+----
+return doc['missing'].size()
+----
+return doc['t'].value.length()
+----
+return doc['l'].value * _score
+----
+return decayDateGauss('2020-01-01T00:00:00Z', '10d', '1d', 0.5, doc['dt'].value)
+----
+return decayDateExp('2020-01-01', '10d', '1d', 0.5, doc['dt'].value)
+----
+return decayGeoLinear('40,-70', '200km', '10km', 0.5, doc['g'].value)
+----
+return decayGeoGauss('40,-70', '200km', '10km', 0.5, doc['g'].value)
+----
+return randomScore(100, '_seq_no') >= 0
+----
+return saturation(doc['i'].value, 10) + sigmoid(doc['i'].value, 2, 0.6)
+----
+return doc.containsKey('i') ? 1 : 0
+----
+return doc['d'].value
+----
+return doc['f'].value
+----
+double x = 0; for (int i = 0; i < doc['l'].length; ++i) { x += doc['l'][i] } return x
+----
+return doc['ip'].value.length()
+----
+return doc['b'].value ? 1 : 2
+----
+return doc['tag.keyword'].value
+----
+return params._source.i
+----
+return Debug.explain(doc['l'])
+----
+return doc['dt'].value.format(DateTimeFormatter.ISO_LOCAL_DATE).length()
+----
+return doc['dt'].getValue().getHour()
+----
+#context: filter
+return doc['l'].value > 4
+----
+#context: filter
+return doc['k'].contains('a')
+----
+#defaults: {"context": "score", "setup": {"index": "painless-docs", "document": {"l": [5, 3, 9], "i": 7, "d": [1.5, 2.5], "b": [true, false], "dt": ["2020-01-02T03:04:05.678Z"], "k": ["b", "a"], "ul": [5], "ver": "1.2.3"}}}
+----
+double s = 0; for (int i = 0; i < doc['l'].size(); ++i) { s += doc['l'].get(i) } return s
+----
+double s = 0; for (int i = 0; i < doc['l'].size(); ++i) { s += doc['l'][i] } return s
+----
+double s = 0; for (int i = 0; i <= doc['l'].size(); ++i) { s += doc['l'].get(i) } return s
+----
+double s = 0; for (int i = 0; i <= doc['l'].size(); ++i) { s += doc['l'][i] } return s
+----
+int i = -1; return doc['l'][i]
+----
+int i = -1; return doc['l'].get(i)
+----
+int i = 1; long x = doc['l'].get(i); return x
+----
+int i = 1; int x = doc['l'].get(i); return x
+----
+int i = 1; String x = doc['l'].get(i); return 1
+----
+int i = 1; double x = doc['d'][i]; return x
+----
+int i = 0; return doc['b'][i] ? 1 : 0
+----
+int i = 0; return doc['dt'][i].getYear()
+----
+int i = 1; return doc['k'].get(i).length()
+----
+int i = 0; return doc['ul'].get(i)
+----
+int i = 0; return doc['missing'].get(i)
+----
+def i = 1; return doc['l'].get(i)
+----
+def i = 1L; return doc['l'].get(i)
+----
+def i = 1L; return doc['l'][i]
+----
+long i = 1; return doc['l'][i]
+----
+int i = 5; return doc['d'].get(i)
+----
+int i = 0; return doc['i'].get(i) + doc['i'][i]
+----
+int i = 0; def x = doc['l'].get(i); return x * 2
+----
+#context: painless_test
+int i = 0; return [1,2].get(i)
+----
+#context: filter
+int i = 1; return doc['l'][i] > 2
+----
+#context: long_field
+for (int i = 0; i < doc['l'].size(); i++) { emit(doc['l'].get(i) * 2) }
+----
+#context: long_field
+for (int i = 0; i < 4; i++) { emit(doc['l'][i]) }
+----
+int i = 1; double x = doc['l'].get(i); return x
+----
+int i = 1; float x = doc['l'][i]; return x
+----
+int i = 1; long x = doc['d'].get(i); return x
+----
+int i = 0; double x = doc['b'].get(i); return x
+----
+int i = 0; double x = doc['d'][i] + doc['l'][i]; return x
+----
+int i = 1; double x = (double) doc['l'].get(i); return x
+----
+#defaults: {"context": "score", "setup": {"index": "painless-docs", "document": {"k": ["b", "a"], "tag": "x", "ip": "10.0.0.1"}}}
+def a = doc['tag'].value; def b = doc['tag'].value; return a === b ? 1 : 0
+----
+def a = doc['tag'].value; def b = doc['tag'].value; return a == b ? 1 : 0
+----
+return doc['tag'].value === doc['tag'].value ? 1 : 0
+----
+String a = doc['k'].value; return a.hashCode() + doc['k'].value.length()
+----
+def l = []; l.add(doc['tag'].value); l.add(doc['tag'].value); return l[0] === l[1] ? 1 : 0
+----
+return doc['ip'].value.length()
+----
+return doc['k'].get(0) === doc['k'].get(0) ? 1 : 0
+----
+#defaults: {"context": "score", "setup": {"index": "painless-docs", "document": {"k": ["b", "a"], "tag": "x", "ip": "10.0.0.1", "dt": "2020-01-02T03:04:05.678Z", "dn": "2020-01-02T03:04:05.123456789Z", "l": [5, 3], "d": 1.5}}}
+#params: {"now": 1600000000000, "origin": "2020-01-05", "cats": ["a", 1, "x"], "c": "x", "qv": [1, 2]}
+return doc['dt'].value.getMillis() / 1000.0
+----
+#params: {"now": 1600000000000}
+return (params.now - doc['dt'].value.toInstant().toEpochMilli()) / 86400000.0
+----
+return doc['dt'].value.millis * 2
+----
+return decayDateGauss('2020-01-01T00:00:00Z', '10d', '1d', 0.5, doc['dt'].value)
+----
+#params: {"origin": "2020-01-05"}
+return decayDateLinear(params.origin, '5d', '0', 0.5, doc['dt'].value) * _score
+----
+return decayDateExp('2020-01-03||-1d', '2d', '12h', 0.25, doc['dt'].value)
+----
+#params: {"origin": 5}
+return decayDateLinear(params.origin, '5d', '0', 0.5, doc['dt'].value)
+----
+return doc['dn'].value.getMillis()
+----
+return doc['k'].contains('b') ? 2.0 : 1.0
+----
+return doc['k'].contains(1) ? 2.0 : 1.0
+----
+return doc['l'].contains(5) ? 2.0 : 1.0
+----
+return doc['l'].contains(5L) ? 2.0 : 1.0
+----
+#params: {"cats": ["a", 1, "x"]}
+return params.cats.contains(doc['tag'].value) ? 2.0 : 1.0
+----
+#params: {"cats": ["a", 1, "x"]}
+return params.cats.contains(doc['l'].value) ? 2.0 : 1.0
+----
+#params: {"c": "x"}
+return doc['tag'].value == params.c ? 3 : 1
+----
+return doc['ip'].value == '10.0.0.1' ? 3 : 1
+----
+return doc['tag'].value.equals('x') ? 3 : 1
+----
+return doc['tag'].value != 'y' ? 3 : 1
+----
+return doc['missing_kw'].value == 'y' ? 3 : 1
+----
+#defaults: {"context": "keyword_field", "setup": {"index": "painless-docs", "document": {"l": [5, 3], "i": 7, "d": 1.5, "dt": "2020-01-02T03:04:05.678Z", "k": ["b", "a"], "g": "41.12,-71.34", "ip": "10.0.0.1", "t": "hello world", "tag": "x"}}}
+emit(doc['k'].value + '-' + doc['l'].value)
+----
+for (def v : doc['k']) { emit(v.toUpperCase()) }
+----
+emit(params._source.t.splitOnToken(' ')[1])
+----
+String s = params._source.tag; if (s != null) emit(s)
+----
+emit(null)
+----
+emit(String.valueOf(doc['dt'].value.getYear()))
+----
+emit(doc['ip'].value)
+----
+#context: ip_field
+emit(doc['ip'].value)
+----
+#context: ip_field
+emit('2001:db8::1')
+----
+#context: ip_field
+emit('not an ip')
+----
+#context: geo_point_field
+emit(doc['g'].lat, doc['g'].lon)
+----
+#context: geo_point_field
+emit(91.0, 0.0)
+----
+#context: date_field
+emit(doc['dt'].value.toInstant().toEpochMilli() + 1000)
+----
+#context: date_field
+emit(ZonedDateTime.parse('2021-05-06T07:08:09Z').toInstant().toEpochMilli())
+----
+#context: double_field
+emit(doc['d'].value); emit(doc['i'].value)
+----
+#context: long_field
+for (long x : doc['l']) { emit(x * 10) }
+----
+#context: boolean_field
+emit(doc['l'].value > 4)
+----
+#context: composite_field
+emit('a', doc['l'].value); emit('b', 'x')
+----
+#context: composite_field
+emit(['a': 1, 'b': 'two'])
+----
+#context: long_field
+for (int i = 0; i < 101; i++) { emit(i) }
+----
+#context: keyword_field
+emit(doc['missing'].value)
+----
+#context: long_field
+emit(Long.parseLong(params._source.tag))

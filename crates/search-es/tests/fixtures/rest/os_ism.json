@@ -1,0 +1,5442 @@
+{
+  "description" : "OpenSearch 3.9.0 Index State Management: policy CRUD (normalized output, seq_no/primary_term concurrency, every validation message and parse position), ism_template conflicts and auto-management (hidden and auto_manage=false indices excluded), add/remove/change_policy/retry/explain on index expressions and aliases, and explain before the plugin's first job run. Capture on a fresh node (explain steps wait for the plugin's asynchronous registration).",
+  "dialect" : "opensearch",
+  "steps" : [
+    {
+      "req" : "GET /_plugins/_ism/policies",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "policies" : [ ],
+        "total_policies" : 0
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/policies/esm-nope",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [.opendistro-ism-config]",
+              "index" : ".opendistro-ism-config",
+              "resource.id" : ".opendistro-ism-config",
+              "resource.type" : "index_expression",
+              "index_uuid" : "_na_"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [.opendistro-ism-config]",
+          "index" : ".opendistro-ism-config",
+          "resource.id" : ".opendistro-ism-config",
+          "resource.type" : "index_expression",
+          "index_uuid" : "_na_"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_ism/policies/esm-nope",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [.opendistro-ism-config]",
+              "index" : ".opendistro-ism-config",
+              "resource.id" : ".opendistro-ism-config",
+              "resource.type" : "index_expression",
+              "index_uuid" : "_na_"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [.opendistro-ism-config]",
+          "index" : ".opendistro-ism-config",
+          "resource.id" : ".opendistro-ism-config",
+          "resource.type" : "index_expression",
+          "index_uuid" : "_na_"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/add/esm-x",
+      "body" : {
+        "policy_id" : "esm-nope"
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "updated_indices" : 0,
+        "failures" : false,
+        "failed_indices" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-p1",
+      "body" : {
+        "policy" : {
+          "description" : "hot warm delete",
+          "default_state" : "hot",
+          "states" : [
+            {
+              "name" : "hot",
+              "actions" : [
+                {
+                  "rollover" : {
+                    "min_index_age" : "1d",
+                    "min_doc_count" : 5
+                  }
+                }
+              ],
+              "transitions" : [
+                {
+                  "state_name" : "warm",
+                  "conditions" : {
+                    "min_index_age" : "7d"
+                  }
+                }
+              ]
+            },
+            {
+              "name" : "warm",
+              "actions" : [
+                {
+                  "replica_count" : {
+                    "number_of_replicas" : 0
+                  }
+                },
+                {
+                  "read_only" : { }
+                }
+              ],
+              "transitions" : [
+                {
+                  "state_name" : "delete",
+                  "conditions" : {
+                    "min_index_age" : "30d"
+                  }
+                }
+              ]
+            },
+            {
+              "name" : "delete",
+              "actions" : [
+                {
+                  "delete" : { }
+                }
+              ],
+              "transitions" : [ ]
+            }
+          ],
+          "ism_template" : {
+            "index_patterns" : [
+              "esm-logs-*"
+            ],
+            "priority" : 100
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 201,
+      "response" : {
+        "_id" : "esm-p1",
+        "_version" : 1,
+        "_primary_term" : 1,
+        "_seq_no" : 0,
+        "policy" : {
+          "policy" : {
+            "policy_id" : "esm-p1",
+            "description" : "hot warm delete",
+            "last_updated_time" : 1792894793831,
+            "schema_version" : 1,
+            "error_notification" : null,
+            "default_state" : "hot",
+            "states" : [
+              {
+                "name" : "hot",
+                "actions" : [
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "rollover" : {
+                      "min_doc_count" : 5,
+                      "min_index_age" : "1d",
+                      "copy_alias" : false
+                    }
+                  }
+                ],
+                "transitions" : [
+                  {
+                    "state_name" : "warm",
+                    "conditions" : {
+                      "min_index_age" : "7d"
+                    }
+                  }
+                ]
+              },
+              {
+                "name" : "warm",
+                "actions" : [
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "replica_count" : {
+                      "number_of_replicas" : 0
+                    }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "read_only" : { }
+                  }
+                ],
+                "transitions" : [
+                  {
+                    "state_name" : "delete",
+                    "conditions" : {
+                      "min_index_age" : "30d"
+                    }
+                  }
+                ]
+              },
+              {
+                "name" : "delete",
+                "actions" : [
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "delete" : { }
+                  }
+                ],
+                "transitions" : [ ]
+              }
+            ],
+            "ism_template" : [
+              {
+                "index_patterns" : [
+                  "esm-logs-*"
+                ],
+                "priority" : 100,
+                "last_updated_time" : 1792894793831
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/policies/esm-p1",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "_id" : "esm-p1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "policy" : {
+          "policy_id" : "esm-p1",
+          "description" : "hot warm delete",
+          "last_updated_time" : 1792894793831,
+          "schema_version" : 31,
+          "error_notification" : null,
+          "default_state" : "hot",
+          "states" : [
+            {
+              "name" : "hot",
+              "actions" : [
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "rollover" : {
+                    "min_doc_count" : 5,
+                    "min_index_age" : "1d",
+                    "copy_alias" : false
+                  }
+                }
+              ],
+              "transitions" : [
+                {
+                  "state_name" : "warm",
+                  "conditions" : {
+                    "min_index_age" : "7d"
+                  }
+                }
+              ]
+            },
+            {
+              "name" : "warm",
+              "actions" : [
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "replica_count" : {
+                    "number_of_replicas" : 0
+                  }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "read_only" : { }
+                }
+              ],
+              "transitions" : [
+                {
+                  "state_name" : "delete",
+                  "conditions" : {
+                    "min_index_age" : "30d"
+                  }
+                }
+              ]
+            },
+            {
+              "name" : "delete",
+              "actions" : [
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "delete" : { }
+                }
+              ],
+              "transitions" : [ ]
+            }
+          ],
+          "ism_template" : [
+            {
+              "index_patterns" : [
+                "esm-logs-*"
+              ],
+              "priority" : 100,
+              "last_updated_time" : 1792894793831
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/policies/esm-nope",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "status_exception",
+              "reason" : "Policy not found"
+            }
+          ],
+          "type" : "status_exception",
+          "reason" : "Policy not found"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_ism/policies/esm-nope",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "status_exception",
+              "reason" : "Policy esm-nope is not found"
+            }
+          ],
+          "type" : "status_exception",
+          "reason" : "Policy esm-nope is not found"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "HEAD /_plugins/_ism/policies/esm-p1",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "text" : "",
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/policies",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "policies" : [
+          {
+            "_id" : "esm-p1",
+            "_seq_no" : 0,
+            "_primary_term" : 1,
+            "policy" : {
+              "policy_id" : "esm-p1",
+              "description" : "hot warm delete",
+              "last_updated_time" : 1792894793831,
+              "schema_version" : 31,
+              "error_notification" : null,
+              "default_state" : "hot",
+              "states" : [
+                {
+                  "name" : "hot",
+                  "actions" : [
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "rollover" : {
+                        "min_doc_count" : 5,
+                        "min_index_age" : "1d",
+                        "copy_alias" : false
+                      }
+                    }
+                  ],
+                  "transitions" : [
+                    {
+                      "state_name" : "warm",
+                      "conditions" : {
+                        "min_index_age" : "7d"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "name" : "warm",
+                  "actions" : [
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "replica_count" : {
+                        "number_of_replicas" : 0
+                      }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "read_only" : { }
+                    }
+                  ],
+                  "transitions" : [
+                    {
+                      "state_name" : "delete",
+                      "conditions" : {
+                        "min_index_age" : "30d"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "name" : "delete",
+                  "actions" : [
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "delete" : { }
+                    }
+                  ],
+                  "transitions" : [ ]
+                }
+              ],
+              "ism_template" : [
+                {
+                  "index_patterns" : [
+                    "esm-logs-*"
+                  ],
+                  "priority" : 100,
+                  "last_updated_time" : 1792894793831
+                }
+              ]
+            }
+          }
+        ],
+        "total_policies" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-p1",
+      "body" : {
+        "policy" : {
+          "description" : "again",
+          "default_state" : "hot",
+          "states" : [
+            {
+              "name" : "hot",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 409,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "version_conflict_engine_exception",
+              "reason" : "[esm-p1]: version conflict, document already exists (current version [1])",
+              "index" : ".opendistro-ism-config",
+              "shard" : "0",
+              "index_uuid" : "GmZItdlPQieGYD2OVa2H0A"
+            }
+          ],
+          "type" : "version_conflict_engine_exception",
+          "reason" : "[esm-p1]: version conflict, document already exists (current version [1])",
+          "index" : ".opendistro-ism-config",
+          "shard" : "0",
+          "index_uuid" : "GmZItdlPQieGYD2OVa2H0A"
+        },
+        "status" : 409
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-p1?if_seq_no=5&if_primary_term=1",
+      "body" : {
+        "policy" : {
+          "description" : "again",
+          "default_state" : "hot",
+          "states" : [
+            {
+              "name" : "hot",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 409,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "version_conflict_engine_exception",
+              "reason" : "[esm-p1]: version conflict, required seqNo [5], primary term [1]. current document has seqNo [0] and primary term [1]",
+              "index" : ".opendistro-ism-config",
+              "shard" : "0",
+              "index_uuid" : "GmZItdlPQieGYD2OVa2H0A"
+            }
+          ],
+          "type" : "version_conflict_engine_exception",
+          "reason" : "[esm-p1]: version conflict, required seqNo [5], primary term [1]. current document has seqNo [0] and primary term [1]",
+          "index" : ".opendistro-ism-config",
+          "shard" : "0",
+          "index_uuid" : "GmZItdlPQieGYD2OVa2H0A"
+        },
+        "status" : 409
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-p2",
+      "body" : {
+        "policy" : {
+          "description" : "v1",
+          "default_state" : "hot",
+          "states" : [
+            {
+              "name" : "hot",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 201,
+      "response" : {
+        "_id" : "esm-p2",
+        "_version" : 1,
+        "_primary_term" : 1,
+        "_seq_no" : 1,
+        "policy" : {
+          "policy" : {
+            "policy_id" : "esm-p2",
+            "description" : "v1",
+            "last_updated_time" : 1792894794377,
+            "schema_version" : 1,
+            "error_notification" : null,
+            "default_state" : "hot",
+            "states" : [
+              {
+                "name" : "hot",
+                "actions" : [ ],
+                "transitions" : [ ]
+              }
+            ],
+            "ism_template" : null
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-p2?if_seq_no=1&if_primary_term=1",
+      "body" : {
+        "policy" : {
+          "description" : "v2",
+          "default_state" : "hot",
+          "states" : [
+            {
+              "name" : "hot",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "_id" : "esm-p2",
+        "_version" : 2,
+        "_primary_term" : 1,
+        "_seq_no" : 2,
+        "policy" : {
+          "policy" : {
+            "policy_id" : "esm-p2",
+            "description" : "v2",
+            "last_updated_time" : 1792894794409,
+            "schema_version" : 1,
+            "error_notification" : null,
+            "default_state" : "hot",
+            "states" : [
+              {
+                "name" : "hot",
+                "actions" : [ ],
+                "transitions" : [ ]
+              }
+            ],
+            "ism_template" : null
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/policies/esm-p2",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "_id" : "esm-p2",
+        "_version" : 2,
+        "_seq_no" : 2,
+        "_primary_term" : 1,
+        "policy" : {
+          "policy_id" : "esm-p2",
+          "description" : "v2",
+          "last_updated_time" : 1792894794409,
+          "schema_version" : 31,
+          "error_notification" : null,
+          "default_state" : "hot",
+          "states" : [
+            {
+              "name" : "hot",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ],
+          "ism_template" : null
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-p3?if_seq_no=0&if_primary_term=1",
+      "body" : {
+        "policy" : {
+          "description" : "v2",
+          "default_state" : "hot",
+          "states" : [
+            {
+              "name" : "hot",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 409,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "version_conflict_engine_exception",
+              "reason" : "[esm-p3]: version conflict, required seqNo [0], primary term [1]. but no document was found",
+              "index" : ".opendistro-ism-config",
+              "shard" : "0",
+              "index_uuid" : "GmZItdlPQieGYD2OVa2H0A"
+            }
+          ],
+          "type" : "version_conflict_engine_exception",
+          "reason" : "[esm-p3]: version conflict, required seqNo [0], primary term [1]. but no document was found",
+          "index" : ".opendistro-ism-config",
+          "shard" : "0",
+          "index_uuid" : "GmZItdlPQieGYD2OVa2H0A"
+        },
+        "status" : 409
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "bad",
+          "default_state" : "nope",
+          "states" : [
+            {
+              "name" : "hot",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Policy must have a valid default state"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Policy must have a valid default state"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "bad",
+          "default_state" : "hot",
+          "states" : [
+            {
+              "name" : "hot",
+              "actions" : [
+                {
+                  "bogus" : { }
+                }
+              ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid field: [bogus] found in Actions."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid field: [bogus] found in Actions."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "bad",
+          "default_state" : "hot",
+          "states" : [
+            {
+              "name" : "hot",
+              "actions" : [ ],
+              "transitions" : [
+                {
+                  "state_name" : "missing"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Policy contains a transition in state=hot pointing to a nonexistent state=missing"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Policy contains a transition in state=hot pointing to a nonexistent state=missing"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "bad",
+          "states" : [
+            {
+              "name" : "hot",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "default_state is null"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "default_state is null"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "nope" : 1
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "Failed to parse object: expecting token of type [START_OBJECT] but found [VALUE_NUMBER]",
+              "line" : 1,
+              "col" : 9
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "Failed to parse object: expecting token of type [START_OBJECT] but found [VALUE_NUMBER]",
+          "line" : 1,
+          "col" : 9
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : { },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "Failed to parse object: expecting token of type [FIELD_NAME] but found [END_OBJECT]",
+              "line" : 1,
+              "col" : 2
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "Failed to parse object: expecting token of type [FIELD_NAME] but found [END_OBJECT]",
+          "line" : 1,
+          "col" : 2
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ]
+        },
+        "other" : 1
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "Failed to parse object: expecting token of type [END_OBJECT] but found [FIELD_NAME]",
+              "line" : 1,
+              "col" : 105
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "Failed to parse object: expecting token of type [END_OBJECT] but found [FIELD_NAME]",
+          "line" : 1,
+          "col" : 105
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "request body is required"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "request body is required"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "hot",
+          "states" : [ ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Policy must contain at least one State"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Policy must contain at least one State"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "dup",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [ ],
+              "transitions" : [ ]
+            },
+            {
+              "name" : "a",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Policy cannot have duplicate state names"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Policy cannot have duplicate state names"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [
+                {
+                  "delete" : { }
+                },
+                {
+                  "open" : { }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "State=a must not contain an action after a delete action"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "State=a must not contain an action after a delete action"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [
+                {
+                  "delete" : { }
+                }
+              ],
+              "transitions" : [
+                {
+                  "state_name" : "a"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "State=a cannot contain transitions if using delete action"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "State=a cannot contain transitions if using delete action"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [
+                {
+                  "force_merge" : { }
+                }
+              ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "ForceMergeActionConfig maxNumSegments is null"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "ForceMergeActionConfig maxNumSegments is null"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [
+                {
+                  "force_merge" : {
+                    "max_num_segments" : 1,
+                    "wait_for_completion" : false
+                  }
+                }
+              ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid field: [wait_for_completion] found in ForceMergeActionConfig."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid field: [wait_for_completion] found in ForceMergeActionConfig."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [
+                {
+                  "rollover" : {
+                    "min_index_age" : "bogus"
+                  }
+                }
+              ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to parse [bogus]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "failed to parse [bogus]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"bogu\""
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [
+                {
+                  "rollover" : {
+                    "min_size" : "bogus"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "failed to parse setting [min_size] with value [bogus] as a size in bytes: unit is missing or unrecognized"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "failed to parse setting [min_size] with value [bogus] as a size in bytes: unit is missing or unrecognized"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [
+                {
+                  "rollover" : {
+                    "bogus" : 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid field: [bogus] found in RolloverAction."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid field: [bogus] found in RolloverAction."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [ ],
+              "transitions" : [
+                {
+                  "state_name" : "a",
+                  "conditions" : {
+                    "min_index_age" : "1d",
+                    "min_doc_count" : 5
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cannot provide more than one Transition condition"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Cannot provide more than one Transition condition"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "transitions" : [
+                {
+                  "state_name" : "a",
+                  "conditions" : {
+                    "min_index_age" : "1d",
+                    "bogus" : 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid field: [bogus] found in Conditions."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid field: [bogus] found in Conditions."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "description is null"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "description is null"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : null,
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a"
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_state_exception",
+              "reason" : "Can't get text on a VALUE_NULL at 1:26"
+            }
+          ],
+          "type" : "illegal_state_exception",
+          "reason" : "Can't get text on a VALUE_NULL at 1:26"
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "State name is null"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "State name is null"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "bogus" : 1
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid field: [bogus] found in State."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid field: [bogus] found in State."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "transitions" : [
+                {
+                  "conditions" : {
+                    "min_doc_count" : 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Transition state name is null"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Transition state name is null"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [
+                {
+                  "retry" : {
+                    "backoff" : "bogus"
+                  },
+                  "open" : { }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No enum constant org.opensearch.indexmanagement.spi.indexstatemanagement.model.ActionRetry.Backoff.BOGUS"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No enum constant org.opensearch.indexmanagement.spi.indexstatemanagement.model.ActionRetry.Backoff.BOGUS"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [
+                {
+                  "retry" : {
+                    "count" : -1
+                  },
+                  "read_only" : { }
+                }
+              ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Count for ActionRetry must be a non-negative number"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Count for ActionRetry must be a non-negative number"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [
+                {
+                  "timeout" : "1h"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Action inside state is null"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Action inside state is null"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [
+                { }
+              ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Action inside state is null"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Action inside state is null"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [
+                {
+                  "delete" : {
+                    "x" : 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "Failed to parse object: expecting token of type [END_OBJECT] but found [FIELD_NAME]",
+              "line" : 1,
+              "col" : 94
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "Failed to parse object: expecting token of type [END_OBJECT] but found [FIELD_NAME]",
+          "line" : 1,
+          "col" : 94
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ],
+          "unknown_key" : 1
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid field: [unknown_key] found in Policy."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid field: [unknown_key] found in Policy."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a"
+            }
+          ],
+          "ism_template" : {
+            "priority" : 1
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Requires at least one index pattern"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Requires at least one index pattern"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a"
+            }
+          ],
+          "ism_template" : {
+            "index_patterns" : "one"
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "Failed to parse object: expecting token of type [START_ARRAY] but found [VALUE_STRING]",
+              "line" : 1,
+              "col" : 107
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "Failed to parse object: expecting token of type [START_ARRAY] but found [VALUE_STRING]",
+          "line" : 1,
+          "col" : 107
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ],
+          "ism_template" : {
+            "index_patterns" : [ ],
+            "priority" : -1
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Requires priority to be >= 0"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Requires priority to be >= 0"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-bad",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a"
+            }
+          ],
+          "error_notification" : {
+            "channel" : {
+              "id" : "x"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "ErrorNotification message template is null"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "ErrorNotification message template is null"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/policies/esm-bad",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "status_exception",
+              "reason" : "Policy not found"
+            }
+          ],
+          "type" : "status_exception",
+          "reason" : "Policy not found"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-all",
+      "body" : {
+        "policy" : {
+          "description" : "all",
+          "default_state" : "a",
+          "error_notification" : {
+            "destination" : {
+              "slack" : {
+                "url" : "https://hooks.slack.com/x"
+              }
+            },
+            "message_template" : {
+              "source" : "err {{ctx.index}}"
+            }
+          },
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [
+                {
+                  "rollover" : {
+                    "min_size" : "1gb",
+                    "min_primary_shard_size" : "1gb",
+                    "min_doc_count" : 1,
+                    "min_index_age" : "1d"
+                  }
+                },
+                {
+                  "read_only" : { }
+                },
+                {
+                  "read_write" : { }
+                },
+                {
+                  "replica_count" : {
+                    "number_of_replicas" : 1
+                  }
+                },
+                {
+                  "force_merge" : {
+                    "max_num_segments" : 1
+                  }
+                },
+                {
+                  "close" : { }
+                },
+                {
+                  "open" : { }
+                },
+                {
+                  "index_priority" : {
+                    "priority" : 50
+                  }
+                },
+                {
+                  "allocation" : {
+                    "require" : {
+                      "box_type" : "warm"
+                    }
+                  }
+                },
+                {
+                  "timeout" : "1h",
+                  "retry" : {
+                    "count" : 5,
+                    "backoff" : "constant",
+                    "delay" : "10m"
+                  },
+                  "read_only" : { }
+                },
+                {
+                  "shrink" : {
+                    "num_new_shards" : 1,
+                    "force_unsafe" : true
+                  }
+                },
+                {
+                  "snapshot" : {
+                    "repository" : "r",
+                    "snapshot" : "s"
+                  }
+                },
+                {
+                  "notification" : {
+                    "destination" : {
+                      "chime" : {
+                        "url" : "https://x"
+                      }
+                    },
+                    "message_template" : {
+                      "source" : "m"
+                    }
+                  }
+                },
+                {
+                  "alias" : {
+                    "actions" : [
+                      {
+                        "add" : {
+                          "alias" : "al"
+                        }
+                      }
+                    ]
+                  }
+                },
+                {
+                  "rollup" : {
+                    "ism_rollup" : {
+                      "description" : "d",
+                      "target_index" : "t",
+                      "page_size" : 100,
+                      "dimensions" : [
+                        {
+                          "date_histogram" : {
+                            "source_field" : "ts",
+                            "fixed_interval" : "60m"
+                          }
+                        }
+                      ],
+                      "metrics" : [ ]
+                    }
+                  }
+                },
+                {
+                  "notification" : {
+                    "channel" : {
+                      "id" : "c1"
+                    },
+                    "message_template" : {
+                      "source" : "m2"
+                    }
+                  }
+                }
+              ],
+              "transitions" : [
+                {
+                  "state_name" : "b",
+                  "conditions" : {
+                    "min_size" : "10gb"
+                  }
+                },
+                {
+                  "state_name" : "b",
+                  "conditions" : {
+                    "min_doc_count" : 10
+                  }
+                },
+                {
+                  "state_name" : "b",
+                  "conditions" : {
+                    "min_rollover_age" : "1d"
+                  }
+                },
+                {
+                  "state_name" : "b",
+                  "conditions" : {
+                    "cron" : {
+                      "cron" : {
+                        "expression" : "* 17 * * SAT",
+                        "timezone" : "America/Los_Angeles"
+                      }
+                    }
+                  }
+                },
+                {
+                  "state_name" : "b"
+                }
+              ]
+            },
+            {
+              "name" : "b",
+              "actions" : [
+                {
+                  "rollover" : { }
+                },
+                {
+                  "force_merge" : {
+                    "max_num_segments" : 2
+                  }
+                },
+                {
+                  "allocation" : {
+                    "include" : {
+                      "a" : "b"
+                    },
+                    "exclude" : {
+                      "c" : "d"
+                    },
+                    "wait_for" : true
+                  }
+                },
+                {
+                  "shrink" : {
+                    "percentage_of_source_shards" : 0.5,
+                    "target_index_name_template" : {
+                      "source" : "{{ctx.index}}_s"
+                    }
+                  }
+                }
+              ],
+              "transitions" : [
+                {
+                  "state_name" : "c"
+                }
+              ]
+            },
+            {
+              "name" : "c",
+              "actions" : [
+                {
+                  "delete" : { }
+                }
+              ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 201,
+      "response" : {
+        "_id" : "esm-all",
+        "_version" : 1,
+        "_primary_term" : 1,
+        "_seq_no" : 3,
+        "policy" : {
+          "policy" : {
+            "policy_id" : "esm-all",
+            "description" : "all",
+            "last_updated_time" : 1792894794704,
+            "schema_version" : 1,
+            "error_notification" : {
+              "destination" : {
+                "slack" : {
+                  "url" : "https://hooks.slack.com/x"
+                }
+              },
+              "message_template" : {
+                "source" : "err {{ctx.index}}",
+                "lang" : "mustache"
+              }
+            },
+            "default_state" : "a",
+            "states" : [
+              {
+                "name" : "a",
+                "actions" : [
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "rollover" : {
+                      "min_size" : "1gb",
+                      "min_doc_count" : 1,
+                      "min_index_age" : "1d",
+                      "min_primary_shard_size" : "1gb",
+                      "copy_alias" : false
+                    }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "read_only" : { }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "read_write" : { }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "replica_count" : {
+                      "number_of_replicas" : 1
+                    }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "force_merge" : {
+                      "max_num_segments" : 1
+                    }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "close" : { }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "open" : { }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "index_priority" : {
+                      "priority" : 50
+                    }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "allocation" : {
+                      "require" : {
+                        "box_type" : "warm"
+                      },
+                      "include" : { },
+                      "exclude" : { },
+                      "wait_for" : false
+                    }
+                  },
+                  {
+                    "timeout" : "1h",
+                    "retry" : {
+                      "count" : 5,
+                      "backoff" : "constant",
+                      "delay" : "10m"
+                    },
+                    "read_only" : { }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "shrink" : {
+                      "num_new_shards" : 1,
+                      "switch_aliases" : false,
+                      "force_unsafe" : true
+                    }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "snapshot" : {
+                      "repository" : "r",
+                      "snapshot" : "s"
+                    }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "notification" : {
+                      "destination" : {
+                        "chime" : {
+                          "url" : "https://x"
+                        }
+                      },
+                      "message_template" : {
+                        "source" : "m",
+                        "lang" : "mustache"
+                      }
+                    }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "alias" : {
+                      "actions" : [
+                        {
+                          "add" : {
+                            "aliases" : [
+                              "al"
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "rollup" : {
+                      "ism_rollup" : {
+                        "description" : "d",
+                        "target_index" : "t",
+                        "page_size" : 100,
+                        "dimensions" : [
+                          {
+                            "date_histogram" : {
+                              "fixed_interval" : "60m",
+                              "source_field" : "ts",
+                              "target_field" : "ts",
+                              "timezone" : "UTC",
+                              "format" : null
+                            }
+                          }
+                        ],
+                        "metrics" : [ ]
+                      }
+                    }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "notification" : {
+                      "channel" : {
+                        "id" : "c1"
+                      },
+                      "message_template" : {
+                        "source" : "m2",
+                        "lang" : "mustache"
+                      }
+                    }
+                  }
+                ],
+                "transitions" : [
+                  {
+                    "state_name" : "b",
+                    "conditions" : {
+                      "min_size" : "10gb"
+                    }
+                  },
+                  {
+                    "state_name" : "b",
+                    "conditions" : {
+                      "min_doc_count" : 10
+                    }
+                  },
+                  {
+                    "state_name" : "b",
+                    "conditions" : {
+                      "min_rollover_age" : "1d"
+                    }
+                  },
+                  {
+                    "state_name" : "b",
+                    "conditions" : {
+                      "cron" : {
+                        "cron" : {
+                          "expression" : "* 17 * * SAT",
+                          "timezone" : "America/Los_Angeles"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "state_name" : "b"
+                  }
+                ]
+              },
+              {
+                "name" : "b",
+                "actions" : [
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "rollover" : {
+                      "copy_alias" : false
+                    }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "force_merge" : {
+                      "max_num_segments" : 2
+                    }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "allocation" : {
+                      "require" : { },
+                      "include" : {
+                        "a" : "b"
+                      },
+                      "exclude" : {
+                        "c" : "d"
+                      },
+                      "wait_for" : true
+                    }
+                  },
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "shrink" : {
+                      "percentage_of_source_shards" : 0.5,
+                      "target_index_name_template" : {
+                        "source" : "{{ctx.index}}_s",
+                        "lang" : "mustache"
+                      },
+                      "switch_aliases" : false
+                    }
+                  }
+                ],
+                "transitions" : [
+                  {
+                    "state_name" : "c"
+                  }
+                ]
+              },
+              {
+                "name" : "c",
+                "actions" : [
+                  {
+                    "retry" : {
+                      "count" : 3,
+                      "backoff" : "exponential",
+                      "delay" : "1m"
+                    },
+                    "delete" : { }
+                  }
+                ],
+                "transitions" : [ ]
+              }
+            ],
+            "ism_template" : null
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/policies/esm-all",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "_id" : "esm-all",
+        "_version" : 1,
+        "_seq_no" : 3,
+        "_primary_term" : 1,
+        "policy" : {
+          "policy_id" : "esm-all",
+          "description" : "all",
+          "last_updated_time" : 1792894794704,
+          "schema_version" : 31,
+          "error_notification" : {
+            "destination" : {
+              "slack" : {
+                "url" : "https://hooks.slack.com/x"
+              }
+            },
+            "message_template" : {
+              "source" : "err {{ctx.index}}",
+              "lang" : "mustache"
+            }
+          },
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "rollover" : {
+                    "min_size" : "1gb",
+                    "min_doc_count" : 1,
+                    "min_index_age" : "1d",
+                    "min_primary_shard_size" : "1gb",
+                    "copy_alias" : false
+                  }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "read_only" : { }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "read_write" : { }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "replica_count" : {
+                    "number_of_replicas" : 1
+                  }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "force_merge" : {
+                    "max_num_segments" : 1
+                  }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "close" : { }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "open" : { }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "index_priority" : {
+                    "priority" : 50
+                  }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "allocation" : {
+                    "require" : {
+                      "box_type" : "warm"
+                    },
+                    "include" : { },
+                    "exclude" : { },
+                    "wait_for" : false
+                  }
+                },
+                {
+                  "timeout" : "1h",
+                  "retry" : {
+                    "count" : 5,
+                    "backoff" : "constant",
+                    "delay" : "10m"
+                  },
+                  "read_only" : { }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "shrink" : {
+                    "num_new_shards" : 1,
+                    "switch_aliases" : false,
+                    "force_unsafe" : true
+                  }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "snapshot" : {
+                    "repository" : "r",
+                    "snapshot" : "s"
+                  }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "notification" : {
+                    "destination" : {
+                      "chime" : {
+                        "url" : "https://x"
+                      }
+                    },
+                    "message_template" : {
+                      "source" : "m",
+                      "lang" : "mustache"
+                    }
+                  }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "alias" : {
+                    "actions" : [
+                      {
+                        "add" : {
+                          "aliases" : [
+                            "al"
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "rollup" : {
+                    "ism_rollup" : {
+                      "description" : "d",
+                      "target_index" : "t",
+                      "page_size" : 100,
+                      "dimensions" : [
+                        {
+                          "date_histogram" : {
+                            "fixed_interval" : "60m",
+                            "source_field" : "ts",
+                            "target_field" : "ts",
+                            "timezone" : "UTC",
+                            "format" : null
+                          }
+                        }
+                      ],
+                      "metrics" : [ ]
+                    }
+                  }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "notification" : {
+                    "channel" : {
+                      "id" : "c1"
+                    },
+                    "message_template" : {
+                      "source" : "m2",
+                      "lang" : "mustache"
+                    }
+                  }
+                }
+              ],
+              "transitions" : [
+                {
+                  "state_name" : "b",
+                  "conditions" : {
+                    "min_size" : "10gb"
+                  }
+                },
+                {
+                  "state_name" : "b",
+                  "conditions" : {
+                    "min_doc_count" : 10
+                  }
+                },
+                {
+                  "state_name" : "b",
+                  "conditions" : {
+                    "min_rollover_age" : "1d"
+                  }
+                },
+                {
+                  "state_name" : "b",
+                  "conditions" : {
+                    "cron" : {
+                      "cron" : {
+                        "expression" : "* 17 * * SAT",
+                        "timezone" : "America/Los_Angeles"
+                      }
+                    }
+                  }
+                },
+                {
+                  "state_name" : "b"
+                }
+              ]
+            },
+            {
+              "name" : "b",
+              "actions" : [
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "rollover" : {
+                    "copy_alias" : false
+                  }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "force_merge" : {
+                    "max_num_segments" : 2
+                  }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "allocation" : {
+                    "require" : { },
+                    "include" : {
+                      "a" : "b"
+                    },
+                    "exclude" : {
+                      "c" : "d"
+                    },
+                    "wait_for" : true
+                  }
+                },
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "shrink" : {
+                    "percentage_of_source_shards" : 0.5,
+                    "target_index_name_template" : {
+                      "source" : "{{ctx.index}}_s",
+                      "lang" : "mustache"
+                    },
+                    "switch_aliases" : false
+                  }
+                }
+              ],
+              "transitions" : [
+                {
+                  "state_name" : "c"
+                }
+              ]
+            },
+            {
+              "name" : "c",
+              "actions" : [
+                {
+                  "retry" : {
+                    "count" : 3,
+                    "backoff" : "exponential",
+                    "delay" : "1m"
+                  },
+                  "delete" : { }
+                }
+              ],
+              "transitions" : [ ]
+            }
+          ],
+          "ism_template" : null
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-e6",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a"
+            }
+          ],
+          "error_notification" : null
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 201,
+      "response" : {
+        "_id" : "esm-e6",
+        "_version" : 1,
+        "_primary_term" : 1,
+        "_seq_no" : 4,
+        "policy" : {
+          "policy" : {
+            "policy_id" : "esm-e6",
+            "description" : "x",
+            "last_updated_time" : 1792894794758,
+            "schema_version" : 1,
+            "error_notification" : null,
+            "default_state" : "a",
+            "states" : [
+              {
+                "name" : "a",
+                "actions" : [ ],
+                "transitions" : [ ]
+              }
+            ],
+            "ism_template" : null
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-e7",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [
+                {
+                  "read_only" : { },
+                  "delete" : { }
+                },
+                {
+                  "retry" : {
+                    "count" : 2
+                  },
+                  "timeout" : "2h",
+                  "open" : { }
+                }
+              ],
+              "transitions" : [
+                {
+                  "state_name" : "a",
+                  "conditions" : { }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "State=a must not contain an action after a delete action"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "State=a must not contain an action after a delete action"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/COS-UP",
+      "body" : {
+        "policy" : {
+          "description" : "up",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ],
+          "schema_version" : 5,
+          "policy_id" : "zzz",
+          "last_updated_time" : 1
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 201,
+      "response" : {
+        "_id" : "COS-UP",
+        "_version" : 1,
+        "_primary_term" : 1,
+        "_seq_no" : 5,
+        "policy" : {
+          "policy" : {
+            "policy_id" : "COS-UP",
+            "description" : "up",
+            "last_updated_time" : 1792894794796,
+            "schema_version" : 5,
+            "error_notification" : null,
+            "default_state" : "a",
+            "states" : [
+              {
+                "name" : "a",
+                "actions" : [ ],
+                "transitions" : [ ]
+              }
+            ],
+            "ism_template" : null
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/policies/COS-UP",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "_id" : "COS-UP",
+        "_version" : 1,
+        "_seq_no" : 5,
+        "_primary_term" : 1,
+        "policy" : {
+          "policy_id" : "COS-UP",
+          "description" : "up",
+          "last_updated_time" : 1792894794796,
+          "schema_version" : 31,
+          "error_notification" : null,
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ],
+          "ism_template" : null
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/policies/esm-e15",
+      "body" : {
+        "policy" : {
+          "description" : "x",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "skip" : "405 lists the allowed methods in the order of OpenSearch handler registration",
+      "status" : 405,
+      "response" : {
+        "error" : "Incorrect HTTP method for uri [/_plugins/_ism/policies/esm-e15] and method [POST], allowed: [DELETE, PUT, GET, HEAD]",
+        "status" : 405
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8",
+        "allow" : "DELETE,PUT,GET,HEAD"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-t1",
+      "body" : {
+        "policy" : {
+          "description" : "t",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ],
+          "ism_template" : [
+            {
+              "index_patterns" : [
+                "esm-t-*"
+              ],
+              "priority" : 10
+            },
+            {
+              "index_patterns" : [
+                "esm-u-*"
+              ]
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 201,
+      "response" : {
+        "_id" : "esm-t1",
+        "_version" : 1,
+        "_primary_term" : 1,
+        "_seq_no" : 6,
+        "policy" : {
+          "policy" : {
+            "policy_id" : "esm-t1",
+            "description" : "t",
+            "last_updated_time" : 1792894794828,
+            "schema_version" : 1,
+            "error_notification" : null,
+            "default_state" : "a",
+            "states" : [
+              {
+                "name" : "a",
+                "actions" : [ ],
+                "transitions" : [ ]
+              }
+            ],
+            "ism_template" : [
+              {
+                "index_patterns" : [
+                  "esm-t-*"
+                ],
+                "priority" : 10,
+                "last_updated_time" : 1792894794828
+              },
+              {
+                "index_patterns" : [
+                  "esm-u-*"
+                ],
+                "priority" : 0,
+                "last_updated_time" : 1792894794828
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-t2",
+      "body" : {
+        "policy" : {
+          "description" : "t",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ],
+          "ism_template" : [
+            {
+              "index_patterns" : [
+                "esm-t-*"
+              ],
+              "priority" : 10
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_management_exception",
+              "reason" : "New policy esm-t2 has an ISM template with index pattern [esm-t-*] matching existing policy templates, please use a different priority than 10"
+            }
+          ],
+          "type" : "index_management_exception",
+          "reason" : "New policy esm-t2 has an ISM template with index pattern [esm-t-*] matching existing policy templates, please use a different priority than 10",
+          "caused_by" : {
+            "type" : "exception",
+            "reason" : "java.lang.IllegalArgumentException: New policy esm-t2 has an ISM template with index pattern [esm-t-*] matching existing policy templates, please use a different priority than 10"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_ism/policies/esm-t3",
+      "body" : {
+        "policy" : {
+          "description" : "t",
+          "default_state" : "a",
+          "states" : [
+            {
+              "name" : "a",
+              "actions" : [ ],
+              "transitions" : [ ]
+            }
+          ],
+          "ism_template" : [
+            {
+              "index_patterns" : [
+                "esm-t-*"
+              ],
+              "priority" : 11
+            }
+          ]
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 201,
+      "response" : {
+        "_id" : "esm-t3",
+        "_version" : 1,
+        "_primary_term" : 1,
+        "_seq_no" : 7,
+        "policy" : {
+          "policy" : {
+            "policy_id" : "esm-t3",
+            "description" : "t",
+            "last_updated_time" : 1792894794888,
+            "schema_version" : 1,
+            "error_notification" : null,
+            "default_state" : "a",
+            "states" : [
+              {
+                "name" : "a",
+                "actions" : [ ],
+                "transitions" : [ ]
+              }
+            ],
+            "ism_template" : [
+              {
+                "index_patterns" : [
+                  "esm-t-*"
+                ],
+                "priority" : 11,
+                "last_updated_time" : 1792894794888
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/policies?queryString=esm-t*",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "policies" : [
+          {
+            "_id" : "esm-t1",
+            "_seq_no" : 6,
+            "_primary_term" : 1,
+            "policy" : {
+              "policy_id" : "esm-t1",
+              "description" : "t",
+              "last_updated_time" : 1792894794828,
+              "schema_version" : 31,
+              "error_notification" : null,
+              "default_state" : "a",
+              "states" : [
+                {
+                  "name" : "a",
+                  "actions" : [ ],
+                  "transitions" : [ ]
+                }
+              ],
+              "ism_template" : [
+                {
+                  "index_patterns" : [
+                    "esm-t-*"
+                  ],
+                  "priority" : 10,
+                  "last_updated_time" : 1792894794828
+                },
+                {
+                  "index_patterns" : [
+                    "esm-u-*"
+                  ],
+                  "priority" : 0,
+                  "last_updated_time" : 1792894794828
+                }
+              ]
+            }
+          },
+          {
+            "_id" : "esm-t3",
+            "_seq_no" : 7,
+            "_primary_term" : 1,
+            "policy" : {
+              "policy_id" : "esm-t3",
+              "description" : "t",
+              "last_updated_time" : 1792894794888,
+              "schema_version" : 31,
+              "error_notification" : null,
+              "default_state" : "a",
+              "states" : [
+                {
+                  "name" : "a",
+                  "actions" : [ ],
+                  "transitions" : [ ]
+                }
+              ],
+              "ism_template" : [
+                {
+                  "index_patterns" : [
+                    "esm-t-*"
+                  ],
+                  "priority" : 11,
+                  "last_updated_time" : 1792894794888
+                }
+              ]
+            }
+          }
+        ],
+        "total_policies" : 2
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/policies?from=1&size=2",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "policies" : [
+          {
+            "_id" : "esm-all",
+            "_seq_no" : 3,
+            "_primary_term" : 1,
+            "policy" : {
+              "policy_id" : "esm-all",
+              "description" : "all",
+              "last_updated_time" : 1792894794704,
+              "schema_version" : 31,
+              "error_notification" : {
+                "destination" : {
+                  "slack" : {
+                    "url" : "https://hooks.slack.com/x"
+                  }
+                },
+                "message_template" : {
+                  "source" : "err {{ctx.index}}",
+                  "lang" : "mustache"
+                }
+              },
+              "default_state" : "a",
+              "states" : [
+                {
+                  "name" : "a",
+                  "actions" : [
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "rollover" : {
+                        "min_size" : "1gb",
+                        "min_doc_count" : 1,
+                        "min_index_age" : "1d",
+                        "min_primary_shard_size" : "1gb",
+                        "copy_alias" : false
+                      }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "read_only" : { }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "read_write" : { }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "replica_count" : {
+                        "number_of_replicas" : 1
+                      }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "force_merge" : {
+                        "max_num_segments" : 1
+                      }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "close" : { }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "open" : { }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "index_priority" : {
+                        "priority" : 50
+                      }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "allocation" : {
+                        "require" : {
+                          "box_type" : "warm"
+                        },
+                        "include" : { },
+                        "exclude" : { },
+                        "wait_for" : false
+                      }
+                    },
+                    {
+                      "timeout" : "1h",
+                      "retry" : {
+                        "count" : 5,
+                        "backoff" : "constant",
+                        "delay" : "10m"
+                      },
+                      "read_only" : { }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "shrink" : {
+                        "num_new_shards" : 1,
+                        "switch_aliases" : false,
+                        "force_unsafe" : true
+                      }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "snapshot" : {
+                        "repository" : "r",
+                        "snapshot" : "s"
+                      }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "notification" : {
+                        "destination" : {
+                          "chime" : {
+                            "url" : "https://x"
+                          }
+                        },
+                        "message_template" : {
+                          "source" : "m",
+                          "lang" : "mustache"
+                        }
+                      }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "alias" : {
+                        "actions" : [
+                          {
+                            "add" : {
+                              "aliases" : [
+                                "al"
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "rollup" : {
+                        "ism_rollup" : {
+                          "description" : "d",
+                          "target_index" : "t",
+                          "page_size" : 100,
+                          "dimensions" : [
+                            {
+                              "date_histogram" : {
+                                "fixed_interval" : "60m",
+                                "source_field" : "ts",
+                                "target_field" : "ts",
+                                "timezone" : "UTC",
+                                "format" : null
+                              }
+                            }
+                          ],
+                          "metrics" : [ ]
+                        }
+                      }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "notification" : {
+                        "channel" : {
+                          "id" : "c1"
+                        },
+                        "message_template" : {
+                          "source" : "m2",
+                          "lang" : "mustache"
+                        }
+                      }
+                    }
+                  ],
+                  "transitions" : [
+                    {
+                      "state_name" : "b",
+                      "conditions" : {
+                        "min_size" : "10gb"
+                      }
+                    },
+                    {
+                      "state_name" : "b",
+                      "conditions" : {
+                        "min_doc_count" : 10
+                      }
+                    },
+                    {
+                      "state_name" : "b",
+                      "conditions" : {
+                        "min_rollover_age" : "1d"
+                      }
+                    },
+                    {
+                      "state_name" : "b",
+                      "conditions" : {
+                        "cron" : {
+                          "cron" : {
+                            "expression" : "* 17 * * SAT",
+                            "timezone" : "America/Los_Angeles"
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "state_name" : "b"
+                    }
+                  ]
+                },
+                {
+                  "name" : "b",
+                  "actions" : [
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "rollover" : {
+                        "copy_alias" : false
+                      }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "force_merge" : {
+                        "max_num_segments" : 2
+                      }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "allocation" : {
+                        "require" : { },
+                        "include" : {
+                          "a" : "b"
+                        },
+                        "exclude" : {
+                          "c" : "d"
+                        },
+                        "wait_for" : true
+                      }
+                    },
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "shrink" : {
+                        "percentage_of_source_shards" : 0.5,
+                        "target_index_name_template" : {
+                          "source" : "{{ctx.index}}_s",
+                          "lang" : "mustache"
+                        },
+                        "switch_aliases" : false
+                      }
+                    }
+                  ],
+                  "transitions" : [
+                    {
+                      "state_name" : "c"
+                    }
+                  ]
+                },
+                {
+                  "name" : "c",
+                  "actions" : [
+                    {
+                      "retry" : {
+                        "count" : 3,
+                        "backoff" : "exponential",
+                        "delay" : "1m"
+                      },
+                      "delete" : { }
+                    }
+                  ],
+                  "transitions" : [ ]
+                }
+              ],
+              "ism_template" : null
+            }
+          },
+          {
+            "_id" : "esm-e6",
+            "_seq_no" : 4,
+            "_primary_term" : 1,
+            "policy" : {
+              "policy_id" : "esm-e6",
+              "description" : "x",
+              "last_updated_time" : 1792894794758,
+              "schema_version" : 31,
+              "error_notification" : null,
+              "default_state" : "a",
+              "states" : [
+                {
+                  "name" : "a",
+                  "actions" : [ ],
+                  "transitions" : [ ]
+                }
+              ],
+              "ism_template" : null
+            }
+          }
+        ],
+        "total_policies" : 7
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/policies?sortOrder=desc&size=3",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "policies" : [
+          {
+            "_id" : "esm-t3",
+            "_seq_no" : 7,
+            "_primary_term" : 1,
+            "policy" : {
+              "policy_id" : "esm-t3",
+              "description" : "t",
+              "last_updated_time" : 1792894794888,
+              "schema_version" : 31,
+              "error_notification" : null,
+              "default_state" : "a",
+              "states" : [
+                {
+                  "name" : "a",
+                  "actions" : [ ],
+                  "transitions" : [ ]
+                }
+              ],
+              "ism_template" : [
+                {
+                  "index_patterns" : [
+                    "esm-t-*"
+                  ],
+                  "priority" : 11,
+                  "last_updated_time" : 1792894794888
+                }
+              ]
+            }
+          },
+          {
+            "_id" : "esm-t1",
+            "_seq_no" : 6,
+            "_primary_term" : 1,
+            "policy" : {
+              "policy_id" : "esm-t1",
+              "description" : "t",
+              "last_updated_time" : 1792894794828,
+              "schema_version" : 31,
+              "error_notification" : null,
+              "default_state" : "a",
+              "states" : [
+                {
+                  "name" : "a",
+                  "actions" : [ ],
+                  "transitions" : [ ]
+                }
+              ],
+              "ism_template" : [
+                {
+                  "index_patterns" : [
+                    "esm-t-*"
+                  ],
+                  "priority" : 10,
+                  "last_updated_time" : 1792894794828
+                },
+                {
+                  "index_patterns" : [
+                    "esm-u-*"
+                  ],
+                  "priority" : 0,
+                  "last_updated_time" : 1792894794828
+                }
+              ]
+            }
+          },
+          {
+            "_id" : "esm-p2",
+            "_seq_no" : 2,
+            "_primary_term" : 1,
+            "policy" : {
+              "policy_id" : "esm-p2",
+              "description" : "v2",
+              "last_updated_time" : 1792894794409,
+              "schema_version" : 31,
+              "error_notification" : null,
+              "default_state" : "hot",
+              "states" : [
+                {
+                  "name" : "hot",
+                  "actions" : [ ],
+                  "transitions" : [ ]
+                }
+              ],
+              "ism_template" : null
+            }
+          }
+        ],
+        "total_policies" : 7
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-logs-000001",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-logs-000001"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-t-1",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-t-1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-u-1",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-u-1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-u-2",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0,
+          "index.hidden" : true
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-u-2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-u-3",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0,
+          "index.plugins.index_state_management.auto_manage" : false
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-u-3"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-v-1",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-v-1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-v-2",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "aliases" : {
+          "esm-va" : { }
+        }
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-v-2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/explain/esm-t-1,esm-u-1,esm-u-2,esm-u-3",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "esm-t-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t3",
+          "index.opendistro.index_state_management.policy_id" : "esm-t3",
+          "index" : "esm-t-1",
+          "index_uuid" : "CETU2uvJSfykaKxvzSDHxw",
+          "policy_id" : "esm-t3",
+          "enabled" : true
+        },
+        "esm-u-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-u-1",
+          "index_uuid" : "OMCt-MiCTu6OBcDKlP0Yow",
+          "policy_id" : "esm-t1",
+          "enabled" : true
+        },
+        "esm-u-2" : {
+          "index.plugins.index_state_management.policy_id" : null,
+          "index.opendistro.index_state_management.policy_id" : null,
+          "enabled" : null
+        },
+        "esm-u-3" : {
+          "index.plugins.index_state_management.policy_id" : null,
+          "index.opendistro.index_state_management.policy_id" : null,
+          "enabled" : null
+        },
+        "total_managed_indices" : 2
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/explain/esm-logs-000001,esm-t-1",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "esm-logs-000001" : {
+          "index.plugins.index_state_management.policy_id" : "esm-p1",
+          "index.opendistro.index_state_management.policy_id" : "esm-p1",
+          "index" : "esm-logs-000001",
+          "index_uuid" : "zsz2gLCDRTWkXTQYXTFwYw",
+          "policy_id" : "esm-p1",
+          "enabled" : true
+        },
+        "esm-t-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t3",
+          "index.opendistro.index_state_management.policy_id" : "esm-t3",
+          "index" : "esm-t-1",
+          "index_uuid" : "CETU2uvJSfykaKxvzSDHxw",
+          "policy_id" : "esm-t3",
+          "enabled" : true
+        },
+        "total_managed_indices" : 2
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/explain/esm-v-1,esm-u-1",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "esm-v-1" : {
+          "index.plugins.index_state_management.policy_id" : null,
+          "index.opendistro.index_state_management.policy_id" : null,
+          "enabled" : null
+        },
+        "esm-u-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-u-1",
+          "index_uuid" : "OMCt-MiCTu6OBcDKlP0Yow",
+          "policy_id" : "esm-t1",
+          "enabled" : true
+        },
+        "total_managed_indices" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/add/esm-v-*",
+      "body" : {
+        "policy_id" : "esm-t1"
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "updated_indices" : 2,
+        "failures" : false,
+        "failed_indices" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/add/esm-v-1",
+      "body" : {
+        "policy_id" : "esm-t1"
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "updated_indices" : 0,
+        "failures" : true,
+        "failed_indices" : [
+          {
+            "index_name" : "esm-v-1",
+            "index_uuid" : "T2fUyTtdSxKv00zSTW7nUg",
+            "reason" : "This index already has a policy, use the update policy API to update index policies"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/add/esm-nope",
+      "body" : {
+        "policy_id" : "esm-t1"
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "updated_indices" : 0,
+        "failures" : false,
+        "failed_indices" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/add/esm-v-1",
+      "body" : {
+        "policy_id" : "nope"
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "status_exception",
+              "reason" : "Could not find policy=nope"
+            }
+          ],
+          "type" : "status_exception",
+          "reason" : "Could not find policy=nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/add/esm-v-1",
+      "body" : { },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Missing policy_id"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Missing policy_id"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/add",
+      "body" : {
+        "policy_id" : "esm-t1"
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Missing indices"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Missing indices"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/explain/esm-v-*",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "esm-v-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-v-1",
+          "index_uuid" : "T2fUyTtdSxKv00zSTW7nUg",
+          "policy_id" : "esm-t1",
+          "enabled" : true
+        },
+        "esm-v-2" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-v-2",
+          "index_uuid" : "r-VX4RWHSkCYynS2ATz3og",
+          "policy_id" : "esm-t1",
+          "enabled" : true
+        },
+        "total_managed_indices" : 2
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/explain/esm-va",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "esm-v-2" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-v-2",
+          "index_uuid" : "r-VX4RWHSkCYynS2ATz3og",
+          "policy_id" : "esm-t1",
+          "enabled" : true
+        },
+        "total_managed_indices" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/explain/esm-u-*,esm-t-*",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "esm-t-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t3",
+          "index.opendistro.index_state_management.policy_id" : "esm-t3",
+          "index" : "esm-t-1",
+          "index_uuid" : "CETU2uvJSfykaKxvzSDHxw",
+          "policy_id" : "esm-t3",
+          "enabled" : true
+        },
+        "esm-u-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-u-1",
+          "index_uuid" : "OMCt-MiCTu6OBcDKlP0Yow",
+          "policy_id" : "esm-t1",
+          "enabled" : true
+        },
+        "esm-u-2" : {
+          "index.plugins.index_state_management.policy_id" : null,
+          "index.opendistro.index_state_management.policy_id" : null,
+          "enabled" : null
+        },
+        "esm-u-3" : {
+          "index.plugins.index_state_management.policy_id" : null,
+          "index.opendistro.index_state_management.policy_id" : null,
+          "enabled" : null
+        },
+        "total_managed_indices" : 2
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/explain",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "esm-logs-000001" : {
+          "index.plugins.index_state_management.policy_id" : "esm-p1",
+          "index.opendistro.index_state_management.policy_id" : "esm-p1",
+          "index" : "esm-logs-000001",
+          "index_uuid" : "zsz2gLCDRTWkXTQYXTFwYw",
+          "policy_id" : "esm-p1",
+          "enabled" : true
+        },
+        "esm-t-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t3",
+          "index.opendistro.index_state_management.policy_id" : "esm-t3",
+          "index" : "esm-t-1",
+          "index_uuid" : "CETU2uvJSfykaKxvzSDHxw",
+          "policy_id" : "esm-t3",
+          "enabled" : true
+        },
+        "esm-u-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-u-1",
+          "index_uuid" : "OMCt-MiCTu6OBcDKlP0Yow",
+          "policy_id" : "esm-t1",
+          "enabled" : true
+        },
+        "esm-v-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-v-1",
+          "index_uuid" : "T2fUyTtdSxKv00zSTW7nUg",
+          "policy_id" : "esm-t1",
+          "enabled" : true
+        },
+        "esm-v-2" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-v-2",
+          "index_uuid" : "r-VX4RWHSkCYynS2ATz3og",
+          "policy_id" : "esm-t1",
+          "enabled" : true
+        },
+        "total_managed_indices" : 5
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/explain/esm-nope*",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: no documents to get;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: no documents to get;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/explain/esm-v-1,esm-nope",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "esm-v-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-v-1",
+          "index_uuid" : "T2fUyTtdSxKv00zSTW7nUg",
+          "policy_id" : "esm-t1",
+          "enabled" : true
+        },
+        "total_managed_indices" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/explain/esm-v-1?show_policy=true",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "esm-v-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-v-1",
+          "index_uuid" : "T2fUyTtdSxKv00zSTW7nUg",
+          "policy_id" : "esm-t1",
+          "enabled" : true,
+          "policy" : {
+            "policy_id" : "esm-t1",
+            "description" : "t",
+            "last_updated_time" : 1792894794828,
+            "schema_version" : 31,
+            "error_notification" : null,
+            "default_state" : "a",
+            "states" : [
+              {
+                "name" : "a",
+                "actions" : [ ],
+                "transitions" : [ ]
+              }
+            ],
+            "ism_template" : [
+              {
+                "index_patterns" : [
+                  "esm-t-*"
+                ],
+                "priority" : 10,
+                "last_updated_time" : 1792894794828
+              },
+              {
+                "index_patterns" : [
+                  "esm-u-*"
+                ],
+                "priority" : 0,
+                "last_updated_time" : 1792894794828
+              }
+            ]
+          }
+        },
+        "total_managed_indices" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/explain/esm-v-1,esm-u-3?validate_action=true",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "esm-v-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-v-1",
+          "index_uuid" : "T2fUyTtdSxKv00zSTW7nUg",
+          "policy_id" : "esm-t1",
+          "enabled" : true,
+          "validate" : {
+            "validation_message" : "Starting Validation",
+            "validation_status" : "passed"
+          }
+        },
+        "esm-u-3" : {
+          "index.plugins.index_state_management.policy_id" : null,
+          "index.opendistro.index_state_management.policy_id" : null,
+          "enabled" : null,
+          "validate" : {
+            "validation_message" : "Starting Validation",
+            "validation_status" : "passed"
+          }
+        },
+        "total_managed_indices" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/change_policy/esm-v-1",
+      "body" : {
+        "policy_id" : "nope"
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "status_exception",
+              "reason" : "Could not find policy=nope"
+            }
+          ],
+          "type" : "status_exception",
+          "reason" : "Could not find policy=nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/change_policy/esm-v-1",
+      "body" : { },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "ChangePolicy policy id is null"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "ChangePolicy policy id is null"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/change_policy/esm-u-3",
+      "body" : {
+        "policy_id" : "esm-t3"
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "updated_indices" : 0,
+        "failures" : true,
+        "failed_indices" : [
+          {
+            "index_name" : "esm-u-3",
+            "index_uuid" : "8-oP80bET0Wmt1YO5AHmGA",
+            "reason" : "This index is not being managed"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/change_policy/esm-v-1",
+      "body" : {
+        "policy_id" : "esm-t3",
+        "state" : "a"
+      },
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "updated_indices" : 1,
+        "failures" : false,
+        "failed_indices" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/explain/esm-v-1",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "esm-v-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-v-1",
+          "index_uuid" : "T2fUyTtdSxKv00zSTW7nUg",
+          "policy_id" : "esm-t1",
+          "enabled" : true
+        },
+        "total_managed_indices" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/retry/esm-u-3",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "updated_indices" : 0,
+        "failures" : true,
+        "failed_indices" : [
+          {
+            "index_name" : "esm-u-3",
+            "index_uuid" : "8-oP80bET0Wmt1YO5AHmGA",
+            "reason" : "This index is not being managed."
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/retry/esm-v-1",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "updated_indices" : 0,
+        "failures" : true,
+        "failed_indices" : [
+          {
+            "index_name" : "esm-v-1",
+            "index_uuid" : "T2fUyTtdSxKv00zSTW7nUg",
+            "reason" : "This index has no metadata information"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/retry/esm-nope",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "index" : "esm-nope",
+              "resource.id" : "esm-nope",
+              "resource.type" : "index_or_alias",
+              "index_uuid" : "_na_"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "index" : "esm-nope",
+          "resource.id" : "esm-nope",
+          "resource.type" : "index_or_alias",
+          "index_uuid" : "_na_"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/remove/esm-nope",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "index" : "esm-nope",
+              "resource.id" : "esm-nope",
+              "resource.type" : "index_or_alias",
+              "index_uuid" : "_na_"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "index" : "esm-nope",
+          "resource.id" : "esm-nope",
+          "resource.type" : "index_or_alias",
+          "index_uuid" : "_na_"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/remove/esm-v-1",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "updated_indices" : 1,
+        "failures" : false,
+        "failed_indices" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/remove/esm-v-1",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "updated_indices" : 0,
+        "failures" : true,
+        "failed_indices" : [
+          {
+            "index_name" : "esm-v-1",
+            "index_uuid" : "T2fUyTtdSxKv00zSTW7nUg",
+            "reason" : "This index does not have a policy to remove"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /esm-v-1/_settings",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "esm-v-1" : {
+          "settings" : {
+            "index" : {
+              "replication" : {
+                "type" : "DOCUMENT"
+              },
+              "number_of_shards" : "1",
+              "plugins" : {
+                "index_state_management" : {
+                  "auto_manage" : "false"
+                }
+              },
+              "provided_name" : "esm-v-1",
+              "creation_date" : "1792894795419",
+              "number_of_replicas" : "0",
+              "uuid" : "T2fUyTtdSxKv00zSTW7nUg",
+              "version" : {
+                "created" : "137307827"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/explain/esm-v-*",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "esm-v-1" : {
+          "index.plugins.index_state_management.policy_id" : null,
+          "index.opendistro.index_state_management.policy_id" : null,
+          "enabled" : null
+        },
+        "esm-v-2" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-v-2",
+          "index_uuid" : "r-VX4RWHSkCYynS2ATz3og",
+          "policy_id" : "esm-t1",
+          "enabled" : true
+        },
+        "total_managed_indices" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v-2",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/explain",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "esm-logs-000001" : {
+          "index.plugins.index_state_management.policy_id" : "esm-p1",
+          "index.opendistro.index_state_management.policy_id" : "esm-p1",
+          "index" : "esm-logs-000001",
+          "index_uuid" : "zsz2gLCDRTWkXTQYXTFwYw",
+          "policy_id" : "esm-p1",
+          "enabled" : true
+        },
+        "esm-t-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t3",
+          "index.opendistro.index_state_management.policy_id" : "esm-t3",
+          "index" : "esm-t-1",
+          "index_uuid" : "CETU2uvJSfykaKxvzSDHxw",
+          "policy_id" : "esm-t3",
+          "enabled" : true
+        },
+        "esm-u-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-u-1",
+          "index_uuid" : "OMCt-MiCTu6OBcDKlP0Yow",
+          "policy_id" : "esm-t1",
+          "enabled" : true
+        },
+        "total_managed_indices" : 3
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_ism/policies/esm-t1",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "_index" : ".opendistro-ism-config",
+        "_id" : "esm-t1",
+        "_version" : 2,
+        "result" : "deleted",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 20,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_ism/explain/esm-u-1",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "esm-u-1" : {
+          "index.plugins.index_state_management.policy_id" : "esm-t1",
+          "index.opendistro.index_state_management.policy_id" : "esm-t1",
+          "index" : "esm-u-1",
+          "index_uuid" : "OMCt-MiCTu6OBcDKlP0Yow",
+          "policy_id" : "esm-t1",
+          "enabled" : true
+        },
+        "total_managed_indices" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_ism/policies/esm-t3",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "_index" : ".opendistro-ism-config",
+        "_id" : "esm-t3",
+        "_version" : 2,
+        "result" : "deleted",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 21,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_ism/policies/esm-t2",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "status_exception",
+              "reason" : "Policy esm-t2 is not found"
+            }
+          ],
+          "type" : "status_exception",
+          "reason" : "Policy esm-t2 is not found"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_ism/policies/esm-p1",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "_index" : ".opendistro-ism-config",
+        "_id" : "esm-p1",
+        "_version" : 2,
+        "result" : "deleted",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 22,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_ism/policies/esm-p2",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "_index" : ".opendistro-ism-config",
+        "_id" : "esm-p2",
+        "_version" : 3,
+        "result" : "deleted",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 23,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_ism/policies/esm-all",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "_index" : ".opendistro-ism-config",
+        "_id" : "esm-all",
+        "_version" : 2,
+        "result" : "deleted",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 24,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_ism/policies/esm-e6",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "_index" : ".opendistro-ism-config",
+        "_id" : "esm-e6",
+        "_version" : 2,
+        "result" : "deleted",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 25,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_ism/policies/esm-e7",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "status_exception",
+              "reason" : "Policy esm-e7 is not found"
+            }
+          ],
+          "type" : "status_exception",
+          "reason" : "Policy esm-e7 is not found"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_ism/policies/COS-UP",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "_index" : ".opendistro-ism-config",
+        "_id" : "COS-UP",
+        "_version" : 2,
+        "result" : "deleted",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 26,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_ism/remove/esm-*",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "capture_sleep_ms" : 2500,
+      "status" : 200,
+      "response" : {
+        "updated_indices" : 3,
+        "failures" : true,
+        "failed_indices" : [
+          {
+            "index_name" : "esm-u-2",
+            "index_uuid" : "OK8ZJvEBT7ikvZAKvFz9KA",
+            "reason" : "This index does not have a policy to remove"
+          },
+          {
+            "index_name" : "esm-v-1",
+            "index_uuid" : "T2fUyTtdSxKv00zSTW7nUg",
+            "reason" : "This index does not have a policy to remove"
+          },
+          {
+            "index_name" : "esm-u-3",
+            "index_uuid" : "8-oP80bET0Wmt1YO5AHmGA",
+            "reason" : "This index does not have a policy to remove"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /esm-logs-000001,esm-t-1,esm-u-1,esm-u-2,esm-u-3,esm-v-1",
+      "mask" : [
+        "took",
+        "last_updated_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    }
+  ]
+}

@@ -1,0 +1,3178 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "PUT",
+      "path": "fxih-a",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "n": {
+              "type": "nested",
+              "properties": {
+                "k": {
+                  "type": "keyword"
+                },
+                "v": {
+                  "type": "long"
+                },
+                "t": {
+                  "type": "text"
+                }
+              }
+            },
+            "nn": {
+              "type": "nested",
+              "properties": {
+                "x": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "k": {
+              "type": "keyword"
+            },
+            "r": {
+              "type": "long"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxih-a"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "fxih-a",
+            "_id": "1"
+          }
+        },
+        {
+          "k": "g1",
+          "r": 1,
+          "n": [
+            {
+              "k": "a"
+            },
+            {
+              "k": "a",
+              "v": 5
+            },
+            {
+              "k": "a",
+              "v": -3
+            }
+          ],
+          "nn": [
+            {
+              "x": "p"
+            }
+          ]
+        },
+        {
+          "index": {
+            "_index": "fxih-a",
+            "_id": "2"
+          }
+        },
+        {
+          "k": "g1",
+          "r": 2,
+          "n": [
+            {
+              "k": "a",
+              "v": [
+                1,
+                100
+              ],
+              "t": "fox fox"
+            },
+            {
+              "k": "a",
+              "v": 50,
+              "t": "fox"
+            }
+          ],
+          "nn": [
+            {
+              "x": "q"
+            }
+          ]
+        },
+        {
+          "index": {
+            "_index": "fxih-a",
+            "_id": "3"
+          }
+        },
+        {
+          "k": "g2",
+          "r": 3,
+          "n": [
+            {
+              "k": "b",
+              "v": 7,
+              "t": "fox dog cat"
+            }
+          ],
+          "nn": [
+            {
+              "x": "p"
+            },
+            {
+              "x": "q"
+            }
+          ]
+        },
+        {
+          "index": {
+            "_index": "fxih-a",
+            "_id": "4"
+          }
+        },
+        {
+          "k": "g2",
+          "r": 4
+        },
+        {
+          "index": {
+            "_index": "fxih-a",
+            "_id": "5"
+          }
+        },
+        {
+          "k": "g1",
+          "r": 5,
+          "n": [
+            {
+              "k": "a",
+              "v": 2
+            }
+          ]
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "fxih-a",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxih-a",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxih-a",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxih-a",
+                "_id": "4",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxih-a",
+                "_id": "5",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxih-a/_search",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "n",
+            "query": {
+              "match_all": {}
+            },
+            "inner_hits": {
+              "sort": [
+                {
+                  "n.v": "asc"
+                }
+              ],
+              "_source": false,
+              "size": 5
+            }
+          }
+        },
+        "_source": false,
+        "sort": [
+          "r"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 45,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 4,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxih-a",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  1
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 3,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 2
+                          },
+                          "_score": null,
+                          "sort": [
+                            -3
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            5
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            9223372036854775807
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  2
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 2,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            1
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            50
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  3
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            7
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  5
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "5",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            2
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxih-a/_search",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "n",
+            "query": {
+              "match_all": {}
+            },
+            "inner_hits": {
+              "sort": [
+                {
+                  "n.v": "desc"
+                }
+              ],
+              "_source": false,
+              "size": 5
+            }
+          }
+        },
+        "_source": false,
+        "sort": [
+          "r"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 10,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 4,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxih-a",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  1
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 3,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            5
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 2
+                          },
+                          "_score": null,
+                          "sort": [
+                            -3
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            -9223372036854775808
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  2
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 2,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            100
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            50
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  3
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            7
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  5
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "5",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            2
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxih-a/_search",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "n",
+            "query": {
+              "match_all": {}
+            },
+            "inner_hits": {
+              "sort": [
+                {
+                  "n.v": {
+                    "order": "asc",
+                    "missing": "_first"
+                  }
+                }
+              ],
+              "_source": false,
+              "size": 5
+            }
+          }
+        },
+        "_source": false,
+        "sort": [
+          "r"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 6,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 4,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxih-a",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  1
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 3,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            -9223372036854775808
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 2
+                          },
+                          "_score": null,
+                          "sort": [
+                            -3
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            5
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  2
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 2,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            1
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            50
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  3
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            7
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  5
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "5",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            2
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxih-a/_search",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "n",
+            "query": {
+              "match_all": {}
+            },
+            "inner_hits": {
+              "sort": [
+                {
+                  "n.v": {
+                    "order": "desc",
+                    "missing": "_last"
+                  }
+                }
+              ],
+              "_source": false,
+              "size": 5
+            }
+          }
+        },
+        "_source": false,
+        "sort": [
+          "r"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 7,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 4,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxih-a",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  1
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 3,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            5
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 2
+                          },
+                          "_score": null,
+                          "sort": [
+                            -3
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            -9223372036854775808
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  2
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 2,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            100
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            50
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  3
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            7
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  5
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "5",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            2
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxih-a/_search",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "n",
+            "query": {
+              "match_all": {}
+            },
+            "inner_hits": {
+              "sort": [
+                {
+                  "n.v": {
+                    "order": "desc",
+                    "mode": "min"
+                  }
+                }
+              ],
+              "_source": false,
+              "size": 5
+            }
+          }
+        },
+        "_source": false,
+        "sort": [
+          "r"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 8,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 4,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxih-a",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  1
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 3,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            5
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 2
+                          },
+                          "_score": null,
+                          "sort": [
+                            -3
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            -9223372036854775808
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  2
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 2,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            50
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            1
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  3
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            7
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  5
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "5",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            2
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxih-a/_search",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "n",
+            "query": {
+              "match_all": {}
+            },
+            "inner_hits": {
+              "sort": [
+                {
+                  "n.v": {
+                    "order": "asc",
+                    "mode": "max"
+                  }
+                }
+              ],
+              "_source": false,
+              "size": 5
+            }
+          }
+        },
+        "_source": false,
+        "sort": [
+          "r"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 5,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 4,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxih-a",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  1
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 3,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 2
+                          },
+                          "_score": null,
+                          "sort": [
+                            -3
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            5
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            9223372036854775807
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  2
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 2,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            50
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            100
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  3
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            7
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  5
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "5",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            2
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxih-a/_search",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "n",
+            "query": {
+              "match_all": {}
+            },
+            "inner_hits": {
+              "sort": [
+                {
+                  "n.v": {
+                    "order": "asc",
+                    "missing": 42
+                  }
+                }
+              ],
+              "_source": false,
+              "size": 5
+            }
+          }
+        },
+        "_source": false,
+        "sort": [
+          "r"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 9,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 4,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxih-a",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  1
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 3,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 2
+                          },
+                          "_score": null,
+                          "sort": [
+                            -3
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            5
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            42
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  2
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 2,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            1
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            50
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  3
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            7
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  5
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "5",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            2
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxih-a/_search",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "n",
+            "query": {
+              "match_all": {}
+            },
+            "inner_hits": {
+              "sort": [
+                {
+                  "n.v": {
+                    "order": "asc",
+                    "mode": "sum"
+                  }
+                }
+              ],
+              "_source": false,
+              "size": 5
+            }
+          }
+        },
+        "_source": false,
+        "sort": [
+          "r"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 7,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 4,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxih-a",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  1
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 3,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 2
+                          },
+                          "_score": null,
+                          "sort": [
+                            -3
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            5
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            9223372036854775807
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  2
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 2,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            50
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            101
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  3
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            7
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  5
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "5",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            2
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxih-a/_search",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "n",
+            "query": {
+              "match_all": {}
+            },
+            "inner_hits": {
+              "sort": [
+                {
+                  "n.v": {
+                    "order": "asc",
+                    "mode": "avg"
+                  }
+                }
+              ],
+              "_source": false,
+              "size": 5
+            }
+          }
+        },
+        "_source": false,
+        "sort": [
+          "r"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 8,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 4,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxih-a",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  1
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 3,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 2
+                          },
+                          "_score": null,
+                          "sort": [
+                            -3
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            5
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            9223372036854775807
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  2
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 2,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            50
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            51
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  3
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            7
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  5
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "5",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            2
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxih-a/_search",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "n",
+            "query": {
+              "match": {
+                "n.t": "fox"
+              }
+            },
+            "inner_hits": {
+              "sort": [
+                {
+                  "_score": "asc"
+                }
+              ],
+              "_source": false
+            }
+          }
+        },
+        "_source": false,
+        "sort": [
+          "r"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 5,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxih-a",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  2
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 2,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            0.16786805
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            0.18360566
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  3
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            0.110856235
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxih-a/_search",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "n",
+            "query": {
+              "match": {
+                "n.t": "fox"
+              }
+            },
+            "inner_hits": {
+              "sort": [
+                {
+                  "_score": "desc"
+                },
+                {
+                  "n.v": "asc"
+                }
+              ],
+              "_source": false
+            }
+          }
+        },
+        "_source": false,
+        "sort": [
+          "r"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 5,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxih-a",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  2
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 2,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            0.18360566,
+                            1
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 1
+                          },
+                          "_score": null,
+                          "sort": [
+                            0.16786805,
+                            50
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  3
+                ],
+                "inner_hits": {
+                  "n": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_nested": {
+                            "field": "n",
+                            "offset": 0
+                          },
+                          "_score": null,
+                          "sort": [
+                            0.110856235,
+                            7
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxih-a/_search",
+      "body": {
+        "collapse": {
+          "field": "k",
+          "inner_hits": {
+            "name": "g",
+            "size": 5,
+            "sort": [
+              "r"
+            ],
+            "_source": false
+          }
+        },
+        "query": {
+          "bool": {
+            "should": [
+              {
+                "match_all": {}
+              },
+              {
+                "nested": {
+                  "path": "nn",
+                  "query": {
+                    "match_all": {}
+                  },
+                  "inner_hits": {
+                    "_source": false
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "_source": false,
+        "sort": [
+          "k"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 54,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 5,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxih-a",
+                "_id": "1",
+                "_score": null,
+                "fields": {
+                  "k": [
+                    "g1"
+                  ]
+                },
+                "sort": [
+                  "g1"
+                ],
+                "inner_hits": {
+                  "nn": {
+                    "hits": {
+                      "total": {
+                        "value": 1,
+                        "relation": "eq"
+                      },
+                      "max_score": 1.0,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_nested": {
+                            "field": "nn",
+                            "offset": 0
+                          },
+                          "_score": 1.0
+                        }
+                      ]
+                    }
+                  },
+                  "g": {
+                    "hits": {
+                      "total": {
+                        "value": 3,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_score": null,
+                          "sort": [
+                            1
+                          ],
+                          "inner_hits": {
+                            "nn": {
+                              "hits": {
+                                "total": {
+                                  "value": 1,
+                                  "relation": "eq"
+                                },
+                                "max_score": 1.0,
+                                "hits": [
+                                  {
+                                    "_index": "fxih-a",
+                                    "_id": "1",
+                                    "_nested": {
+                                      "field": "nn",
+                                      "offset": 0
+                                    },
+                                    "_score": 1.0
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_score": null,
+                          "sort": [
+                            2
+                          ],
+                          "inner_hits": {
+                            "nn": {
+                              "hits": {
+                                "total": {
+                                  "value": 1,
+                                  "relation": "eq"
+                                },
+                                "max_score": 1.0,
+                                "hits": [
+                                  {
+                                    "_index": "fxih-a",
+                                    "_id": "2",
+                                    "_nested": {
+                                      "field": "nn",
+                                      "offset": 0
+                                    },
+                                    "_score": 1.0
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "5",
+                          "_score": null,
+                          "sort": [
+                            5
+                          ],
+                          "inner_hits": {
+                            "nn": {
+                              "hits": {
+                                "total": {
+                                  "value": 0,
+                                  "relation": "eq"
+                                },
+                                "max_score": null,
+                                "hits": []
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "3",
+                "_score": null,
+                "fields": {
+                  "k": [
+                    "g2"
+                  ]
+                },
+                "sort": [
+                  "g2"
+                ],
+                "inner_hits": {
+                  "nn": {
+                    "hits": {
+                      "total": {
+                        "value": 2,
+                        "relation": "eq"
+                      },
+                      "max_score": 1.0,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_nested": {
+                            "field": "nn",
+                            "offset": 0
+                          },
+                          "_score": 1.0
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_nested": {
+                            "field": "nn",
+                            "offset": 1
+                          },
+                          "_score": 1.0
+                        }
+                      ]
+                    }
+                  },
+                  "g": {
+                    "hits": {
+                      "total": {
+                        "value": 2,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_score": null,
+                          "sort": [
+                            3
+                          ],
+                          "inner_hits": {
+                            "nn": {
+                              "hits": {
+                                "total": {
+                                  "value": 2,
+                                  "relation": "eq"
+                                },
+                                "max_score": 1.0,
+                                "hits": [
+                                  {
+                                    "_index": "fxih-a",
+                                    "_id": "3",
+                                    "_nested": {
+                                      "field": "nn",
+                                      "offset": 0
+                                    },
+                                    "_score": 1.0
+                                  },
+                                  {
+                                    "_index": "fxih-a",
+                                    "_id": "3",
+                                    "_nested": {
+                                      "field": "nn",
+                                      "offset": 1
+                                    },
+                                    "_score": 1.0
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "4",
+                          "_score": null,
+                          "sort": [
+                            4
+                          ],
+                          "inner_hits": {
+                            "nn": {
+                              "hits": {
+                                "total": {
+                                  "value": 0,
+                                  "relation": "eq"
+                                },
+                                "max_score": null,
+                                "hits": []
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxih-a/_search",
+      "body": {
+        "runtime_mappings": {
+          "rt": {
+            "type": "long",
+            "script": {
+              "source": "emit(doc['r'].value * 2)"
+            }
+          },
+          "rk": {
+            "type": "keyword",
+            "script": {
+              "source": "emit('x' + doc['k'].value)"
+            }
+          }
+        },
+        "query": {
+          "range": {
+            "rt": {
+              "gte": 0
+            }
+          }
+        },
+        "collapse": {
+          "field": "k",
+          "inner_hits": [
+            {
+              "name": "top",
+              "size": 2,
+              "sort": [
+                {
+                  "rt": "desc"
+                }
+              ],
+              "_source": false
+            },
+            {
+              "name": "kw",
+              "size": 1,
+              "_source": false,
+              "sort": [
+                "r"
+              ]
+            }
+          ]
+        },
+        "_source": false,
+        "sort": [
+          "k"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 47,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 5,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxih-a",
+                "_id": "1",
+                "_score": null,
+                "fields": {
+                  "k": [
+                    "g1"
+                  ]
+                },
+                "sort": [
+                  "g1"
+                ],
+                "inner_hits": {
+                  "top": {
+                    "hits": {
+                      "total": {
+                        "value": 3,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "5",
+                          "_score": null,
+                          "sort": [
+                            10
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_score": null,
+                          "sort": [
+                            4
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "kw": {
+                    "hits": {
+                      "total": {
+                        "value": 3,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_score": null,
+                          "sort": [
+                            1
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "_index": "fxih-a",
+                "_id": "3",
+                "_score": null,
+                "fields": {
+                  "k": [
+                    "g2"
+                  ]
+                },
+                "sort": [
+                  "g2"
+                ],
+                "inner_hits": {
+                  "top": {
+                    "hits": {
+                      "total": {
+                        "value": 2,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "4",
+                          "_score": null,
+                          "sort": [
+                            8
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_score": null,
+                          "sort": [
+                            6
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "kw": {
+                    "hits": {
+                      "total": {
+                        "value": 2,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "3",
+                          "_score": null,
+                          "sort": [
+                            3
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxih-a/_search",
+      "body": {
+        "runtime_mappings": {
+          "rk": {
+            "type": "keyword",
+            "script": {
+              "source": "emit('x' + doc['k'].value)"
+            }
+          }
+        },
+        "query": {
+          "term": {
+            "rk": "xg1"
+          }
+        },
+        "collapse": {
+          "field": "k",
+          "inner_hits": {
+            "name": "top",
+            "_source": false,
+            "sort": [
+              "r"
+            ]
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 9,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "fxih-a",
+                "_id": "1",
+                "_score": 1.0,
+                "fields": {
+                  "k": [
+                    "g1"
+                  ]
+                },
+                "inner_hits": {
+                  "top": {
+                    "hits": {
+                      "total": {
+                        "value": 3,
+                        "relation": "eq"
+                      },
+                      "max_score": null,
+                      "hits": [
+                        {
+                          "_index": "fxih-a",
+                          "_id": "1",
+                          "_score": null,
+                          "sort": [
+                            1
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "2",
+                          "_score": null,
+                          "sort": [
+                            2
+                          ]
+                        },
+                        {
+                          "_index": "fxih-a",
+                          "_id": "5",
+                          "_score": null,
+                          "sort": [
+                            5
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/fxih-a",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,2009 @@
+{
+  "description" : "ES|QL: source commands, processing commands, functions, aggregations, formats, params, errors",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-emp",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "emp_no" : {
+              "type" : "integer"
+            },
+            "first_name" : {
+              "type" : "keyword"
+            },
+            "last_name" : {
+              "type" : "text",
+              "fields" : {
+                "keyword" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "gender" : {
+              "type" : "keyword"
+            },
+            "salary" : {
+              "type" : "long"
+            },
+            "height" : {
+              "type" : "double"
+            },
+            "hire_date" : {
+              "type" : "date"
+            },
+            "languages" : {
+              "type" : "integer"
+            },
+            "still_hired" : {
+              "type" : "boolean"
+            },
+            "dept" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-emp"
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-emp/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"10001\"}}\n{\"emp_no\": 10001, \"first_name\": \"Georgi\", \"last_name\": \"Facello\", \"gender\": \"M\", \"salary\": 57305, \"height\": 2.03, \"hire_date\": \"1986-06-26T00:00:00Z\", \"languages\": 2, \"still_hired\": true, \"dept\": \"eng\"}\n{\"index\": {\"_id\": \"10002\"}}\n{\"emp_no\": 10002, \"first_name\": \"Bezalel\", \"last_name\": \"Simmel\", \"gender\": \"F\", \"salary\": 56371, \"height\": 2.08, \"hire_date\": \"1985-11-21T00:00:00Z\", \"languages\": 5, \"still_hired\": true, \"dept\": \"sales\"}\n{\"index\": {\"_id\": \"10003\"}}\n{\"emp_no\": 10003, \"first_name\": \"Parto\", \"last_name\": \"Bamford\", \"gender\": \"M\", \"salary\": 61805, \"height\": 1.83, \"hire_date\": \"1986-08-28T00:00:00Z\", \"languages\": 4, \"still_hired\": false, \"dept\": \"eng\"}\n{\"index\": {\"_id\": \"10004\"}}\n{\"emp_no\": 10004, \"first_name\": \"Chirstian\", \"last_name\": \"Koblick\", \"gender\": \"M\", \"salary\": 36174, \"height\": 1.78, \"hire_date\": \"1986-12-01T00:00:00Z\", \"languages\": 5, \"still_hired\": true, \"dept\": \"ops\"}\n{\"index\": {\"_id\": \"10005\"}}\n{\"emp_no\": 10005, \"first_name\": \"Kyoichi\", \"last_name\": \"Maliniak\", \"gender\": \"M\", \"salary\": 63528, \"height\": 2.05, \"hire_date\": \"1989-09-12T00:00:00Z\", \"languages\": 1, \"still_hired\": true, \"dept\": \"sales\"}\n{\"index\": {\"_id\": \"10006\"}}\n{\"emp_no\": 10006, \"first_name\": \"Anneke\", \"last_name\": \"Preusig\", \"gender\": \"F\", \"salary\": 60335, \"height\": 1.56, \"hire_date\": \"1989-06-02T00:00:00Z\", \"languages\": 3, \"still_hired\": false, \"dept\": \"eng\"}\n{\"index\": {\"_id\": \"10007\"}}\n{\"emp_no\": 10007, \"first_name\": \"Tzvetan\", \"last_name\": \"Zielinski\", \"gender\": \"F\", \"salary\": 74572, \"height\": 1.7, \"hire_date\": \"1989-02-10T00:00:00Z\", \"languages\": 4, \"still_hired\": true, \"dept\": \"ops\"}\n{\"index\": {\"_id\": \"10008\"}}\n{\"emp_no\": 10008, \"first_name\": \"Saniya\", \"last_name\": \"Kalloufi\", \"gender\": null, \"salary\": 43906, \"height\": 2.1, \"hire_date\": \"1994-09-15T00:00:00Z\", \"languages\": null, \"still_hired\": false, \"dept\": \"eng\"}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | SORT emp_no | LIMIT 3"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747832867,
+        "rows_emitted" : 27,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 3551861,
+        "start_time_in_millis" : 1792747832853,
+        "expiration_time_in_millis" : 1793179832808,
+        "columns" : [
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          },
+          {
+            "name" : "emp_no",
+            "type" : "integer"
+          },
+          {
+            "name" : "first_name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "gender",
+            "type" : "keyword"
+          },
+          {
+            "name" : "height",
+            "type" : "double"
+          },
+          {
+            "name" : "hire_date",
+            "type" : "date"
+          },
+          {
+            "name" : "languages",
+            "type" : "integer"
+          },
+          {
+            "name" : "last_name",
+            "type" : "text"
+          },
+          {
+            "name" : "last_name.keyword",
+            "type" : "keyword"
+          },
+          {
+            "name" : "salary",
+            "type" : "long"
+          },
+          {
+            "name" : "still_hired",
+            "type" : "boolean"
+          }
+        ],
+        "values" : [
+          [
+            "eng",
+            10001,
+            "Georgi",
+            "M",
+            2.03,
+            "1986-06-26T00:00:00.000Z",
+            2,
+            "Facello",
+            "Facello",
+            57305,
+            true
+          ],
+          [
+            "sales",
+            10002,
+            "Bezalel",
+            "F",
+            2.08,
+            "1985-11-21T00:00:00.000Z",
+            5,
+            "Simmel",
+            "Simmel",
+            56371,
+            true
+          ],
+          [
+            "eng",
+            10003,
+            "Parto",
+            "M",
+            1.83,
+            "1986-08-28T00:00:00.000Z",
+            4,
+            "Bamford",
+            "Bamford",
+            61805,
+            false
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | KEEP emp_no, first_name, salary | SORT salary DESC | LIMIT 4"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747832886,
+        "rows_emitted" : 40,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 3961433,
+        "start_time_in_millis" : 1792747832871,
+        "expiration_time_in_millis" : 1793179832808,
+        "columns" : [
+          {
+            "name" : "emp_no",
+            "type" : "integer"
+          },
+          {
+            "name" : "first_name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "salary",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            10007,
+            "Tzvetan",
+            74572
+          ],
+          [
+            10005,
+            "Kyoichi",
+            63528
+          ],
+          [
+            10003,
+            "Parto",
+            61805
+          ],
+          [
+            10006,
+            "Anneke",
+            60335
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE salary > 60000 | KEEP first_name, salary | SORT first_name"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747832906,
+        "rows_emitted" : 36,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 3590582,
+        "start_time_in_millis" : 1792747832890,
+        "expiration_time_in_millis" : 1793179832808,
+        "columns" : [
+          {
+            "name" : "first_name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "salary",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            "Anneke",
+            60335
+          ],
+          [
+            "Kyoichi",
+            63528
+          ],
+          [
+            "Parto",
+            61805
+          ],
+          [
+            "Tzvetan",
+            74572
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS c = COUNT(*), avg_s = AVG(salary), max_h = MAX(height) BY dept | SORT dept"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747832927,
+        "rows_emitted" : 56,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 2525254,
+        "start_time_in_millis" : 1792747832911,
+        "expiration_time_in_millis" : 1793179832808,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "avg_s",
+            "type" : "double"
+          },
+          {
+            "name" : "max_h",
+            "type" : "double"
+          },
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            4,
+            55837.75,
+            2.1,
+            "eng"
+          ],
+          [
+            2,
+            55373.0,
+            1.78,
+            "ops"
+          ],
+          [
+            2,
+            59949.5,
+            2.08,
+            "sales"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS COUNT(*)"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747832936,
+        "rows_emitted" : 6,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 526880,
+        "start_time_in_millis" : 1792747832930,
+        "expiration_time_in_millis" : 1793179832808,
+        "columns" : [
+          {
+            "name" : "COUNT(*)",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS c = COUNT(gender), d = COUNT_DISTINCT(gender), mn = MIN(hire_date), s = SUM(languages)"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747832948,
+        "rows_emitted" : 22,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 1483977,
+        "start_time_in_millis" : 1792747832939,
+        "expiration_time_in_millis" : 1793179832808,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "d",
+            "type" : "long"
+          },
+          {
+            "name" : "mn",
+            "type" : "date"
+          },
+          {
+            "name" : "s",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            7,
+            2,
+            "1985-11-21T00:00:00.000Z",
+            24
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL k = salary / 1000, n = CONCAT(first_name, \" \", last_name) | KEEP emp_no, k, n | SORT emp_no | LIMIT 2"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833118,
+        "rows_emitted" : 24,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 41000968,
+        "start_time_in_millis" : 1792747833014,
+        "expiration_time_in_millis" : 1793179833008,
+        "columns" : [
+          {
+            "name" : "emp_no",
+            "type" : "integer"
+          },
+          {
+            "name" : "k",
+            "type" : "long"
+          },
+          {
+            "name" : "n",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            10001,
+            57,
+            "Georgi Facello"
+          ],
+          [
+            10002,
+            56,
+            "Bezalel Simmel"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | DROP last_name*, height | SORT emp_no | LIMIT 1"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833134,
+        "rows_emitted" : 10,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 2246094,
+        "start_time_in_millis" : 1792747833122,
+        "expiration_time_in_millis" : 1793179833008,
+        "columns" : [
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          },
+          {
+            "name" : "emp_no",
+            "type" : "integer"
+          },
+          {
+            "name" : "first_name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "gender",
+            "type" : "keyword"
+          },
+          {
+            "name" : "hire_date",
+            "type" : "date"
+          },
+          {
+            "name" : "languages",
+            "type" : "integer"
+          },
+          {
+            "name" : "salary",
+            "type" : "long"
+          },
+          {
+            "name" : "still_hired",
+            "type" : "boolean"
+          }
+        ],
+        "values" : [
+          [
+            "eng",
+            10001,
+            "Georgi",
+            "M",
+            "1986-06-26T00:00:00.000Z",
+            2,
+            57305,
+            true
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | RENAME first_name AS fn | KEEP fn, emp_no | SORT emp_no | LIMIT 2"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833153,
+        "rows_emitted" : 20,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 2502499,
+        "start_time_in_millis" : 1792747833139,
+        "expiration_time_in_millis" : 1793179833008,
+        "columns" : [
+          {
+            "name" : "fn",
+            "type" : "keyword"
+          },
+          {
+            "name" : "emp_no",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            "Georgi",
+            10001
+          ],
+          [
+            "Bezalel",
+            10002
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE gender IS NULL | KEEP emp_no, gender, languages"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833165,
+        "rows_emitted" : 7,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 1128136,
+        "start_time_in_millis" : 1792747833156,
+        "expiration_time_in_millis" : 1793179833008,
+        "columns" : [
+          {
+            "name" : "emp_no",
+            "type" : "integer"
+          },
+          {
+            "name" : "gender",
+            "type" : "keyword"
+          },
+          {
+            "name" : "languages",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            10008,
+            null,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE first_name LIKE \"*a*\" AND still_hired == true | KEEP first_name | SORT first_name"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833185,
+        "rows_emitted" : 27,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 2415458,
+        "start_time_in_millis" : 1792747833170,
+        "expiration_time_in_millis" : 1793179833008,
+        "columns" : [
+          {
+            "name" : "first_name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "Bezalel"
+          ],
+          [
+            "Chirstian"
+          ],
+          [
+            "Tzvetan"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL y = DATE_EXTRACT(\"year\", hire_date) | STATS c = COUNT(*) BY y | SORT y"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833199,
+        "rows_emitted" : 48,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 1630420,
+        "start_time_in_millis" : 1792747833188,
+        "expiration_time_in_millis" : 1793179833008,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "y",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            1985
+          ],
+          [
+            3,
+            1986
+          ],
+          [
+            3,
+            1989
+          ],
+          [
+            1,
+            1994
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL b = CASE(salary > 60000, \"high\", salary > 50000, \"mid\", \"low\") | STATS c = COUNT(*) BY b | SORT b"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833219,
+        "rows_emitted" : 42,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 2557743,
+        "start_time_in_millis" : 1792747833204,
+        "expiration_time_in_millis" : 1793179833208,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "b",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            4,
+            "high"
+          ],
+          [
+            2,
+            "low"
+          ],
+          [
+            2,
+            "mid"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS avg_l = AVG(languages) BY gender | SORT gender NULLS FIRST"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833240,
+        "rows_emitted" : 40,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 2048817,
+        "start_time_in_millis" : 1792747833224,
+        "expiration_time_in_millis" : 1793179833208,
+        "columns" : [
+          {
+            "name" : "avg_l",
+            "type" : "double"
+          },
+          {
+            "name" : "gender",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            null,
+            null
+          ],
+          [
+            4.0,
+            "F"
+          ],
+          [
+            3.0,
+            "M"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | SORT height DESC, emp_no | KEEP emp_no, height | LIMIT 3"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833255,
+        "rows_emitted" : 27,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 2046141,
+        "start_time_in_millis" : 1792747833244,
+        "expiration_time_in_millis" : 1793179833208,
+        "columns" : [
+          {
+            "name" : "emp_no",
+            "type" : "integer"
+          },
+          {
+            "name" : "height",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            10008,
+            2.1
+          ],
+          [
+            10002,
+            2.08
+          ],
+          [
+            10005,
+            2.05
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL r = ROUND(height, 1), u = TO_UPPER(first_name), l = LENGTH(first_name) | KEEP r, u, l | SORT u | LIMIT 3"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833275,
+        "rows_emitted" : 64,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 2002691,
+        "start_time_in_millis" : 1792747833261,
+        "expiration_time_in_millis" : 1793179833208,
+        "columns" : [
+          {
+            "name" : "r",
+            "type" : "double"
+          },
+          {
+            "name" : "u",
+            "type" : "keyword"
+          },
+          {
+            "name" : "l",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1.6,
+            "ANNEKE",
+            6
+          ],
+          [
+            2.1,
+            "BEZALEL",
+            7
+          ],
+          [
+            1.8,
+            "CHIRSTIAN",
+            9
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL bucket = DATE_TRUNC(1 year, hire_date) | STATS c = COUNT(*) BY bucket | SORT bucket"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833356,
+        "rows_emitted" : 34,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 3473115,
+        "start_time_in_millis" : 1792747833278,
+        "expiration_time_in_millis" : 1793179833208,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "bucket",
+            "type" : "date"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            "1985-01-01T00:00:00.000Z"
+          ],
+          [
+            3,
+            "1986-01-01T00:00:00.000Z"
+          ],
+          [
+            3,
+            "1989-01-01T00:00:00.000Z"
+          ],
+          [
+            1,
+            "1994-01-01T00:00:00.000Z"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "ROW a = 1, b = \"two\", c = null, d = [1, 2, 3]"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833363,
+        "rows_emitted" : 1,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 73527,
+        "start_time_in_millis" : 1792747833361,
+        "expiration_time_in_millis" : 1793179833208,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "b",
+            "type" : "keyword"
+          },
+          {
+            "name" : "c",
+            "type" : "null"
+          },
+          {
+            "name" : "d",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            "two",
+            null,
+            [
+              1,
+              2,
+              3
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "ROW a = 5 | EVAL b = a * 2, c = a / 2, d = a % 3, e = -a"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833370,
+        "rows_emitted" : 5,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 72345,
+        "start_time_in_millis" : 1792747833366,
+        "expiration_time_in_millis" : 1793179833208,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "b",
+            "type" : "integer"
+          },
+          {
+            "name" : "c",
+            "type" : "integer"
+          },
+          {
+            "name" : "d",
+            "type" : "integer"
+          },
+          {
+            "name" : "e",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            5,
+            10,
+            2,
+            2,
+            -5
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "ROW x = 1.5 | EVAL y = TO_INTEGER(x), z = TO_STRING(x), w = TO_DOUBLE(\"3.25\")"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833378,
+        "rows_emitted" : 4,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 89357,
+        "start_time_in_millis" : 1792747833374,
+        "expiration_time_in_millis" : 1793179833208,
+        "columns" : [
+          {
+            "name" : "x",
+            "type" : "double"
+          },
+          {
+            "name" : "y",
+            "type" : "integer"
+          },
+          {
+            "name" : "z",
+            "type" : "keyword"
+          },
+          {
+            "name" : "w",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            1.5,
+            2,
+            "1.5",
+            3.25
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "SHOW INFO"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833382,
+        "rows_emitted" : 1,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 88754,
+        "start_time_in_millis" : 1792747833381,
+        "expiration_time_in_millis" : 1793179833208,
+        "columns" : [
+          {
+            "name" : "version",
+            "type" : "keyword"
+          },
+          {
+            "name" : "date",
+            "type" : "keyword"
+          },
+          {
+            "name" : "hash",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "9.5.5",
+            "2026-09-30T22:12:03.984586187Z",
+            "48acba663b09e70b115dd879329141506c377890"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE emp_no IN (10001, 10003) | KEEP emp_no | SORT emp_no"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833462,
+        "rows_emitted" : 18,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 1763146,
+        "start_time_in_millis" : 1792747833386,
+        "expiration_time_in_millis" : 1793179833408,
+        "columns" : [
+          {
+            "name" : "emp_no",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            10001
+          ],
+          [
+            10003
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL c = COALESCE(gender, \"?\") | KEEP emp_no, c | SORT emp_no DESC | LIMIT 2"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833478,
+        "rows_emitted" : 22,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 1931939,
+        "start_time_in_millis" : 1792747833466,
+        "expiration_time_in_millis" : 1793179833408,
+        "columns" : [
+          {
+            "name" : "emp_no",
+            "type" : "integer"
+          },
+          {
+            "name" : "c",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            10008,
+            "?"
+          ],
+          [
+            10007,
+            "F"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS m = MEDIAN(salary), p = PERCENTILE(salary, 90)"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833492,
+        "rows_emitted" : 22,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 1396966,
+        "start_time_in_millis" : 1792747833482,
+        "expiration_time_in_millis" : 1793179833408,
+        "columns" : [
+          {
+            "name" : "m",
+            "type" : "double"
+          },
+          {
+            "name" : "p",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            58820.0,
+            66841.2
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp METADATA _id, _index | SORT emp_no | KEEP _id, _index | LIMIT 2"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833507,
+        "rows_emitted" : 20,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 2063864,
+        "start_time_in_millis" : 1792747833496,
+        "expiration_time_in_millis" : 1793179833408,
+        "columns" : [
+          {
+            "name" : "_id",
+            "type" : "keyword"
+          },
+          {
+            "name" : "_index",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "10001",
+            "compat-xpack-emp"
+          ],
+          [
+            "10002",
+            "compat-xpack-emp"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | LIMIT 0"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833513,
+        "rows_emitted" : 0,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 37230,
+        "start_time_in_millis" : 1792747833510,
+        "expiration_time_in_millis" : 1793179833408,
+        "columns" : [
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          },
+          {
+            "name" : "emp_no",
+            "type" : "integer"
+          },
+          {
+            "name" : "first_name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "gender",
+            "type" : "keyword"
+          },
+          {
+            "name" : "height",
+            "type" : "double"
+          },
+          {
+            "name" : "hire_date",
+            "type" : "date"
+          },
+          {
+            "name" : "languages",
+            "type" : "integer"
+          },
+          {
+            "name" : "last_name",
+            "type" : "text"
+          },
+          {
+            "name" : "last_name.keyword",
+            "type" : "keyword"
+          },
+          {
+            "name" : "salary",
+            "type" : "long"
+          },
+          {
+            "name" : "still_hired",
+            "type" : "boolean"
+          }
+        ],
+        "values" : [ ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | KEEP nope"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:30: Unknown column [nope]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:30: Unknown column [nope]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-missing"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Unknown index [compat-xpack-missing]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Unknown index [compat-xpack-missing]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE salary > \"abc\""
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:31: first argument of [salary > \"abc\"] is [numeric] so second argument must also be [numeric] but was [keyword]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:31: first argument of [salary > \"abc\"] is [numeric] so second argument must also be [numeric] but was [keyword]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | STATS x = AVG(first_name)"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:35: argument of [AVG(first_name)] must be [aggregate_metric_double, exponential_histogram, tdigest or numeric except unsigned_long or counter types], found value [first_name] type [keyword]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:35: argument of [AVG(first_name)] must be [aggregate_metric_double, exponential_histogram, tdigest or numeric except unsigned_long or counter types], found value [first_name] type [keyword]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | SORT"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:29: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:29: mismatched input '<EOF>' expecting {QUOTED_STRING, INTEGER_LITERAL, DECIMAL_LITERAL, 'false', 'first', 'last', 'not', 'null', '?', 'true', '+', '-', '??', NAMED_OR_POSITIONAL_PARAM, NAMED_OR_POSITIONAL_DOUBLE_PARAMS, '[', '(', UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}",
+          "caused_by" : {
+            "type" : "input_mismatch_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | EVAL x = 1 / 0 | KEEP x | LIMIT 1"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833552,
+        "rows_emitted" : 8,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 802211,
+        "start_time_in_millis" : 1792747833543,
+        "expiration_time_in_millis" : 1793179833408,
+        "columns" : [
+          {
+            "name" : "x",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE MATCH(last_name, \"Facello\") | KEEP emp_no"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833566,
+        "rows_emitted" : 7,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 1079277,
+        "start_time_in_millis" : 1792747833556,
+        "expiration_time_in_millis" : 1793179833408,
+        "columns" : [
+          {
+            "name" : "emp_no",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            10001
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?format=csv",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | KEEP emp_no, first_name | SORT emp_no | LIMIT 2"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200
+    },
+    {
+      "req" : "POST /_query?format=txt",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | KEEP emp_no, first_name | SORT emp_no | LIMIT 2"
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | KEEP emp_no, first_name | SORT emp_no | LIMIT 2",
+        "columnar" : true
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833661,
+        "rows_emitted" : 20,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 2725596,
+        "start_time_in_millis" : 1792747833647,
+        "expiration_time_in_millis" : 1793179833608,
+        "columns" : [
+          {
+            "name" : "emp_no",
+            "type" : "integer"
+          },
+          {
+            "name" : "first_name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            10001,
+            10002
+          ],
+          [
+            "Georgi",
+            "Bezalel"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | WHERE emp_no == ?n | KEEP first_name",
+        "params" : [
+          {
+            "n" : 10002
+          }
+        ]
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833673,
+        "rows_emitted" : 7,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 1084085,
+        "start_time_in_millis" : 1792747833664,
+        "expiration_time_in_millis" : 1793179833608,
+        "columns" : [
+          {
+            "name" : "first_name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "Bezalel"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=-took,-documents_found,-values_loaded",
+      "body" : {
+        "query" : "FROM compat-xpack-emp | KEEP emp_no | SORT emp_no | LIMIT 1",
+        "filter" : {
+          "term" : {
+            "dept" : "ops"
+          }
+        }
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "completion_time_in_millis" : 1792747833688,
+        "rows_emitted" : 9,
+        "bytes_read" : 0,
+        "read_nanos" : 0,
+        "cpu_nanos" : 1556502,
+        "start_time_in_millis" : 1792747833677,
+        "expiration_time_in_millis" : 1793179833608,
+        "columns" : [
+          {
+            "name" : "emp_no",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            10004
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query",
+      "body" : {
+        "query" : "ROW a=1",
+        "foo" : 1
+      },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:20] [esql/query] unknown field [foo]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:20] [esql/query] unknown field [foo]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query",
+      "body" : { },
+      "mask" : [
+        "completion_time_in_millis",
+        "expiration_time_in_millis",
+        "rows_emitted",
+        "cpu_nanos",
+        "bytes_read",
+        "read_nanos",
+        "took",
+        "documents_found",
+        "values_loaded"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: [query] is required;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: [query] is required;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-emp",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

@@ -1,0 +1,5350 @@
+[
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"a c <em>x</em> b"
+]
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>c</em> <em>x</em> <em>b</em>"
+]
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {},
+"fragments": [
+"a c x <em>b</em>"
+]
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> c x <em>b</em>"
+]
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"a c <em>x</em> b"
+]
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"a c <em>x</em> b"
+]
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"a c <em>x</em> b"
+]
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"a c <em>x</em> b"
+]
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> c x <em>b</em>"
+]
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a c x b</em>"
+]
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> c x <em>b</em>"
+]
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a c x b</em>"
+]
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> c <em>x</em> <em>b</em>"
+]
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> c x <em>b</em>"
+]
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>c</em> x <em>b</em>"
+]
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a c x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>c</em> x b"
+]
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {},
+"fragments": [
+"a <em>b</em>"
+]
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em>"
+]
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b</em>"
+]
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em>"
+]
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b</em>"
+]
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em>"
+]
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b</em>"
+]
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em>"
+]
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b</em>"
+]
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em>"
+]
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em>"
+]
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a a</em> <em>b</em>"
+]
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>a</em> <em>b</em>"
+]
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"a <em>a b</em>"
+]
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>a</em> <em>b</em>"
+]
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"a <em>a b</em>"
+]
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"a <em>a</em> <em>b</em>"
+]
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": [
+"a <em>a b</em>"
+]
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>a</em> <em>b</em>"
+]
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {},
+"fragments": [
+"a <em>a b</em>"
+]
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>a</em> <em>b</em>"
+]
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a a b</em>"
+]
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>a</em> <em>b</em>"
+]
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a a b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"b a <em>x</em> a"
+]
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"b a <em>x</em> a"
+]
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>b</em> <em>a x a</em>"
+]
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>b</em> <em>a</em> x <em>a</em>"
+]
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"b a <em>x</em> a"
+]
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>b</em> <em>a</em> <em>x</em> a"
+]
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"b a <em>x</em> a"
+]
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"b a <em>x</em> a"
+]
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>b a</em> x a"
+]
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>b</em> <em>a</em> x a"
+]
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>b a</em> x a"
+]
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>b</em> <em>a</em> x a"
+]
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>b</em> <em>a</em> <em>x</em> a"
+]
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>b</em> <em>a</em> x a"
+]
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"b a x a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>x</em> <em>a y b z c</em>"
+]
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>x</em> <em>a</em> y <em>b</em> z <em>c</em>"
+]
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {},
+"fragments": [
+"x a y <em>b</em> z c"
+]
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"x <em>a</em> y <em>b</em> z c"
+]
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>x</em> <em>a y b</em> z c"
+]
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>x</em> <em>a</em> y <em>b</em> z c"
+]
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>x</em> a y b z c"
+]
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>x</em> a y b z c"
+]
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"x <em>a</em> y <em>b</em> z c"
+]
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {},
+"fragments": [
+"x <em>a y b</em> z c"
+]
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"x <em>a</em> y <em>b</em> z c"
+]
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>x</em> <em>a</em> y <em>b</em> z c"
+]
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"x <em>a</em> y <em>b</em> z c"
+]
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {},
+"fragments": [
+"x a <em>y</em> b z c"
+]
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"x a <em>y</em> b z c"
+]
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"x a y b z c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>c</em> <em>b</em> <em>a</em>"
+]
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {},
+"fragments": [
+"c <em>b</em> a"
+]
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"c <em>b</em> <em>a</em>"
+]
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"c <em>b</em> <em>a</em>"
+]
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": [
+"c <em>b a</em>"
+]
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"c <em>b</em> <em>a</em>"
+]
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {},
+"fragments": [
+"c <em>b a</em>"
+]
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"c <em>b</em> <em>a</em>"
+]
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"c <em>b</em> <em>a</em>"
+]
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>c</em> <em>b</em> <em>a</em>"
+]
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>c b a</em>"
+]
+},
+{
+"values": [
+"c b a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>c</em> b <em>a</em>"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b a b c</em>"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> <em>a</em> <em>b</em> <em>c</em>"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b a</em> <em>b</em> c"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> <em>a</em> <em>b</em> c"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b</em> <em>a b</em> c"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> <em>a</em> <em>b</em> c"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b</em> <em>a b</em> c"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> <em>a</em> <em>b</em> c"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": [
+"a <em>b a</em> b c"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> <em>a</em> <em>b</em> c"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {},
+"fragments": [
+"a b <em>a b c</em>"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"a b <em>a</em> <em>b</em> <em>c</em>"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b</em> <em>a b</em> c"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> <em>a</em> <em>b</em> c"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b a b</em> c"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> <em>a</em> <em>b</em> c"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {},
+"fragments": [
+"a b <em>a b c</em>"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"a <em>b</em> <em>a</em> <em>b</em> <em>c</em>"
+]
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a b a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"a b <em>a</em> b <em>c</em>"
+]
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"a <em>x</em> <em>x</em> <em>x</em> b"
+]
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"a <em>x</em> <em>x</em> <em>x</em> b"
+]
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {},
+"fragments": [
+"a x x x <em>b</em>"
+]
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> x x x <em>b</em>"
+]
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"a <em>x</em> <em>x</em> <em>x</em> b"
+]
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"a <em>x</em> <em>x</em> <em>x</em> b"
+]
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"a <em>x</em> <em>x</em> <em>x</em> b"
+]
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"a <em>x</em> <em>x</em> <em>x</em> b"
+]
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a x x x b</em>"
+]
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> x x x <em>b</em>"
+]
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> x x x <em>b</em>"
+]
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a x x x b"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>b</em> <em>b</em> <em>a a</em>"
+]
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>b</em> <em>b</em> <em>a</em> <em>a</em>"
+]
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>b</em> <em>b</em> <em>a</em> a"
+]
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": [
+"b <em>b a</em> a"
+]
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>b</em> <em>b</em> <em>a</em> a"
+]
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {},
+"fragments": [
+"b <em>b a</em> a"
+]
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>b</em> <em>b</em> <em>a</em> a"
+]
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>b</em> <em>b</em> <em>a</em> a"
+]
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"b b a a"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b c</em> <em>a b c</em>"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> <em>c</em> <em>a</em> <em>b</em> <em>c</em>"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {},
+"fragments": [
+"a <em>b</em> c a <em>b</em> c"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> c <em>a</em> <em>b</em> c"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b</em> c <em>a b</em> c"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> c <em>a</em> <em>b</em> c"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b</em> c <em>a b</em> c"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> c <em>a</em> <em>b</em> c"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b c a b</em> c"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> c <em>a</em> <em>b</em> c"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b c</em> <em>a b c</em>"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> <em>c</em> <em>a</em> <em>b</em> <em>c</em>"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b</em> c <em>a b</em> c"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> c <em>a</em> <em>b</em> c"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b c a b</em> c"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> c <em>a</em> <em>b</em> c"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>a b c</em> <em>a b c</em>"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> <em>b</em> <em>c</em> <em>a</em> <em>b</em> <em>c</em>"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": [
+"a b <em>c a</em> b c"
+]
+},
+{
+"values": [
+"a b c a b c"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>a</em> b <em>c</em> <em>a</em> b <em>c</em>"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>x</em> <em>b a c</em> y"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 2
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>x</em> <em>b</em> <em>a</em> <em>c</em> y"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {},
+"fragments": [
+"x <em>b</em> a c y"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a"
+],
+"slop": 1
+},
+{
+"term": "b"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"x <em>b</em> <em>a</em> c y"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>x</em> b a c y"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 1
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>x</em> <em>b</em> <em>a</em> c y"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {},
+"fragments": [
+"<em>x</em> b a c y"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 0
+},
+{
+"term": "x"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>x</em> b a c y"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": [
+"x <em>b a</em> c y"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"b",
+"a"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"x <em>b</em> <em>a</em> c y"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 0
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {},
+"fragments": [
+"x <em>b a</em> c y"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b"
+],
+"slop": 3
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"x <em>b</em> <em>a</em> c y"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"x",
+"b"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>x</em> <em>b</em> <em>a</em> c y"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"a",
+"b"
+],
+"slop": 2
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"x <em>b</em> <em>a</em> c y"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {},
+"fragments": [
+"x b a c <em>y</em>"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"a",
+"b",
+"c"
+],
+"slop": 1
+},
+{
+"term": "y"
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"x <em>b</em> <em>a</em> <em>c</em> <em>y</em>"
+]
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"x b a c y"
+],
+"q": {
+"should": [
+{
+"phrase": [
+"c",
+"a"
+],
+"slop": 1
+}
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"x b <em>a</em> <em>c</em> y"
+]
+}
+]

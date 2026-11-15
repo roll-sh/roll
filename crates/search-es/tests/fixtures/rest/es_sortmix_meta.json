@@ -1,0 +1,5185 @@
+{
+  "description" : "Elasticsearch 9.5.5: mixed-type sort merging (SortFieldValidation widening and incompatible types, numeric_type long on floats, unsigned_long mix), script_fields _id under stored_fields _none_, collapse on _data_stream_timestamp, docvalue_fields metadata fields",
+  "steps" : [
+    {
+      "req" : "PUT /esm-m1",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "long"
+            },
+            "g" : {
+              "type" : "date"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-m1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m2",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "double"
+            },
+            "g" : {
+              "type" : "date_nanos"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-m2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m4",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "float"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-m4"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m1/_doc/1?refresh=true",
+      "body" : {
+        "f" : 3,
+        "g" : "2020-01-01T00:00:00Z"
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-m1",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m2/_doc/1?refresh=true",
+      "body" : {
+        "f" : 2.5,
+        "g" : "2020-01-02T00:00:00.123456789Z"
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-m2",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m2/_doc/2?refresh=true",
+      "body" : {
+        "f" : -1.75
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-m2",
+        "_id" : "2",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m4/_doc/1?refresh=true",
+      "body" : {
+        "f" : 7.9
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-m4",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m4/_doc/2?refresh=true",
+      "body" : { },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-m4",
+        "_id" : "2",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc",
+              "numeric_type" : "long"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                3
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                -1
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "asc",
+              "numeric_type" : "long"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                -1
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                3
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc",
+              "numeric_type" : "long"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                -1
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m2,esm-m4/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc",
+              "numeric_type" : "long"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                7
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                -1
+              ]
+            },
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                -9223372036854775808
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m2,esm-m4/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "asc",
+              "numeric_type" : "long",
+              "missing" : "_first"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                -9223372036854775808
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                -1
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                7
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m2,esm-m4/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc",
+              "numeric_type" : "date"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                7
+              ]
+            },
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                3
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                -1
+              ]
+            },
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                -9223372036854775808
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m2,esm-m4/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc",
+              "numeric_type" : "double"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                7.900000095367432
+              ]
+            },
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                3.0
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                2.5
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                -1.75
+              ]
+            },
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                "-Infinity"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc",
+              "numeric_type" : "long"
+            }
+          }
+        ],
+        "search_after" : [
+          3
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                -1
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc",
+              "numeric_type" : "long"
+            }
+          }
+        ],
+        "search_after" : [
+          2
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                -1
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                3.0
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                2.5
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                -1.75
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m5",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-m5"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m5/_doc/1?refresh=true",
+      "body" : {
+        "f" : "abc"
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-m5",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m5/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [ ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "",
+          "phase" : "fetch",
+          "grouped" : true,
+          "failed_shards" : [ ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Can't sort on field [f]; the field has incompatible sort types: [LONG] and [STRING] across shards!"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m5/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc"
+            }
+          }
+        ],
+        "size" : 0
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m3",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "unsigned_long"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-m3"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m3/_doc/1?refresh=true",
+      "body" : {
+        "f" : 18446744073709551615
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-m3",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m6",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "scaled_float",
+              "scaling_factor" : 100
+            }
+          }
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-m6"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m6/_doc/1?refresh=true",
+      "body" : {
+        "f" : 1.23
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-m6",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m6/_doc/2?refresh=true",
+      "body" : { },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-m6",
+        "_id" : "2",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m7",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "integer"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-m7"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m7/_doc/1?refresh=true",
+      "body" : {
+        "f" : 5
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-m7",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m7/_doc/2?refresh=true",
+      "body" : { },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-m7",
+        "_id" : "2",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m3/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : "desc"
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [ ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "",
+          "phase" : "fetch",
+          "grouped" : true,
+          "failed_shards" : [ ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Can't do sort across indices, as a field has [unsigned_long] type in one index, and different type in another index!"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m3/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : "desc"
+          }
+        ],
+        "size" : 0
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m3/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : "desc"
+          }
+        ],
+        "query" : {
+          "term" : {
+            "f" : 3
+          }
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [ ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "",
+          "phase" : "fetch",
+          "grouped" : true,
+          "failed_shards" : [ ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Can't do sort across indices, as a field has [unsigned_long] type in one index, and different type in another index!"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m6/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : "desc"
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                3.0
+              ]
+            },
+            {
+              "_index" : "esm-m6",
+              "sort" : [
+                1.23
+              ]
+            },
+            {
+              "_index" : "esm-m6",
+              "sort" : [
+                "-Infinity"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m6/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : "asc"
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m6",
+              "sort" : [
+                1.23
+              ]
+            },
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                3.0
+              ]
+            },
+            {
+              "_index" : "esm-m6",
+              "sort" : [
+                "Infinity"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m7,esm-m1/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : "asc"
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                3
+              ]
+            },
+            {
+              "_index" : "esm-m7",
+              "sort" : [
+                5
+              ]
+            },
+            {
+              "_index" : "esm-m7",
+              "sort" : [
+                2147483647
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m7,esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : "asc"
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                -1.75
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                2.5
+              ]
+            },
+            {
+              "_index" : "esm-m7",
+              "sort" : [
+                5.0
+              ]
+            },
+            {
+              "_index" : "esm-m7",
+              "sort" : [
+                2.147483647E9
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m7,esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : "asc"
+          }
+        ],
+        "query" : {
+          "term" : {
+            "f" : 5
+          }
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m7",
+              "sort" : [
+                5
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m7,esm-m4/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc",
+              "numeric_type" : "double"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                7.900000095367432
+              ]
+            },
+            {
+              "_index" : "esm-m7",
+              "sort" : [
+                5.0
+              ]
+            },
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                "-Infinity"
+              ]
+            },
+            {
+              "_index" : "esm-m7",
+              "sort" : [
+                "-Infinity"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m4/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : "desc"
+          },
+          {
+            "_doc" : "asc"
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                7.900000095367432,
+                0
+              ]
+            },
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                3.0,
+                0
+              ]
+            },
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                "-Infinity",
+                1
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m5/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc"
+            }
+          }
+        ],
+        "query" : {
+          "term" : {
+            "f" : "abc"
+          }
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m5",
+              "sort" : [
+                "abc"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m2,esm-m5/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [ ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "",
+          "phase" : "fetch",
+          "grouped" : true,
+          "failed_shards" : [ ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Can't sort on field [f]; the field has incompatible sort types: [DOUBLE] and [STRING] across shards!"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc"
+            }
+          }
+        ],
+        "from" : 1,
+        "size" : 1
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                2.5
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "g" : {
+              "order" : "desc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                1577923200123456789
+              ]
+            },
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                1577836800000
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc"
+            }
+          }
+        ],
+        "collapse" : {
+          "field" : "f"
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                3.0
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                2.5
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                -1.75
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "g" : {
+              "order" : "desc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                1577923200123456789
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "g" : {
+              "order" : "asc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                1577923200123456789
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                9223372036854775807
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "g" : {
+              "order" : "desc",
+              "numeric_type" : "date_nanos"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                1577923200123456789
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "g" : {
+              "order" : "desc",
+              "numeric_type" : "date_nanos"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                1577923200123456789
+              ]
+            },
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                1577836800000000000
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "g" : {
+              "order" : "asc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                1577836800000
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                1577923200123456789
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                9223372036854775807
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m5,esm-m1/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "asc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [ ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "",
+          "phase" : "fetch",
+          "grouped" : true,
+          "failed_shards" : [ ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Can't sort on field [f]; the field has incompatible sort types: [LONG] and [STRING] across shards!"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m5,esm-m1/_search?filter_path=hits.hits._index,hits.hits.sort,error",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "asc"
+            }
+          }
+        ],
+        "size" : 1
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [ ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "",
+          "phase" : "fetch",
+          "grouped" : true,
+          "failed_shards" : [ ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Can't sort on field [f]; the field has incompatible sort types: [LONG] and [STRING] across shards!"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "asc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                -1.75
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                2.5
+              ]
+            },
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                3.0
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m4/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "asc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                3.0
+              ]
+            },
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                7.900000095367432
+              ]
+            },
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                "Infinity"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m2,esm-m4/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "asc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                -1.75
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                2.5
+              ]
+            },
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                7.900000095367432
+              ]
+            },
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                "Infinity"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m2,esm-m4/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "asc"
+            }
+          }
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                -1.75
+              ]
+            },
+            {
+              "_index" : "esm-m2",
+              "sort" : [
+                2.5
+              ]
+            },
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                3.0
+              ]
+            },
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                7.900000095367432
+              ]
+            },
+            {
+              "_index" : "esm-m4",
+              "sort" : [
+                "Infinity"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc"
+            }
+          }
+        ],
+        "size" : 1
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                3.0
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-m1,esm-m2/_search?filter_path=hits.hits._index,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "f" : {
+              "order" : "desc"
+            }
+          }
+        ],
+        "query" : {
+          "term" : {
+            "_index" : "esm-m1"
+          }
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_index" : "esm-m1",
+              "sort" : [
+                3
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-m1,esm-m2,esm-m3,esm-m4,esm-m5,esm-m6,esm-m7",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-sf",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            },
+            "n" : {
+              "type" : "integer",
+              "ignore_malformed" : true
+            }
+          }
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-sf"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-sf/_doc/1?refresh=true&routing=r1",
+      "body" : {
+        "k" : "x",
+        "n" : "bad"
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-sf",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-sf/_search",
+      "body" : {
+        "stored_fields" : "_none_",
+        "script_fields" : {
+          "s" : {
+            "script" : "1"
+          }
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "esm-sf",
+              "_id" : "1",
+              "_score" : 1.0,
+              "fields" : {
+                "s" : [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-sf/_search",
+      "body" : {
+        "stored_fields" : "_none_",
+        "script_fields" : {
+          "s" : {
+            "script" : "1"
+          }
+        },
+        "_source" : true
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: [stored_fields] cannot be disabled if [_source] is requested;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: [stored_fields] cannot be disabled if [_source] is requested;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-sf/_search",
+      "body" : {
+        "stored_fields" : "_none_",
+        "script_fields" : {
+          "s" : {
+            "script" : "1"
+          }
+        },
+        "version" : true,
+        "seq_no_primary_term" : true
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "esm-sf",
+              "_id" : "1",
+              "_version" : 1,
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "_score" : 1.0,
+              "fields" : {
+                "s" : [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-sf/_search",
+      "body" : {
+        "stored_fields" : "_none_"
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "esm-sf",
+              "_score" : 1.0
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-sf/_search",
+      "body" : {
+        "stored_fields" : "_none_",
+        "docvalue_fields" : [
+          "k"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "esm-sf",
+              "_score" : 1.0,
+              "fields" : {
+                "k" : [
+                  "x"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-sf/_search",
+      "body" : {
+        "stored_fields" : "_none_",
+        "script_fields" : {
+          "s" : {
+            "script" : "doc['k'].value"
+          }
+        },
+        "docvalue_fields" : [
+          "k"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "esm-sf",
+              "_id" : "1",
+              "_score" : 1.0,
+              "fields" : {
+                "s" : [
+                  "x"
+                ],
+                "k" : [
+                  "x"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-sf/_search?filter_path=hits.hits",
+      "body" : {
+        "stored_fields" : "_none_",
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "stored_fields" : "_none_",
+              "script_fields" : {
+                "s" : {
+                  "script" : "1"
+                }
+              }
+            }
+          }
+        },
+        "size" : 0
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-sf/_search?filter_path=aggregations",
+      "body" : {
+        "stored_fields" : "_none_",
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "stored_fields" : "_none_",
+              "script_fields" : {
+                "s" : {
+                  "script" : "1"
+                }
+              }
+            }
+          }
+        },
+        "size" : 0
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "aggregations" : {
+          "t" : {
+            "hits" : {
+              "total" : {
+                "value" : 1,
+                "relation" : "eq"
+              },
+              "max_score" : 1.0,
+              "hits" : [
+                {
+                  "_index" : "esm-sf",
+                  "_id" : "1",
+                  "_score" : 1.0,
+                  "fields" : {
+                    "s" : [
+                      1
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-sf/_search",
+      "body" : {
+        "collapse" : {
+          "field" : "_data_stream_timestamp"
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "collapse is not supported for the field [_data_stream_timestamp] of the type [_data_stream_timestamp]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-sf",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "collapse is not supported for the field [_data_stream_timestamp] of the type [_data_stream_timestamp]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "collapse is not supported for the field [_data_stream_timestamp] of the type [_data_stream_timestamp]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "collapse is not supported for the field [_data_stream_timestamp] of the type [_data_stream_timestamp]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-sf/_search?filter_path=aggregations",
+      "body" : {
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "stored_fields" : "_none_"
+            }
+          }
+        },
+        "size" : 0
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "aggregations" : {
+          "t" : {
+            "hits" : {
+              "total" : {
+                "value" : 1,
+                "relation" : "eq"
+              },
+              "max_score" : 1.0,
+              "hits" : [
+                {
+                  "_index" : "esm-sf",
+                  "_score" : 1.0
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-sf/_search?filter_path=aggregations",
+      "body" : {
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "stored_fields" : "_none_",
+              "docvalue_fields" : [
+                "k"
+              ]
+            }
+          }
+        },
+        "size" : 0
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "aggregations" : {
+          "t" : {
+            "hits" : {
+              "total" : {
+                "value" : 1,
+                "relation" : "eq"
+              },
+              "max_score" : 1.0,
+              "hits" : [
+                {
+                  "_index" : "esm-sf",
+                  "_score" : 1.0,
+                  "fields" : {
+                    "k" : [
+                      "x"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-sf/_search",
+      "body" : {
+        "stored_fields" : "_none_",
+        "_source" : false
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "esm-sf",
+              "_score" : 1.0
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-sf/_search",
+      "body" : {
+        "stored_fields" : "_none_",
+        "_source" : [
+          "k"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: [stored_fields] cannot be disabled if [_source] is requested;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: [stored_fields] cannot be disabled if [_source] is requested;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-sf/_search",
+      "body" : {
+        "stored_fields" : "_none_",
+        "_source" : true,
+        "fields" : [
+          "k"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: [stored_fields] cannot be disabled if [_source] is requested;2: [stored_fields] cannot be disabled when using the [fields] option;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: [stored_fields] cannot be disabled if [_source] is requested;2: [stored_fields] cannot be disabled when using the [fields] option;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-sf",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-fp",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "object"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-fp"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fp/_search?size=0&filter_path=-took,-_shards,-timed_out,-hits.hits._index",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fp/_search?filter_path=-took,-_shards,-timed_out,-hits.hits._index",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fp/_mapping?filter_path=-esm-fp.mappings.properties.a.properties.x",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "esm-fp" : {
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "object"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fp/_mapping?filter_path=-esm-fp.mappings.properties.a.x",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "esm-fp" : {
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "object"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fp/_mapping?filter_path=-esm-fp.mappings.x",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "esm-fp" : {
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "object"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fp/_search?size=0&filter_path=-hits.total,-hits.max_score",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fp/_search?size=0&filter_path=-hits.*",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fp/_search?size=0&filter_path=-hits.hits.*",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fp/_search?size=0&filter_path=-hits.hits",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fp/_search?size=0&filter_path=-hits.**._id",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fp/_search?size=0&filter_path=-**._id",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fp/_search?size=0&filter_path=hits.hits,-took",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-fp",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/settings?filter_path=-persistent.x",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "persistent" : { },
+        "transient" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/settings?filter_path=-persistent.x.y",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "persistent" : { },
+        "transient" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/settings?filter_path=-persistent.*",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "persistent" : { },
+        "transient" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/settings?filter_path=-*.x",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "persistent" : { },
+        "transient" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/settings?filter_path=-**.x",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "persistent" : { },
+        "transient" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-dv",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-dv"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-dv/_doc/1?refresh=true",
+      "body" : {
+        "k" : "x"
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-dv",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "*"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_routing] of type [_routing]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_routing] of type [_routing]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_routing] of type [_routing]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_routing] of type [_routing]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_i*"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_ignored_source] of type [_ignored_source]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_ignored_source] of type [_ignored_source]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_ignored_source] of type [_ignored_source]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_ignored_source] of type [_ignored_source]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_id"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_index"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "fields" : {
+                "_index" : [
+                  "esm-dv"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_ignored"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_ignored_source"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_ignored_source] of type [_ignored_source]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_ignored_source] of type [_ignored_source]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_ignored_source] of type [_ignored_source]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_ignored_source] of type [_ignored_source]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_field_names"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_field_names] of type [_field_names]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_field_names] of type [_field_names]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_field_names] of type [_field_names]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_field_names] of type [_field_names]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_routing"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_routing] of type [_routing]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_routing] of type [_routing]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_routing] of type [_routing]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_routing] of type [_routing]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_seq_no"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "fields" : {
+                "_seq_no" : [
+                  0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_version"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "fields" : {
+                "_version" : [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_source"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_source] of type [_source]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_source] of type [_source]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_source] of type [_source]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_source] of type [_source]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_doc_count"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_doc_count] of type [_doc_count]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_doc_count] of type [_doc_count]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_doc_count] of type [_doc_count]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_doc_count] of type [_doc_count]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_tier"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_tier] of type [_tier]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_tier] of type [_tier]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_tier] of type [_tier]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_tier] of type [_tier]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_index_mode"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "fields" : {
+                "_index_mode" : [
+                  "standard"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_data_stream_timestamp"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_data_stream_timestamp] of type [_data_stream_timestamp]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_data_stream_timestamp] of type [_data_stream_timestamp]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_data_stream_timestamp] of type [_data_stream_timestamp]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_data_stream_timestamp] of type [_data_stream_timestamp]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_nested_path"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_nested_path] of type [_nested_path]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_nested_path] of type [_nested_path]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_nested_path] of type [_nested_path]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_nested_path] of type [_nested_path]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_feature"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_feature] of type [_feature]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_feature] of type [_feature]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_feature] of type [_feature]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_feature] of type [_feature]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_primary_term"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_s*"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_source] of type [_source]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_source] of type [_source]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_source] of type [_source]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_source] of type [_source]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_r*"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_routing] of type [_routing]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_routing] of type [_routing]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_routing] of type [_routing]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_routing] of type [_routing]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_d*"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_doc_count] of type [_doc_count]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_doc_count] of type [_doc_count]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_doc_count] of type [_doc_count]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_doc_count] of type [_doc_count]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "k*"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "fields" : {
+                "k" : [
+                  "x"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_t*"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_tier] of type [_tier]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_tier] of type [_tier]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_tier] of type [_tier]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_tier] of type [_tier]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_v*"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "fields" : {
+                "_version" : [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_n*"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_nested_path] of type [_nested_path]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_nested_path] of type [_nested_path]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_nested_path] of type [_nested_path]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_nested_path] of type [_nested_path]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search?filter_path=hits.hits.fields,error.root_cause.reason",
+      "body" : {
+        "docvalue_fields" : [
+          "_f*"
+        ]
+      },
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_feature] of type [_feature]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-dv",
+              "node" : "G1uxk-BrQxaPD6hPGHoU_A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on field [_feature] of type [_feature]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [_feature] of type [_feature]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on field [_feature] of type [_feature]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-dv",
+      "mask" : [
+        "node",
+        "took",
+        "last_updated_time",
+        "start_time",
+        "end_time",
+        "start_time_in_millis",
+        "end_time_in_millis",
+        "duration_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

@@ -1,0 +1,392 @@
+{
+  "description" : "enrich: policies, validation, execute, the enrich processor",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-src",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "email" : {
+              "type" : "keyword"
+            },
+            "name" : {
+              "type" : "keyword"
+            },
+            "zip" : {
+              "type" : "integer"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-src"
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-src/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"email\":\"a@x.com\",\"name\":\"Alice\",\"zip\":1000}\n{\"index\":{\"_id\":\"2\"}}\n{\"email\":\"b@x.com\",\"name\":\"Bob\",\"zip\":2000}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "PUT /_enrich/policy/compat-xpack-pol",
+      "body" : {
+        "match" : {
+          "indices" : "compat-xpack-src",
+          "match_field" : "email",
+          "enrich_fields" : [
+            "name",
+            "zip"
+          ]
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_enrich/policy/compat-xpack-pol",
+      "body" : {
+        "match" : {
+          "indices" : "compat-xpack-src",
+          "match_field" : "email",
+          "enrich_fields" : [
+            "name"
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_already_exists_exception",
+              "reason" : "policy [compat-xpack-pol] already exists"
+            }
+          ],
+          "type" : "resource_already_exists_exception",
+          "reason" : "policy [compat-xpack-pol] already exists"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_enrich/policy/compat-xpack-bad",
+      "body" : {
+        "match" : {
+          "indices" : "compat-xpack-src"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Required [match_field, enrich_fields]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Required [match_field, enrich_fields]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_enrich/policy/compat-xpack-bad2",
+      "body" : {
+        "foo" : {
+          "indices" : "compat-xpack-src",
+          "match_field" : "email",
+          "enrich_fields" : [
+            "name"
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unsupported policy type [foo], supported types are [match, geo_match, range]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unsupported policy type [foo], supported types are [match, geo_match, range]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_enrich/policy/compat-xpack-bad3",
+      "body" : {
+        "match" : {
+          "indices" : "compat-xpack-missing",
+          "match_field" : "email",
+          "enrich_fields" : [
+            "name"
+          ]
+        }
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [compat-xpack-missing]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "compat-xpack-missing",
+              "index_uuid" : "_na_",
+              "index" : "compat-xpack-missing"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [compat-xpack-missing]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "compat-xpack-missing",
+          "index_uuid" : "_na_",
+          "index" : "compat-xpack-missing"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "PUT /_enrich/policy/COMPAT",
+      "body" : {
+        "match" : {
+          "indices" : "compat-xpack-src",
+          "match_field" : "email",
+          "enrich_fields" : [
+            "name"
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid policy name [COMPAT], must be lowercase"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid policy name [COMPAT], must be lowercase"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /_enrich/policy/compat-xpack-pol",
+      "status" : 200,
+      "response" : {
+        "policies" : [
+          {
+            "config" : {
+              "match" : {
+                "name" : "compat-xpack-pol",
+                "indices" : [
+                  "compat-xpack-src"
+                ],
+                "match_field" : "email",
+                "enrich_fields" : [
+                  "name",
+                  "zip"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "GET /_enrich/policy/compat-xpack-nope",
+      "status" : 200,
+      "response" : {
+        "policies" : [ ]
+      }
+    },
+    {
+      "req" : "PUT /_enrich/policy/compat-xpack-pol/_execute?filter_path=status",
+      "status" : 200,
+      "response" : {
+        "status" : {
+          "phase" : "COMPLETE"
+        }
+      }
+    },
+    {
+      "req" : "PUT /_enrich/policy/compat-xpack-nope/_execute",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "policy [compat-xpack-nope] does not exist"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "policy [compat-xpack-nope] does not exist"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/compat-xpack-enr",
+      "body" : {
+        "processors" : [
+          {
+            "enrich" : {
+              "policy_name" : "compat-xpack-pol",
+              "field" : "email",
+              "target_field" : "user"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/compat-xpack-enr/_simulate?filter_path=docs.doc._source",
+      "body" : {
+        "docs" : [
+          {
+            "_source" : {
+              "email" : "a@x.com"
+            }
+          },
+          {
+            "_source" : {
+              "email" : "z@x.com"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_source" : {
+                "user" : {
+                  "zip" : 1000,
+                  "name" : "Alice",
+                  "email" : "a@x.com"
+                },
+                "email" : "a@x.com"
+              }
+            }
+          },
+          {
+            "doc" : {
+              "_source" : {
+                "email" : "z@x.com"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/compat-xpack-enr2",
+      "body" : {
+        "processors" : [
+          {
+            "enrich" : {
+              "policy_name" : "compat-xpack-nope",
+              "field" : "email",
+              "target_field" : "user"
+            }
+          }
+        ]
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "exception",
+              "reason" : "java.lang.IllegalArgumentException: no enrich index exists for policy with name [compat-xpack-nope]",
+              "processor_type" : "enrich"
+            }
+          ],
+          "type" : "exception",
+          "reason" : "java.lang.IllegalArgumentException: no enrich index exists for policy with name [compat-xpack-nope]",
+          "processor_type" : "enrich",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "no enrich index exists for policy with name [compat-xpack-nope]"
+          }
+        },
+        "status" : 500
+      }
+    },
+    {
+      "req" : "DELETE /_enrich/policy/compat-xpack-pol",
+      "status" : 409,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "status_exception",
+              "reason" : "Could not delete policy [compat-xpack-pol] because a pipeline is referencing it [compat-xpack-enr]"
+            }
+          ],
+          "type" : "status_exception",
+          "reason" : "Could not delete policy [compat-xpack-pol] because a pipeline is referencing it [compat-xpack-enr]"
+        },
+        "status" : 409
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/compat-xpack-enr",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_enrich/policy/compat-xpack-pol",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_enrich/policy/compat-xpack-pol",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "policy [compat-xpack-pol] not found"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "policy [compat-xpack-pol] not found"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-src",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

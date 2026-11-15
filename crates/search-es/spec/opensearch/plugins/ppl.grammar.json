@@ -1,0 +1,20 @@
+{
+  "ppl.grammar": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/search-plugins/sql/ppl/index/",
+      "description": "The PPL grammar (ANTLR's serialized ATNs) for client-side autocompletion."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ppl/_grammar",
+          "methods": [
+            "GET"
+          ]
+        }
+      ]
+    },
+    "params": {}
+  }
+}

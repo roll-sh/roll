@@ -1,0 +1,12 @@
+# Tests of Elasticsearch 9.5.5's `watcher-security` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (security roles=x-pack/plugin/watcher/src/yamlRestTest/resources/roles.yml users=test_admin:x-pack-test-password:superuser,watcher_manager:x-pack-test-password:watcher_manager,x_pack_rest_user:x-pack-test-password:watcher_manager login=watcher_manager:x-pack-test-password admin=test_admin:x-pack-test-password setting=xpack.ml.enabled=false setting=xpack.notification.email.account._email.smtp.host=host.domain setting=xpack.notification.email.account._email.smtp.port=587 setting=xpack.notification.email.account._email.smtp.user=_user).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+watcher-security:security/10_insufficient_privs/Test watcher is protected by security
+watcher-security:security/20_settings_filter/Test watcher settings filter is applied
+watcher-security:security/20_test_run_as_execute_watch/Test watch index action does not work without permissions
+watcher-security:security/20_test_run_as_execute_watch/Test watch index action requires permission to write to an index
+watcher-security:security/20_test_run_as_execute_watch/Test watch is runas user properly recorded
+watcher-security:security/20_test_run_as_execute_watch/Test watch search input does not work against index user is not allowed to read
+watcher-security:security/20_test_run_as_execute_watch/Test watch search input is run as user who added the watch
+watcher-security:security/20_test_run_as_execute_watch/Test watch search transform does not work without permissions
+watcher-security:security/20_test_run_as_execute_watch/Test watch search transform is run as user who added the watch

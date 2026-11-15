@@ -1,0 +1,1244 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "DELETE",
+      "path": "/hw-src,hw-src2?ignore_unavailable=true",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/hw-src",
+      "body": {
+        "mappings": {
+          "properties": {
+            "vec0": {
+              "type": "dense_vector",
+              "dims": 2
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "hw-src"
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/hw-src2",
+      "body": {},
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "hw-src2"
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/hw-src/_doc/1?refresh=true",
+      "body": {
+        "o": {
+          "kw0": 1,
+          "x": 2
+        },
+        "a0": 1,
+        "b": {
+          "c": {
+            "d0": 1,
+            "e": 3
+          }
+        },
+        "x.y0": 1,
+        "n": [
+          {
+            "kw0": 1,
+            "z": 2
+          }
+        ],
+        "oo": {
+          "p": 1
+        },
+        "t": "hello",
+        "vec0": [
+          1,
+          2
+        ]
+      },
+      "es": {
+        "status": 201,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "hw-src",
+          "_id": "1",
+          "_version": 1,
+          "result": "created",
+          "forced_refresh": true,
+          "_shards": {
+            "total": 2,
+            "successful": 1,
+            "failed": 0
+          },
+          "_seq_no": 0,
+          "_primary_term": 1
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/hw-src2/_doc/1?refresh=true",
+      "body": {
+        "o": {
+          "kw0": 1,
+          "x": 2
+        },
+        "a0": 1,
+        "b": {
+          "c": {
+            "d0": 1,
+            "e": 3
+          }
+        },
+        "x.y0": 1,
+        "n": [
+          {
+            "kw0": 1,
+            "z": 2
+          }
+        ],
+        "oo": {
+          "p": 1
+        },
+        "t": "hello"
+      },
+      "es": {
+        "status": 201,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "hw-src2",
+          "_id": "1",
+          "_version": 1,
+          "result": "created",
+          "forced_refresh": true,
+          "_shards": {
+            "total": 2,
+            "successful": 1,
+            "failed": 0
+          },
+          "_seq_no": 0,
+          "_primary_term": 1
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src/_search",
+      "body": {
+        "_source": [
+          "*0"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "b": {
+                    "c": {
+                      "d0": 1
+                    }
+                  },
+                  "x.y0": 1,
+                  "vec0": [
+                    1.0,
+                    2.0
+                  ],
+                  "n": [
+                    {
+                      "kw0": 1
+                    }
+                  ],
+                  "a0": 1,
+                  "o": {
+                    "kw0": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src/_search",
+      "body": {
+        "_source": [
+          "vec*"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "vec0": [
+                    1.0,
+                    2.0
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src/_search",
+      "body": {
+        "_source": [
+          "o*",
+          "vec0"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "oo": {
+                    "p": 1
+                  },
+                  "vec0": [
+                    1.0,
+                    2.0
+                  ],
+                  "o": {
+                    "kw0": 1,
+                    "x": 2
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src/_search",
+      "body": {
+        "_source": {
+          "includes": [
+            "*0"
+          ],
+          "excludes": [
+            "a0"
+          ]
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "b": {
+                    "c": {
+                      "d0": 1
+                    }
+                  },
+                  "x.y0": 1,
+                  "vec0": [
+                    1.0,
+                    2.0
+                  ],
+                  "n": [
+                    {
+                      "kw0": 1
+                    }
+                  ],
+                  "o": {
+                    "kw0": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src/_search",
+      "body": {
+        "_source": {
+          "includes": [
+            "o*"
+          ],
+          "excludes": [
+            "vec0"
+          ]
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "o": {
+                    "kw0": 1,
+                    "x": 2
+                  },
+                  "oo": {
+                    "p": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src/_search",
+      "body": {
+        "_source": [
+          "*0"
+        ],
+        "fields": [
+          "t"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "b": {
+                    "c": {
+                      "d0": 1
+                    }
+                  },
+                  "x.y0": 1,
+                  "vec0": [
+                    1.0,
+                    2.0
+                  ],
+                  "n": [
+                    {
+                      "kw0": 1
+                    }
+                  ],
+                  "a0": 1,
+                  "o": {
+                    "kw0": 1
+                  }
+                },
+                "fields": {
+                  "t": [
+                    "hello"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src/_search",
+      "body": {
+        "_source": [
+          "*0"
+        ],
+        "fields": [
+          "nothere"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "b": {
+                    "c": {
+                      "d0": 1
+                    }
+                  },
+                  "x.y0": 1,
+                  "vec0": [
+                    1.0,
+                    2.0
+                  ],
+                  "n": [
+                    {
+                      "kw0": 1
+                    }
+                  ],
+                  "a0": 1,
+                  "o": {
+                    "kw0": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src/_search",
+      "body": {
+        "_source": [
+          "*0"
+        ],
+        "docvalue_fields": [
+          "a0"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "b": {
+                    "c": {
+                      "d0": 1
+                    }
+                  },
+                  "x.y0": 1,
+                  "vec0": [
+                    1.0,
+                    2.0
+                  ],
+                  "n": [
+                    {
+                      "kw0": 1
+                    }
+                  ],
+                  "a0": 1,
+                  "o": {
+                    "kw0": 1
+                  }
+                },
+                "fields": {
+                  "a0": [
+                    1
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src/_search",
+      "body": {
+        "_source": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "a0": 1,
+                  "b": {
+                    "c": {
+                      "d0": 1,
+                      "e": 3
+                    }
+                  },
+                  "n": [
+                    {
+                      "kw0": 1,
+                      "z": 2
+                    }
+                  ],
+                  "o": {
+                    "kw0": 1,
+                    "x": 2
+                  },
+                  "oo": {
+                    "p": 1
+                  },
+                  "t": "hello",
+                  "x.y0": 1
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-src/_doc/1?_source_includes=*0",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "hw-src",
+          "_id": "1",
+          "_version": 1,
+          "_seq_no": 0,
+          "_primary_term": 1,
+          "found": true,
+          "_source": {
+            "b": {
+              "c": {
+                "d0": 1
+              }
+            },
+            "x.y0": 1,
+            "vec0": [
+              1.0,
+              2.0
+            ],
+            "n": [
+              {
+                "kw0": 1
+              }
+            ],
+            "a0": 1,
+            "o": {
+              "kw0": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src2/_search",
+      "body": {
+        "_source": [
+          "*0"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src2",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "a0": 1
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src2/_search",
+      "body": {
+        "_source": [
+          "vec*"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src2",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {}
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src2/_search",
+      "body": {
+        "_source": [
+          "o*",
+          "vec0"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src2",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "o": {
+                    "kw0": 1,
+                    "x": 2
+                  },
+                  "oo": {
+                    "p": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src2/_search",
+      "body": {
+        "_source": {
+          "includes": [
+            "*0"
+          ],
+          "excludes": [
+            "a0"
+          ]
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src2",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {}
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src2/_search",
+      "body": {
+        "_source": {
+          "includes": [
+            "o*"
+          ],
+          "excludes": [
+            "vec0"
+          ]
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src2",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "o": {
+                    "kw0": 1,
+                    "x": 2
+                  },
+                  "oo": {
+                    "p": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src2/_search",
+      "body": {
+        "_source": [
+          "*0"
+        ],
+        "fields": [
+          "t"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src2",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "b": {
+                    "c": {
+                      "d0": 1
+                    }
+                  },
+                  "x.y0": 1,
+                  "n": [
+                    {
+                      "kw0": 1
+                    }
+                  ],
+                  "a0": 1,
+                  "o": {
+                    "kw0": 1
+                  }
+                },
+                "fields": {
+                  "t": [
+                    "hello"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src2/_search",
+      "body": {
+        "_source": [
+          "*0"
+        ],
+        "fields": [
+          "nothere"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src2",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "a0": 1
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src2/_search",
+      "body": {
+        "_source": [
+          "*0"
+        ],
+        "docvalue_fields": [
+          "a0"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src2",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "a0": 1
+                },
+                "fields": {
+                  "a0": [
+                    1
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-src2/_search",
+      "body": {
+        "_source": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hw-src2",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "a0": 1,
+                  "b": {
+                    "c": {
+                      "d0": 1,
+                      "e": 3
+                    }
+                  },
+                  "n": [
+                    {
+                      "kw0": 1,
+                      "z": 2
+                    }
+                  ],
+                  "o": {
+                    "kw0": 1,
+                    "x": 2
+                  },
+                  "oo": {
+                    "p": 1
+                  },
+                  "t": "hello",
+                  "x.y0": 1
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-src2/_doc/1?_source_includes=*0",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "hw-src2",
+          "_id": "1",
+          "_version": 1,
+          "_seq_no": 0,
+          "_primary_term": 1,
+          "found": true,
+          "_source": {
+            "a0": 1
+          }
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/hw-src,hw-src2",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

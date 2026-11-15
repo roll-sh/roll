@@ -1,0 +1,13 @@
+# Tests of Elasticsearch 9.5.5's `ingest-attachment` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+ingest-attachment:ingest_attachment/10_basic/Ingest attachment plugin installed
+ingest-attachment:ingest_attachment/20_attachment_processor/Test attachment processor with fields
+ingest-attachment:ingest_attachment/20_attachment_processor/Test indexed chars are configurable
+ingest-attachment:ingest_attachment/20_attachment_processor/Test indexed chars are configurable per document
+ingest-attachment:ingest_attachment/20_attachment_processor/Test ingest attachment processor with defaults
+ingest-attachment:ingest_attachment/20_max_field_bytes/Attachment larger than limit is rejected
+ingest-attachment:ingest_attachment/20_max_field_bytes/Attachment on_failure runs when binary size exceeds limit
+ingest-attachment:ingest_attachment/20_max_field_bytes/Attachment succeeds when binary size is within limits
+ingest-attachment:ingest_attachment/30_files_supported/Test ingest attachment processor with .doc file
+ingest-attachment:ingest_attachment/30_files_supported/Test ingest attachment processor with .docx file

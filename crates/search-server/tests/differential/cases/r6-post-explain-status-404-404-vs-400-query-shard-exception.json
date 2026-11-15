@@ -1,0 +1,87 @@
+{
+ "found": {
+  "case": 90,
+  "case_seed": 105000405,
+  "seed": 105
+ },
+ "signature": "POST _explain status 404:404 vs 400:query_shard_exception",
+ "steps": [
+  {
+   "body": {
+    "settings": {
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m3-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m3-a"
+  },
+  {
+   "body": {
+    "settings": {
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m3-b",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m3-b"
+  },
+  {
+   "body": {
+    "query": {
+     "bool": {
+      "should": [
+       {
+        "dis_max": {
+         "queries": [
+          {
+           "combined_fields": {
+            "query": "ran data query"
+           }
+          }
+         ]
+        }
+       }
+      ]
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "_id": "1",
+     "_index": "diff-m3-b",
+     "matched": false
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 404
+   },
+   "method": "POST",
+   "path": "/diff-m3-b/_explain/1"
+  }
+ ]
+}

@@ -1,0 +1,455 @@
+{
+  "description" : "transform pivot: percentiles keys (50, 99_5) and object mappings for percentiles/stats/extended_stats/boxplot, integral max written as long",
+  "steps" : [
+    {
+      "req" : "PUT /xpack-tsrc?filter_path=errors,acknowledged,error",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "g" : {
+              "type" : "keyword"
+            },
+            "v" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /xpack-tsrc/_bulk?refresh=true&filter_path=errors,error",
+      "raw" : "{\"index\":{}}\n{\"g\": \"b\", \"v\": 0}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 1}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 2}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 3}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 4}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 5}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 6}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 7}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 8}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 9}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 10}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 11}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 12}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 13}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 14}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 15}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 16}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 17}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 18}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 19}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 20}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 21}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 22}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 23}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 24}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 25}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 26}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 27}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 28}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 29}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 30}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 31}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 32}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 33}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 34}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 35}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 36}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 37}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 38}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 39}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 40}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 41}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 42}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 43}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 44}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 45}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 46}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 47}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 48}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 49}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 50}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 51}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 52}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 53}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 54}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 55}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 56}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 57}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 58}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 59}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 60}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 61}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 62}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 63}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 64}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 65}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 66}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 67}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 68}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 69}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 70}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 71}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 72}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 73}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 74}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 75}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 76}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 77}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 78}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 79}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 80}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 81}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 82}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 83}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 84}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 85}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 86}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 87}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 88}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 89}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 90}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 91}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 92}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 93}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 94}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 95}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 96}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 97}\n{\"index\":{}}\n{\"g\": \"b\", \"v\": 98}\n{\"index\":{}}\n{\"g\": \"a\", \"v\": 99}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /_transform/_preview?filter_path=preview,generated_dest_index.mappings.properties,error",
+      "body" : {
+        "source" : {
+          "index" : "xpack-tsrc"
+        },
+        "pivot" : {
+          "group_by" : {
+            "g" : {
+              "terms" : {
+                "field" : "g"
+              }
+            }
+          },
+          "aggregations" : {
+            "p" : {
+              "percentiles" : {
+                "field" : "v",
+                "percents" : [
+                  50,
+                  99.5,
+                  1
+                ]
+              }
+            },
+            "q" : {
+              "percentiles" : {
+                "field" : "v"
+              }
+            },
+            "m" : {
+              "max" : {
+                "field" : "v"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "preview" : [
+          {
+            "p" : {
+              "1" : 1.98,
+              "50" : 50.0,
+              "99_5" : 98.51
+            },
+            "q" : {
+              "1" : 1.98,
+              "5" : 5.9,
+              "25" : 25.5,
+              "50" : 50.0,
+              "75" : 74.5,
+              "95" : 94.1,
+              "99" : 98.02
+            },
+            "g" : "a",
+            "m" : 99
+          },
+          {
+            "p" : {
+              "1" : 0.98,
+              "50" : 49.0,
+              "99_5" : 97.51
+            },
+            "q" : {
+              "1" : 0.98,
+              "5" : 4.9,
+              "25" : 24.5,
+              "50" : 49.0,
+              "75" : 73.5,
+              "95" : 93.1,
+              "99" : 97.02
+            },
+            "g" : "b",
+            "m" : 98
+          }
+        ],
+        "generated_dest_index" : {
+          "mappings" : {
+            "properties" : {
+              "g" : {
+                "type" : "keyword"
+              },
+              "q.99" : {
+                "type" : "double"
+              },
+              "p.50" : {
+                "type" : "double"
+              },
+              "q.50" : {
+                "type" : "double"
+              },
+              "q.95" : {
+                "type" : "double"
+              },
+              "m" : {
+                "type" : "long"
+              },
+              "q.75" : {
+                "type" : "double"
+              },
+              "p" : {
+                "type" : "object"
+              },
+              "q" : {
+                "type" : "object"
+              },
+              "p.1" : {
+                "type" : "double"
+              },
+              "q.25" : {
+                "type" : "double"
+              },
+              "p.99_5" : {
+                "type" : "double"
+              },
+              "q.1" : {
+                "type" : "double"
+              },
+              "q.5" : {
+                "type" : "double"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /_transform/_preview?filter_path=preview,error",
+      "body" : {
+        "source" : {
+          "index" : "xpack-tsrc"
+        },
+        "pivot" : {
+          "group_by" : {
+            "g" : {
+              "terms" : {
+                "field" : "g"
+              }
+            }
+          },
+          "aggregations" : {
+            "s" : {
+              "stats" : {
+                "field" : "v"
+              }
+            },
+            "b" : {
+              "boxplot" : {
+                "field" : "v"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "preview" : [
+          {
+            "b" : {
+              "q1" : 25.5,
+              "q2" : 50.0,
+              "q3" : 74.5,
+              "min" : 1.0,
+              "max" : 99.0,
+              "lower" : 1.0,
+              "upper" : 99.0
+            },
+            "s" : {
+              "min" : 1.0,
+              "avg" : 50.0,
+              "max" : 99.0,
+              "count" : 50.0,
+              "sum" : 2500.0
+            },
+            "g" : "a"
+          },
+          {
+            "b" : {
+              "q1" : 24.5,
+              "q2" : 49.0,
+              "q3" : 73.5,
+              "min" : 0.0,
+              "max" : 98.0,
+              "lower" : 0.0,
+              "upper" : 98.0
+            },
+            "s" : {
+              "min" : 0.0,
+              "avg" : 49.0,
+              "max" : 98.0,
+              "count" : 50.0,
+              "sum" : 2450.0
+            },
+            "g" : "b"
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_transform/_preview?filter_path=preview,error",
+      "body" : {
+        "source" : {
+          "index" : "xpack-tsrc"
+        },
+        "pivot" : {
+          "group_by" : {
+            "g" : {
+              "terms" : {
+                "field" : "g"
+              }
+            }
+          },
+          "aggregations" : {
+            "z" : {
+              "stats" : {
+                "field" : "v"
+              }
+            },
+            "a" : {
+              "boxplot" : {
+                "field" : "v"
+              }
+            },
+            "m" : {
+              "extended_stats" : {
+                "field" : "v"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "preview" : [
+          {
+            "a" : {
+              "q1" : 25.5,
+              "q2" : 50.0,
+              "q3" : 74.5,
+              "min" : 1.0,
+              "max" : 99.0,
+              "lower" : 1.0,
+              "upper" : 99.0
+            },
+            "g" : "a",
+            "z" : {
+              "min" : 1.0,
+              "avg" : 50.0,
+              "max" : 99.0,
+              "count" : 50.0,
+              "sum" : 2500.0
+            },
+            "m" : {
+              "variance_population" : 833.0,
+              "std_deviation_bounds" : {
+                "lower_population" : -7.723478758647246,
+                "upper_sampling" : 108.309518948453,
+                "lower_sampling" : -8.309518948453004,
+                "upper_population" : 107.72347875864725,
+                "upper" : 107.72347875864725,
+                "lower" : -7.723478758647246
+              },
+              "max" : 99.0,
+              "count" : 50,
+              "sum" : 2500.0,
+              "std_deviation_population" : 28.861739379323623,
+              "sum_of_squares" : 166650.0,
+              "std_deviation_sampling" : 29.154759474226502,
+              "min" : 1.0,
+              "avg" : 50.0,
+              "variance" : 833.0,
+              "std_deviation" : 28.861739379323623,
+              "variance_sampling" : 850.0
+            }
+          },
+          {
+            "a" : {
+              "q1" : 24.5,
+              "q2" : 49.0,
+              "q3" : 73.5,
+              "min" : 0.0,
+              "max" : 98.0,
+              "lower" : 0.0,
+              "upper" : 98.0
+            },
+            "g" : "b",
+            "z" : {
+              "min" : 0.0,
+              "avg" : 49.0,
+              "max" : 98.0,
+              "count" : 50.0,
+              "sum" : 2450.0
+            },
+            "m" : {
+              "variance_population" : 833.0,
+              "std_deviation_bounds" : {
+                "lower_population" : -8.723478758647246,
+                "upper_sampling" : 107.309518948453,
+                "lower_sampling" : -9.309518948453004,
+                "upper_population" : 106.72347875864725,
+                "upper" : 106.72347875864725,
+                "lower" : -8.723478758647246
+              },
+              "max" : 98.0,
+              "count" : 50,
+              "sum" : 2450.0,
+              "std_deviation_population" : 28.861739379323623,
+              "sum_of_squares" : 161700.0,
+              "std_deviation_sampling" : 29.154759474226502,
+              "min" : 0.0,
+              "avg" : 49.0,
+              "variance" : 833.0,
+              "std_deviation" : 28.861739379323623,
+              "variance_sampling" : 850.0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_transform/_preview?filter_path=preview,error",
+      "body" : {
+        "source" : {
+          "index" : "xpack-tsrc"
+        },
+        "pivot" : {
+          "group_by" : {
+            "g" : {
+              "terms" : {
+                "field" : "g"
+              }
+            }
+          },
+          "aggregations" : {
+            "a" : {
+              "stats" : {
+                "field" : "v"
+              }
+            },
+            "z" : {
+              "boxplot" : {
+                "field" : "v"
+              }
+            },
+            "y" : {
+              "percentiles" : {
+                "field" : "v"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "preview" : [
+          {
+            "a" : {
+              "min" : 1.0,
+              "avg" : 50.0,
+              "max" : 99.0,
+              "count" : 50.0,
+              "sum" : 2500.0
+            },
+            "g" : "a",
+            "y" : {
+              "1" : 1.98,
+              "5" : 5.9,
+              "25" : 25.5,
+              "50" : 50.0,
+              "75" : 74.5,
+              "95" : 94.1,
+              "99" : 98.02
+            },
+            "z" : {
+              "q1" : 25.5,
+              "q2" : 50.0,
+              "q3" : 74.5,
+              "min" : 1.0,
+              "max" : 99.0,
+              "lower" : 1.0,
+              "upper" : 99.0
+            }
+          },
+          {
+            "a" : {
+              "min" : 0.0,
+              "avg" : 49.0,
+              "max" : 98.0,
+              "count" : 50.0,
+              "sum" : 2450.0
+            },
+            "g" : "b",
+            "y" : {
+              "1" : 0.98,
+              "5" : 4.9,
+              "25" : 24.5,
+              "50" : 49.0,
+              "75" : 73.5,
+              "95" : 93.1,
+              "99" : 97.02
+            },
+            "z" : {
+              "q1" : 24.5,
+              "q2" : 49.0,
+              "q3" : 73.5,
+              "min" : 0.0,
+              "max" : 98.0,
+              "lower" : 0.0,
+              "upper" : 98.0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "DELETE /xpack-tsrc?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+# Tests of Elasticsearch 9.5.5's `analysis-phonetic` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plugins).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+analysis-phonetic:analysis_phonetic/10_metaphone/Metaphone
+analysis-phonetic:analysis_phonetic/20_double_metaphone/Double Metaphone
+analysis-phonetic:analysis_phonetic/30_beider_morse/Double Metaphone
+analysis-phonetic:analysis_phonetic/40_search/Index phonetic content
+analysis-phonetic:analysis_phonetic/50_daitch_mokotoff/Daitch Mokotoff

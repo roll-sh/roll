@@ -1,0 +1,633 @@
+{
+  "description" : "ES|QL constant folding (aggregation parameters, full-text queries, MV_SORT/TOP orders), base conversion (TO_LONG/TO_INTEGER radix), list parameters",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-p5?filter_path=errors,acknowledged,error",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "name" : {
+              "type" : "text"
+            },
+            "salary" : {
+              "type" : "integer"
+            },
+            "d" : {
+              "type" : "date"
+            },
+            "s" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-p5/_bulk?refresh=true&filter_path=errors,error",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"name\":\"Bob x\",\"salary\":5,\"d\":\"2024-01-01T00:00:00Z\",\"s\":\"ff\"}\n{\"index\":{\"_id\":\"2\"}}\n{\"name\":\"Alice\",\"salary\":7,\"s\":\"zz\"}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW b = -6 | EVAL l = to_long(\"101\", b)"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "b",
+            "type" : "integer"
+          },
+          {
+            "name" : "l",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            -6,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW b = TO_LONG(-6) | EVAL l = to_long(\"101\", b)"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "b",
+            "type" : "long"
+          },
+          {
+            "name" : "l",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            -6,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW l = to_long(\"101\", \"ten\")"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:24: Cannot convert string [ten] to [LONG], error [Cannot parse number [ten]]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:24: Cannot convert string [ten] to [LONG], error [Cannot parse number [ten]]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW l = to_long(\"101\", \"2\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "l",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            5
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW d = NOW() | EVAL l = to_long(d, 10)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:26: first argument of [to_long(d, 10)] must be [string], found value [d] type [datetime]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:26: first argument of [to_long(d, 10)] must be [string], found value [d] type [datetime]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW l = to_long(\"zz\", 36), m = to_integer(\"-ff\", 16), n = to_long(\"0x1F\", 16), o = to_long(\"11\", 1)"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "l",
+            "type" : "long"
+          },
+          {
+            "name" : "m",
+            "type" : "integer"
+          },
+          {
+            "name" : "n",
+            "type" : "long"
+          },
+          {
+            "name" : "o",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            1295,
+            -255,
+            31,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW l = to_long(\"zz\", 10), m = to_integer(\"7fffffffff\", 16), n = to_long(\"0X1f\", 16), o = to_long(\"0x\", 16), p = to_long(\"+11\", 2)"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "l",
+            "type" : "long"
+          },
+          {
+            "name" : "m",
+            "type" : "integer"
+          },
+          {
+            "name" : "n",
+            "type" : "long"
+          },
+          {
+            "name" : "o",
+            "type" : "long"
+          },
+          {
+            "name" : "p",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            null,
+            null,
+            null,
+            null,
+            3
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p5 | EVAL l = to_long(s, 16), i = to_integer(s, 36) | KEEP l, i | SORT l"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "l",
+            "type" : "long"
+          },
+          {
+            "name" : "i",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            255,
+            555
+          ],
+          [
+            null,
+            1295
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p5 | EVAL l = to_long(d, 10)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:33: first argument of [to_long(d, 10)] must be [string], found value [d] type [datetime]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:33: first argument of [to_long(d, 10)] must be [string], found value [d] type [datetime]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p5 | STATS c = COUNT_DISTINCT(salary, salary + 1)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:34: second argument of [COUNT_DISTINCT(salary, salary + 1)] must be a constant, received [salary + 1]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:34: second argument of [COUNT_DISTINCT(salary, salary + 1)] must be a constant, received [salary + 1]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p5 | STATS c = COUNT_DISTINCT(salary, 100 * 2), p = PERCENTILE(salary, 25 + 25)"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "p",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            2,
+            6.0
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p5 | STATS p = PERCENTILE(salary, salary + 1)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:34: second argument of [PERCENTILE(salary, salary + 1)] must be a constant, received [salary + 1]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:34: second argument of [PERCENTILE(salary, salary + 1)] must be a constant, received [salary + 1]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p5 | STATS t = TOP(salary, 10 - 20, \"dEsc\")"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:46: Limit must be greater than 0 in [TOP(salary, 10 - 20, \"dEsc\")], found [-10]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:46: Limit must be greater than 0 in [TOP(salary, 10 - 20, \"dEsc\")], found [-10]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p5 | STATS t = TOP(salary, 2, REVERSE(\"csed123\"))"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:49: Invalid order value in [TOP(salary, 2, REVERSE(\"csed123\"))], expected [ASC, DESC] but got [321desc]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:49: Invalid order value in [TOP(salary, 2, REVERSE(\"csed123\"))], expected [ASC, DESC] but got [321desc]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p5 | STATS t = TOP(salary, 1 + 1, CONCAT(\"de\", \"sc\"))"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "t",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            [
+              7,
+              5
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = [3, 1, 2] | EVAL s = mv_sort(a, CONCAT(\"ASC\", \"DESC\"))"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid order value in [mv_sort(a, CONCAT(\"ASC\", \"DESC\"))], expected one of [ASC, DESC] but got [ASCDESC]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid order value in [mv_sort(a, CONCAT(\"ASC\", \"DESC\"))], expected one of [ASC, DESC] but got [ASCDESC]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = [3, 1, 2], str = \"REVERSE\" | EVAL s = mv_sort(a, CONCAT(str, \"DESC\"))"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid order value in [mv_sort(a, CONCAT(str, \"DESC\"))], expected one of [ASC, DESC] but got [REVERSEDESC]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid order value in [mv_sort(a, CONCAT(str, \"DESC\"))], expected one of [ASC, DESC] but got [REVERSEDESC]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = [3, 1, 2] | EVAL s = mv_sort(a, CONCAT(\"de\", \"sc\"))"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          },
+          {
+            "name" : "s",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            [
+              3,
+              1,
+              2
+            ],
+            [
+              3,
+              2,
+              1
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p5 | WHERE MATCH(salary, salary + 10000 )"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:44: Query must be a constant string in [MATCH(salary, salary + 10000 )], found [salary + 10000]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:44: Query must be a constant string in [MATCH(salary, salary + 10000 )], found [salary + 10000]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p5 | WHERE MATCH(name, CONCAT(\"Bob\", \" x\")) | KEEP name"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "text"
+          }
+        ],
+        "values" : [
+          [
+            "Bob x"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-p5 | WHERE QSTR(CONCAT(name, \"Bob\"))"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:35: Query must be a constant string in [QSTR(CONCAT(name, \"Bob\"))], found [CONCAT(name, \"Bob\")]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:35: Query must be a constant string in [QSTR(CONCAT(name, \"Bob\"))], found [CONCAT(name, \"Bob\")]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = ?x, b = ?y | EVAL c = MV_COUNT(a)",
+        "params" : [
+          {
+            "x" : []
+          },
+          {
+            "y" : [
+              5
+            ]
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "null"
+          },
+          {
+            "name" : "b",
+            "type" : "integer"
+          },
+          {
+            "name" : "c",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            null,
+            5,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = ?, b = ?, c = ?",
+        "params" : [
+          [],
+          1,
+          [
+            1,
+            2
+          ]
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "null"
+          },
+          {
+            "name" : "b",
+            "type" : "integer"
+          },
+          {
+            "name" : "c",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            null,
+            1,
+            [
+              1,
+              2
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-p5?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

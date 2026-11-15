@@ -1,0 +1,1162 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "PUT",
+      "path": "/hlwm",
+      "body": {
+        "settings": {
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "t": {
+              "type": "text"
+            },
+            "k": {
+              "type": "keyword"
+            },
+            "n": {
+              "type": "long"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "hlwm"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "hlwm",
+            "_id": "1"
+          }
+        },
+        {
+          "t": "the quick brown fox jumps over the lazy dog",
+          "k": "a",
+          "n": 5
+        },
+        {
+          "index": {
+            "_index": "hlwm",
+            "_id": "2"
+          }
+        },
+        {
+          "t": "a lazy dog sleeps",
+          "k": "b",
+          "n": 7
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "hlwm",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hlwm",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hlwm/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "must": [
+              {
+                "match": {
+                  "t": "fox"
+                }
+              }
+            ],
+            "should": [
+              {
+                "bool": {
+                  "must": [
+                    {
+                      "term": {
+                        "t": "dog"
+                      }
+                    },
+                    {
+                      "term": {
+                        "k": "zzz"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "fields": {
+            "t": {}
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.59891266,
+            "hits": [
+              {
+                "_index": "hlwm",
+                "_id": "1",
+                "_score": 0.59891266,
+                "_source": {
+                  "t": "the quick brown fox jumps over the lazy dog",
+                  "k": "a",
+                  "n": 5
+                },
+                "highlight": {
+                  "t": [
+                    "the quick brown <em>fox</em> jumps over the lazy dog"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hlwm/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "should": [
+              {
+                "match": {
+                  "t": "fox"
+                }
+              },
+              {
+                "bool": {
+                  "filter": [
+                    {
+                      "term": {
+                        "t": "dog"
+                      }
+                    },
+                    {
+                      "range": {
+                        "n": {
+                          "gt": 100
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "fields": {
+            "t": {}
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.59891266,
+            "hits": [
+              {
+                "_index": "hlwm",
+                "_id": "1",
+                "_score": 0.59891266,
+                "_source": {
+                  "t": "the quick brown fox jumps over the lazy dog",
+                  "k": "a",
+                  "n": 5
+                },
+                "highlight": {
+                  "t": [
+                    "the quick brown <em>fox</em> jumps over the lazy dog"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hlwm/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "must": [
+              {
+                "match": {
+                  "t": "fox"
+                }
+              }
+            ],
+            "must_not": [
+              {
+                "term": {
+                  "t": "cat"
+                }
+              }
+            ],
+            "should": [
+              {
+                "match_phrase": {
+                  "t": "lazy fox"
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "fields": {
+            "t": {}
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.59891266,
+            "hits": [
+              {
+                "_index": "hlwm",
+                "_id": "1",
+                "_score": 0.59891266,
+                "_source": {
+                  "t": "the quick brown fox jumps over the lazy dog",
+                  "k": "a",
+                  "n": 5
+                },
+                "highlight": {
+                  "t": [
+                    "the quick brown <em>fox</em> jumps over the lazy dog"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hlwm/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "should": [
+              {
+                "match": {
+                  "t": "fox"
+                }
+              },
+              {
+                "match": {
+                  "t": {
+                    "query": "dog quick",
+                    "operator": "and",
+                    "minimum_should_match": "100%"
+                  }
+                }
+              }
+            ],
+            "minimum_should_match": 1
+          }
+        },
+        "highlight": {
+          "fields": {
+            "t": {}
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.35536,
+            "hits": [
+              {
+                "_index": "hlwm",
+                "_id": "1",
+                "_score": 1.35536,
+                "_source": {
+                  "t": "the quick brown fox jumps over the lazy dog",
+                  "k": "a",
+                  "n": 5
+                },
+                "highlight": {
+                  "t": [
+                    "the <em>quick</em> brown <em>fox</em> jumps over the lazy <em>dog</em>"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hlwm/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "should": [
+              {
+                "match": {
+                  "t": "fox"
+                }
+              },
+              {
+                "match": {
+                  "t": {
+                    "query": "dog cat",
+                    "operator": "and"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "fields": {
+            "t": {}
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.59891266,
+            "hits": [
+              {
+                "_index": "hlwm",
+                "_id": "1",
+                "_score": 0.59891266,
+                "_source": {
+                  "t": "the quick brown fox jumps over the lazy dog",
+                  "k": "a",
+                  "n": 5
+                },
+                "highlight": {
+                  "t": [
+                    "the quick brown <em>fox</em> jumps over the lazy dog"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hlwm/_search",
+      "body": {
+        "query": {
+          "dis_max": {
+            "queries": [
+              {
+                "match": {
+                  "t": "fox"
+                }
+              },
+              {
+                "bool": {
+                  "must": [
+                    {
+                      "term": {
+                        "t": "dog"
+                      }
+                    },
+                    {
+                      "term": {
+                        "t": "nope"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "fields": {
+            "t": {}
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.59891266,
+            "hits": [
+              {
+                "_index": "hlwm",
+                "_id": "1",
+                "_score": 0.59891266,
+                "_source": {
+                  "t": "the quick brown fox jumps over the lazy dog",
+                  "k": "a",
+                  "n": 5
+                },
+                "highlight": {
+                  "t": [
+                    "the quick brown <em>fox</em> jumps over the lazy dog"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hlwm/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "should": [
+              {
+                "term": {
+                  "t": "fox"
+                }
+              },
+              {
+                "terms": {
+                  "t": [
+                    "dog",
+                    "nope"
+                  ]
+                }
+              }
+            ],
+            "minimum_should_match": 2
+          }
+        },
+        "highlight": {
+          "fields": {
+            "t": {}
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.5989127,
+            "hits": [
+              {
+                "_index": "hlwm",
+                "_id": "1",
+                "_score": 1.5989127,
+                "_source": {
+                  "t": "the quick brown fox jumps over the lazy dog",
+                  "k": "a",
+                  "n": 5
+                },
+                "highlight": {
+                  "t": [
+                    "the quick brown <em>fox</em> jumps over the lazy <em>dog</em>"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hlwm/_search",
+      "body": {
+        "query": {
+          "constant_score": {
+            "filter": {
+              "bool": {
+                "should": [
+                  {
+                    "term": {
+                      "t": "fox"
+                    }
+                  },
+                  {
+                    "bool": {
+                      "must": [
+                        {
+                          "term": {
+                            "t": "dog"
+                          }
+                        },
+                        {
+                          "term": {
+                            "k": "no"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "highlight": {
+          "fields": {
+            "t": {}
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "hlwm",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "t": "the quick brown fox jumps over the lazy dog",
+                  "k": "a",
+                  "n": 5
+                },
+                "highlight": {
+                  "t": [
+                    "the quick brown <em>fox</em> jumps over the lazy dog"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hlwm/_search",
+      "body": {
+        "query": {
+          "function_score": {
+            "query": {
+              "bool": {
+                "should": [
+                  {
+                    "term": {
+                      "t": "fox"
+                    }
+                  },
+                  {
+                    "bool": {
+                      "must": [
+                        {
+                          "term": {
+                            "t": "dog"
+                          }
+                        },
+                        {
+                          "term": {
+                            "k": "no"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "highlight": {
+          "fields": {
+            "t": {}
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.59891266,
+            "hits": [
+              {
+                "_index": "hlwm",
+                "_id": "1",
+                "_score": 0.59891266,
+                "_source": {
+                  "t": "the quick brown fox jumps over the lazy dog",
+                  "k": "a",
+                  "n": 5
+                },
+                "highlight": {
+                  "t": [
+                    "the quick brown <em>fox</em> jumps over the lazy dog"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hlwm/_search",
+      "body": {
+        "query": {
+          "match": {
+            "t": "fox"
+          }
+        },
+        "highlight": {
+          "fields": {
+            "t": {
+              "highlight_query": {
+                "bool": {
+                  "must": [
+                    {
+                      "term": {
+                        "t": "dog"
+                      }
+                    },
+                    {
+                      "term": {
+                        "k": "zz"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.59891266,
+            "hits": [
+              {
+                "_index": "hlwm",
+                "_id": "1",
+                "_score": 0.59891266,
+                "_source": {
+                  "t": "the quick brown fox jumps over the lazy dog",
+                  "k": "a",
+                  "n": 5
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hlwm/_search",
+      "body": {
+        "query": {
+          "match": {
+            "t": "fox"
+          }
+        },
+        "highlight": {
+          "fields": {
+            "t": {
+              "no_match_size": 10,
+              "highlight_query": {
+                "bool": {
+                  "must": [
+                    {
+                      "term": {
+                        "t": "dog"
+                      }
+                    },
+                    {
+                      "term": {
+                        "k": "zz"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.59891266,
+            "hits": [
+              {
+                "_index": "hlwm",
+                "_id": "1",
+                "_score": 0.59891266,
+                "_source": {
+                  "t": "the quick brown fox jumps over the lazy dog",
+                  "k": "a",
+                  "n": 5
+                },
+                "highlight": {
+                  "t": [
+                    "the quick brown"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hlwm/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "should": [
+              {
+                "match": {
+                  "t": "fox"
+                }
+              },
+              {
+                "bool": {
+                  "must": [
+                    {
+                      "term": {
+                        "t": "lazy"
+                      }
+                    },
+                    {
+                      "term": {
+                        "k": "b"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "fields": {
+            "t": {
+              "type": "plain"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.90951216,
+            "hits": [
+              {
+                "_index": "hlwm",
+                "_id": "2",
+                "_score": 0.90951216,
+                "_source": {
+                  "t": "a lazy dog sleeps",
+                  "k": "b",
+                  "n": 7
+                },
+                "highlight": {
+                  "t": [
+                    "a <em>lazy</em> dog sleeps"
+                  ]
+                }
+              },
+              {
+                "_index": "hlwm",
+                "_id": "1",
+                "_score": 0.59891266,
+                "_source": {
+                  "t": "the quick brown fox jumps over the lazy dog",
+                  "k": "a",
+                  "n": 5
+                },
+                "highlight": {
+                  "t": [
+                    "the quick brown <em>fox</em> jumps over the <em>lazy</em> dog"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hlwm/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "should": [
+              {
+                "match": {
+                  "t": "fox"
+                }
+              },
+              {
+                "bool": {
+                  "must": [
+                    {
+                      "term": {
+                        "t": "lazy"
+                      }
+                    },
+                    {
+                      "term": {
+                        "k": "b"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "fields": {
+            "t": {}
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.90951216,
+            "hits": [
+              {
+                "_index": "hlwm",
+                "_id": "2",
+                "_score": 0.90951216,
+                "_source": {
+                  "t": "a lazy dog sleeps",
+                  "k": "b",
+                  "n": 7
+                },
+                "highlight": {
+                  "t": [
+                    "a <em>lazy</em> dog sleeps"
+                  ]
+                }
+              },
+              {
+                "_index": "hlwm",
+                "_id": "1",
+                "_score": 0.59891266,
+                "_source": {
+                  "t": "the quick brown fox jumps over the lazy dog",
+                  "k": "a",
+                  "n": 5
+                },
+                "highlight": {
+                  "t": [
+                    "the quick brown <em>fox</em> jumps over the lazy dog"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/hlwm",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

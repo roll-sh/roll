@@ -1,0 +1,5261 @@
+[
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "max(1 2)"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "max(1 2)",
+       "      ^---- HERE"
+      ],
+      "script": "max(1 2)",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "max(1 2)",
+        "      ^---- HERE"
+       ],
+       "script": "max(1 2)",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "unexpected token '2' on line (1) position (6) was expecting one of RP"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "max("
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "max(",
+       "    ^---- HERE"
+      ],
+      "script": "max(",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "max(",
+        "    ^---- HERE"
+       ],
+       "script": "max(",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "unexpected token '<EOF>' on line (1) position (4) was expecting one of RP"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "("
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "(",
+       " ^---- HERE"
+      ],
+      "script": "(",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "(",
+        " ^---- HERE"
+       ],
+       "script": "(",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "unexpected end of expression",
+        "caused_by": {
+         "type": "no_viable_alt_exception",
+         "reason": null
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": ")"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       ")",
+       "^---- HERE"
+      ],
+      "script": ")",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        ")",
+        "^---- HERE"
+       ],
+       "script": ")",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "invalid sequence of tokens near ')' on line (1) position (0)",
+        "caused_by": {
+         "type": "no_viable_alt_exception",
+         "reason": null
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "1 = 2"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "1 = 2",
+       "  ^---- HERE"
+      ],
+      "script": "1 = 2",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "1 = 2",
+        "  ^---- HERE"
+       ],
+       "script": "1 = 2",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "unexpected character '= ' on line (1) position (2)",
+        "caused_by": {
+         "type": "lexer_no_viable_alt_exception",
+         "reason": null
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['l']("
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "doc['l'](",
+       "         ^---- HERE"
+      ],
+      "script": "doc['l'](",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "doc['l'](",
+        "         ^---- HERE"
+       ],
+       "script": "doc['l'](",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "unexpected token '<EOF>' on line (1) position (9) was expecting one of RP"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "a."
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "a.",
+       " ^---- HERE"
+      ],
+      "script": "a.",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "a.",
+        " ^---- HERE"
+       ],
+       "script": "a.",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "unexpected character '.' on line (1) position (1)",
+        "caused_by": {
+         "type": "lexer_no_viable_alt_exception",
+         "reason": null
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['l'"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "doc['l'",
+       "   ^---- HERE"
+      ],
+      "script": "doc['l'",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "doc['l'",
+        "   ^---- HERE"
+       ],
+       "script": "doc['l'",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "unexpected character '[' on line (1) position (3)",
+        "caused_by": {
+         "type": "lexer_no_viable_alt_exception",
+         "reason": null
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "1 ? : 2"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "1 ? : 2",
+       "    ^---- HERE"
+      ],
+      "script": "1 ? : 2",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "1 ? : 2",
+        "    ^---- HERE"
+       ],
+       "script": "1 ? : 2",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "invalid sequence of tokens near ':' on line (1) position (4)",
+        "caused_by": {
+         "type": "no_viable_alt_exception",
+         "reason": null
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "--1"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "!!1"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "~~5"
+  },
+  "status": 200,
+  "response": {
+   "took": 4,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        5.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        5.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        5.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "1 < < 2"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "1 < < 2",
+       "    ^---- HERE"
+      ],
+      "script": "1 < < 2",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "1 < < 2",
+        "    ^---- HERE"
+       ],
+       "script": "1 < < 2",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "invalid sequence of tokens near '<' on line (1) position (4)",
+        "caused_by": {
+         "type": "no_viable_alt_exception",
+         "reason": null
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "1 <> 2"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "1 <> 2",
+       "   ^---- HERE"
+      ],
+      "script": "1 <> 2",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "1 <> 2",
+        "   ^---- HERE"
+       ],
+       "script": "1 <> 2",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "invalid sequence of tokens near '>' on line (1) position (3)",
+        "caused_by": {
+         "type": "no_viable_alt_exception",
+         "reason": null
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "1 =< 2"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "1 =< 2",
+       "  ^---- HERE"
+      ],
+      "script": "1 =< 2",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "1 =< 2",
+        "  ^---- HERE"
+       ],
+       "script": "1 =< 2",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "unexpected character '=<' on line (1) position (2)",
+        "caused_by": {
+         "type": "lexer_no_viable_alt_exception",
+         "reason": null
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "~"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "~",
+       " ^---- HERE"
+      ],
+      "script": "~",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "~",
+        " ^---- HERE"
+       ],
+       "script": "~",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "unexpected end of expression",
+        "caused_by": {
+         "type": "no_viable_alt_exception",
+         "reason": null
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "-"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "-",
+       " ^---- HERE"
+      ],
+      "script": "-",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "-",
+        " ^---- HERE"
+       ],
+       "script": "-",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "unexpected end of expression",
+        "caused_by": {
+         "type": "no_viable_alt_exception",
+         "reason": null
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "a b"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "a b",
+       "  ^---- HERE"
+      ],
+      "script": "a b",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "a b",
+        "  ^---- HERE"
+       ],
+       "script": "a b",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "unexpected token 'b' on line (1) position (2) was expecting one of <EOF>"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "1 +\n*"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "1 +\n*",
+       "    ^---- HERE"
+      ],
+      "script": "1 +\n*",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "1 +\n*",
+        "    ^---- HERE"
+       ],
+       "script": "1 +\n*",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "invalid sequence of tokens near '*' on line (2) position (0)",
+        "caused_by": {
+         "type": "no_viable_alt_exception",
+         "reason": null
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "1 +\t*"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "1 +\t*",
+       "    ^---- HERE"
+      ],
+      "script": "1 +\t*",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "1 +\t*",
+        "    ^---- HERE"
+       ],
+       "script": "1 +\t*",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "invalid sequence of tokens near '*' on line (1) position (4)",
+        "caused_by": {
+         "type": "no_viable_alt_exception",
+         "reason": null
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "é"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "é",
+       "^---- HERE"
+      ],
+      "script": "é",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "é",
+        "^---- HERE"
+       ],
+       "script": "é",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "unexpected character 'é' on line (1) position (0)",
+        "caused_by": {
+         "type": "lexer_no_viable_alt_exception",
+         "reason": null
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['é']"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "link error",
+      "script_stack": [
+       "doc['é']",
+       "     ^---- HERE"
+      ],
+      "script": "doc['é']",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "link error",
+       "script_stack": [
+        "doc['é']",
+        "     ^---- HERE"
+       ],
+       "script": "doc['é']",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "Field [é] does not exist in mappings"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "0x7fffffffffffffffff"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "general_script_exception",
+      "reason": "Failed to compile inline script [0x7fffffffffffffffff] using lang [expression]"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "general_script_exception",
+       "reason": "Failed to compile inline script [0x7fffffffffffffffff] using lang [expression]",
+       "caused_by": {
+        "type": "number_format_exception",
+        "reason": "For input string: \"7fffffffffffffffff\" under radix 16"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "077777777777777777777777"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "general_script_exception",
+      "reason": "Failed to compile inline script [077777777777777777777777] using lang [expression]"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "general_script_exception",
+       "reason": "Failed to compile inline script [077777777777777777777777] using lang [expression]",
+       "caused_by": {
+        "type": "number_format_exception",
+        "reason": "For input string: \"77777777777777777777777\" under radix 8"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "999999999999999999999"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        1e+21
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        1e+21
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        1e+21
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "1e400"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        "Infinity"
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        "Infinity"
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        "Infinity"
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": ".5e-3"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0005
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0005
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0005
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "5 % 0"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        "NaN"
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        "NaN"
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        "NaN"
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "-0.0"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        -0.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        -0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        -0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "1 ? 2 : 3 ? 4 : 5"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        2.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        2.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        2.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "0 ? 2 : 0 ? 4 : 5"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        5.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        5.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        5.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "1 || 0 && 0"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "2 * 3 % 4"
+  },
+  "status": 200,
+  "response": {
+   "took": 4,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        2.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        2.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        2.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "1 - 2 - 3"
+  },
+  "status": 200,
+  "response": {
+   "took": 4,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        -4.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        -4.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        -4.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "2 << 1 + 1"
+  },
+  "status": 200,
+  "response": {
+   "took": 4,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        8.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        8.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        8.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "1 == 1 == 1"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "1 < 2 < 3"
+  },
+  "status": 200,
+  "response": {
+   "took": 4,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "((((((((((((((((((((1))))))))))))))))))))"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "abs(-0.0)"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "t",
+   "params": {
+    "t": true
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "link error",
+      "script_stack": [
+       "t",
+       "^---- HERE"
+      ],
+      "script": "t",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "link error",
+       "script_stack": [
+        "t",
+        "^---- HERE"
+       ],
+       "script": "t",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "Parameter [t] must be a numeric type"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "i * f + neg",
+   "params": {
+    "i": 3,
+    "f": 1.5,
+    "neg": -2
+   }
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        2.5
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        2.5
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        2.5
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "_score",
+   "params": {
+    "_score": 7
+   }
+  },
+  "status": 200,
+  "response": {
+   "took": 2,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        7.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        7.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        7.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "score",
+  "script": {
+   "lang": "expression",
+   "source": "_score",
+   "params": {
+    "_score": 7
+   }
+  },
+  "status": 200,
+  "response": {
+   "took": 6,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": 1.0,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": 1.0,
+      "_source": {
+       "l": [
+        5,
+        3,
+        9,
+        3
+       ],
+       "i": 7,
+       "d": 1.5,
+       "f": 0.1,
+       "hf": 0.1,
+       "sf": 1.234,
+       "by": -3,
+       "ul": 18446744073709551615,
+       "dt": "2020-01-02T03:04:05.678Z",
+       "dn": "2020-01-02T03:04:05.123456789Z",
+       "old": "1500-03-04T05:06:07.008Z",
+       "g": [
+        "41.12,-71.34",
+        "40,-70"
+       ],
+       "k": "x",
+       "b": [
+        true,
+        false
+       ],
+       "t": "hello",
+       "ip": "10.0.0.1",
+       "neg": -2.75,
+       "big": 1e+300
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": 1.0,
+      "_source": {
+       "k": "y",
+       "l": [
+        -4,
+        10
+       ],
+       "dt": [
+        "2021-12-31T23:59:59.999Z",
+        "1969-12-31T23:59:59.999Z"
+       ],
+       "neg": -0.5,
+       "big": -1e+19
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": 1.0,
+      "_source": {
+       "d": 2.5
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "x(1)",
+   "params": {
+    "x": 1
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "x(1)",
+       "^---- HERE"
+      ],
+      "script": "x(1)",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "x(1)",
+        "^---- HERE"
+       ],
+       "script": "x(1)",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "Invalid expression 'x(1)': Unrecognized function call (x)."
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['l'].avg() + doc['d'].avg()"
+  },
+  "status": 200,
+  "response": {
+   "took": 6,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        6.5
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        3.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        2.5
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['l'].median() * doc['l'].count()"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        16.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        6.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['by'].sum() + doc['b'].count()"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        -1.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['f'].value * 3"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.30000000447034836
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['hf'].max()"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0999755859375
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['ul'].count()"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['dn'].getYear()"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        2020.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['dn'].date.year"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        2020.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['old'].getHourOfDay()"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        5.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['old'].date.hourOfDay"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        5.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['old'].date.weekOfWeekyear"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        9.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['old'].date.dayOfWeek"
+  },
+  "status": 200,
+  "response": {
+   "took": 6,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        7.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['g'].lat + doc['g'].lon"
+  },
+  "status": 200,
+  "response": {
+   "took": 4,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        -30.000000055879354
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['g'].empty + doc['l'].empty"
+  },
+  "status": 200,
+  "response": {
+   "took": 4,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['g'].getLat()"
+  },
+  "status": 200,
+  "response": {
+   "took": 2,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        39.9999999627471
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['g'].date.year"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "link error",
+      "script_stack": [
+       "doc['g'].date.year",
+       "^---- HERE"
+      ],
+      "script": "doc['g'].date.year",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "link error",
+       "script_stack": [
+        "doc['g'].date.year",
+        "^---- HERE"
+       ],
+       "script": "doc['g'].date.year",
+       "lang": "expression",
+       "caused_by": {
+        "type": "illegal_argument_exception",
+        "reason": "Member variable [year] does not exist for geo field [g]."
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['l'].date.year"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "link error",
+      "script_stack": [
+       "doc['l'].date.year",
+       "^---- HERE"
+      ],
+      "script": "doc['l'].date.year",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "link error",
+       "script_stack": [
+        "doc['l'].date.year",
+        "^---- HERE"
+       ],
+       "script": "doc['l'].date.year",
+       "lang": "expression",
+       "caused_by": {
+        "type": "illegal_argument_exception",
+        "reason": "Member variable [year] does not exist for numeric field [l]."
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['l'].getDate.year"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "link error",
+      "script_stack": [
+       "doc['l'].getDate.year",
+       "^---- HERE"
+      ],
+      "script": "doc['l'].getDate.year",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "link error",
+       "script_stack": [
+        "doc['l'].getDate.year",
+        "^---- HERE"
+       ],
+       "script": "doc['l'].getDate.year",
+       "lang": "expression",
+       "caused_by": {
+        "type": "illegal_argument_exception",
+        "reason": "Member variable [year] does not exist for numeric field [l]."
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['l'].date.year.x"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "link error",
+      "script_stack": [
+       "doc['l'].date.year.x",
+       "^---- HERE"
+      ],
+      "script": "doc['l'].date.year.x",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "link error",
+       "script_stack": [
+        "doc['l'].date.year.x",
+        "^---- HERE"
+       ],
+       "script": "doc['l'].date.year.x",
+       "lang": "expression",
+       "caused_by": {
+        "type": "illegal_argument_exception",
+        "reason": "Variable [doc['l'].date.year.x] does not follow an allowed format of either doc['field'] or doc['field'].method()"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['l']['x']"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "link error",
+      "script_stack": [
+       "doc['l']['x']",
+       "^---- HERE"
+      ],
+      "script": "doc['l']['x']",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "link error",
+       "script_stack": [
+        "doc['l']['x']",
+        "^---- HERE"
+       ],
+       "script": "doc['l']['x']",
+       "lang": "expression",
+       "caused_by": {
+        "type": "illegal_argument_exception",
+        "reason": "Only member variables or member methods may be accessed on a field when not accessing the field directly"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['l'][0].x"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "link error",
+      "script_stack": [
+       "doc['l'][0].x",
+       "^---- HERE"
+      ],
+      "script": "doc['l'][0].x",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "link error",
+       "script_stack": [
+        "doc['l'][0].x",
+        "^---- HERE"
+       ],
+       "script": "doc['l'][0].x",
+       "lang": "expression",
+       "caused_by": {
+        "type": "illegal_argument_exception",
+        "reason": "Variable [doc['l'][0].x] does not follow an allowed format of either doc['field'] or doc['field'].method()"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc[\"l\"]['x']"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "link error",
+      "script_stack": [
+       "doc['l']['x']",
+       "^---- HERE"
+      ],
+      "script": "doc[\"l\"]['x']",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "link error",
+       "script_stack": [
+        "doc['l']['x']",
+        "^---- HERE"
+       ],
+       "script": "doc[\"l\"]['x']",
+       "lang": "expression",
+       "caused_by": {
+        "type": "illegal_argument_exception",
+        "reason": "Only member variables or member methods may be accessed on a field when not accessing the field directly"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc[1]"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "link error",
+      "script_stack": [
+       "doc[1]",
+       "   ^---- HERE"
+      ],
+      "script": "doc[1]",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "link error",
+       "script_stack": [
+        "doc[1]",
+        "   ^---- HERE"
+       ],
+       "script": "doc[1]",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "Variable 'doc' must be used with a specific field like: doc['myfield']"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['l'].min() > doc['l'].max() ? 1 : 0"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['l'] | 1"
+  },
+  "status": 200,
+  "response": {
+   "took": 2,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        3.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        -3.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['big'] >> 1"
+  },
+  "status": 200,
+  "response": {
+   "took": 2,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        4.611686018427388e+18
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        -4.611686018427388e+18
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['big'] & -1"
+  },
+  "status": 200,
+  "response": {
+   "took": 2,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        9.223372036854776e+18
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        -9.223372036854776e+18
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "~doc['neg']"
+  },
+  "status": 200,
+  "response": {
+   "took": 2,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        -1.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        -1.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['neg'] << 2"
+  },
+  "status": 200,
+  "response": {
+   "took": 2,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        -8.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['d'] && doc['l']"
+  },
+  "status": 200,
+  "response": {
+   "took": 2,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "doc['neg'] || 0"
+  },
+  "status": 200,
+  "response": {
+   "took": 4,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "!doc['l']"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        1.0
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "field",
+  "script": {
+   "lang": "expression",
+   "source": "haversin(doc['g'].lat, doc['g'].lon, 40, -70)"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "fields": {
+       "v": [
+        0.0
+       ]
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "fields": {
+       "v": [
+        8318.623518586845
+       ]
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "fields": {
+       "v": [
+        8318.623518586845
+       ]
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "score",
+  "script": {
+   "lang": "expression",
+   "source": "doc['l'].max() * _score + 1"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": 11.0,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": 10.0,
+      "_source": {
+       "l": [
+        5,
+        3,
+        9,
+        3
+       ],
+       "i": 7,
+       "d": 1.5,
+       "f": 0.1,
+       "hf": 0.1,
+       "sf": 1.234,
+       "by": -3,
+       "ul": 18446744073709551615,
+       "dt": "2020-01-02T03:04:05.678Z",
+       "dn": "2020-01-02T03:04:05.123456789Z",
+       "old": "1500-03-04T05:06:07.008Z",
+       "g": [
+        "41.12,-71.34",
+        "40,-70"
+       ],
+       "k": "x",
+       "b": [
+        true,
+        false
+       ],
+       "t": "hello",
+       "ip": "10.0.0.1",
+       "neg": -2.75,
+       "big": 1e+300
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": 11.0,
+      "_source": {
+       "k": "y",
+       "l": [
+        -4,
+        10
+       ],
+       "dt": [
+        "2021-12-31T23:59:59.999Z",
+        "1969-12-31T23:59:59.999Z"
+       ],
+       "neg": -0.5,
+       "big": -1e+19
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": 1.0,
+      "_source": {
+       "d": 2.5
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "score",
+  "script": {
+   "lang": "expression",
+   "source": "_value + 1"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": 1.0,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": 1.0,
+      "_source": {
+       "l": [
+        5,
+        3,
+        9,
+        3
+       ],
+       "i": 7,
+       "d": 1.5,
+       "f": 0.1,
+       "hf": 0.1,
+       "sf": 1.234,
+       "by": -3,
+       "ul": 18446744073709551615,
+       "dt": "2020-01-02T03:04:05.678Z",
+       "dn": "2020-01-02T03:04:05.123456789Z",
+       "old": "1500-03-04T05:06:07.008Z",
+       "g": [
+        "41.12,-71.34",
+        "40,-70"
+       ],
+       "k": "x",
+       "b": [
+        true,
+        false
+       ],
+       "t": "hello",
+       "ip": "10.0.0.1",
+       "neg": -2.75,
+       "big": 1e+300
+      },
+      "sort": [
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": 1.0,
+      "_source": {
+       "k": "y",
+       "l": [
+        -4,
+        10
+       ],
+       "dt": [
+        "2021-12-31T23:59:59.999Z",
+        "1969-12-31T23:59:59.999Z"
+       ],
+       "neg": -0.5,
+       "big": -1e+19
+      },
+      "sort": [
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": 1.0,
+      "_source": {
+       "d": 2.5
+      },
+      "sort": [
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "sort",
+  "script": {
+   "lang": "expression",
+   "source": "_score"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "_source": {
+       "l": [
+        5,
+        3,
+        9,
+        3
+       ],
+       "i": 7,
+       "d": 1.5,
+       "f": 0.1,
+       "hf": 0.1,
+       "sf": 1.234,
+       "by": -3,
+       "ul": 18446744073709551615,
+       "dt": "2020-01-02T03:04:05.678Z",
+       "dn": "2020-01-02T03:04:05.123456789Z",
+       "old": "1500-03-04T05:06:07.008Z",
+       "g": [
+        "41.12,-71.34",
+        "40,-70"
+       ],
+       "k": "x",
+       "b": [
+        true,
+        false
+       ],
+       "t": "hello",
+       "ip": "10.0.0.1",
+       "neg": -2.75,
+       "big": 1e+300
+      },
+      "sort": [
+       0.0,
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "_source": {
+       "k": "y",
+       "l": [
+        -4,
+        10
+       ],
+       "dt": [
+        "2021-12-31T23:59:59.999Z",
+        "1969-12-31T23:59:59.999Z"
+       ],
+       "neg": -0.5,
+       "big": -1e+19
+      },
+      "sort": [
+       0.0,
+       1
+      ]
+     },
+     {
+      "_id": "3",
+      "_score": null,
+      "_source": {
+       "d": 2.5
+      },
+      "sort": [
+       0.0,
+       2
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "sort",
+  "script": {
+   "lang": "expression",
+   "source": "_value"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "link error",
+      "script_stack": [
+       "_value",
+       "^---- HERE"
+      ],
+      "script": "_value",
+      "lang": "expression"
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-expr",
+      "node": "KUCoktuNRmSHRByJKia02g",
+      "reason": {
+       "type": "script_exception",
+       "reason": "link error",
+       "script_stack": [
+        "_value",
+        "^---- HERE"
+       ],
+       "script": "_value",
+       "lang": "expression",
+       "caused_by": {
+        "type": "parse_exception",
+        "reason": "Unknown variable [_value]"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  }
+ },
+ {
+  "context": "sort",
+  "script": {
+   "lang": "expression",
+   "source": "doc['d'].empty * 10 + doc['l']"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "3",
+      "_score": null,
+      "_source": {
+       "d": 2.5
+      },
+      "sort": [
+       0.0,
+       2
+      ]
+     },
+     {
+      "_id": "1",
+      "_score": null,
+      "_source": {
+       "l": [
+        5,
+        3,
+        9,
+        3
+       ],
+       "i": 7,
+       "d": 1.5,
+       "f": 0.1,
+       "hf": 0.1,
+       "sf": 1.234,
+       "by": -3,
+       "ul": 18446744073709551615,
+       "dt": "2020-01-02T03:04:05.678Z",
+       "dn": "2020-01-02T03:04:05.123456789Z",
+       "old": "1500-03-04T05:06:07.008Z",
+       "g": [
+        "41.12,-71.34",
+        "40,-70"
+       ],
+       "k": "x",
+       "b": [
+        true,
+        false
+       ],
+       "t": "hello",
+       "ip": "10.0.0.1",
+       "neg": -2.75,
+       "big": 1e+300
+      },
+      "sort": [
+       3.0,
+       0
+      ]
+     },
+     {
+      "_id": "2",
+      "_score": null,
+      "_source": {
+       "k": "y",
+       "l": [
+        -4,
+        10
+       ],
+       "dt": [
+        "2021-12-31T23:59:59.999Z",
+        "1969-12-31T23:59:59.999Z"
+       ],
+       "neg": -0.5,
+       "big": -1e+19
+      },
+      "sort": [
+       6.0,
+       1
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "aggs",
+  "script": {
+   "lang": "expression",
+   "source": "_score * 3 + _value"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "mn": {
+     "value": 3.0
+    },
+    "mx": {
+     "value": 3.0
+    }
+   }
+  }
+ },
+ {
+  "context": "aggs",
+  "script": {
+   "lang": "expression",
+   "source": "doc['dt'].getMonth()"
+  },
+  "status": 200,
+  "response": {
+   "took": 5,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "mn": {
+     "value": 0.0
+    },
+    "mx": {
+     "value": 11.0
+    }
+   }
+  }
+ },
+ {
+  "context": "value",
+  "script": {
+   "lang": "expression",
+   "source": "_value * _value"
+  },
+  "status": 200,
+  "response": {
+   "took": 5,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "value": 68.0
+    }
+   }
+  }
+ },
+ {
+  "context": "value",
+  "script": {
+   "lang": "expression",
+   "source": "doc['l'].count()"
+  },
+  "status": 200,
+  "response": {
+   "took": 4,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 3,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "value": 20.0
+    }
+   }
+  }
+ },
+ {
+  "context": "filter",
+  "script": {
+   "lang": "expression",
+   "source": "doc['l'] < 0"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 1,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "2",
+      "_score": null,
+      "_source": {
+       "k": "y",
+       "l": [
+        -4,
+        10
+       ],
+       "dt": [
+        "2021-12-31T23:59:59.999Z",
+        "1969-12-31T23:59:59.999Z"
+       ],
+       "neg": -0.5,
+       "big": -1e+19
+      },
+      "sort": [
+       1
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "filter",
+  "script": {
+   "lang": "expression",
+   "source": "_value"
+  },
+  "status": 200,
+  "response": {
+   "took": 3,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 0,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   }
+  }
+ },
+ {
+  "context": "filter",
+  "script": {
+   "lang": "expression",
+   "source": "doc['g'].empty"
+  },
+  "status": 200,
+  "response": {
+   "took": 2,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 1,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": [
+     {
+      "_id": "1",
+      "_score": null,
+      "_source": {
+       "l": [
+        5,
+        3,
+        9,
+        3
+       ],
+       "i": 7,
+       "d": 1.5,
+       "f": 0.1,
+       "hf": 0.1,
+       "sf": 1.234,
+       "by": -3,
+       "ul": 18446744073709551615,
+       "dt": "2020-01-02T03:04:05.678Z",
+       "dn": "2020-01-02T03:04:05.123456789Z",
+       "old": "1500-03-04T05:06:07.008Z",
+       "g": [
+        "41.12,-71.34",
+        "40,-70"
+       ],
+       "k": "x",
+       "b": [
+        true,
+        false
+       ],
+       "t": "hello",
+       "ip": "10.0.0.1",
+       "neg": -2.75,
+       "big": 1e+300
+      },
+      "sort": [
+       0
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "context": "filter",
+  "script": {
+   "lang": "expression",
+   "source": "-0.0"
+  },
+  "status": 200,
+  "response": {
+   "took": 2,
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 0,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   }
+  }
+ }
+]

@@ -1,0 +1,730 @@
+{
+  "description" : "Mapping updates, conflicts, field mappings.",
+  "steps" : [
+    {
+      "req" : "PUT /esm-m1",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "title" : {
+              "type" : "text",
+              "fields" : {
+                "raw" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "n" : {
+              "type" : "long"
+            },
+            "obj" : {
+              "properties" : {
+                "x" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-m1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m1/_mapping",
+      "body" : {
+        "properties" : {
+          "added" : {
+            "type" : "date",
+            "format" : "yyyy-MM-dd"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-m1/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-m1" : {
+          "mappings" : {
+            "properties" : {
+              "added" : {
+                "type" : "date",
+                "format" : "yyyy-MM-dd"
+              },
+              "n" : {
+                "type" : "long"
+              },
+              "obj" : {
+                "properties" : {
+                  "x" : {
+                    "type" : "keyword"
+                  }
+                }
+              },
+              "title" : {
+                "type" : "text",
+                "fields" : {
+                  "raw" : {
+                    "type" : "keyword"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m1/_mapping",
+      "body" : {
+        "properties" : {
+          "n" : {
+            "type" : "keyword"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "mapper [n] cannot be changed from type [long] to [keyword]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "mapper [n] cannot be changed from type [long] to [keyword]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m1/_mapping",
+      "body" : {
+        "properties" : {
+          "title" : {
+            "type" : "text",
+            "analyzer" : "english"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [title] conflicts with existing mapper:\n\tCannot update parameter [analyzer] from [default] to [english]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [title] conflicts with existing mapper:\n\tCannot update parameter [analyzer] from [default] to [english]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m1/_mapping",
+      "body" : {
+        "properties" : {
+          "obj" : {
+            "type" : "nested"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "can't merge a non-nested mapping [obj] with a nested mapping"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "can't merge a non-nested mapping [obj] with a nested mapping"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m1/_mapping",
+      "body" : {
+        "dynamic" : "strict"
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m1/_mapping",
+      "body" : {
+        "_source" : {
+          "enabled" : false
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m1/_mapping",
+      "body" : { },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m1/_mapping",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "request body is required"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "request body is required"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m1/_mapping",
+      "body" : {
+        "properties" : {
+          "bad" : {
+            "type" : "bogus"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "The mapper type [bogus] declared on field [bad] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation."
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: The mapper type [bogus] declared on field [bad] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation.",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "The mapper type [bogus] declared on field [bad] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation."
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-nope/_mapping",
+      "body" : {
+        "properties" : {
+          "a" : {
+            "type" : "keyword"
+          }
+        }
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-nope",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-nope",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-m1/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-m1" : {
+          "mappings" : {
+            "dynamic" : "strict",
+            "_source" : {
+              "enabled" : false
+            },
+            "properties" : {
+              "added" : {
+                "type" : "date",
+                "format" : "yyyy-MM-dd"
+              },
+              "n" : {
+                "type" : "long"
+              },
+              "obj" : {
+                "properties" : {
+                  "x" : {
+                    "type" : "keyword"
+                  }
+                }
+              },
+              "title" : {
+                "type" : "text",
+                "fields" : {
+                  "raw" : {
+                    "type" : "keyword"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-m1/_mapping/field/title*",
+      "status" : 200,
+      "response" : {
+        "esm-m1" : {
+          "mappings" : {
+            "title.raw" : {
+              "full_name" : "title.raw",
+              "mapping" : {
+                "raw" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "title" : {
+              "full_name" : "title",
+              "mapping" : {
+                "title" : {
+                  "type" : "text",
+                  "fields" : {
+                    "raw" : {
+                      "type" : "keyword"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-m1/_mapping/field/obj.x,n",
+      "status" : 200,
+      "response" : {
+        "esm-m1" : {
+          "mappings" : {
+            "obj.x" : {
+              "full_name" : "obj.x",
+              "mapping" : {
+                "x" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "n" : {
+              "full_name" : "n",
+              "mapping" : {
+                "n" : {
+                  "type" : "long"
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-m1/_mapping/field/nope",
+      "status" : 200,
+      "response" : {
+        "esm-m1" : {
+          "mappings" : { }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-m1/_mapping/field/_id,_routing",
+      "status" : 200,
+      "response" : {
+        "esm-m1" : {
+          "mappings" : {
+            "_routing" : {
+              "full_name" : "_routing",
+              "mapping" : { }
+            },
+            "_id" : {
+              "full_name" : "_id",
+              "mapping" : { }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-m1/_mapping/field/n?include_defaults=true",
+      "status" : 200,
+      "response" : {
+        "esm-m1" : {
+          "mappings" : {
+            "n" : {
+              "full_name" : "n",
+              "mapping" : {
+                "n" : {
+                  "type" : "long",
+                  "index" : true,
+                  "doc_values" : true,
+                  "store" : false,
+                  "ignore_malformed" : false,
+                  "coerce" : true,
+                  "null_value" : null,
+                  "script" : null,
+                  "on_script_error" : "fail",
+                  "meta" : { },
+                  "time_series_dimension" : false,
+                  "time_series_metric" : null
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-m2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m*/_mapping",
+      "body" : {
+        "properties" : {
+          "shared" : {
+            "type" : "keyword"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-m2/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-m2" : {
+          "mappings" : {
+            "properties" : {
+              "shared" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-nope/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-nope",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-nope",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m3",
+      "body" : {
+        "settings" : {
+          "index.mapping.total_fields.limit" : 2
+        },
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "keyword"
+            },
+            "b" : {
+              "type" : "keyword"
+            },
+            "c" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Limit of total fields [2] has been exceeded"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Limit of total fields [2] has been exceeded"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m3",
+      "body" : {
+        "settings" : {
+          "index.mapping.depth.limit" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "properties" : {
+                "b" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Limit of mapping depth [1] has been exceeded due to object field [a]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Limit of mapping depth [1] has been exceeded due to object field [a]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m3",
+      "body" : {
+        "mappings" : {
+          "_doc" : {
+            "properties" : {
+              "a" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "The mapping definition cannot be nested under a type [_doc]."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "The mapping definition cannot be nested under a type [_doc]."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-m4",
+      "body" : {
+        "mappings" : {
+          "dynamic_templates" : [
+            {
+              "strings" : {
+                "match_mapping_type" : "string",
+                "mapping" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          ],
+          "runtime" : {
+            "r" : {
+              "type" : "long",
+              "script" : "emit(1)"
+            }
+          },
+          "_meta" : {
+            "v" : 1
+          },
+          "_routing" : {
+            "required" : true
+          },
+          "date_detection" : false
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-m4"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-m4/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-m4" : {
+          "mappings" : {
+            "_meta" : {
+              "v" : 1
+            },
+            "_routing" : {
+              "required" : true
+            },
+            "dynamic_templates" : [
+              {
+                "strings" : {
+                  "match_mapping_type" : "string",
+                  "mapping" : {
+                    "type" : "keyword"
+                  }
+                }
+              }
+            ],
+            "date_detection" : false,
+            "runtime" : {
+              "r" : {
+                "type" : "long",
+                "script" : {
+                  "source" : "emit(1)",
+                  "lang" : "painless"
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

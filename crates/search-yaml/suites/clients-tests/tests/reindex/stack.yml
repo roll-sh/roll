@@ -1,0 +1,36 @@
+---
+requires:
+  serverless: false
+  stack: true
+---
+setup:
+  - do:
+      indices.create: { index: 'reindex_test' }
+  - do:
+      index:
+        index: 'reindex_test'
+        body: { name: 'garbanzo' }
+        refresh: true
+---
+teardown:
+  - do:
+      indices.delete: { index: 'reindex_test' }
+  - do:
+      indices.delete: { index: 'reindex_test_reindexed', ignore: 404 }
+---
+'reindex':
+  - do:
+      reindex:
+        wait_for_completion: false
+        scroll: 10s
+        body:
+          source: { index: 'reindex_test' }
+          dest: { index: 'reindex_test_reindexed' }
+  - is_true: task
+  - set: { task: task_id }
+
+  - do:
+      reindex_rethrottle:
+        task_id: $task_id
+        requests_per_second: 1
+  - is_true: nodes

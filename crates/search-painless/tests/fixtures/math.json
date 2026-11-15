@@ -1,0 +1,2406 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('123456789012345678901234567890').multiply(new BigInteger('-987654321'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-121932631124828532112482853211126352690"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('100').add(BigInteger.ONE)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "101"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-17').divide(new BigInteger('5'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-3"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-17').remainder(new BigInteger('5'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-2"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-17').mod(new BigInteger('5'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "3"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-17').divideAndRemainder(new BigInteger('5'))[1]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-2"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('2').pow(100)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1267650600228229401496703205376"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('12').gcd(new BigInteger('18'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "6"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('3').modPow(new BigInteger('200'), new BigInteger('1000007'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "959082"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('3').modInverse(new BigInteger('11'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "4"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-6').and(new BigInteger('3'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-6').or(new BigInteger('3'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-6').xor(new BigInteger('3'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-7"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-6').andNot(new BigInteger('3'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-8"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-6').not()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-5').shiftRight(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-3"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('5').shiftLeft(70)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "5902958103587056517120"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-128').bitLength()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "7"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-128').bitCount()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "7"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('40').getLowestSetBit()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "3"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-6').testBit(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "true"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('6').setBit(70)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1180591620717411303430"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-6').clearBit(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-8"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('6').flipBit(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "7"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-129').toByteArray()[0]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-1"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('255').toString(16)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "ff"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-255').toString(2)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-11111111"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('ff')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)",
+       "java.base/java.lang.Integer.parseInt(Integer.java:529)",
+       "java.base/java.math.BigInteger.<init>(BigInteger.java:583)",
+       "java.base/java.math.BigInteger.<init>(BigInteger.java:721)",
+       "return new BigInteger('ff')",
+       "       ^---- HERE"
+      ],
+      "script": "return new BigInteger('ff')",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 27
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)",
+     "java.base/java.lang.Integer.parseInt(Integer.java:529)",
+     "java.base/java.math.BigInteger.<init>(BigInteger.java:583)",
+     "java.base/java.math.BigInteger.<init>(BigInteger.java:721)",
+     "return new BigInteger('ff')",
+     "       ^---- HERE"
+    ],
+    "script": "return new BigInteger('ff')",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 27
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"ff\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('ff', 16)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "255"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-zz', 36)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-1295"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('9223372036854775808').longValue()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-9223372036854775808"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('9223372036854775808').intValue()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('9223372036854775808').longValueExact()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigInteger.longValueExact(BigInteger.java:5131)",
+       "return new BigInteger('9223372036854775808').longValueExact()",
+       "                                            ^---- HERE"
+      ],
+      "script": "return new BigInteger('9223372036854775808').longValueExact()",
+      "lang": "painless",
+      "position": {
+       "offset": 44,
+       "start": 0,
+       "end": 61
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigInteger.longValueExact(BigInteger.java:5131)",
+     "return new BigInteger('9223372036854775808').longValueExact()",
+     "                                            ^---- HERE"
+    ],
+    "script": "return new BigInteger('9223372036854775808').longValueExact()",
+    "lang": "painless",
+    "position": {
+     "offset": 44,
+     "start": 0,
+     "end": 61
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "BigInteger out of long range"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('300').byteValueExact()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigInteger.byteValueExact(BigInteger.java:5192)",
+       "return new BigInteger('300').byteValueExact()",
+       "                            ^---- HERE"
+      ],
+      "script": "return new BigInteger('300').byteValueExact()",
+      "lang": "painless",
+      "position": {
+       "offset": 28,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigInteger.byteValueExact(BigInteger.java:5192)",
+     "return new BigInteger('300').byteValueExact()",
+     "                            ^---- HERE"
+    ],
+    "script": "return new BigInteger('300').byteValueExact()",
+    "lang": "painless",
+    "position": {
+     "offset": 28,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "BigInteger out of byte range"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('123456789012345678901234567890').doubleValue()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.2345678901234568E29"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('1').divide(BigInteger.ZERO)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.MutableBigInteger.divideKnuth(MutableBigInteger.java:1271)",
+       "java.base/java.math.BigInteger.divideKnuth(BigInteger.java:2492)",
+       "java.base/java.math.BigInteger.divide(BigInteger.java:2473)",
+       "return new BigInteger('1').divide(BigInteger.ZERO)",
+       "                                            ^---- HERE"
+      ],
+      "script": "return new BigInteger('1').divide(BigInteger.ZERO)",
+      "lang": "painless",
+      "position": {
+       "offset": 44,
+       "start": 0,
+       "end": 50
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.MutableBigInteger.divideKnuth(MutableBigInteger.java:1271)",
+     "java.base/java.math.BigInteger.divideKnuth(BigInteger.java:2492)",
+     "java.base/java.math.BigInteger.divide(BigInteger.java:2473)",
+     "return new BigInteger('1').divide(BigInteger.ZERO)",
+     "                                            ^---- HERE"
+    ],
+    "script": "return new BigInteger('1').divide(BigInteger.ZERO)",
+    "lang": "painless",
+    "position": {
+     "offset": 44,
+     "start": 0,
+     "end": 50
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "BigInteger divide by zero"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('1').mod(new BigInteger('-1'))",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigInteger.mod(BigInteger.java:2960)",
+       "return new BigInteger('1').mod(new BigInteger('-1'))",
+       "                               ^---- HERE"
+      ],
+      "script": "return new BigInteger('1').mod(new BigInteger('-1'))",
+      "lang": "painless",
+      "position": {
+       "offset": 31,
+       "start": 0,
+       "end": 52
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigInteger.mod(BigInteger.java:2960)",
+     "return new BigInteger('1').mod(new BigInteger('-1'))",
+     "                               ^---- HERE"
+    ],
+    "script": "return new BigInteger('1').mod(new BigInteger('-1'))",
+    "lang": "painless",
+    "position": {
+     "offset": 31,
+     "start": 0,
+     "end": 52
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "BigInteger: modulus not positive"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('2').modInverse(new BigInteger('4'))",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.MutableBigInteger.mutableModInverse(MutableBigInteger.java:2376)",
+       "java.base/java.math.BigInteger.modInverse(BigInteger.java:3558)",
+       "return new BigInteger('2').modInverse(new BigInteger('4'))",
+       "                                      ^---- HERE"
+      ],
+      "script": "return new BigInteger('2').modInverse(new BigInteger('4'))",
+      "lang": "painless",
+      "position": {
+       "offset": 38,
+       "start": 0,
+       "end": 58
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.MutableBigInteger.mutableModInverse(MutableBigInteger.java:2376)",
+     "java.base/java.math.BigInteger.modInverse(BigInteger.java:3558)",
+     "return new BigInteger('2').modInverse(new BigInteger('4'))",
+     "                                      ^---- HERE"
+    ],
+    "script": "return new BigInteger('2').modInverse(new BigInteger('4'))",
+    "lang": "painless",
+    "position": {
+     "offset": 38,
+     "start": 0,
+     "end": 58
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "BigInteger not invertible."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('2').pow(-1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigInteger.pow(BigInteger.java:2597)",
+       "return new BigInteger('2').pow(-1)",
+       "                          ^---- HERE"
+      ],
+      "script": "return new BigInteger('2').pow(-1)",
+      "lang": "painless",
+      "position": {
+       "offset": 26,
+       "start": 0,
+       "end": 34
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigInteger.pow(BigInteger.java:2597)",
+     "return new BigInteger('2').pow(-1)",
+     "                          ^---- HERE"
+    ],
+    "script": "return new BigInteger('2').pow(-1)",
+    "lang": "painless",
+    "position": {
+     "offset": 26,
+     "start": 0,
+     "end": 34
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "Negative exponent"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigInteger.<init>(BigInteger.java:533)",
+       "java.base/java.math.BigInteger.<init>(BigInteger.java:721)",
+       "return new BigInteger('')",
+       "       ^---- HERE"
+      ],
+      "script": "return new BigInteger('')",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigInteger.<init>(BigInteger.java:533)",
+     "java.base/java.math.BigInteger.<init>(BigInteger.java:721)",
+     "return new BigInteger('')",
+     "       ^---- HERE"
+    ],
+    "script": "return new BigInteger('')",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 25
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "Zero length BigInteger"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('1-2')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigInteger.<init>(BigInteger.java:541)",
+       "java.base/java.math.BigInteger.<init>(BigInteger.java:721)",
+       "return new BigInteger('1-2')",
+       "       ^---- HERE"
+      ],
+      "script": "return new BigInteger('1-2')",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 28
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigInteger.<init>(BigInteger.java:541)",
+     "java.base/java.math.BigInteger.<init>(BigInteger.java:721)",
+     "return new BigInteger('1-2')",
+     "       ^---- HERE"
+    ],
+    "script": "return new BigInteger('1-2')",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 28
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "Illegal embedded sign character"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('5').compareTo(new BigInteger('7'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-1"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('5').equals(new BigInteger('5'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "true"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('5').hashCode()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('-12345678901234567890').hashCode()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1436577082"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return BigInteger.valueOf(-5L).signum()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-1"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('5').max(new BigInteger('7'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "7"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('5').testBit(-1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigInteger.testBit(BigInteger.java:3829)",
+       "return new BigInteger('5').testBit(-1)",
+       "                          ^---- HERE"
+      ],
+      "script": "return new BigInteger('5').testBit(-1)",
+      "lang": "painless",
+      "position": {
+       "offset": 26,
+       "start": 0,
+       "end": 38
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigInteger.testBit(BigInteger.java:3829)",
+     "return new BigInteger('5').testBit(-1)",
+     "                          ^---- HERE"
+    ],
+    "script": "return new BigInteger('5').testBit(-1)",
+    "lang": "painless",
+    "position": {
+     "offset": 26,
+     "start": 0,
+     "end": 38
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "Negative bit address"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.50')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.50"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1E+3')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1E+3"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('0.0000001')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1E-7"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('123.456e-10')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.23456E-8"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('-0.00')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1E+3').toPlainString()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1000"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('12345E+2').toEngineeringString()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.2345E+6"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('0.000123').toEngineeringString()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.000123"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('0E+2').toEngineeringString()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.0E+3"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return BigDecimal.valueOf(0.1)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.1"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return BigDecimal.valueOf(1e20)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.0E+20"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return BigDecimal.valueOf(100.0)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "100.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('10').divide(new BigDecimal('4'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2.5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1').divide(new BigDecimal('3'))",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigDecimal.divide(BigDecimal.java:1811)",
+       "return new BigDecimal('1').divide(new BigDecimal('3'))",
+       "                                  ^---- HERE"
+      ],
+      "script": "return new BigDecimal('1').divide(new BigDecimal('3'))",
+      "lang": "painless",
+      "position": {
+       "offset": 34,
+       "start": 0,
+       "end": 54
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigDecimal.divide(BigDecimal.java:1811)",
+     "return new BigDecimal('1').divide(new BigDecimal('3'))",
+     "                                  ^---- HERE"
+    ],
+    "script": "return new BigDecimal('1').divide(new BigDecimal('3'))",
+    "lang": "painless",
+    "position": {
+     "offset": 34,
+     "start": 0,
+     "end": 54
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "Non-terminating decimal expansion; no exact representable decimal result."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1').divide(new BigDecimal('3'), MathContext.DECIMAL32)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.3333333"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('2').divide(new BigDecimal('3'), new MathContext(5))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.66667"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.00').divide(new BigDecimal('4'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.25"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('100').divide(new BigDecimal('0.01'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.00E+4"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1').divide(new BigDecimal('0'))",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigDecimal.divide(BigDecimal.java:1786)",
+       "return new BigDecimal('1').divide(new BigDecimal('0'))",
+       "                                  ^---- HERE"
+      ],
+      "script": "return new BigDecimal('1').divide(new BigDecimal('0'))",
+      "lang": "painless",
+      "position": {
+       "offset": 34,
+       "start": 0,
+       "end": 54
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigDecimal.divide(BigDecimal.java:1786)",
+     "return new BigDecimal('1').divide(new BigDecimal('0'))",
+     "                                  ^---- HERE"
+    ],
+    "script": "return new BigDecimal('1').divide(new BigDecimal('0'))",
+    "lang": "painless",
+    "position": {
+     "offset": 34,
+     "start": 0,
+     "end": 54
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "Division by zero"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('0').divide(new BigDecimal('0'))",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigDecimal.divide(BigDecimal.java:1785)",
+       "return new BigDecimal('0').divide(new BigDecimal('0'))",
+       "                                  ^---- HERE"
+      ],
+      "script": "return new BigDecimal('0').divide(new BigDecimal('0'))",
+      "lang": "painless",
+      "position": {
+       "offset": 34,
+       "start": 0,
+       "end": 54
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigDecimal.divide(BigDecimal.java:1785)",
+     "return new BigDecimal('0').divide(new BigDecimal('0'))",
+     "                                  ^---- HERE"
+    ],
+    "script": "return new BigDecimal('0').divide(new BigDecimal('0'))",
+    "lang": "painless",
+    "position": {
+     "offset": 34,
+     "start": 0,
+     "end": 54
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "Division undefined"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('0.00').divide(new BigDecimal('3'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.25').setScale(1, RoundingMode.HALF_EVEN)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.2"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.25').setScale(1, RoundingMode.HALF_UP)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.3"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('-1.25').setScale(1, RoundingMode.HALF_DOWN)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-1.2"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.21').setScale(1, RoundingMode.CEILING)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.3"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('-1.21').setScale(1, RoundingMode.FLOOR)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-1.3"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.21').setScale(1, RoundingMode.UP)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.3"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.29').setScale(1, RoundingMode.DOWN)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.2"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.25').setScale(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigDecimal.commonNeedIncrement(BigDecimal.java:4963)",
+       "java.base/java.math.BigDecimal.needIncrement(BigDecimal.java:5013)",
+       "java.base/java.math.BigDecimal.divideAndRound(BigDecimal.java:4927)",
+       "java.base/java.math.BigDecimal.setScale(BigDecimal.java:2981)",
+       "java.base/java.math.BigDecimal.setScale(BigDecimal.java:3041)",
+       "return new BigDecimal('1.25').setScale(1)",
+       "                             ^---- HERE"
+      ],
+      "script": "return new BigDecimal('1.25').setScale(1)",
+      "lang": "painless",
+      "position": {
+       "offset": 29,
+       "start": 0,
+       "end": 41
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigDecimal.commonNeedIncrement(BigDecimal.java:4963)",
+     "java.base/java.math.BigDecimal.needIncrement(BigDecimal.java:5013)",
+     "java.base/java.math.BigDecimal.divideAndRound(BigDecimal.java:4927)",
+     "java.base/java.math.BigDecimal.setScale(BigDecimal.java:2981)",
+     "java.base/java.math.BigDecimal.setScale(BigDecimal.java:3041)",
+     "return new BigDecimal('1.25').setScale(1)",
+     "                             ^---- HERE"
+    ],
+    "script": "return new BigDecimal('1.25').setScale(1)",
+    "lang": "painless",
+    "position": {
+     "offset": 29,
+     "start": 0,
+     "end": 41
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "Rounding necessary"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.25').setScale(4)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.2500"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('10.5').divideToIntegralValue(new BigDecimal('3'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "3.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('10.5').remainder(new BigDecimal('3'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('-10.5').divideAndRemainder(new BigDecimal('3'))[1]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-1.5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('999').round(new MathContext(2))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.0E+3"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.10').add(new BigDecimal('2.205'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "3.305"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.10').subtract(new BigDecimal('2.205'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-1.105"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.10').multiply(new BigDecimal('2.205'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2.42550"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('100').stripTrailingZeros()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1E+2"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('0.000').stripTrailingZeros()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.5').pow(3)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "3.375"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.5').pow(3, new MathContext(2))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "3.4"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('123.45').movePointLeft(3)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.12345"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('123.45').movePointRight(3)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "123450"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('123.45').movePointRight(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1234.5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('123.45').scaleByPowerOfTen(3)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.2345E+5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('123.45').ulp()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.01"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('123.45').precision()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('123.45').scale()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('-123.45').signum()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-1"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('123.45').toBigInteger()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "123"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('123.45').toBigIntegerExact()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigDecimal.commonNeedIncrement(BigDecimal.java:4963)",
+       "java.base/java.math.BigDecimal.needIncrement(BigDecimal.java:5013)",
+       "java.base/java.math.BigDecimal.divideAndRound(BigDecimal.java:4927)",
+       "java.base/java.math.BigDecimal.setScale(BigDecimal.java:2981)",
+       "java.base/java.math.BigDecimal.toBigIntegerExact(BigDecimal.java:3613)",
+       "return new BigDecimal('123.45').toBigIntegerExact()",
+       "                               ^---- HERE"
+      ],
+      "script": "return new BigDecimal('123.45').toBigIntegerExact()",
+      "lang": "painless",
+      "position": {
+       "offset": 31,
+       "start": 0,
+       "end": 51
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigDecimal.commonNeedIncrement(BigDecimal.java:4963)",
+     "java.base/java.math.BigDecimal.needIncrement(BigDecimal.java:5013)",
+     "java.base/java.math.BigDecimal.divideAndRound(BigDecimal.java:4927)",
+     "java.base/java.math.BigDecimal.setScale(BigDecimal.java:2981)",
+     "java.base/java.math.BigDecimal.toBigIntegerExact(BigDecimal.java:3613)",
+     "return new BigDecimal('123.45').toBigIntegerExact()",
+     "                               ^---- HERE"
+    ],
+    "script": "return new BigDecimal('123.45').toBigIntegerExact()",
+    "lang": "painless",
+    "position": {
+     "offset": 31,
+     "start": 0,
+     "end": 51
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "Rounding necessary"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('123.45').intValueExact()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigDecimal.commonNeedIncrement(BigDecimal.java:4963)",
+       "java.base/java.math.BigDecimal.needIncrement(BigDecimal.java:5013)",
+       "java.base/java.math.BigDecimal.divideAndRound(BigDecimal.java:4927)",
+       "java.base/java.math.BigDecimal.setScale(BigDecimal.java:2981)",
+       "java.base/java.math.BigDecimal.longValueExact(BigDecimal.java:3700)",
+       "java.base/java.math.BigDecimal.intValueExact(BigDecimal.java:3759)",
+       "return new BigDecimal('123.45').intValueExact()",
+       "                               ^---- HERE"
+      ],
+      "script": "return new BigDecimal('123.45').intValueExact()",
+      "lang": "painless",
+      "position": {
+       "offset": 31,
+       "start": 0,
+       "end": 47
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigDecimal.commonNeedIncrement(BigDecimal.java:4963)",
+     "java.base/java.math.BigDecimal.needIncrement(BigDecimal.java:5013)",
+     "java.base/java.math.BigDecimal.divideAndRound(BigDecimal.java:4927)",
+     "java.base/java.math.BigDecimal.setScale(BigDecimal.java:2981)",
+     "java.base/java.math.BigDecimal.longValueExact(BigDecimal.java:3700)",
+     "java.base/java.math.BigDecimal.intValueExact(BigDecimal.java:3759)",
+     "return new BigDecimal('123.45').intValueExact()",
+     "                               ^---- HERE"
+    ],
+    "script": "return new BigDecimal('123.45').intValueExact()",
+    "lang": "painless",
+    "position": {
+     "offset": 31,
+     "start": 0,
+     "end": 47
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "Rounding necessary"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('123').intValueExact()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "123"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('99999999999').intValueExact()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigDecimal.intValueExact(BigDecimal.java:3761)",
+       "return new BigDecimal('99999999999').intValueExact()",
+       "                                    ^---- HERE"
+      ],
+      "script": "return new BigDecimal('99999999999').intValueExact()",
+      "lang": "painless",
+      "position": {
+       "offset": 36,
+       "start": 0,
+       "end": 52
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigDecimal.intValueExact(BigDecimal.java:3761)",
+     "return new BigDecimal('99999999999').intValueExact()",
+     "                                    ^---- HERE"
+    ],
+    "script": "return new BigDecimal('99999999999').intValueExact()",
+    "lang": "painless",
+    "position": {
+     "offset": 36,
+     "start": 0,
+     "end": 52
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "Overflow"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('123.45').intValue()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "123"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('123.45').doubleValue()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "123.45"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('2.0').equals(new BigDecimal('2.00'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "false"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('2.0').compareTo(new BigDecimal('2.00'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('2.0').hashCode()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "621"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('123456789012345678901234567890.5').hashCode()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1113278083"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('2.0').max(new BigDecimal('2.00'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('abc')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigDecimal.<init>(BigDecimal.java:626)",
+       "java.base/java.math.BigDecimal.<init>(BigDecimal.java:515)",
+       "java.base/java.math.BigDecimal.<init>(BigDecimal.java:921)",
+       "return new BigDecimal('abc')",
+       "       ^---- HERE"
+      ],
+      "script": "return new BigDecimal('abc')",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 28
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigDecimal.<init>(BigDecimal.java:626)",
+     "java.base/java.math.BigDecimal.<init>(BigDecimal.java:515)",
+     "java.base/java.math.BigDecimal.<init>(BigDecimal.java:921)",
+     "return new BigDecimal('abc')",
+     "       ^---- HERE"
+    ],
+    "script": "return new BigDecimal('abc')",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 28
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "Character a is neither a decimal digit number, decimal point, nor \"e\" notation exponential mark."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.2.3')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigDecimal.<init>(BigDecimal.java:603)",
+       "java.base/java.math.BigDecimal.<init>(BigDecimal.java:515)",
+       "java.base/java.math.BigDecimal.<init>(BigDecimal.java:921)",
+       "return new BigDecimal('1.2.3')",
+       "       ^---- HERE"
+      ],
+      "script": "return new BigDecimal('1.2.3')",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 30
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigDecimal.<init>(BigDecimal.java:603)",
+     "java.base/java.math.BigDecimal.<init>(BigDecimal.java:515)",
+     "java.base/java.math.BigDecimal.<init>(BigDecimal.java:921)",
+     "return new BigDecimal('1.2.3')",
+     "       ^---- HERE"
+    ],
+    "script": "return new BigDecimal('1.2.3')",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 30
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "Character array contains more than one decimal point."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigDecimal.<init>(BigDecimal.java:721)",
+       "java.base/java.math.BigDecimal.<init>(BigDecimal.java:515)",
+       "java.base/java.math.BigDecimal.<init>(BigDecimal.java:921)",
+       "return new BigDecimal('')",
+       "       ^---- HERE"
+      ],
+      "script": "return new BigDecimal('')",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigDecimal.<init>(BigDecimal.java:721)",
+     "java.base/java.math.BigDecimal.<init>(BigDecimal.java:515)",
+     "java.base/java.math.BigDecimal.<init>(BigDecimal.java:921)",
+     "return new BigDecimal('')",
+     "       ^---- HERE"
+    ],
+    "script": "return new BigDecimal('')",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 25
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": null,
+     "caused_by": {
+      "type": "array_index_out_of_bounds_exception",
+      "reason": "Index 0 out of bounds for length 0"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1e')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigDecimal.<init>(BigDecimal.java:721)",
+       "java.base/java.math.BigDecimal.<init>(BigDecimal.java:515)",
+       "java.base/java.math.BigDecimal.<init>(BigDecimal.java:921)",
+       "return new BigDecimal('1e')",
+       "       ^---- HERE"
+      ],
+      "script": "return new BigDecimal('1e')",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 27
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigDecimal.<init>(BigDecimal.java:721)",
+     "java.base/java.math.BigDecimal.<init>(BigDecimal.java:515)",
+     "java.base/java.math.BigDecimal.<init>(BigDecimal.java:921)",
+     "return new BigDecimal('1e')",
+     "       ^---- HERE"
+    ],
+    "script": "return new BigDecimal('1e')",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 27
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": null,
+     "caused_by": {
+      "type": "array_index_out_of_bounds_exception",
+      "reason": "Index 2 out of bounds for length 2"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('-1.5').abs()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.5').negate()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-1.5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.234567').plus(new MathContext(3))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.23"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.23456', new MathContext(3))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.23"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MathContext.DECIMAL64",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "precision=16 roundingMode=HALF_EVEN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new MathContext(5).getRoundingMode()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "HALF_UP"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return RoundingMode.valueOf('UP')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "UP"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return RoundingMode.values().length",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "8"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new MathContext(-1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.MathContext.<init>(MathContext.java:158)",
+       "java.base/java.math.MathContext.<init>(MathContext.java:142)",
+       "return new MathContext(-1)",
+       "       ^---- HERE"
+      ],
+      "script": "return new MathContext(-1)",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 26
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.MathContext.<init>(MathContext.java:158)",
+     "java.base/java.math.MathContext.<init>(MathContext.java:142)",
+     "return new MathContext(-1)",
+     "       ^---- HERE"
+    ],
+    "script": "return new MathContext(-1)",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 26
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Digits < 0"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%d %x', new def[] {new BigInteger('-123456789012345678901234567890'), new BigInteger('255')})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-123456789012345678901234567890 ff"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%.3f %e', new def[] {new BigDecimal('1.23456'), new BigDecimal('12345.678')})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.235 1.234568e+04"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [new BigDecimal('2.5'), new BigDecimal('1.5')].stream().sorted().collect(Collectors.toList())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1.5, 2.5]"
+  }
+ }
+]

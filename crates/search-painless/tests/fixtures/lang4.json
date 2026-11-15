@@ -1,0 +1,4402 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "int x = 'a'",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "int x = 'a'",
+       "        ^---- HERE"
+      ],
+      "script": "int x = 'a'",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 11
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "int x = 'a'",
+     "        ^---- HERE"
+    ],
+    "script": "int x = 'a'",
+    "lang": "painless",
+    "position": {
+     "offset": 8,
+     "start": 0,
+     "end": 11
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.String] to [int]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String s = 1;",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "String s = 1;",
+       "           ^---- HERE"
+      ],
+      "script": "String s = 1;",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 13
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "String s = 1;",
+     "           ^---- HERE"
+    ],
+    "script": "String s = 1;",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 0,
+     "end": 13
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [java.lang.String]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int x = 1; x = 'str'",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "int x = 1; x = 'str'",
+       "               ^---- HERE"
+      ],
+      "script": "int x = 1; x = 'str'",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 0,
+       "end": 20
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "int x = 1; x = 'str'",
+     "               ^---- HERE"
+    ],
+    "script": "int x = 1; x = 'str'",
+    "lang": "painless",
+    "position": {
+     "offset": 15,
+     "start": 0,
+     "end": 20
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.String] to [int]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def x = 1; int y = x + 'a'",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "def x = 1; int y = x + 'a'",
+       "                   ^---- HERE"
+      ],
+      "script": "def x = 1; int y = x + 'a'",
+      "lang": "painless",
+      "position": {
+       "offset": 19,
+       "start": 0,
+       "end": 26
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "def x = 1; int y = x + 'a'",
+     "                   ^---- HERE"
+    ],
+    "script": "def x = 1; int y = x + 'a'",
+    "lang": "painless",
+    "position": {
+     "offset": 19,
+     "start": 0,
+     "end": 26
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.String] to [int]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = new List()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "List l = new List()",
+       "         ^---- HERE"
+      ],
+      "script": "List l = new List()",
+      "lang": "painless",
+      "position": {
+       "offset": 9,
+       "start": 0,
+       "end": 19
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "List l = new List()",
+     "         ^---- HERE"
+    ],
+    "script": "List l = new List()",
+    "lang": "painless",
+    "position": {
+     "offset": 9,
+     "start": 0,
+     "end": 19
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "constructor [java.util.List, <init>/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "Map m = new Map()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "Map m = new Map()",
+       "        ^---- HERE"
+      ],
+      "script": "Map m = new Map()",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 17
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "Map m = new Map()",
+     "        ^---- HERE"
+    ],
+    "script": "Map m = new Map()",
+    "lang": "painless",
+    "position": {
+     "offset": 8,
+     "start": 0,
+     "end": 17
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "constructor [java.util.Map, <init>/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "new ArrayList().foo",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "new ArrayList().foo",
+       "               ^---- HERE"
+      ],
+      "script": "new ArrayList().foo",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 0,
+       "end": 19
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "new ArrayList().foo",
+     "               ^---- HERE"
+    ],
+    "script": "new ArrayList().foo",
+    "lang": "painless",
+    "position": {
+     "offset": 15,
+     "start": 0,
+     "end": 19
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "invalid list index [foo]",
+     "caused_by": {
+      "type": "number_format_exception",
+      "reason": "For input string: \"foo\""
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ArrayList.size()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "ArrayList.size()",
+       "         ^---- HERE"
+      ],
+      "script": "ArrayList.size()",
+      "lang": "painless",
+      "position": {
+       "offset": 9,
+       "start": 0,
+       "end": 16
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "ArrayList.size()",
+     "         ^---- HERE"
+    ],
+    "script": "ArrayList.size()",
+    "lang": "painless",
+    "position": {
+     "offset": 9,
+     "start": 0,
+     "end": 16
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "static method [java.util.ArrayList, size/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Math.PI = 3",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return Math.PI = 3",
+       "           ^---- HERE"
+      ],
+      "script": "return Math.PI = 3",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 18
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return Math.PI = 3",
+     "           ^---- HERE"
+    ],
+    "script": "return Math.PI = 3",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 0,
+     "end": 18
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "invalid assignment: cannot assign a value to read-only field [PI]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int x; x.length()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "int x; x.length()",
+       "        ^---- HERE"
+      ],
+      "script": "int x; x.length()",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 17
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "int x; x.length()",
+     "        ^---- HERE"
+    ],
+    "script": "int x; x.length()",
+    "lang": "painless",
+    "position": {
+     "offset": 8,
+     "start": 0,
+     "end": 17
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [int, length/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String s = 'a'; s.length = 5",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "String s = 'a'; s.length = 5",
+       "                 ^---- HERE"
+      ],
+      "script": "String s = 'a'; s.length = 5",
+      "lang": "painless",
+      "position": {
+       "offset": 17,
+       "start": 0,
+       "end": 28
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "String s = 'a'; s.length = 5",
+     "                 ^---- HERE"
+    ],
+    "script": "String s = 'a'; s.length = 5",
+    "lang": "painless",
+    "position": {
+     "offset": 17,
+     "start": 0,
+     "end": 28
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "field [java.lang.String, length] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int[] a = new int[2]; a.length = 3",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "int[] a = new int[2]; a.length = 3",
+       "                       ^---- HERE"
+      ],
+      "script": "int[] a = new int[2]; a.length = 3",
+      "lang": "painless",
+      "position": {
+       "offset": 23,
+       "start": 0,
+       "end": 34
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "int[] a = new int[2]; a.length = 3",
+     "                       ^---- HERE"
+    ],
+    "script": "int[] a = new int[2]; a.length = 3",
+    "lang": "painless",
+    "position": {
+     "offset": 23,
+     "start": 0,
+     "end": 34
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "invalid assignment: cannot assign a value write to read-only field [length] for an array."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return undefinedVar + 1",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return undefinedVar + 1",
+       "       ^---- HERE"
+      ],
+      "script": "return undefinedVar + 1",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 23
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return undefinedVar + 1",
+     "       ^---- HERE"
+    ],
+    "script": "return undefinedVar + 1",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 23
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "cannot resolve symbol [undefinedVar]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 1 +",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return 1 +",
+       "          ^---- HERE"
+      ],
+      "script": "return 1 +",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 10
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return 1 +",
+     "          ^---- HERE"
+    ],
+    "script": "return 1 +",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 10
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "unexpected end of script.",
+     "caused_by": {
+      "type": "no_viable_alt_exception",
+      "reason": null
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return (1 + 2",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return (1 + 2",
+       "             ^---- HERE"
+      ],
+      "script": "return (1 + 2",
+      "lang": "painless",
+      "position": {
+       "offset": 13,
+       "start": 0,
+       "end": 13
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return (1 + 2",
+     "             ^---- HERE"
+    ],
+    "script": "return (1 + 2",
+    "lang": "painless",
+    "position": {
+     "offset": 13,
+     "start": 0,
+     "end": 13
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "unexpected end of script.",
+     "caused_by": {
+      "type": "no_viable_alt_exception",
+      "reason": null
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 'unterminated",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return 'unterminated",
+       "       ^---- HERE"
+      ],
+      "script": "return 'unterminated",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 20
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return 'unterminated",
+     "       ^---- HERE"
+    ],
+    "script": "return 'unterminated",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 20
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "unexpected character ['unterminated].",
+     "caused_by": {
+      "type": "lexer_no_viable_alt_exception",
+      "reason": null
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return \"unterminated",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return \"unterminated",
+       "       ^---- HERE"
+      ],
+      "script": "return \"unterminated",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 20
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return \"unterminated",
+     "       ^---- HERE"
+    ],
+    "script": "return \"unterminated",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 20
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "unexpected character [\"unterminated].",
+     "caused_by": {
+      "type": "lexer_no_viable_alt_exception",
+      "reason": null
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int x = 1;; return x",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "int x = 1;; return x",
+       "          ^---- HERE"
+      ],
+      "script": "int x = 1;; return x",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 20
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "int x = 1;; return x",
+     "          ^---- HERE"
+    ],
+    "script": "int x = 1;; return x",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 20
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "unexpected token [';'] was expecting one of [<EOF>]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "if (true) return 1; else return 2",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "if (true) return 1; else  ...",
+       "^---- HERE"
+      ],
+      "script": "if (true) return 1; else return 2",
+      "lang": "painless",
+      "position": {
+       "offset": 0,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "if (true) return 1; else  ...",
+     "^---- HERE"
+    ],
+    "script": "if (true) return 1; else return 2",
+    "lang": "painless",
+    "position": {
+     "offset": 0,
+     "start": 0,
+     "end": 25
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "extraneous if block"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "for (;;) { break } return 1",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "for (;;) { break } return ...",
+       "^---- HERE"
+      ],
+      "script": "for (;;) { break } return 1",
+      "lang": "painless",
+      "position": {
+       "offset": 0,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "for (;;) { break } return ...",
+     "^---- HERE"
+    ],
+    "script": "for (;;) { break } return 1",
+    "lang": "painless",
+    "position": {
+     "offset": 0,
+     "start": 0,
+     "end": 25
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "extraneous for loop"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "while (true) {}",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "while (true) {}",
+       "^---- HERE"
+      ],
+      "script": "while (true) {}",
+      "lang": "painless",
+      "position": {
+       "offset": 0,
+       "start": 0,
+       "end": 15
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "while (true) {}",
+     "^---- HERE"
+    ],
+    "script": "while (true) {}",
+    "lang": "painless",
+    "position": {
+     "offset": 0,
+     "start": 0,
+     "end": 15
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "no paths escape from while loop"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "for (int i = 0; i < 10; i++) {} return i",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... ; i < 10; i++) {} return i",
+       "                             ^---- HERE"
+      ],
+      "script": "for (int i = 0; i < 10; i++) {} return i",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 14,
+       "end": 40
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... ; i < 10; i++) {} return i",
+     "                             ^---- HERE"
+    ],
+    "script": "for (int i = 0; i < 10; i++) {} return i",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 14,
+     "end": 40
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "cannot resolve symbol [i]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int f(int x) { } return f(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "int f(int x) { } return f ...",
+       "^---- HERE"
+      ],
+      "script": "int f(int x) { } return f(1)",
+      "lang": "painless",
+      "position": {
+       "offset": 0,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "int f(int x) { } return f ...",
+     "^---- HERE"
+    ],
+    "script": "int f(int x) { } return f(1)",
+    "lang": "painless",
+    "position": {
+     "offset": 0,
+     "start": 0,
+     "end": 25
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "invalid function definition: found no statements for function [f] with [1] parameters"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "void f() { return 1 } f()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "void f() { return 1 } f()",
+       "                  ^---- HERE"
+      ],
+      "script": "void f() { return 1 } f()",
+      "lang": "painless",
+      "position": {
+       "offset": 18,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "void f() { return 1 } f()",
+     "                  ^---- HERE"
+    ],
+    "script": "void f() { return 1 } f()",
+    "lang": "painless",
+    "position": {
+     "offset": 18,
+     "start": 0,
+     "end": 25
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [void]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int f() { return 'a' } return f()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "int f() { return 'a' } return f()",
+       "                 ^---- HERE"
+      ],
+      "script": "int f() { return 'a' } return f()",
+      "lang": "painless",
+      "position": {
+       "offset": 17,
+       "start": 0,
+       "end": 33
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "int f() { return 'a' } return f()",
+     "                 ^---- HERE"
+    ],
+    "script": "int f() { return 'a' } return f()",
+    "lang": "painless",
+    "position": {
+     "offset": 17,
+     "start": 0,
+     "end": 33
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.String] to [int]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def f(int x, int x) { return x } return f(1, 2)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "def f(int x, int x) { ret ...",
+       "^---- HERE"
+      ],
+      "script": "def f(int x, int x) { return x } return f(1, 2)",
+      "lang": "painless",
+      "position": {
+       "offset": 0,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "def f(int x, int x) { ret ...",
+     "^---- HERE"
+    ],
+    "script": "def f(int x, int x) { return x } return f(1, 2)",
+    "lang": "painless",
+    "position": {
+     "offset": 0,
+     "start": 0,
+     "end": 25
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "variable [x] is already defined"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int f(int a) { return a } int f(int b) { return b } return f(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... nt f(int a) { return a } int f(int b) { return b } ...",
+       "                             ^---- HERE"
+      ],
+      "script": "int f(int a) { return a } int f(int b) { return b } return f(1)",
+      "lang": "painless",
+      "position": {
+       "offset": 26,
+       "start": 1,
+       "end": 51
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... nt f(int a) { return a } int f(int b) { return b } ...",
+     "                             ^---- HERE"
+    ],
+    "script": "int f(int a) { return a } int f(int b) { return b } return f(1)",
+    "lang": "painless",
+    "position": {
+     "offset": 26,
+     "start": 1,
+     "end": 51
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "invalid function definition: found duplicate function [f/1]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return f(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return f(1)",
+       "       ^---- HERE"
+      ],
+      "script": "return f(1)",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 11
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return f(1)",
+     "       ^---- HERE"
+    ],
+    "script": "return f(1)",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 11
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Unknown call [f] with [1] arguments."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Math.max(1, 2, 3)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return Math.max(1, 2, 3)",
+       "           ^---- HERE"
+      ],
+      "script": "return Math.max(1, 2, 3)",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 24
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return Math.max(1, 2, 3)",
+     "           ^---- HERE"
+    ],
+    "script": "return Math.max(1, 2, 3)",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 0,
+     "end": 24
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "static method [java.lang.Math, max/3] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 'a'.substring('b')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return 'a'.substring('b')",
+       "                     ^---- HERE"
+      ],
+      "script": "return 'a'.substring('b')",
+      "lang": "painless",
+      "position": {
+       "offset": 21,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return 'a'.substring('b')",
+     "                     ^---- HERE"
+    ],
+    "script": "return 'a'.substring('b')",
+    "lang": "painless",
+    "position": {
+     "offset": 21,
+     "start": 0,
+     "end": 25
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.String] to [int]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new ArrayList(1, 2, 3)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return new ArrayList(1, 2, 3)",
+       "       ^---- HERE"
+      ],
+      "script": "return new ArrayList(1, 2, 3)",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 29
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return new ArrayList(1, 2, 3)",
+     "       ^---- HERE"
+    ],
+    "script": "return new ArrayList(1, 2, 3)",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 29
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "constructor [java.util.ArrayList, <init>/3] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new HashMap().put(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return new HashMap().put(1)",
+       "                    ^---- HERE"
+      ],
+      "script": "return new HashMap().put(1)",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 27
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return new HashMap().put(1)",
+     "                    ^---- HERE"
+    ],
+    "script": "return new HashMap().put(1)",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 27
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [java.util.HashMap, put/1] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def x = 1; return x.foo.bar",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return x.foo.bar",
+       "        ^---- HERE"
+      ],
+      "script": "def x = 1; return x.foo.bar",
+      "lang": "painless",
+      "position": {
+       "offset": 19,
+       "start": 11,
+       "end": 27
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return x.foo.bar",
+     "        ^---- HERE"
+    ],
+    "script": "def x = 1; return x.foo.bar",
+    "lang": "painless",
+    "position": {
+     "offset": 19,
+     "start": 11,
+     "end": 27
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "dynamic getter [java.lang.Integer, foo] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [1, 2, 3][1]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ['a': 1]['a']",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 'abc'[1]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return 'abc'[1]",
+       "            ^---- HERE"
+      ],
+      "script": "return 'abc'[1]",
+      "lang": "painless",
+      "position": {
+       "offset": 12,
+       "start": 0,
+       "end": 15
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return 'abc'[1]",
+     "            ^---- HERE"
+    ],
+    "script": "return 'abc'[1]",
+    "lang": "painless",
+    "position": {
+     "offset": 12,
+     "start": 0,
+     "end": 15
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Illegal array access on type [java.lang.String]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int x = 5; return x[0]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "int x = 5; return x[0]",
+       "                   ^---- HERE"
+      ],
+      "script": "int x = 5; return x[0]",
+      "lang": "painless",
+      "position": {
+       "offset": 19,
+       "start": 0,
+       "end": 22
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "int x = 5; return x[0]",
+     "                   ^---- HERE"
+    ],
+    "script": "int x = 5; return x[0]",
+    "lang": "painless",
+    "position": {
+     "offset": 19,
+     "start": 0,
+     "end": 22
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Illegal array access on type [int]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return (String) 5",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return (String) 5",
+       "                ^---- HERE"
+      ],
+      "script": "return (String) 5",
+      "lang": "painless",
+      "position": {
+       "offset": 16,
+       "start": 0,
+       "end": 17
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return (String) 5",
+     "                ^---- HERE"
+    ],
+    "script": "return (String) 5",
+    "lang": "painless",
+    "position": {
+     "offset": 16,
+     "start": 0,
+     "end": 17
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [java.lang.String]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return (int) 'abc'",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return (int) 'abc'",
+       "             ^---- HERE"
+      ],
+      "script": "return (int) 'abc'",
+      "lang": "painless",
+      "position": {
+       "offset": 13,
+       "start": 0,
+       "end": 18
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return (int) 'abc'",
+     "             ^---- HERE"
+    ],
+    "script": "return (int) 'abc'",
+    "lang": "painless",
+    "position": {
+     "offset": 13,
+     "start": 0,
+     "end": 18
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.String] to [int]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return (boolean) 1",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return (boolean) 1",
+       "                 ^---- HERE"
+      ],
+      "script": "return (boolean) 1",
+      "lang": "painless",
+      "position": {
+       "offset": 17,
+       "start": 0,
+       "end": 18
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return (boolean) 1",
+     "                 ^---- HERE"
+    ],
+    "script": "return (boolean) 1",
+    "lang": "painless",
+    "position": {
+     "offset": 17,
+     "start": 0,
+     "end": 18
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [boolean]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return (Integer) null",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "null"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return (int) null",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return (int) null",
+       "             ^---- HERE"
+      ],
+      "script": "return (int) null",
+      "lang": "painless",
+      "position": {
+       "offset": 13,
+       "start": 0,
+       "end": 17
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return (int) null",
+     "             ^---- HERE"
+    ],
+    "script": "return (int) null",
+    "lang": "painless",
+    "position": {
+     "offset": 13,
+     "start": 0,
+     "end": 17
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Cannot cast null to a primitive type [int]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "Integer i = 1; Long l = i",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "Integer i = 1; Long l = i",
+       "            ^---- HERE"
+      ],
+      "script": "Integer i = 1; Long l = i",
+      "lang": "painless",
+      "position": {
+       "offset": 12,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "Integer i = 1; Long l = i",
+     "            ^---- HERE"
+    ],
+    "script": "Integer i = 1; Long l = i",
+    "lang": "painless",
+    "position": {
+     "offset": 12,
+     "start": 0,
+     "end": 25
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [java.lang.Integer]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "long l = 1; int i = l",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "long l = 1; int i = l",
+       "                    ^---- HERE"
+      ],
+      "script": "long l = 1; int i = l",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 21
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "long l = 1; int i = l",
+     "                    ^---- HERE"
+    ],
+    "script": "long l = 1; int i = l",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 21
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [long] to [int]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int i = 1L",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "int i = 1L",
+       "        ^---- HERE"
+      ],
+      "script": "int i = 1L",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 10
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "int i = 1L",
+     "        ^---- HERE"
+    ],
+    "script": "int i = 1L",
+    "lang": "painless",
+    "position": {
+     "offset": 8,
+     "start": 0,
+     "end": 10
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [long] to [int]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "float f = 1.0",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "float f = 1.0",
+       "          ^---- HERE"
+      ],
+      "script": "float f = 1.0",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 13
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "float f = 1.0",
+     "          ^---- HERE"
+    ],
+    "script": "float f = 1.0",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 13
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [double] to [float]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double d = 1.0f; return d",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "byte b = 127; b++; return b",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-128"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "byte b = 128",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "byte b = 128",
+       "         ^---- HERE"
+      ],
+      "script": "byte b = 128",
+      "lang": "painless",
+      "position": {
+       "offset": 9,
+       "start": 0,
+       "end": 12
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "byte b = 128",
+     "         ^---- HERE"
+    ],
+    "script": "byte b = 128",
+    "lang": "painless",
+    "position": {
+     "offset": 9,
+     "start": 0,
+     "end": 12
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [byte]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "short s = 1; s = s + 1",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "short s = 1; s = s + 1",
+       "                 ^---- HERE"
+      ],
+      "script": "short s = 1; s = s + 1",
+      "lang": "painless",
+      "position": {
+       "offset": 17,
+       "start": 0,
+       "end": 22
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "short s = 1; s = s + 1",
+     "                 ^---- HERE"
+    ],
+    "script": "short s = 1; s = s + 1",
+    "lang": "painless",
+    "position": {
+     "offset": 17,
+     "start": 0,
+     "end": 22
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [short]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "char c = 65; return c",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "A"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "char c = 65536",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "char c = 65536",
+       "         ^---- HERE"
+      ],
+      "script": "char c = 65536",
+      "lang": "painless",
+      "position": {
+       "offset": 9,
+       "start": 0,
+       "end": 14
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "char c = 65536",
+     "         ^---- HERE"
+    ],
+    "script": "char c = 65536",
+    "lang": "painless",
+    "position": {
+     "offset": 9,
+     "start": 0,
+     "end": 14
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [char]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 1 instanceof String",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "false"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 'a' instanceof Integer",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "false"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return null instanceof Object",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "false"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [] instanceof List && [:] instanceof Map",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "true"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String s = null; return s == null ? 'null' : s",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "null"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 1 == 1L && 1 == 1.0 && 1.0f == 1.0",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "true"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "Integer a = 1000; Integer b = 1000; return [a == b, a === b, a.equals(b)]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "Integer a = 1000; Integer b = 1000; r ...",
+       "            ^---- HERE"
+      ],
+      "script": "Integer a = 1000; Integer b = 1000; return [a == b, a === b, a.equals(b)]",
+      "lang": "painless",
+      "position": {
+       "offset": 12,
+       "start": 0,
+       "end": 37
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "Integer a = 1000; Integer b = 1000; r ...",
+     "            ^---- HERE"
+    ],
+    "script": "Integer a = 1000; Integer b = 1000; return [a == b, a === b, a.equals(b)]",
+    "lang": "painless",
+    "position": {
+     "offset": 12,
+     "start": 0,
+     "end": 37
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [java.lang.Integer]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def a = 'x'; def b = 'x'; return [a == b, a === b]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def a = new ArrayList(); def b = new ArrayList(); return [a == b, a === b, a != b, a !== b]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, false, false, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 1 <=> 2",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return 1 <=> 2",
+       "           ^---- HERE"
+      ],
+      "script": "return 1 <=> 2",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 14
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return 1 <=> 2",
+     "           ^---- HERE"
+    ],
+    "script": "return 1 <=> 2",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 0,
+     "end": 14
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "invalid sequence of tokens near ['>'].",
+     "caused_by": {
+      "type": "no_viable_alt_exception",
+      "reason": null
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 5 > 3 > 1",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return 5 > 3 > 1",
+       "       ^---- HERE"
+      ],
+      "script": "return 5 > 3 > 1",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 16
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return 5 > 3 > 1",
+     "       ^---- HERE"
+    ],
+    "script": "return 5 > 3 > 1",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 16
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [boolean] to [int]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return !5",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return !5",
+       "        ^---- HERE"
+      ],
+      "script": "return !5",
+      "lang": "painless",
+      "position": {
+       "offset": 8,
+       "start": 0,
+       "end": 9
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return !5",
+     "        ^---- HERE"
+    ],
+    "script": "return !5",
+    "lang": "painless",
+    "position": {
+     "offset": 8,
+     "start": 0,
+     "end": 9
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [boolean]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return -'5'",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return -'5'",
+       "       ^---- HERE"
+      ],
+      "script": "return -'5'",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 11
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return -'5'",
+     "       ^---- HERE"
+    ],
+    "script": "return -'5'",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 11
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot apply the subtraction operator [-] to the type [java.lang.String]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ~1.5",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return ~1.5",
+       "       ^---- HERE"
+      ],
+      "script": "return ~1.5",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 11
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return ~1.5",
+     "       ^---- HERE"
+    ],
+    "script": "return ~1.5",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 11
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot apply the bitwise not operator [~] to the type [double]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return true + 1",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return true + 1",
+       "       ^---- HERE"
+      ],
+      "script": "return true + 1",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 15
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return true + 1",
+     "       ^---- HERE"
+    ],
+    "script": "return true + 1",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 15
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [boolean] to [int]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 'a' * 3",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return 'a' * 3",
+       "       ^---- HERE"
+      ],
+      "script": "return 'a' * 3",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 14
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return 'a' * 3",
+     "       ^---- HERE"
+    ],
+    "script": "return 'a' * 3",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 14
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.String] to [int]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [1] - [1]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return [1] - [1]",
+       "       ^---- HERE"
+      ],
+      "script": "return [1] - [1]",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 16
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return [1] - [1]",
+     "       ^---- HERE"
+    ],
+    "script": "return [1] - [1]",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 16
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot apply the subtraction operator [-] to the types [java.util.ArrayList] and [java.util.ArrayList]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 1 << 33",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 1L << 65",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return -8 >> 1 == -4 && -8 >>> 28 == 15",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "true"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 7 & 3 | 4 ^ 1",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "7"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "boolean b = true; b &= false; b |= true; b ^= true; return b",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "false"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int x = 10; x /= 3; x %= 2; x <<= 3; x >>= 1; x >>>= 1; x &= 7; x |= 8; x ^= 1; return x",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "11"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String s = 'a'; s += 'b' + 1; return s",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "ab1"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def x = 2; x *= 'a'",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "x *= 'a'",
+       "     ^---- HERE"
+      ],
+      "script": "def x = 2; x *= 'a'",
+      "lang": "painless",
+      "position": {
+       "offset": 16,
+       "start": 11,
+       "end": 19
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "x *= 'a'",
+     "     ^---- HERE"
+    ],
+    "script": "def x = 2; x *= 'a'",
+    "lang": "painless",
+    "position": {
+     "offset": 16,
+     "start": 11,
+     "end": 19
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot apply [*] operation to types [java.lang.Integer] and [java.lang.String]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def s = 'abc'; return s.length() + s.size()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return s.length() + s.size()",
+       "                     ^---- HERE"
+      ],
+      "script": "def s = 'abc'; return s.length() + s.size()",
+      "lang": "painless",
+      "position": {
+       "offset": 36,
+       "start": 15,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return s.length() + s.size()",
+     "                     ^---- HERE"
+    ],
+    "script": "def s = 'abc'; return s.length() + s.size()",
+    "lang": "painless",
+    "position": {
+     "offset": 36,
+     "start": 15,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "dynamic method [java.lang.String, size/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [1, 2, 3].size() + 'ab'.length() + ['a': 1].size()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "6"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Collections.emptyList().add(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.AbstractList.add(AbstractList.java:155)",
+       "java.base/java.util.AbstractList.add(AbstractList.java:113)",
+       "return Collections.emptyList().add(1)",
+       "                                   ^---- HERE"
+      ],
+      "script": "return Collections.emptyList().add(1)",
+      "lang": "painless",
+      "position": {
+       "offset": 35,
+       "start": 0,
+       "end": 37
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.AbstractList.add(AbstractList.java:155)",
+     "java.base/java.util.AbstractList.add(AbstractList.java:113)",
+     "return Collections.emptyList().add(1)",
+     "                                   ^---- HERE"
+    ],
+    "script": "return Collections.emptyList().add(1)",
+    "lang": "painless",
+    "position": {
+     "offset": 35,
+     "start": 0,
+     "end": 37
+    },
+    "caused_by": {
+     "type": "unsupported_operation_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return List.of(1, 2).add(3)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return List.of(1, 2).add(3)",
+       "           ^---- HERE"
+      ],
+      "script": "return List.of(1, 2).add(3)",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 27
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return List.of(1, 2).add(3)",
+     "           ^---- HERE"
+    ],
+    "script": "return List.of(1, 2).add(3)",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 0,
+     "end": 27
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "static method [java.util.List, of/2] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Map.of('a', 1, 'a', 2)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return Map.of('a', 1, 'a', 2)",
+       "          ^---- HERE"
+      ],
+      "script": "return Map.of('a', 1, 'a', 2)",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 29
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return Map.of('a', 1, 'a', 2)",
+     "          ^---- HERE"
+    ],
+    "script": "return Map.of('a', 1, 'a', 2)",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 29
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "static method [java.util.Map, of/4] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return List.of(1, null)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return List.of(1, null)",
+       "           ^---- HERE"
+      ],
+      "script": "return List.of(1, null)",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 23
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return List.of(1, null)",
+     "           ^---- HERE"
+    ],
+    "script": "return List.of(1, null)",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 0,
+     "end": 23
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "static method [java.util.List, of/2] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Set.of(1, 1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return Set.of(1, 1)",
+       "          ^---- HERE"
+      ],
+      "script": "return Set.of(1, 1)",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 19
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return Set.of(1, 1)",
+     "          ^---- HERE"
+    ],
+    "script": "return Set.of(1, 1)",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 19
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "static method [java.util.Set, of/2] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3]; for (def x : l) { l.remove(0) } return l",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$Itr.checkForComodification(ArrayList.java:1104)",
+       "java.base/java.util.ArrayList$Itr.next(ArrayList.java:1058)",
+       "l = [1, 2, 3]; ",
+       "    ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3]; for (def x : l) { l.remove(0) } return l",
+      "lang": "painless",
+      "position": {
+       "offset": 9,
+       "start": 5,
+       "end": 20
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$Itr.checkForComodification(ArrayList.java:1104)",
+     "java.base/java.util.ArrayList$Itr.next(ArrayList.java:1058)",
+     "l = [1, 2, 3]; ",
+     "    ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3]; for (def x : l) { l.remove(0) } return l",
+    "lang": "painless",
+    "position": {
+     "offset": 9,
+     "start": 5,
+     "end": 20
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "Map m = ['a': 1, 'b': 2]; for (def k : m.keySet()) { m.remove('b') } return m",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.HashMap$HashIterator.nextNode(HashMap.java:1631)",
+       "java.base/java.util.HashMap$KeyIterator.next(HashMap.java:1654)",
+       "for (def k : m.keySet()) { ",
+       "              ^---- HERE"
+      ],
+      "script": "Map m = ['a': 1, 'b': 2]; for (def k : m.keySet()) { m.remove('b') } return m",
+      "lang": "painless",
+      "position": {
+       "offset": 40,
+       "start": 26,
+       "end": 53
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.HashMap$HashIterator.nextNode(HashMap.java:1631)",
+     "java.base/java.util.HashMap$KeyIterator.next(HashMap.java:1654)",
+     "for (def k : m.keySet()) { ",
+     "              ^---- HERE"
+    ],
+    "script": "Map m = ['a': 1, 'b': 2]; for (def k : m.keySet()) { m.remove('b') } return m",
+    "lang": "painless",
+    "position": {
+     "offset": 40,
+     "start": 26,
+     "end": 53
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [1, 2, 3].get(-1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:100)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.util.Objects.checkIndex(Objects.java:365)",
+       "java.base/java.util.ArrayList.get(ArrayList.java:428)",
+       "return [1, 2, 3].get(-1)",
+       "                ^---- HERE"
+      ],
+      "script": "return [1, 2, 3].get(-1)",
+      "lang": "painless",
+      "position": {
+       "offset": 16,
+       "start": 0,
+       "end": 24
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:100)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.util.Objects.checkIndex(Objects.java:365)",
+     "java.base/java.util.ArrayList.get(ArrayList.java:428)",
+     "return [1, 2, 3].get(-1)",
+     "                ^---- HERE"
+    ],
+    "script": "return [1, 2, 3].get(-1)",
+    "lang": "painless",
+    "position": {
+     "offset": 16,
+     "start": 0,
+     "end": 24
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": "Index -1 out of bounds for length 3"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3]; return l[-1] + l[-3]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "4"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3]; return l[-4]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:100)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.util.Objects.checkIndex(Objects.java:365)",
+       "java.base/java.util.ArrayList.get(ArrayList.java:428)",
+       "return l[-4]",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3]; return l[-4]",
+      "lang": "painless",
+      "position": {
+       "offset": 28,
+       "start": 20,
+       "end": 32
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:100)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.util.Objects.checkIndex(Objects.java:365)",
+     "java.base/java.util.ArrayList.get(ArrayList.java:428)",
+     "return l[-4]",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3]; return l[-4]",
+    "lang": "painless",
+    "position": {
+     "offset": 28,
+     "start": 20,
+     "end": 32
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": "Index -1 out of bounds for length 3"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int[] a = new int[3]; return a[-1]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int[] a = new int[3]; return a[5]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return a[5]",
+       "        ^---- HERE"
+      ],
+      "script": "int[] a = new int[3]; return a[5]",
+      "lang": "painless",
+      "position": {
+       "offset": 30,
+       "start": 22,
+       "end": 33
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return a[5]",
+     "        ^---- HERE"
+    ],
+    "script": "int[] a = new int[3]; return a[5]",
+    "lang": "painless",
+    "position": {
+     "offset": 30,
+     "start": 22,
+     "end": 33
+    },
+    "caused_by": {
+     "type": "array_index_out_of_bounds_exception",
+     "reason": "Index 5 out of bounds for length 3"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new int[-1]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return new int[-1]",
+       "       ^---- HERE"
+      ],
+      "script": "return new int[-1]",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 18
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return new int[-1]",
+     "       ^---- HERE"
+    ],
+    "script": "return new int[-1]",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 18
+    },
+    "caused_by": {
+     "type": "negative_array_size_exception",
+     "reason": "-1"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String s = 'abc'; return s.charAt(-1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:55)",
+       "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:52)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.lang.String.checkIndex(String.java:5279)",
+       "java.base/java.lang.StringLatin1.charAt(StringLatin1.java:58)",
+       "java.base/java.lang.String.charAt(String.java:1843)",
+       "return s.charAt(-1)",
+       "        ^---- HERE"
+      ],
+      "script": "String s = 'abc'; return s.charAt(-1)",
+      "lang": "painless",
+      "position": {
+       "offset": 26,
+       "start": 18,
+       "end": 37
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:55)",
+     "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:52)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.lang.String.checkIndex(String.java:5279)",
+     "java.base/java.lang.StringLatin1.charAt(StringLatin1.java:58)",
+     "java.base/java.lang.String.charAt(String.java:1843)",
+     "return s.charAt(-1)",
+     "        ^---- HERE"
+    ],
+    "script": "String s = 'abc'; return s.charAt(-1)",
+    "lang": "painless",
+    "position": {
+     "offset": 26,
+     "start": 18,
+     "end": 37
+    },
+    "caused_by": {
+     "type": "string_index_out_of_bounds_exception",
+     "reason": "Index -1 out of bounds for length 3"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 'abc'.substring(2, 1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:55)",
+       "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:52)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckFromToIndex(Preconditions.java:112)",
+       "java.base/jdk.internal.util.Preconditions.checkFromToIndex(Preconditions.java:349)",
+       "java.base/java.lang.String.checkBoundsBeginEnd(String.java:5312)",
+       "java.base/java.lang.String.substring(String.java:3274)",
+       "return 'abc'.substring(2, 1)",
+       "            ^---- HERE"
+      ],
+      "script": "return 'abc'.substring(2, 1)",
+      "lang": "painless",
+      "position": {
+       "offset": 12,
+       "start": 0,
+       "end": 28
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:55)",
+     "java.base/jdk.internal.util.Preconditions$1.apply(Preconditions.java:52)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckFromToIndex(Preconditions.java:112)",
+     "java.base/jdk.internal.util.Preconditions.checkFromToIndex(Preconditions.java:349)",
+     "java.base/java.lang.String.checkBoundsBeginEnd(String.java:5312)",
+     "java.base/java.lang.String.substring(String.java:3274)",
+     "return 'abc'.substring(2, 1)",
+     "            ^---- HERE"
+    ],
+    "script": "return 'abc'.substring(2, 1)",
+    "lang": "painless",
+    "position": {
+     "offset": 12,
+     "start": 0,
+     "end": 28
+    },
+    "caused_by": {
+     "type": "string_index_out_of_bounds_exception",
+     "reason": "Range [2, 1) out of bounds for length 3"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ''.split(',').length",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return ''.split(',').length",
+       "         ^---- HERE"
+      ],
+      "script": "return ''.split(',').length",
+      "lang": "painless",
+      "position": {
+       "offset": 9,
+       "start": 0,
+       "end": 27
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return ''.split(',').length",
+     "         ^---- HERE"
+    ],
+    "script": "return ''.split(',').length",
+    "lang": "painless",
+    "position": {
+     "offset": 9,
+     "start": 0,
+     "end": 27
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [java.lang.String, split/1] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 'a,,b,,'.split(',').length",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return 'a,,b,,'.split(',').length",
+       "               ^---- HERE"
+      ],
+      "script": "return 'a,,b,,'.split(',').length",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 0,
+       "end": 33
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return 'a,,b,,'.split(',').length",
+     "               ^---- HERE"
+    ],
+    "script": "return 'a,,b,,'.split(',').length",
+    "lang": "painless",
+    "position": {
+     "offset": 15,
+     "start": 0,
+     "end": 33
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [java.lang.String, split/1] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 'a1b2'.split(/\\d/)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return 'a1b2'.split(/\\d/)",
+       "             ^---- HERE"
+      ],
+      "script": "return 'a1b2'.split(/\\d/)",
+      "lang": "painless",
+      "position": {
+       "offset": 13,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return 'a1b2'.split(/\\d/)",
+     "             ^---- HERE"
+    ],
+    "script": "return 'a1b2'.split(/\\d/)",
+    "lang": "painless",
+    "position": {
+     "offset": 13,
+     "start": 0,
+     "end": 25
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [java.lang.String, split/1] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Integer.parseInt('')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)",
+       "java.base/java.lang.Integer.parseInt(Integer.java:506)",
+       "java.base/java.lang.Integer.parseInt(Integer.java:626)",
+       "return Integer.parseInt('')",
+       "              ^---- HERE"
+      ],
+      "script": "return Integer.parseInt('')",
+      "lang": "painless",
+      "position": {
+       "offset": 14,
+       "start": 0,
+       "end": 27
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)",
+     "java.base/java.lang.Integer.parseInt(Integer.java:506)",
+     "java.base/java.lang.Integer.parseInt(Integer.java:626)",
+     "return Integer.parseInt('')",
+     "              ^---- HERE"
+    ],
+    "script": "return Integer.parseInt('')",
+    "lang": "painless",
+    "position": {
+     "offset": 14,
+     "start": 0,
+     "end": 27
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Long.parseLong('9223372036854775808')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)",
+       "java.base/java.lang.Long.parseLong(Long.java:556)",
+       "java.base/java.lang.Long.parseLong(Long.java:660)",
+       "return Long.parseLong('9223372036854775808')",
+       "           ^---- HERE"
+      ],
+      "script": "return Long.parseLong('9223372036854775808')",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)",
+     "java.base/java.lang.Long.parseLong(Long.java:556)",
+     "java.base/java.lang.Long.parseLong(Long.java:660)",
+     "return Long.parseLong('9223372036854775808')",
+     "           ^---- HERE"
+    ],
+    "script": "return Long.parseLong('9223372036854775808')",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"9223372036854775808\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Double.parseDouble('1e400')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "Infinity"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Double.parseDouble('abc')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/jdk.internal.math.FloatingDecimal.check(FloatingDecimal.java:1751)",
+       "java.base/jdk.internal.math.FloatingDecimal.readJavaFormatString(FloatingDecimal.java:1374)",
+       "java.base/jdk.internal.math.FloatingDecimal.parseDouble(FloatingDecimal.java:61)",
+       "java.base/java.lang.Double.parseDouble(Double.java:993)",
+       "return Double.parseDouble('abc')",
+       "             ^---- HERE"
+      ],
+      "script": "return Double.parseDouble('abc')",
+      "lang": "painless",
+      "position": {
+       "offset": 13,
+       "start": 0,
+       "end": 32
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/jdk.internal.math.FloatingDecimal.check(FloatingDecimal.java:1751)",
+     "java.base/jdk.internal.math.FloatingDecimal.readJavaFormatString(FloatingDecimal.java:1374)",
+     "java.base/jdk.internal.math.FloatingDecimal.parseDouble(FloatingDecimal.java:61)",
+     "java.base/java.lang.Double.parseDouble(Double.java:993)",
+     "return Double.parseDouble('abc')",
+     "             ^---- HERE"
+    ],
+    "script": "return Double.parseDouble('abc')",
+    "lang": "painless",
+    "position": {
+     "offset": 13,
+     "start": 0,
+     "end": 32
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"abc\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Integer.valueOf(null)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return Integer.valueOf(null)",
+       "                       ^---- HERE"
+      ],
+      "script": "return Integer.valueOf(null)",
+      "lang": "painless",
+      "position": {
+       "offset": 23,
+       "start": 0,
+       "end": 28
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return Integer.valueOf(null)",
+     "                       ^---- HERE"
+    ],
+    "script": "return Integer.valueOf(null)",
+    "lang": "painless",
+    "position": {
+     "offset": 23,
+     "start": 0,
+     "end": 28
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Cannot cast null to a primitive type [int]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Boolean.valueOf('TRUE') && Boolean.parseBoolean(null) == false",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return Boolean.valueOf('TRUE') && Boolean.parseB ...",
+       "                       ^---- HERE"
+      ],
+      "script": "return Boolean.valueOf('TRUE') && Boolean.parseBoolean(null) == false",
+      "lang": "painless",
+      "position": {
+       "offset": 23,
+       "start": 0,
+       "end": 48
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return Boolean.valueOf('TRUE') && Boolean.parseB ...",
+     "                       ^---- HERE"
+    ],
+    "script": "return Boolean.valueOf('TRUE') && Boolean.parseBoolean(null) == false",
+    "lang": "painless",
+    "position": {
+     "offset": 23,
+     "start": 0,
+     "end": 48
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.String] to [boolean]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigDecimal('1.10').add(new BigDecimal('2.205')).setScale(2, RoundingMode.HALF_UP)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "3.31"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new BigInteger('123456789012345678901234567890').multiply(BigInteger.TEN).mod(BigInteger.valueOf(97))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "35"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return BigDecimal.valueOf(10).divide(BigDecimal.valueOf(3))",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.math.BigDecimal.divide(BigDecimal.java:1811)",
+       "return BigDecimal.valueOf(10).divide(BigDecimal.valueOf(3))",
+       "                                               ^---- HERE"
+      ],
+      "script": "return BigDecimal.valueOf(10).divide(BigDecimal.valueOf(3))",
+      "lang": "painless",
+      "position": {
+       "offset": 47,
+       "start": 0,
+       "end": 59
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.math.BigDecimal.divide(BigDecimal.java:1811)",
+     "return BigDecimal.valueOf(10).divide(BigDecimal.valueOf(3))",
+     "                                               ^---- HERE"
+    ],
+    "script": "return BigDecimal.valueOf(10).divide(BigDecimal.valueOf(3))",
+    "lang": "painless",
+    "position": {
+     "offset": 47,
+     "start": 0,
+     "end": 59
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "Non-terminating decimal expansion; no exact representable decimal result."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return BigDecimal.valueOf(10).divide(BigDecimal.valueOf(3), 5, RoundingMode.DOWN)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... rn BigDecimal.valueOf(10).divide(BigDecimal.valueO ...",
+       "                             ^---- HERE"
+      ],
+      "script": "return BigDecimal.valueOf(10).divide(BigDecimal.valueOf(3), 5, RoundingMode.DOWN)",
+      "lang": "painless",
+      "position": {
+       "offset": 29,
+       "start": 4,
+       "end": 54
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... rn BigDecimal.valueOf(10).divide(BigDecimal.valueO ...",
+     "                             ^---- HERE"
+    ],
+    "script": "return BigDecimal.valueOf(10).divide(BigDecimal.valueOf(3), 5, RoundingMode.DOWN)",
+    "lang": "painless",
+    "position": {
+     "offset": 29,
+     "start": 4,
+     "end": 54
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [java.math.BigDecimal, divide/3] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [1.23456789e-10, 123456789.123, 1.0E-3, 0.001, 1234567.0, 12345678.0, -0.0f, Float.MIN_VALUE]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1.23456789E-10, 1.23456789123E8, 0.001, 0.001, 1234567.0, 1.2345678E7, -0.0, 1.4E-45]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [(long) 1e19, (int) -1e19, (long) Double.NaN, (int) Float.POSITIVE_INFINITY, (char) 66.7, (byte) -129.9]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[9223372036854775807, -2147483648, 0, 2147483647, B, 127]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 10 / 3.0f",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "3.3333333"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 1 / 3 * 3 + 1.0 / 3 * 3",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Math.pow(2, 0.5) * Math.pow(2, 0.5) == 2.0",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "false"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Math.sqrt(-1)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "NaN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Math.log(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-Infinity"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Math.abs(Integer.MIN_VALUE)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2.147483648E9"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Math.exp(1) + Math.log10(1000) + Math.sin(0) + Math.atan2(1, 1)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "6.503679991856493"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Math.min(-0.0, 0.0), Math.max(Double.NaN, 1.0), Math.round(Double.NaN), Math.round(1e20)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[-0.0, NaN, 0, 9223372036854775807]"
+  }
+ }
+]

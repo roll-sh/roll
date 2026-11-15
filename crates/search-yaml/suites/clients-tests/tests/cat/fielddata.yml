@@ -1,0 +1,9 @@
+---
+requires:
+  serverless: false
+  stack: true
+---
+"cat.fielddata":
+  - do:
+      cat.fielddata: {}
+# TODO: Potentially implement a function that checks the request was OK.

@@ -1,0 +1,21 @@
+//! Metric aggregations.
+
+pub mod cardinality;
+pub mod cartesian;
+pub mod hll_tables;
+pub mod matrix_stats;
+pub mod geo;
+pub mod geo_line;
+pub mod hdr;
+pub mod percentiles;
+pub mod rate;
+pub mod scripted_metric;
+pub mod simple;
+pub mod sketch;
+pub mod string_stats;
+pub mod t_test;
+pub mod tdigest;
+pub mod union_state;
+pub mod top_hits;
+pub mod top_metrics;
+pub mod ts_rate;

@@ -1,0 +1,19 @@
+# Tests of Elasticsearch 9.5.5's `search-business-rules` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (basic).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever dynamic pinning and ordering
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever error case - both ids and docs
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever error case - duplicate doc
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever error case - duplicate id
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever error case - null inner query
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever errors if sorting by anything other than score
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever explanation
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever multi-index vs single-index filtering
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever parameter variations
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever with empty parameters
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever with explicit sort on score
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever with ids and empty docs array should fail
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever with non-existent doc specified via docs
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever with non-existent id
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever with pagination
+search-business-rules:search-business-rules/10_pinned_retriever/pinned retriever with rank window size

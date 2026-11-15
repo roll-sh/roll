@@ -111,6 +111,7 @@ fn postgres() -> Router {
         .route("/v1/storage/buckets/{name}", get(|| async { axum::Json(json!({ "name": "logs" })) }))
         .route("/v1/storage/buckets", get(|| async { axum::Json(json!([{ "name": "logs" }, { "name": "media" }])) }))
         .route("/v1/apps/services", post(|| async { axum::Json(json!({ "id": "svc_new" })) }))
+        .route("/v1/apps/plan", post(|| async { axum::Json(json!({ "builder": "node" })) }))
         .route("/v1/apps/services/{id}", axum::routing::patch(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
@@ -1467,6 +1468,19 @@ async fn a_link_needs_reveal_on_what_it_links() {
         { "product": "streams", "resources": [{ "id": "st_9" }], "actions": { "read": "allow" } },
     ]), json!({})).await;
     assert_eq!(d.call(&reader, Method::PATCH, "/v1/apps/services/svc_a", Some(scale)).await.0, StatusCode::OK);
+    // A roll code repo apps reads for the caller (a service built from it, a plan of it): read on
+    // that repo too, so no apps grant reaches a repo's code, head or stack by itself.
+    let from_repo = json!({ "project": "p", "name": "api", "source": { "kind": "repo", "repo": "acme/secret" } });
+    let (s, e) = d.call(&apps, Method::POST, "/v1/apps/services", Some(from_repo.clone())).await;
+    assert_eq!((s, e["needs"]["product"].as_str(), e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("code"), Some("read")), "{e}");
+    let (s, e) = d.call(&apps, Method::POST, "/v1/apps/plan", Some(json!({ "repo": "acme/secret" }))).await;
+    assert_eq!((s, e["needs"]["product"].as_str()), (StatusCode::FORBIDDEN, Some("code")), "{e}");
+    let (coder, _) = d.token(json!([
+        { "product": "apps", "resources": "*", "actions": { "read": "allow", "write": "allow", "deploy": "allow" } },
+        { "product": "code", "resources": [{ "id": "acme/secret" }], "actions": { "read": "allow" } },
+    ]), json!({})).await;
+    assert_eq!(d.call(&coder, Method::POST, "/v1/apps/services", Some(from_repo)).await.0, StatusCode::OK);
+    assert_eq!(d.call(&coder, Method::POST, "/v1/apps/plan", Some(json!({ "repo": "acme/secret" }))).await.0, StatusCode::OK);
 
     let (both, both_id) = d.token(json!([
         { "product": "apps", "resources": "*", "actions": { "write": "allow", "deploy": "allow" } },

@@ -1,0 +1,74 @@
+#defaults: {"doc": {"message": "2024-05-01T10:20:30Z GET /index.html 200 1534", "user": {"name": "Alice Smith", "email": "ALICE@EXAMPLE.COM"}, "tags": ["a", "b"], "price": "12.50", "qty": 3, "ts": 1714558830000, "geo": {"lat": 41.1, "lon": -71.3}, "nested": [{"k": 1}, {"k": 2}]}, "meta": {"_index": "painless-ingest", "_id": "1"}}
+String[] parts = ctx.message.splitOnToken(' '); ctx.method = parts[1]; ctx.path = parts[2]; ctx.status = Integer.parseInt(parts[3]); ctx.bytes = Long.parseLong(parts[4])
+----
+ctx.when = ZonedDateTime.parse(ctx.message.substring(0, 20)).toInstant().toEpochMilli()
+----
+ctx.user.email = ctx.user.email.toLowerCase(); ctx.user.first = ctx.user.name.substring(0, ctx.user.name.indexOf(' '))
+----
+ctx.total = Double.parseDouble(ctx.price) * ctx.qty
+----
+ctx.day = Instant.ofEpochMilli(ctx.ts).atZone(ZoneOffset.UTC).getDayOfWeek().toString()
+----
+ctx.date = DateTimeFormatter.ofPattern('yyyy/MM/dd HH:mm').withZone(ZoneId.of('Europe/Paris')).format(Instant.ofEpochMilli(ctx.ts))
+----
+if (ctx.tags.contains('a')) { ctx.tags.add('has-a') } else { ctx.tags.add('no-a') }
+----
+ctx.ks = ctx.nested.stream().mapToInt(n -> n.k).sum()
+----
+ctx.remove('nested'); ctx.count = ctx.size()
+----
+for (def e : ctx.user.entrySet()) { ctx['u_' + e.getKey()] = e.getValue() }
+----
+ctx.hash = MessageDigests.toHexString(MessageDigests.sha256().digest(ctx.user.email.getBytes(StandardCharsets.UTF_8)))
+----
+ctx.geo_s = ctx.geo.lat + ',' + ctx.geo.lon
+----
+def m = /(\d+)$/.matcher(ctx.message); if (m.find()) { ctx.last = m.group(1) }
+----
+ctx.lvl = ctx.qty > 2 ? 'high' : 'low'
+----
+ctx.missing_len = ctx.nothing?.length() ?: -1
+----
+ctx._index = ctx._index + '-' + ctx.qty
+----
+ctx.tags = ctx.tags.stream().map(t -> t.toUpperCase()).collect(Collectors.toList())
+----
+ctx.json = Json.dump(ctx.user)
+----
+ctx.parsed = Json.load('{"x": [1, 2.5, "s", null]}')
+----
+ctx.uuid_len = UUID.randomUUID().toString().length()
+----
+ctx.p = Processors.lowercase('ABC') + Processors.uppercase('def')
+----
+ctx.when = ctx._ingest.timestamp != null
+----
+throw new IllegalArgumentException('bad doc ' + ctx.qty)
+----
+ctx.x = ctx.user.name.foo.bar
+----
+ctx.n = ctx.price * 2
+----
+ctx.n = ctx.qty / 0
+----
+ctx.l = ctx.tags[5]
+----
+ctx.metadata().put('x', 1)
+----
+ctx.i = ctx._id + ctx._version
+----
+ctx.words = ctx.user.name.split(' ')
+----
+ctx.trimmed = '  x '.trim(); ctx.empty = ''; ctx.nul = null
+----
+ctx.f = 1.1f; ctx.d = 1.1d; ctx.b = (byte) 3; ctx.c = (char) 65; ctx.big = 10000000000L
+----
+ctx.arr = new int[] {1, 2, 3}; ctx.sarr = new String[] {'a'}
+----
+ctx.set = new HashSet(['x', 'y'])
+----
+ctx.zdt = ZonedDateTime.ofInstant(Instant.ofEpochMilli(ctx.ts), ZoneOffset.UTC)
+----
+ctx.inst = Instant.ofEpochMilli(ctx.ts)
+----
+ctx.ld = LocalDate.of(2020, 1, 2)

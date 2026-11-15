@@ -1,0 +1,785 @@
+{
+  "description" : "EQL: event queries, pipes, sequences (by, maxspan, until), samples, errors",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-ev",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "event" : {
+              "properties" : {
+                "category" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "process" : {
+              "properties" : {
+                "pid" : {
+                  "type" : "keyword"
+                },
+                "name" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "seq" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-ev"
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ev/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"1\"}}\n{\"@timestamp\": \"2020-12-06T11:04:05.000Z\", \"event\": {\"category\": \"process\"}, \"process\": {\"pid\": \"p1\", \"name\": \"cmd.exe\"}, \"seq\": 1}\n{\"index\": {\"_id\": \"2\"}}\n{\"@timestamp\": \"2020-12-06T11:04:07.000Z\", \"event\": {\"category\": \"file\"}, \"process\": {\"pid\": \"p1\", \"name\": \"foo.txt\"}, \"seq\": 2}\n{\"index\": {\"_id\": \"3\"}}\n{\"@timestamp\": \"2020-12-06T11:05:00.000Z\", \"event\": {\"category\": \"network\"}, \"process\": {\"pid\": \"p2\", \"name\": \"x\"}, \"seq\": 3}\n{\"index\": {\"_id\": \"4\"}}\n{\"@timestamp\": \"2020-12-06T11:06:00.000Z\", \"event\": {\"category\": \"process\"}, \"process\": {\"pid\": \"p2\", \"name\": \"explorer.exe\"}, \"seq\": 4}\n{\"index\": {\"_id\": \"5\"}}\n{\"@timestamp\": \"2020-12-06T11:07:00.000Z\", \"event\": {\"category\": \"file\"}, \"process\": {\"pid\": \"p2\", \"name\": \"bar.txt\"}, \"seq\": 5}\n{\"index\": {\"_id\": \"6\"}}\n{\"@timestamp\": \"2020-12-06T11:08:00.000Z\", \"event\": {\"category\": \"process\"}, \"process\": {\"pid\": \"p3\", \"name\": \"cmd.exe\"}, \"seq\": 6}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ev/_eql/search?filter_path=-took",
+      "body" : {
+        "query" : "process where process.name == \"cmd.exe\""
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "is_running" : false,
+        "timed_out" : false,
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "events" : [
+            {
+              "_index" : "compat-xpack-ev",
+              "_id" : "1",
+              "_source" : {
+                "@timestamp" : "2020-12-06T11:04:05.000Z",
+                "event" : {
+                  "category" : "process"
+                },
+                "process" : {
+                  "pid" : "p1",
+                  "name" : "cmd.exe"
+                },
+                "seq" : 1
+              }
+            },
+            {
+              "_index" : "compat-xpack-ev",
+              "_id" : "6",
+              "_source" : {
+                "@timestamp" : "2020-12-06T11:08:00.000Z",
+                "event" : {
+                  "category" : "process"
+                },
+                "process" : {
+                  "pid" : "p3",
+                  "name" : "cmd.exe"
+                },
+                "seq" : 6
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ev/_eql/search?filter_path=-took",
+      "body" : {
+        "query" : "any where seq > 4"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "is_running" : false,
+        "timed_out" : false,
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "events" : [
+            {
+              "_index" : "compat-xpack-ev",
+              "_id" : "5",
+              "_source" : {
+                "@timestamp" : "2020-12-06T11:07:00.000Z",
+                "event" : {
+                  "category" : "file"
+                },
+                "process" : {
+                  "pid" : "p2",
+                  "name" : "bar.txt"
+                },
+                "seq" : 5
+              }
+            },
+            {
+              "_index" : "compat-xpack-ev",
+              "_id" : "6",
+              "_source" : {
+                "@timestamp" : "2020-12-06T11:08:00.000Z",
+                "event" : {
+                  "category" : "process"
+                },
+                "process" : {
+                  "pid" : "p3",
+                  "name" : "cmd.exe"
+                },
+                "seq" : 6
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ev/_eql/search?filter_path=-took",
+      "body" : {
+        "query" : "file where true | tail 1"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "is_running" : false,
+        "timed_out" : false,
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "events" : [
+            {
+              "_index" : "compat-xpack-ev",
+              "_id" : "5",
+              "_source" : {
+                "@timestamp" : "2020-12-06T11:07:00.000Z",
+                "event" : {
+                  "category" : "file"
+                },
+                "process" : {
+                  "pid" : "p2",
+                  "name" : "bar.txt"
+                },
+                "seq" : 5
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ev/_eql/search?filter_path=-took",
+      "body" : {
+        "query" : "process where process.name : \"CMD*\""
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "is_running" : false,
+        "timed_out" : false,
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "events" : [
+            {
+              "_index" : "compat-xpack-ev",
+              "_id" : "1",
+              "_source" : {
+                "@timestamp" : "2020-12-06T11:04:05.000Z",
+                "event" : {
+                  "category" : "process"
+                },
+                "process" : {
+                  "pid" : "p1",
+                  "name" : "cmd.exe"
+                },
+                "seq" : 1
+              }
+            },
+            {
+              "_index" : "compat-xpack-ev",
+              "_id" : "6",
+              "_source" : {
+                "@timestamp" : "2020-12-06T11:08:00.000Z",
+                "event" : {
+                  "category" : "process"
+                },
+                "process" : {
+                  "pid" : "p3",
+                  "name" : "cmd.exe"
+                },
+                "seq" : 6
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ev/_eql/search?filter_path=-took",
+      "body" : {
+        "query" : "sequence by process.pid [process where true] [file where true]"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "is_running" : false,
+        "timed_out" : false,
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "sequences" : [
+            {
+              "join_keys" : [
+                "p1"
+              ],
+              "events" : [
+                {
+                  "_index" : "compat-xpack-ev",
+                  "_id" : "1",
+                  "_source" : {
+                    "@timestamp" : "2020-12-06T11:04:05.000Z",
+                    "event" : {
+                      "category" : "process"
+                    },
+                    "process" : {
+                      "pid" : "p1",
+                      "name" : "cmd.exe"
+                    },
+                    "seq" : 1
+                  }
+                },
+                {
+                  "_index" : "compat-xpack-ev",
+                  "_id" : "2",
+                  "_source" : {
+                    "@timestamp" : "2020-12-06T11:04:07.000Z",
+                    "event" : {
+                      "category" : "file"
+                    },
+                    "process" : {
+                      "pid" : "p1",
+                      "name" : "foo.txt"
+                    },
+                    "seq" : 2
+                  }
+                }
+              ]
+            },
+            {
+              "join_keys" : [
+                "p2"
+              ],
+              "events" : [
+                {
+                  "_index" : "compat-xpack-ev",
+                  "_id" : "4",
+                  "_source" : {
+                    "@timestamp" : "2020-12-06T11:06:00.000Z",
+                    "event" : {
+                      "category" : "process"
+                    },
+                    "process" : {
+                      "pid" : "p2",
+                      "name" : "explorer.exe"
+                    },
+                    "seq" : 4
+                  }
+                },
+                {
+                  "_index" : "compat-xpack-ev",
+                  "_id" : "5",
+                  "_source" : {
+                    "@timestamp" : "2020-12-06T11:07:00.000Z",
+                    "event" : {
+                      "category" : "file"
+                    },
+                    "process" : {
+                      "pid" : "p2",
+                      "name" : "bar.txt"
+                    },
+                    "seq" : 5
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ev/_eql/search?filter_path=-took",
+      "body" : {
+        "query" : "sequence with maxspan=5s [process where true] [file where true]"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "is_running" : false,
+        "timed_out" : false,
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "sequences" : [
+            {
+              "events" : [
+                {
+                  "_index" : "compat-xpack-ev",
+                  "_id" : "1",
+                  "_source" : {
+                    "@timestamp" : "2020-12-06T11:04:05.000Z",
+                    "event" : {
+                      "category" : "process"
+                    },
+                    "process" : {
+                      "pid" : "p1",
+                      "name" : "cmd.exe"
+                    },
+                    "seq" : 1
+                  }
+                },
+                {
+                  "_index" : "compat-xpack-ev",
+                  "_id" : "2",
+                  "_source" : {
+                    "@timestamp" : "2020-12-06T11:04:07.000Z",
+                    "event" : {
+                      "category" : "file"
+                    },
+                    "process" : {
+                      "pid" : "p1",
+                      "name" : "foo.txt"
+                    },
+                    "seq" : 2
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ev/_eql/search?filter_path=-took",
+      "body" : {
+        "query" : "sample by process.pid [process where true] [file where true]"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "is_running" : false,
+        "timed_out" : false,
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "sequences" : [
+            {
+              "join_keys" : [
+                "p1"
+              ],
+              "events" : [
+                {
+                  "_index" : "compat-xpack-ev",
+                  "_id" : "1",
+                  "_source" : {
+                    "@timestamp" : "2020-12-06T11:04:05.000Z",
+                    "event" : {
+                      "category" : "process"
+                    },
+                    "process" : {
+                      "pid" : "p1",
+                      "name" : "cmd.exe"
+                    },
+                    "seq" : 1
+                  }
+                },
+                {
+                  "_index" : "compat-xpack-ev",
+                  "_id" : "2",
+                  "_source" : {
+                    "@timestamp" : "2020-12-06T11:04:07.000Z",
+                    "event" : {
+                      "category" : "file"
+                    },
+                    "process" : {
+                      "pid" : "p1",
+                      "name" : "foo.txt"
+                    },
+                    "seq" : 2
+                  }
+                }
+              ]
+            },
+            {
+              "join_keys" : [
+                "p2"
+              ],
+              "events" : [
+                {
+                  "_index" : "compat-xpack-ev",
+                  "_id" : "4",
+                  "_source" : {
+                    "@timestamp" : "2020-12-06T11:06:00.000Z",
+                    "event" : {
+                      "category" : "process"
+                    },
+                    "process" : {
+                      "pid" : "p2",
+                      "name" : "explorer.exe"
+                    },
+                    "seq" : 4
+                  }
+                },
+                {
+                  "_index" : "compat-xpack-ev",
+                  "_id" : "5",
+                  "_source" : {
+                    "@timestamp" : "2020-12-06T11:07:00.000Z",
+                    "event" : {
+                      "category" : "file"
+                    },
+                    "process" : {
+                      "pid" : "p2",
+                      "name" : "bar.txt"
+                    },
+                    "seq" : 5
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ev/_eql/search?filter_path=-took",
+      "body" : {
+        "query" : "process where process.name in (\"cmd.exe\", \"explorer.exe\") | head 2"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "is_running" : false,
+        "timed_out" : false,
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "events" : [
+            {
+              "_index" : "compat-xpack-ev",
+              "_id" : "1",
+              "_source" : {
+                "@timestamp" : "2020-12-06T11:04:05.000Z",
+                "event" : {
+                  "category" : "process"
+                },
+                "process" : {
+                  "pid" : "p1",
+                  "name" : "cmd.exe"
+                },
+                "seq" : 1
+              }
+            },
+            {
+              "_index" : "compat-xpack-ev",
+              "_id" : "4",
+              "_source" : {
+                "@timestamp" : "2020-12-06T11:06:00.000Z",
+                "event" : {
+                  "category" : "process"
+                },
+                "process" : {
+                  "pid" : "p2",
+                  "name" : "explorer.exe"
+                },
+                "seq" : 4
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ev/_eql/search?filter_path=-took",
+      "body" : {
+        "query" : "sequence [process where true] [file where true] until [network where true]"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "is_running" : false,
+        "timed_out" : false,
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "sequences" : [
+            {
+              "events" : [
+                {
+                  "_index" : "compat-xpack-ev",
+                  "_id" : "1",
+                  "_source" : {
+                    "@timestamp" : "2020-12-06T11:04:05.000Z",
+                    "event" : {
+                      "category" : "process"
+                    },
+                    "process" : {
+                      "pid" : "p1",
+                      "name" : "cmd.exe"
+                    },
+                    "seq" : 1
+                  }
+                },
+                {
+                  "_index" : "compat-xpack-ev",
+                  "_id" : "2",
+                  "_source" : {
+                    "@timestamp" : "2020-12-06T11:04:07.000Z",
+                    "event" : {
+                      "category" : "file"
+                    },
+                    "process" : {
+                      "pid" : "p1",
+                      "name" : "foo.txt"
+                    },
+                    "seq" : 2
+                  }
+                }
+              ]
+            },
+            {
+              "events" : [
+                {
+                  "_index" : "compat-xpack-ev",
+                  "_id" : "4",
+                  "_source" : {
+                    "@timestamp" : "2020-12-06T11:06:00.000Z",
+                    "event" : {
+                      "category" : "process"
+                    },
+                    "process" : {
+                      "pid" : "p2",
+                      "name" : "explorer.exe"
+                    },
+                    "seq" : 4
+                  }
+                },
+                {
+                  "_index" : "compat-xpack-ev",
+                  "_id" : "5",
+                  "_source" : {
+                    "@timestamp" : "2020-12-06T11:07:00.000Z",
+                    "event" : {
+                      "category" : "file"
+                    },
+                    "process" : {
+                      "pid" : "p2",
+                      "name" : "bar.txt"
+                    },
+                    "seq" : 5
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ev/_eql/search?filter_path=-took",
+      "body" : {
+        "query" : "process where nope == 1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:15: Unknown column [nope]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:15: Unknown column [nope]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ev/_eql/search?filter_path=-took",
+      "body" : {
+        "query" : "process where seq =="
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:21: mismatched input '<EOF>' expecting {'false', 'null', 'true', '+', '-', '(', '?', STRING, INTEGER_VALUE, DECIMAL_VALUE, IDENTIFIER, QUOTED_IDENTIFIER, TILDE_IDENTIFIER}"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:21: mismatched input '<EOF>' expecting {'false', 'null', 'true', '+', '-', '(', '?', STRING, INTEGER_VALUE, DECIMAL_VALUE, IDENTIFIER, QUOTED_IDENTIFIER, TILDE_IDENTIFIER}",
+          "caused_by" : {
+            "type" : "input_mismatch_exception",
+            "reason" : null
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ev/_eql/search?filter_path=-took",
+      "body" : {
+        "query" : "any where true",
+        "size" : 2,
+        "fields" : [
+          "seq"
+        ],
+        "filter" : {
+          "range" : {
+            "seq" : {
+              "gte" : 3
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "is_running" : false,
+        "timed_out" : false,
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "events" : [
+            {
+              "_index" : "compat-xpack-ev",
+              "_id" : "5",
+              "_source" : {
+                "@timestamp" : "2020-12-06T11:07:00.000Z",
+                "event" : {
+                  "category" : "file"
+                },
+                "process" : {
+                  "pid" : "p2",
+                  "name" : "bar.txt"
+                },
+                "seq" : 5
+              },
+              "fields" : {
+                "seq" : [
+                  5
+                ]
+              }
+            },
+            {
+              "_index" : "compat-xpack-ev",
+              "_id" : "6",
+              "_source" : {
+                "@timestamp" : "2020-12-06T11:08:00.000Z",
+                "event" : {
+                  "category" : "process"
+                },
+                "process" : {
+                  "pid" : "p3",
+                  "name" : "cmd.exe"
+                },
+                "seq" : 6
+              },
+              "fields" : {
+                "seq" : [
+                  6
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ev/_eql/search",
+      "body" : {
+        "query" : "any where true",
+        "foo" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:27] [eql/search] unknown field [foo]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:27] [eql/search] unknown field [foo]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-none/_eql/search",
+      "body" : {
+        "query" : "any where true"
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline -1:-1: Unknown index [compat-xpack-none]"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [Unknown index [compat-xpack-none]]",
+          "index_uuid" : "_na_",
+          "index" : "Unknown index [compat-xpack-none]",
+          "caused_by" : {
+            "type" : "verification_exception",
+            "reason" : "Found 1 problem\nline -1:-1: Unknown index [compat-xpack-none]"
+          }
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-ev",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

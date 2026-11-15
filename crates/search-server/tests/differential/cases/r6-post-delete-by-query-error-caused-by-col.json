@@ -1,0 +1,77 @@
+{
+ "found": {
+  "case": 41,
+  "case_seed": 23000110,
+  "seed": 23
+ },
+ "signature": "POST _delete_by_query .error.caused_by.col",
+ "steps": [
+  {
+   "body": {
+    "settings": {
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m0-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m0-a"
+  },
+  {
+   "body": {
+    "query": {
+     "bool": {
+      "must": [
+       {}
+      ],
+      "should": [
+       {
+        "multi_match": {}
+       }
+      ]
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "error": {
+      "caused_by": {
+       "col": 45,
+       "line": 1,
+       "reason": "No text specified for multi_match query",
+       "type": "parsing_exception"
+      },
+      "reason": "[1:45] [bool] failed to parse field [should]",
+      "root_cause": [
+       {
+        "col": 45,
+        "line": 1,
+        "reason": "No text specified for multi_match query",
+        "type": "parsing_exception"
+       }
+      ],
+      "type": "x_content_parse_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m0-a/_delete_by_query?refresh=true&slices=1"
+  }
+ ]
+}

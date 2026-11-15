@@ -1,0 +1,1110 @@
+{
+  "description": "ISM execution: rollover (failures, retries, retry API, copy_alias), transitions, the force merge's read-only step (OpenSearch 3.9.0, job_interval 1, jitter 0; ism_run moves a job's start time)",
+  "dialect": "opensearch",
+  "steps": [
+    {
+      "req": "PUT /_snapshot/esm-repo",
+      "body": {
+        "type": "fs",
+        "settings": {
+          "location": "/repo/esm"
+        }
+      },
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_ism/policies/esm-r1",
+      "body": {
+        "policy": {
+          "description": "rollover",
+          "default_state": "hot",
+          "states": [
+            {
+              "name": "hot",
+              "actions": [
+                {
+                  "retry": {
+                    "count": 1,
+                    "backoff": "constant",
+                    "delay": "1s"
+                  },
+                  "rollover": {
+                    "min_doc_count": 2,
+                    "copy_alias": true
+                  }
+                }
+              ],
+              "transitions": [
+                {
+                  "state_name": "warm"
+                }
+              ]
+            },
+            {
+              "name": "warm",
+              "actions": [
+                {
+                  "force_merge": {
+                    "max_num_segments": 1
+                  }
+                },
+                {
+                  "alias": {
+                    "actions": [
+                      {
+                        "add": {
+                          "alias": "esm-warm"
+                        }
+                      }
+                    ]
+                  }
+                },
+                {
+                  "allocation": {
+                    "exclude": {
+                      "box": "cold"
+                    },
+                    "wait_for": false
+                  }
+                },
+                {
+                  "close": {}
+                },
+                {
+                  "open": {}
+                }
+              ],
+              "transitions": [
+                {
+                  "state_name": "cold",
+                  "conditions": {
+                    "min_index_age": "1ms"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "cold",
+              "actions": [
+                {
+                  "snapshot": {
+                    "repository": "esm-repo",
+                    "snapshot": "esm-snap"
+                  }
+                },
+                {
+                  "delete": {}
+                }
+              ],
+              "transitions": []
+            }
+          ]
+        }
+      },
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time",
+        "_seq_no"
+      ],
+      "status": 201,
+      "response": {
+        "_id": "esm-r1",
+        "_version": 1,
+        "_primary_term": 1,
+        "_seq_no": 115,
+        "policy": {
+          "policy": {
+            "policy_id": "esm-r1",
+            "description": "rollover",
+            "last_updated_time": 1793136982427,
+            "schema_version": 1,
+            "error_notification": null,
+            "default_state": "hot",
+            "states": [
+              {
+                "name": "hot",
+                "actions": [
+                  {
+                    "retry": {
+                      "count": 1,
+                      "backoff": "constant",
+                      "delay": "1s"
+                    },
+                    "rollover": {
+                      "min_doc_count": 2,
+                      "copy_alias": true
+                    }
+                  }
+                ],
+                "transitions": [
+                  {
+                    "state_name": "warm"
+                  }
+                ]
+              },
+              {
+                "name": "warm",
+                "actions": [
+                  {
+                    "retry": {
+                      "count": 3,
+                      "backoff": "exponential",
+                      "delay": "1m"
+                    },
+                    "force_merge": {
+                      "max_num_segments": 1
+                    }
+                  },
+                  {
+                    "retry": {
+                      "count": 3,
+                      "backoff": "exponential",
+                      "delay": "1m"
+                    },
+                    "alias": {
+                      "actions": [
+                        {
+                          "add": {
+                            "aliases": [
+                              "esm-warm"
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "retry": {
+                      "count": 3,
+                      "backoff": "exponential",
+                      "delay": "1m"
+                    },
+                    "allocation": {
+                      "require": {},
+                      "include": {},
+                      "exclude": {
+                        "box": "cold"
+                      },
+                      "wait_for": false
+                    }
+                  },
+                  {
+                    "retry": {
+                      "count": 3,
+                      "backoff": "exponential",
+                      "delay": "1m"
+                    },
+                    "close": {}
+                  },
+                  {
+                    "retry": {
+                      "count": 3,
+                      "backoff": "exponential",
+                      "delay": "1m"
+                    },
+                    "open": {}
+                  }
+                ],
+                "transitions": [
+                  {
+                    "state_name": "cold",
+                    "conditions": {
+                      "min_index_age": "1ms"
+                    }
+                  }
+                ]
+              },
+              {
+                "name": "cold",
+                "actions": [
+                  {
+                    "retry": {
+                      "count": 3,
+                      "backoff": "exponential",
+                      "delay": "1m"
+                    },
+                    "snapshot": {
+                      "repository": "esm-repo",
+                      "snapshot": "esm-snap"
+                    }
+                  },
+                  {
+                    "retry": {
+                      "count": 3,
+                      "backoff": "exponential",
+                      "delay": "1m"
+                    },
+                    "delete": {}
+                  }
+                ],
+                "transitions": []
+              }
+            ],
+            "ism_template": null
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /esm-r-000001",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0
+        },
+        "aliases": {
+          "esm-other": {}
+        }
+      },
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-r-000001"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ism/add/esm-r-000001",
+      "body": {
+        "policy_id": "esm-r1"
+      },
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "updated_indices": 1,
+        "failures": false,
+        "failed_indices": []
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_ism/explain/esm-r-000001",
+      "ism_run": [
+        "esm-r-000001"
+      ],
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "esm-r-000001": {
+          "index.plugins.index_state_management.policy_id": "esm-r1",
+          "index.opendistro.index_state_management.policy_id": "esm-r1",
+          "index": "esm-r-000001",
+          "index_uuid": "BG3XgDSYQF-yBoQ-aLD8Kg",
+          "policy_id": "esm-r1",
+          "policy_seq_no": 115,
+          "policy_primary_term": 1,
+          "index_creation_date": 1793136982454,
+          "state": {
+            "name": "hot",
+            "start_time": 1793136984563
+          },
+          "retry_info": {
+            "failed": false,
+            "consumed_retries": 0
+          },
+          "info": {
+            "message": "Successfully initialized policy: esm-r1"
+          },
+          "enabled": true
+        },
+        "total_managed_indices": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_ism/explain/esm-r-000001",
+      "ism_run": [
+        "esm-r-000001"
+      ],
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "esm-r-000001": {
+          "index.plugins.index_state_management.policy_id": "esm-r1",
+          "index.opendistro.index_state_management.policy_id": "esm-r1",
+          "index": "esm-r-000001",
+          "index_uuid": "BG3XgDSYQF-yBoQ-aLD8Kg",
+          "policy_id": "esm-r1",
+          "policy_seq_no": 115,
+          "policy_primary_term": 1,
+          "rolled_over": false,
+          "index_creation_date": 1793136982454,
+          "state": {
+            "name": "hot",
+            "start_time": 1793136984563
+          },
+          "action": {
+            "name": "rollover",
+            "start_time": 1793136992600,
+            "index": 0,
+            "failed": false,
+            "consumed_retries": 1,
+            "last_retry_time": 1793136993399
+          },
+          "step": {
+            "name": "attempt_rollover",
+            "start_time": 1793136992600,
+            "step_status": "failed"
+          },
+          "retry_info": {
+            "failed": false,
+            "consumed_retries": 0
+          },
+          "info": {
+            "message": "Missing rollover_alias index setting [index=esm-r-000001]"
+          },
+          "enabled": true
+        },
+        "total_managed_indices": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_ism/explain/esm-r-000001",
+      "ism_run": [
+        "esm-r-000001"
+      ],
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "esm-r-000001": {
+          "index.plugins.index_state_management.policy_id": "esm-r1",
+          "index.opendistro.index_state_management.policy_id": "esm-r1",
+          "index": "esm-r-000001",
+          "index_uuid": "BG3XgDSYQF-yBoQ-aLD8Kg",
+          "policy_id": "esm-r1",
+          "policy_seq_no": 115,
+          "policy_primary_term": 1,
+          "rolled_over": false,
+          "index_creation_date": 1793136982454,
+          "state": {
+            "name": "hot",
+            "start_time": 1793136984563
+          },
+          "action": {
+            "name": "rollover",
+            "start_time": 1793136992600,
+            "index": 0,
+            "failed": true,
+            "consumed_retries": 1,
+            "last_retry_time": 1793136993399
+          },
+          "step": {
+            "name": "attempt_rollover",
+            "start_time": 1793136992600,
+            "step_status": "failed"
+          },
+          "retry_info": {
+            "failed": false,
+            "consumed_retries": 0
+          },
+          "info": {
+            "message": "Missing rollover_alias index setting [index=esm-r-000001]"
+          },
+          "enabled": true
+        },
+        "total_managed_indices": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ism/explain/esm-r-000001",
+      "body": {
+        "filter": {
+          "failed": true
+        }
+      },
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "esm-r-000001": {
+          "index.plugins.index_state_management.policy_id": "esm-r1",
+          "index.opendistro.index_state_management.policy_id": "esm-r1",
+          "index": "esm-r-000001",
+          "index_uuid": "BG3XgDSYQF-yBoQ-aLD8Kg",
+          "policy_id": "esm-r1",
+          "policy_seq_no": 115,
+          "policy_primary_term": 1,
+          "rolled_over": false,
+          "index_creation_date": 1793136982454,
+          "state": {
+            "name": "hot",
+            "start_time": 1793136984563
+          },
+          "action": {
+            "name": "rollover",
+            "start_time": 1793136992600,
+            "index": 0,
+            "failed": true,
+            "consumed_retries": 1,
+            "last_retry_time": 1793136993399
+          },
+          "step": {
+            "name": "attempt_rollover",
+            "start_time": 1793136992600,
+            "step_status": "failed"
+          },
+          "retry_info": {
+            "failed": false,
+            "consumed_retries": 0
+          },
+          "info": {
+            "message": "Missing rollover_alias index setting [index=esm-r-000001]"
+          },
+          "enabled": true
+        },
+        "total_managed_indices": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_ism/explain/esm-r-000001",
+      "ism_run": [
+        "esm-r-000001"
+      ],
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "esm-r-000001": {
+          "index.plugins.index_state_management.policy_id": "esm-r1",
+          "index.opendistro.index_state_management.policy_id": "esm-r1",
+          "index": "esm-r-000001",
+          "index_uuid": "BG3XgDSYQF-yBoQ-aLD8Kg",
+          "policy_id": "esm-r1",
+          "policy_seq_no": 115,
+          "policy_primary_term": 1,
+          "rolled_over": false,
+          "index_creation_date": 1793136982454,
+          "state": {
+            "name": "hot",
+            "start_time": 1793136984563
+          },
+          "action": {
+            "name": "rollover",
+            "start_time": 1793136992600,
+            "index": 0,
+            "failed": true,
+            "consumed_retries": 1,
+            "last_retry_time": 1793136993399
+          },
+          "step": {
+            "name": "attempt_rollover",
+            "start_time": 1793136992600,
+            "step_status": "failed"
+          },
+          "retry_info": {
+            "failed": false,
+            "consumed_retries": 0
+          },
+          "info": {
+            "message": "Missing rollover_alias index setting [index=esm-r-000001]"
+          },
+          "enabled": false
+        },
+        "total_managed_indices": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_ism/retry/esm-r-000001",
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "updated_indices": 1,
+        "failures": false,
+        "failed_indices": []
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_ism/explain/esm-r-000001",
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time",
+        "enabled"
+      ],
+      "status": 200,
+      "response": {
+        "esm-r-000001": {
+          "index.plugins.index_state_management.policy_id": "esm-r1",
+          "index.opendistro.index_state_management.policy_id": "esm-r1",
+          "index": "esm-r-000001",
+          "index_uuid": "BG3XgDSYQF-yBoQ-aLD8Kg",
+          "policy_id": "esm-r1",
+          "policy_seq_no": 115,
+          "policy_primary_term": 1,
+          "rolled_over": false,
+          "index_creation_date": 1793136982454,
+          "state": {
+            "name": "hot",
+            "start_time": 1793136984563
+          },
+          "action": {
+            "name": "rollover",
+            "start_time": null,
+            "index": 0,
+            "failed": false,
+            "consumed_retries": 0,
+            "last_retry_time": null
+          },
+          "retry_info": {
+            "failed": false,
+            "consumed_retries": 0
+          },
+          "info": {
+            "message": "Pending retry of failed managed index"
+          },
+          "enabled": false
+        },
+        "total_managed_indices": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      },
+      "mask_reason": "OpenSearch's explain searches the job documents before the retry's enable is refreshed"
+    },
+    {
+      "req": "PUT /esm-r-000001/_settings",
+      "body": {
+        "index.plugins.index_state_management.rollover_alias": "esm-r"
+      },
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_aliases",
+      "body": {
+        "actions": [
+          {
+            "add": {
+              "index": "esm-r-000001",
+              "alias": "esm-r",
+              "is_write_index": true
+            }
+          }
+        ]
+      },
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_ism/explain/esm-r-000001",
+      "ism_run": [
+        "esm-r-000001"
+      ],
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "esm-r-000001": {
+          "index.plugins.index_state_management.policy_id": "esm-r1",
+          "index.opendistro.index_state_management.policy_id": "esm-r1",
+          "index": "esm-r-000001",
+          "index_uuid": "BG3XgDSYQF-yBoQ-aLD8Kg",
+          "policy_id": "esm-r1",
+          "policy_seq_no": 115,
+          "policy_primary_term": 1,
+          "rolled_over": false,
+          "index_creation_date": 1793136982454,
+          "state": {
+            "name": "hot",
+            "start_time": 1793136984563
+          },
+          "action": {
+            "name": "rollover",
+            "start_time": 1793137016752,
+            "index": 0,
+            "failed": false,
+            "consumed_retries": 0,
+            "last_retry_time": null
+          },
+          "step": {
+            "name": "attempt_rollover",
+            "start_time": 1793137016752,
+            "step_status": "condition_not_met"
+          },
+          "retry_info": {
+            "failed": false,
+            "consumed_retries": 0
+          },
+          "info": {
+            "message": "Pending rollover of index [index=esm-r-000001]",
+            "conditions": {
+              "min_doc_count": {
+                "condition": 2,
+                "current": 0
+              }
+            }
+          },
+          "enabled": true
+        },
+        "total_managed_indices": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /esm-r/_doc?refresh=true",
+      "body": {
+        "f": 1
+      },
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time",
+        "_id"
+      ],
+      "status": 201,
+      "response": {
+        "_index": "esm-r-000001",
+        "_id": "-AxLf6EBfaTvQgajl0sd",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /esm-r/_doc?refresh=true",
+      "body": {
+        "f": 2
+      },
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time",
+        "_id"
+      ],
+      "status": 201,
+      "response": {
+        "_index": "esm-r-000001",
+        "_id": "-QxLf6EBfaTvQgajl0tc",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 1,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_ism/explain/esm-r-000001",
+      "ism_run": [
+        "esm-r-000001"
+      ],
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "esm-r-000001": {
+          "index.plugins.index_state_management.policy_id": "esm-r1",
+          "index.opendistro.index_state_management.policy_id": "esm-r1",
+          "index": "esm-r-000001",
+          "index_uuid": "BG3XgDSYQF-yBoQ-aLD8Kg",
+          "policy_id": "esm-r1",
+          "policy_seq_no": 115,
+          "policy_primary_term": 1,
+          "rolled_over": true,
+          "rolled_over_index_name": "esm-r-000002",
+          "index_creation_date": 1793136982454,
+          "state": {
+            "name": "hot",
+            "start_time": 1793136984563
+          },
+          "action": {
+            "name": "rollover",
+            "start_time": 1793137016752,
+            "index": 0,
+            "failed": false,
+            "consumed_retries": 0,
+            "last_retry_time": null
+          },
+          "step": {
+            "name": "attempt_rollover",
+            "start_time": 1793137016752,
+            "step_status": "completed"
+          },
+          "retry_info": {
+            "failed": false,
+            "consumed_retries": 0
+          },
+          "info": {
+            "message": "Successfully rolled over and copied alias from [index=esm-r-000001] to [index=esm-r-000002]",
+            "conditions": {
+              "min_doc_count": {
+                "condition": 2,
+                "current": 2
+              }
+            }
+          },
+          "enabled": true
+        },
+        "total_managed_indices": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_cat/aliases/esm-*?h=alias,index,is_write_index&s=alias,index",
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "text": "esm-other esm-r-000001 -\nesm-other esm-r-000002 -\nesm-r     esm-r-000001 false\nesm-r     esm-r-000002 true\n",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_ism/explain/esm-r-000002",
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "esm-r-000002": {
+          "index.plugins.index_state_management.policy_id": null,
+          "index.opendistro.index_state_management.policy_id": null,
+          "enabled": null
+        },
+        "total_managed_indices": 0
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_ism/explain/esm-r-000001",
+      "ism_run": [
+        "esm-r-000001"
+      ],
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "esm-r-000001": {
+          "index.plugins.index_state_management.policy_id": "esm-r1",
+          "index.opendistro.index_state_management.policy_id": "esm-r1",
+          "index": "esm-r-000001",
+          "index_uuid": "BG3XgDSYQF-yBoQ-aLD8Kg",
+          "policy_id": "esm-r1",
+          "policy_seq_no": 115,
+          "policy_primary_term": 1,
+          "rolled_over": true,
+          "rolled_over_index_name": "esm-r-000002",
+          "index_creation_date": 1793136982454,
+          "transition_to": "warm",
+          "retry_info": {
+            "failed": false,
+            "consumed_retries": 0
+          },
+          "info": {
+            "message": "Transitioning to warm [index=esm-r-000001]"
+          },
+          "enabled": true
+        },
+        "total_managed_indices": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_ism/explain/esm-r-000001",
+      "ism_run": [
+        "esm-r-000001"
+      ],
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "esm-r-000001": {
+          "index.plugins.index_state_management.policy_id": "esm-r1",
+          "index.opendistro.index_state_management.policy_id": "esm-r1",
+          "index": "esm-r-000001",
+          "index_uuid": "BG3XgDSYQF-yBoQ-aLD8Kg",
+          "policy_id": "esm-r1",
+          "policy_seq_no": 115,
+          "policy_primary_term": 1,
+          "rolled_over": true,
+          "rolled_over_index_name": "esm-r-000002",
+          "index_creation_date": 1793136982454,
+          "state": {
+            "name": "warm",
+            "start_time": 1793137040946
+          },
+          "action": {
+            "name": "force_merge",
+            "start_time": 1793137040946,
+            "index": 0,
+            "failed": false,
+            "consumed_retries": 0,
+            "last_retry_time": 0
+          },
+          "step": {
+            "name": "attempt_set_read_only",
+            "start_time": 1793137040946,
+            "step_status": "completed"
+          },
+          "retry_info": {
+            "failed": false,
+            "consumed_retries": 0
+          },
+          "info": {
+            "message": "Successfully set index to read-only [index=esm-r-000001]"
+          },
+          "enabled": true
+        },
+        "total_managed_indices": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /esm-r-*",
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_snapshot/esm-repo/esm-snap*",
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_snapshot/esm-repo",
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_ism/policies/esm-r1",
+      "mask": [
+        "start_time",
+        "index_creation_date",
+        "last_retry_time",
+        "policy_seq_no",
+        "last_updated_time",
+        "_seq_no"
+      ],
+      "status": 200,
+      "response": {
+        "_index": ".opendistro-ism-config",
+        "_id": "esm-r1",
+        "_version": 2,
+        "result": "deleted",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 174,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    }
+  ],
+  "node_settings": {
+    "path.repo": "/repo"
+  }
+}

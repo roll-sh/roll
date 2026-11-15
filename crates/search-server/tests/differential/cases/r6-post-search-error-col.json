@@ -1,0 +1,131 @@
+{
+ "found": {
+  "case": 16,
+  "case_seed": 103000325,
+  "seed": 103
+ },
+ "signature": "POST _search .error.col",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "bool0": {
+       "type": "boolean"
+      },
+      "byte0": {
+       "type": "byte"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dbl0": {
+       "type": "double"
+      },
+      "int0": {
+       "type": "integer"
+      },
+      "ip0": {
+       "type": "ip"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "long0": {
+       "type": "long"
+      },
+      "sayt0": {
+       "type": "search_as_you_type"
+      },
+      "scaled0": {
+       "scaling_factor": 100,
+       "type": "scaled_float"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "term_vector": "with_positions_offsets",
+       "type": "text"
+      },
+      "ulong0": {
+       "type": "unsigned_long"
+      },
+      "wild0": {
+       "type": "wildcard"
+      }
+     }
+    },
+    "settings": {
+     "merge.policy.segments_per_tier": 20,
+     "number_of_replicas": 0,
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m6-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m6-a"
+  },
+  {
+   "body": {
+    "aggs": {
+     "filters_26": {
+      "aggs": {
+       "filters_27": {
+        "filters": {
+         "filters": {
+          "b": {
+           "multi_match": {
+            "type": "phrase"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "error": {
+      "col": 103,
+      "line": 1,
+      "reason": "No text specified for multi_match query",
+      "root_cause": [
+       {
+        "col": 103,
+        "line": 1,
+        "reason": "No text specified for multi_match query",
+        "type": "parsing_exception"
+       }
+      ],
+      "type": "parsing_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m6-a/_search"
+  }
+ ]
+}

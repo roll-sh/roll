@@ -1,0 +1,556 @@
+{
+  "diff": {
+    "es": "weight(text0:blue in <masked>) [PerFieldSimilarity], result of:",
+    "path": ".hits.hits[0]._explanation.details[0].description",
+    "roll": "weight(text0.raw:blue in <masked>) [PerFieldSimilarity], result of:"
+  },
+  "found": {
+    "case": 87,
+    "case_seed": 12000123,
+    "seed": 12
+  },
+  "roll": {
+    "body": {
+      "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 2,
+        "total": 2
+      },
+      "hits": {
+        "hits": [
+          {
+            "_explanation": {
+              "description": "sum of:",
+              "details": [
+                {
+                  "description": "weight(text0.raw:blue in 1) [PerFieldSimilarity], result of:",
+                  "details": [
+                    {
+                      "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                      "details": [
+                        {
+                          "description": "boost",
+                          "details": [],
+                          "value": 2.2
+                        },
+                        {
+                          "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                          "details": [
+                            {
+                              "description": "n, number of documents containing term",
+                              "details": [],
+                              "value": 1
+                            },
+                            {
+                              "description": "N, total number of documents with field",
+                              "details": [],
+                              "value": 2
+                            }
+                          ],
+                          "value": 0.6931472
+                        },
+                        {
+                          "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                          "details": [
+                            {
+                              "description": "freq, occurrences of term within document",
+                              "details": [],
+                              "value": 1.0
+                            },
+                            {
+                              "description": "k1, term saturation parameter",
+                              "details": [],
+                              "value": 1.2
+                            },
+                            {
+                              "description": "b, length normalization parameter",
+                              "details": [],
+                              "value": 0.75
+                            },
+                            {
+                              "description": "dl, length of field",
+                              "details": [],
+                              "value": 1.0
+                            },
+                            {
+                              "description": "avgdl, average length of field",
+                              "details": [],
+                              "value": 2.0
+                            }
+                          ],
+                          "value": 0.5714286
+                        }
+                      ],
+                      "value": 0.8713851
+                    }
+                  ],
+                  "value": 0.8713851
+                },
+                {
+                  "description": "weight(text0:blue in 1) [PerFieldSimilarity], result of:",
+                  "details": [
+                    {
+                      "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                      "details": [
+                        {
+                          "description": "boost",
+                          "details": [],
+                          "value": 2.2
+                        },
+                        {
+                          "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                          "details": [
+                            {
+                              "description": "n, number of documents containing term",
+                              "details": [],
+                              "value": 1
+                            },
+                            {
+                              "description": "N, total number of documents with field",
+                              "details": [],
+                              "value": 2
+                            }
+                          ],
+                          "value": 0.6931472
+                        },
+                        {
+                          "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                          "details": [
+                            {
+                              "description": "freq, occurrences of term within document",
+                              "details": [],
+                              "value": 1.0
+                            },
+                            {
+                              "description": "k1, term saturation parameter",
+                              "details": [],
+                              "value": 1.2
+                            },
+                            {
+                              "description": "b, length normalization parameter",
+                              "details": [],
+                              "value": 0.75
+                            },
+                            {
+                              "description": "dl, length of field",
+                              "details": [],
+                              "value": 11.0
+                            },
+                            {
+                              "description": "avgdl, average length of field",
+                              "details": [],
+                              "value": 7.5
+                            }
+                          ],
+                          "value": 0.38167936
+                        }
+                      ],
+                      "value": 0.5820319
+                    }
+                  ],
+                  "value": 0.5820319
+                }
+              ],
+              "value": 1.4534171
+            },
+            "_id": "8",
+            "_index": "diff-m2-a",
+            "_node": "0Zr0L-l4THmSU_MWbe51EQ",
+            "_score": 1.4534171,
+            "_shard": "[diff-m2-a][0]",
+            "_source": {
+              "date0": [
+                "2024-02-02T02:02:00Z",
+                1722083040000,
+                1733742000000
+              ],
+              "flt0": 104.37,
+              "ip0": "10.1.0.67",
+              "long0": 46,
+              "mot0": "banana of quick query banana running",
+              "short0": -128,
+              "text0": [
+                "jumps running cherry",
+                "shard cherry score elastic running of and",
+                "blue"
+              ],
+              "text1": "search data cat cat cat of index banana over"
+            }
+          }
+        ],
+        "max_score": 1.4534171,
+        "total": {
+          "relation": "eq",
+          "value": 1
+        }
+      },
+      "timed_out": false,
+      "took": 2
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "POST _search .hits.hits[]._explanation.details[].description",
+  "steps": [
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "date0": {
+              "type": "date"
+            },
+            "text0": {
+              "fields": {
+                "raw": {
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            }
+          }
+        },
+        "settings": {
+          "number_of_replicas": 0,
+          "number_of_shards": 2,
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m2-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m2-a"
+    },
+    {
+      "es": {
+        "body": {
+          "errors": false,
+          "items": [
+            {
+              "index": {
+                "_id": "7",
+                "_index": "diff-m2-a",
+                "_primary_term": 1,
+                "_seq_no": 0,
+                "_shards": {
+                  "failed": 0,
+                  "successful": 1,
+                  "total": 1
+                },
+                "_version": 1,
+                "result": "created",
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_id": "8",
+                "_index": "diff-m2-a",
+                "_primary_term": 1,
+                "_seq_no": 1,
+                "_shards": {
+                  "failed": 0,
+                  "successful": 1,
+                  "total": 1
+                },
+                "_version": 1,
+                "result": "created",
+                "status": 201
+              }
+            }
+          ],
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "lines": [
+        {
+          "index": {
+            "_id": "7",
+            "_index": "diff-m2-a"
+          }
+        },
+        {
+          "date0": 1706032800000,
+          "flt0": 143.41,
+          "ip0": "10.0.2.118",
+          "kw0": "x-2",
+          "long0": -6,
+          "mot0": "cat cat cats Quick query and",
+          "n": [
+            {
+              "kw0": "gamma",
+              "long0": -14,
+              "text0": "over jumps ran jumps query runs quick index"
+            },
+            {
+              "kw0": "x-1",
+              "long0": 23,
+              "text0": "shard"
+            }
+          ],
+          "short0": 267,
+          "text0": "elastic data engine quick"
+        },
+        {
+          "index": {
+            "_id": "8",
+            "_index": "diff-m2-a"
+          }
+        },
+        {
+          "date0": [
+            "2024-02-02T02:02:00Z",
+            1722083040000,
+            1733742000000
+          ],
+          "flt0": 104.37,
+          "ip0": "10.1.0.67",
+          "long0": 46,
+          "mot0": "banana of quick query banana running",
+          "short0": -128,
+          "text0": [
+            "jumps running cherry",
+            "shard cherry score elastic running of and",
+            "blue"
+          ],
+          "text1": "search data cat cat cat of index banana over"
+        }
+      ],
+      "method": "POST",
+      "path": "/_bulk"
+    },
+    {
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "successful": 2,
+            "total": 2
+          }
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m2-a/_refresh"
+    },
+    {
+      "body": {
+        "explain": true,
+        "query": {
+          "simple_query_string": {
+            "query": "blue"
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 2,
+            "total": 2
+          },
+          "hits": {
+            "hits": [
+              {
+                "_explanation": {
+                  "description": "sum of:",
+                  "details": [
+                    {
+                      "description": "weight(text0:blue in 1) [PerFieldSimilarity], result of:",
+                      "details": [
+                        {
+                          "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                          "details": [
+                            {
+                              "description": "boost",
+                              "details": [],
+                              "value": 2.2
+                            },
+                            {
+                              "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                              "details": [
+                                {
+                                  "description": "n, number of documents containing term",
+                                  "details": [],
+                                  "value": 1
+                                },
+                                {
+                                  "description": "N, total number of documents with field",
+                                  "details": [],
+                                  "value": 2
+                                }
+                              ],
+                              "value": 0.6931472
+                            },
+                            {
+                              "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                              "details": [
+                                {
+                                  "description": "freq, occurrences of term within document",
+                                  "details": [],
+                                  "value": 1.0
+                                },
+                                {
+                                  "description": "k1, term saturation parameter",
+                                  "details": [],
+                                  "value": 1.2
+                                },
+                                {
+                                  "description": "b, length normalization parameter",
+                                  "details": [],
+                                  "value": 0.75
+                                },
+                                {
+                                  "description": "dl, length of field",
+                                  "details": [],
+                                  "value": 11.0
+                                },
+                                {
+                                  "description": "avgdl, average length of field",
+                                  "details": [],
+                                  "value": 7.5
+                                }
+                              ],
+                              "value": 0.38167936
+                            }
+                          ],
+                          "value": 0.5820319
+                        }
+                      ],
+                      "value": 0.5820319
+                    },
+                    {
+                      "description": "weight(text0.raw:blue in 1) [PerFieldSimilarity], result of:",
+                      "details": [
+                        {
+                          "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                          "details": [
+                            {
+                              "description": "boost",
+                              "details": [],
+                              "value": 2.2
+                            },
+                            {
+                              "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                              "details": [
+                                {
+                                  "description": "n, number of documents containing term",
+                                  "details": [],
+                                  "value": 1
+                                },
+                                {
+                                  "description": "N, total number of documents with field",
+                                  "details": [],
+                                  "value": 2
+                                }
+                              ],
+                              "value": 0.6931472
+                            },
+                            {
+                              "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                              "details": [
+                                {
+                                  "description": "freq, occurrences of term within document",
+                                  "details": [],
+                                  "value": 1.0
+                                },
+                                {
+                                  "description": "k1, term saturation parameter",
+                                  "details": [],
+                                  "value": 1.2
+                                },
+                                {
+                                  "description": "b, length normalization parameter",
+                                  "details": [],
+                                  "value": 0.75
+                                },
+                                {
+                                  "description": "dl, length of field",
+                                  "details": [],
+                                  "value": 1.0
+                                },
+                                {
+                                  "description": "avgdl, average length of field",
+                                  "details": [],
+                                  "value": 2.0
+                                }
+                              ],
+                              "value": 0.5714286
+                            }
+                          ],
+                          "value": 0.8713851
+                        }
+                      ],
+                      "value": 0.8713851
+                    }
+                  ],
+                  "value": 1.4534171
+                },
+                "_id": "8",
+                "_index": "diff-m2-a",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_score": 1.4534171,
+                "_shard": "[diff-m2-a][0]",
+                "_source": {
+                  "date0": [
+                    "2024-02-02T02:02:00Z",
+                    1722083040000,
+                    1733742000000
+                  ],
+                  "flt0": 104.37,
+                  "ip0": "10.1.0.67",
+                  "long0": 46,
+                  "mot0": "banana of quick query banana running",
+                  "short0": -128,
+                  "text0": [
+                    "jumps running cherry",
+                    "shard cherry score elastic running of and",
+                    "blue"
+                  ],
+                  "text1": "search data cat cat cat of index banana over"
+                }
+              }
+            ],
+            "max_score": 1.4534171,
+            "total": {
+              "relation": "eq",
+              "value": 1
+            }
+          },
+          "timed_out": false,
+          "took": 1
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m2-a/_search"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+[package]
+name = "search-yaml"
+description = "Runner for Elasticsearch's YAML REST test format, against roll search or a real Elasticsearch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "search-yaml"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+clap.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+indexmap.workspace = true
+regex.workspace = true
+rustls-native-certs.workspace = true
+rustls-pemfile.workspace = true
+serde.workspace = true
+# Correctly rounded float parsing: responses are compared with Java's Double.parseDouble results.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+tokio.workspace = true
+tokio-rustls.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# kill(2) on a spawned cluster's process group (--spawn).
+libc.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+tempfile.workspace = true

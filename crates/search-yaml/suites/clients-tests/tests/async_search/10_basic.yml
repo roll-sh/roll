@@ -1,0 +1,54 @@
+---
+requires:
+  serverless: true
+  stack: true
+---
+setup:
+  - do:
+      index:
+        index: async_search_test_10
+        refresh: true
+        id: 42
+        body: { "name": 'Las lenguas de diamante', "author": 'Juana de Ibarbourou', "release_date": '1918-12-01', "page_count": 108}
+  - do:
+      index:
+        index: async_search_test_10
+        id: 43
+        refresh: true
+        body: { "name": 'Bestiario', "author": 'Julio Cortazar', "release_date": '1952-10-12', "page_count": 133}
+  - do:
+      index:
+        index: async_search_test_10
+        id: 44
+        refresh: true
+        body: { "name": 'Tales of love, madness and death', 'author': 'Horacio Quiroga', 'release_date': '1917-12-01', 'page_count': 188 }
+
+---
+teardown:
+  - do:
+      indices.delete:
+        index: async_search_test_10
+---
+"Async Search basic operations":
+  - do:
+      async_search.submit:
+        index: async_search_test_10
+        q: 'julio'
+        keep_on_completion: true
+  - match: { response.hits.hits.0._source.name: 'Bestiario' }
+  - set:   { id: id }
+
+  - do:
+      async_search.get:
+        id: $id
+  - match: { response.hits.hits.0._source.name: 'Bestiario' }
+
+  - do:
+      async_search.status:
+        id: $id
+  - match: { completion_status: 200 }
+
+  - do:
+      async_search.delete:
+        id: $id
+  - match: { acknowledged: true }

@@ -1,0 +1,4808 @@
+{
+  "description" : "Round 4 (c): runtime fields (mapping and request definitions, every scalar type, fields API, term/terms/range/exists/prefix/match queries, aggregations), keyed flattened sub-fields (queries, unsupported automaton queries, fields), strict columnar index modes (flattened dotted fields, prefix dynamic, synthetic and columnar_stored sources, sequence numbers), script rescorer, query rescorer weights and explanations, rescorer retriever with collapse, collapse with search_after and inner_hits validation, indices_boost expressions (aliases, wildcards, missing and remote names), closed indices in searches",
+  "steps" : [
+    {
+      "req" : "PUT /es-docs-r4rt",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "runtime" : {
+            "day" : {
+              "type" : "keyword",
+              "script" : {
+                "source" : "emit(doc['ts'].value.dayOfWeekEnum.toString())"
+              }
+            },
+            "src_n" : {
+              "type" : "long"
+            },
+            "flag" : {
+              "type" : "boolean",
+              "script" : "emit(doc['n'].value > 4)"
+            }
+          },
+          "properties" : {
+            "kwd" : {
+              "type" : "keyword"
+            },
+            "ts" : {
+              "type" : "date"
+            },
+            "n" : {
+              "type" : "long"
+            },
+            "addr" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r4rt"
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rt/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"kwd\":\"foo\",\"ts\":\"2021-01-04T00:00:00Z\",\"n\":3,\"src_n\":[\"7\",\"2\"],\"addr\":\"10.0.0.1\"}\n{\"index\":{\"_id\":\"2\"}}\n{\"kwd\":\"bar\",\"ts\":\"2021-01-05T00:00:00Z\",\"n\":5,\"src_n\":1,\"addr\":\"10.0.0.9\"}\n{\"index\":{\"_id\":\"3\"}}\n{\"kwd\":\"baz\",\"ts\":\"2021-01-05T10:00:00Z\",\"n\":8}\n",
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-r4rt",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4rt",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4rt",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rt/_search",
+      "body" : {
+        "runtime_mappings" : {
+          "ru" : {
+            "type" : "keyword",
+            "script" : {
+              "source" : "emit(doc['kwd'].value.toUpperCase())"
+            }
+          },
+          "n2" : {
+            "type" : "long",
+            "script" : "emit(doc['n'].value * 2); emit(1)"
+          },
+          "d" : {
+            "type" : "date",
+            "format" : "yyyy-MM-dd",
+            "script" : "emit(doc['ts'].value.toInstant().toEpochMilli())"
+          },
+          "half" : {
+            "type" : "double",
+            "script" : "emit(doc['n'].value / 2.0)"
+          },
+          "ip" : {
+            "type" : "ip",
+            "script" : "emit(doc['addr'].size() == 0 ? '127.0.0.1' : doc['addr'].value)"
+          }
+        },
+        "fields" : [
+          "ru",
+          "n2",
+          "d",
+          "day",
+          "src_n",
+          "flag",
+          "half",
+          "ip"
+        ],
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4rt",
+              "_id" : "1",
+              "_score" : null,
+              "fields" : {
+                "flag" : [
+                  false
+                ],
+                "half" : [
+                  1.5
+                ],
+                "ru" : [
+                  "FOO"
+                ],
+                "d" : [
+                  "2021-01-04"
+                ],
+                "n2" : [
+                  1,
+                  6
+                ],
+                "ip" : [
+                  "10.0.0.1"
+                ],
+                "src_n" : [
+                  2,
+                  7
+                ],
+                "day" : [
+                  "MONDAY"
+                ]
+              },
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-r4rt",
+              "_id" : "2",
+              "_score" : null,
+              "fields" : {
+                "flag" : [
+                  true
+                ],
+                "half" : [
+                  2.5
+                ],
+                "ru" : [
+                  "BAR"
+                ],
+                "d" : [
+                  "2021-01-05"
+                ],
+                "n2" : [
+                  1,
+                  10
+                ],
+                "ip" : [
+                  "10.0.0.9"
+                ],
+                "src_n" : [
+                  1
+                ],
+                "day" : [
+                  "TUESDAY"
+                ]
+              },
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_index" : "es-docs-r4rt",
+              "_id" : "3",
+              "_score" : null,
+              "fields" : {
+                "flag" : [
+                  true
+                ],
+                "half" : [
+                  4.0
+                ],
+                "ru" : [
+                  "BAZ"
+                ],
+                "d" : [
+                  "2021-01-05"
+                ],
+                "n2" : [
+                  1,
+                  16
+                ],
+                "ip" : [
+                  "127.0.0.1"
+                ],
+                "day" : [
+                  "TUESDAY"
+                ]
+              },
+              "sort" : [
+                2
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rt/_search",
+      "body" : {
+        "runtime_mappings" : {
+          "ru" : {
+            "type" : "keyword",
+            "script" : {
+              "source" : "emit(doc['kwd'].value.toUpperCase())"
+            }
+          },
+          "n2" : {
+            "type" : "long",
+            "script" : "emit(doc['n'].value * 2); emit(1)"
+          },
+          "d" : {
+            "type" : "date",
+            "format" : "yyyy-MM-dd",
+            "script" : "emit(doc['ts'].value.toInstant().toEpochMilli())"
+          },
+          "half" : {
+            "type" : "double",
+            "script" : "emit(doc['n'].value / 2.0)"
+          },
+          "ip" : {
+            "type" : "ip",
+            "script" : "emit(doc['addr'].size() == 0 ? '127.0.0.1' : doc['addr'].value)"
+          }
+        },
+        "query" : {
+          "range" : {
+            "n2" : {
+              "gte" : 10
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4rt",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_index" : "es-docs-r4rt",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                2
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rt/_search",
+      "body" : {
+        "query" : {
+          "term" : {
+            "day" : "MONDAY"
+          }
+        },
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4rt",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rt/_search",
+      "body" : {
+        "runtime_mappings" : {
+          "ru" : {
+            "type" : "keyword",
+            "script" : {
+              "source" : "emit(doc['kwd'].value.toUpperCase())"
+            }
+          },
+          "n2" : {
+            "type" : "long",
+            "script" : "emit(doc['n'].value * 2); emit(1)"
+          },
+          "d" : {
+            "type" : "date",
+            "format" : "yyyy-MM-dd",
+            "script" : "emit(doc['ts'].value.toInstant().toEpochMilli())"
+          },
+          "half" : {
+            "type" : "double",
+            "script" : "emit(doc['n'].value / 2.0)"
+          },
+          "ip" : {
+            "type" : "ip",
+            "script" : "emit(doc['addr'].size() == 0 ? '127.0.0.1' : doc['addr'].value)"
+          }
+        },
+        "query" : {
+          "bool" : {
+            "filter" : [
+              {
+                "terms" : {
+                  "ru" : [
+                    "FOO",
+                    "BAZ"
+                  ]
+                }
+              },
+              {
+                "exists" : {
+                  "field" : "half"
+                }
+              },
+              {
+                "prefix" : {
+                  "ru" : "B"
+                }
+              }
+            ]
+          }
+        },
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4rt",
+              "_id" : "3",
+              "_score" : 0.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rt/_search",
+      "body" : {
+        "runtime_mappings" : {
+          "ru" : {
+            "type" : "keyword",
+            "script" : {
+              "source" : "emit(doc['kwd'].value.toUpperCase())"
+            }
+          },
+          "n2" : {
+            "type" : "long",
+            "script" : "emit(doc['n'].value * 2); emit(1)"
+          },
+          "d" : {
+            "type" : "date",
+            "format" : "yyyy-MM-dd",
+            "script" : "emit(doc['ts'].value.toInstant().toEpochMilli())"
+          },
+          "half" : {
+            "type" : "double",
+            "script" : "emit(doc['n'].value / 2.0)"
+          },
+          "ip" : {
+            "type" : "ip",
+            "script" : "emit(doc['addr'].size() == 0 ? '127.0.0.1' : doc['addr'].value)"
+          }
+        },
+        "query" : {
+          "match" : {
+            "flag" : true
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4rt",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_index" : "es-docs-r4rt",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                2
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rt/_search",
+      "body" : {
+        "runtime_mappings" : {
+          "ru" : {
+            "type" : "keyword",
+            "script" : {
+              "source" : "emit(doc['kwd'].value.toUpperCase())"
+            }
+          },
+          "n2" : {
+            "type" : "long",
+            "script" : "emit(doc['n'].value * 2); emit(1)"
+          },
+          "d" : {
+            "type" : "date",
+            "format" : "yyyy-MM-dd",
+            "script" : "emit(doc['ts'].value.toInstant().toEpochMilli())"
+          },
+          "half" : {
+            "type" : "double",
+            "script" : "emit(doc['n'].value / 2.0)"
+          },
+          "ip" : {
+            "type" : "ip",
+            "script" : "emit(doc['addr'].size() == 0 ? '127.0.0.1' : doc['addr'].value)"
+          }
+        },
+        "query" : {
+          "range" : {
+            "half" : {
+              "gt" : 1.5,
+              "lte" : 4
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4rt",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_index" : "es-docs-r4rt",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                2
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rt/_search",
+      "body" : {
+        "runtime_mappings" : {
+          "ru" : {
+            "type" : "keyword",
+            "script" : {
+              "source" : "emit(doc['kwd'].value.toUpperCase())"
+            }
+          },
+          "n2" : {
+            "type" : "long",
+            "script" : "emit(doc['n'].value * 2); emit(1)"
+          },
+          "d" : {
+            "type" : "date",
+            "format" : "yyyy-MM-dd",
+            "script" : "emit(doc['ts'].value.toInstant().toEpochMilli())"
+          },
+          "half" : {
+            "type" : "double",
+            "script" : "emit(doc['n'].value / 2.0)"
+          },
+          "ip" : {
+            "type" : "ip",
+            "script" : "emit(doc['addr'].size() == 0 ? '127.0.0.1' : doc['addr'].value)"
+          }
+        },
+        "query" : {
+          "term" : {
+            "ip" : "10.0.0.9"
+          }
+        },
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4rt",
+              "_id" : "2",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rt/_search",
+      "body" : {
+        "runtime_mappings" : {
+          "ru" : {
+            "type" : "keyword",
+            "script" : {
+              "source" : "emit(doc['kwd'].value.toUpperCase())"
+            }
+          },
+          "n2" : {
+            "type" : "long",
+            "script" : "emit(doc['n'].value * 2); emit(1)"
+          },
+          "d" : {
+            "type" : "date",
+            "format" : "yyyy-MM-dd",
+            "script" : "emit(doc['ts'].value.toInstant().toEpochMilli())"
+          },
+          "half" : {
+            "type" : "double",
+            "script" : "emit(doc['n'].value / 2.0)"
+          },
+          "ip" : {
+            "type" : "ip",
+            "script" : "emit(doc['addr'].size() == 0 ? '127.0.0.1' : doc['addr'].value)"
+          }
+        },
+        "size" : 0,
+        "aggs" : {
+          "t" : {
+            "terms" : {
+              "field" : "day"
+            }
+          },
+          "s" : {
+            "sum" : {
+              "field" : "n2"
+            }
+          },
+          "m" : {
+            "max" : {
+              "field" : "half"
+            }
+          },
+          "src" : {
+            "terms" : {
+              "field" : "src_n"
+            }
+          },
+          "f" : {
+            "terms" : {
+              "field" : "flag"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "t" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "TUESDAY",
+                "doc_count" : 2
+              },
+              {
+                "key" : "MONDAY",
+                "doc_count" : 1
+              }
+            ]
+          },
+          "s" : {
+            "value" : 35.0
+          },
+          "m" : {
+            "value" : 4.0
+          },
+          "src" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : 1,
+                "doc_count" : 1
+              },
+              {
+                "key" : 2,
+                "doc_count" : 1
+              },
+              {
+                "key" : 7,
+                "doc_count" : 1
+              }
+            ]
+          },
+          "f" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : 1,
+                "key_as_string" : "true",
+                "doc_count" : 2
+              },
+              {
+                "key" : 0,
+                "key_as_string" : "false",
+                "doc_count" : 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rt/_search",
+      "body" : {
+        "runtime_mappings" : {
+          "ru" : {
+            "type" : "keyword",
+            "script" : {
+              "source" : "emit(doc['kwd'].value.toUpperCase())"
+            }
+          },
+          "n2" : {
+            "type" : "long",
+            "script" : "emit(doc['n'].value * 2); emit(1)"
+          },
+          "d" : {
+            "type" : "date",
+            "format" : "yyyy-MM-dd",
+            "script" : "emit(doc['ts'].value.toInstant().toEpochMilli())"
+          },
+          "half" : {
+            "type" : "double",
+            "script" : "emit(doc['n'].value / 2.0)"
+          },
+          "ip" : {
+            "type" : "ip",
+            "script" : "emit(doc['addr'].size() == 0 ? '127.0.0.1' : doc['addr'].value)"
+          }
+        },
+        "fields" : [
+          "*"
+        ],
+        "_source" : false,
+        "query" : {
+          "ids" : {
+            "values" : [
+              "2"
+            ]
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4rt",
+              "_id" : "2",
+              "_score" : 1.0,
+              "fields" : {
+                "flag" : [
+                  true
+                ],
+                "half" : [
+                  2.5
+                ],
+                "ru" : [
+                  "BAR"
+                ],
+                "d" : [
+                  "2021-01-05"
+                ],
+                "n2" : [
+                  1,
+                  10
+                ],
+                "ip" : [
+                  "10.0.0.9"
+                ],
+                "kwd" : [
+                  "bar"
+                ],
+                "src_n" : [
+                  1
+                ],
+                "addr" : [
+                  "10.0.0.9"
+                ],
+                "day" : [
+                  "TUESDAY"
+                ],
+                "n" : [
+                  5
+                ],
+                "ts" : [
+                  "2021-01-05T00:00:00.000Z"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r4rt",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4fl",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "h" : {
+              "type" : "flattened"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r4fl"
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fl/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"h\":{\"a\":\"text/plain\",\"b\":\"x1\",\"c\":{\"d\":\"Foo\"}}}\n{\"index\":{\"_id\":\"2\"}}\n{\"h\":{\"a\":\"application/json\",\"b\":[\"x2\",\"x0\"]}}\n",
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-r4fl",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4fl",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fl/_search",
+      "body" : {
+        "query" : {
+          "term" : {
+            "h.a" : "text/plain"
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4fl",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fl/_search",
+      "body" : {
+        "query" : {
+          "terms" : {
+            "h.b" : [
+              "x0",
+              "x1"
+            ]
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4fl",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-r4fl",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fl/_search",
+      "body" : {
+        "query" : {
+          "range" : {
+            "h.b" : {
+              "gte" : "x1"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4fl",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-r4fl",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fl/_search",
+      "body" : {
+        "query" : {
+          "range" : {
+            "h.b" : {
+              "lt" : "x1"
+            }
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4fl",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fl/_search",
+      "body" : {
+        "query" : {
+          "prefix" : {
+            "h.c.d" : "F"
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4fl",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fl/_search",
+      "body" : {
+        "query" : {
+          "exists" : {
+            "field" : "h.c"
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fl/_search",
+      "body" : {
+        "query" : {
+          "exists" : {
+            "field" : "h.c.d"
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4fl",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fl/_search",
+      "body" : {
+        "query" : {
+          "match" : {
+            "h.c.d" : "Foo"
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4fl",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fl/_search",
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "query" : "h.a:text\\/plain"
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4fl",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fl/_search",
+      "body" : {
+        "query" : {
+          "term" : {
+            "h" : "Foo"
+          }
+        },
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4fl",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fl/_search",
+      "body" : {
+        "query" : {
+          "wildcard" : {
+            "h.a" : "text*"
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: [wildcard] queries are not currently supported on keyed [flattened] fields.",
+              "index_uuid" : "sPJBw6i2SyWYGsSK-ziDUQ",
+              "index" : "es-docs-r4fl"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r4fl",
+              "node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: [wildcard] queries are not currently supported on keyed [flattened] fields.",
+                "index_uuid" : "sPJBw6i2SyWYGsSK-ziDUQ",
+                "index" : "es-docs-r4fl",
+                "caused_by" : {
+                  "type" : "unsupported_operation_exception",
+                  "reason" : "[wildcard] queries are not currently supported on keyed [flattened] fields."
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fl/_search",
+      "body" : {
+        "query" : {
+          "regexp" : {
+            "h.a" : "te.t"
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: [regexp] queries are not currently supported on keyed [flattened] fields.",
+              "index_uuid" : "sPJBw6i2SyWYGsSK-ziDUQ",
+              "index" : "es-docs-r4fl"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r4fl",
+              "node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: [regexp] queries are not currently supported on keyed [flattened] fields.",
+                "index_uuid" : "sPJBw6i2SyWYGsSK-ziDUQ",
+                "index" : "es-docs-r4fl",
+                "caused_by" : {
+                  "type" : "unsupported_operation_exception",
+                  "reason" : "[regexp] queries are not currently supported on keyed [flattened] fields."
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fl/_search",
+      "body" : {
+        "query" : {
+          "fuzzy" : {
+            "h.b" : "x9"
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: [fuzzy] queries are not currently supported on keyed [flattened] fields.",
+              "index_uuid" : "sPJBw6i2SyWYGsSK-ziDUQ",
+              "index" : "es-docs-r4fl"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r4fl",
+              "node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: [fuzzy] queries are not currently supported on keyed [flattened] fields.",
+                "index_uuid" : "sPJBw6i2SyWYGsSK-ziDUQ",
+                "index" : "es-docs-r4fl",
+                "caused_by" : {
+                  "type" : "unsupported_operation_exception",
+                  "reason" : "[fuzzy] queries are not currently supported on keyed [flattened] fields."
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fl/_search",
+      "body" : {
+        "fields" : [
+          "h.c.d",
+          "h.b",
+          "h.nope"
+        ],
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4fl",
+              "_id" : "1",
+              "_score" : null,
+              "fields" : {
+                "h.c.d" : [
+                  "Foo"
+                ],
+                "h.b" : [
+                  "x1"
+                ]
+              },
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-r4fl",
+              "_id" : "2",
+              "_score" : null,
+              "fields" : {
+                "h.b" : [
+                  "x2",
+                  "x0"
+                ]
+              },
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r4fl",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4col",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar",
+          "index.mapping.source.mode" : "synthetic",
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "dynamic" : "false",
+          "properties" : {
+            "kwd" : {
+              "type" : "keyword"
+            },
+            "field.kwd" : {
+              "type" : "keyword"
+            },
+            "n" : {
+              "type" : "long"
+            },
+            "t" : {
+              "type" : "text"
+            },
+            "attributes" : {
+              "dynamic" : "true",
+              "properties" : {
+                "host" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r4col"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4col/_doc/1?refresh=true",
+      "body" : {
+        "kwd" : [
+          "z",
+          "a",
+          "z"
+        ],
+        "field" : {
+          "kwd" : "bar"
+        },
+        "n" : [
+          "5",
+          3
+        ],
+        "t" : "Hello World",
+        "un" : {
+          "x" : 1
+        },
+        "ul" : "y",
+        "attributes" : {
+          "host" : "h1",
+          "region" : "eu"
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-r4col",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : -2,
+        "_primary_term" : 0
+      }
+    },
+    {
+      "req" : "GET /es-docs-r4col/_doc/1",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-r4col",
+        "_id" : "1",
+        "_version" : 1,
+        "found" : true,
+        "_source" : {
+          "attributes.host" : "h1",
+          "attributes.region" : "eu",
+          "field.kwd" : "bar",
+          "kwd" : [
+            "z",
+            "a",
+            "z"
+          ],
+          "n" : [
+            5,
+            3
+          ],
+          "t" : "Hello World"
+        }
+      }
+    },
+    {
+      "req" : "GET /es-docs-r4col/_mapping",
+      "status" : 200,
+      "response" : {
+        "es-docs-r4col" : {
+          "mappings" : {
+            "dynamic" : "false",
+            "prefix_properties" : {
+              "attributes" : {
+                "dynamic" : "true"
+              }
+            },
+            "properties" : {
+              "attributes.host" : {
+                "type" : "keyword"
+              },
+              "attributes.region" : {
+                "type" : "keyword"
+              },
+              "field.kwd" : {
+                "type" : "keyword"
+              },
+              "kwd" : {
+                "type" : "keyword"
+              },
+              "n" : {
+                "type" : "long"
+              },
+              "t" : {
+                "type" : "text"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4col/_search",
+      "body" : {
+        "query" : {
+          "term" : {
+            "field.kwd" : "bar"
+          }
+        },
+        "seq_no_primary_term" : true
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4col",
+              "_id" : "1",
+              "_seq_no" : -2,
+              "_primary_term" : 0,
+              "_score" : 1.0,
+              "_source" : {
+                "attributes.host" : "h1",
+                "attributes.region" : "eu",
+                "field.kwd" : "bar",
+                "kwd" : [
+                  "z",
+                  "a",
+                  "z"
+                ],
+                "n" : [
+                  5,
+                  3
+                ],
+                "t" : "Hello World"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4col/_search",
+      "body" : {
+        "query" : {
+          "term" : {
+            "attributes.region" : "eu"
+          }
+        },
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4col",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4cst",
+      "body" : {
+        "settings" : {
+          "index.mode" : "columnar",
+          "index.mapping.source.mode" : "columnar_stored",
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "dynamic" : "false",
+          "properties" : {
+            "kwd" : {
+              "type" : "keyword"
+            },
+            "field.kwd" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r4cst"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4cst/_doc/1?refresh=true",
+      "body" : {
+        "kwd" : "foo",
+        "field" : {
+          "kwd" : "bar"
+        },
+        "other" : 1
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-r4cst",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : -2,
+        "_primary_term" : 0
+      }
+    },
+    {
+      "req" : "GET /es-docs-r4cst/_source/1",
+      "status" : 200,
+      "response" : {
+        "field.kwd" : "bar",
+        "kwd" : "foo"
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r4col,es-docs-r4cst",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4rs",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "title" : {
+              "type" : "text"
+            },
+            "n" : {
+              "type" : "integer"
+            },
+            "g" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r4rs"
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rs/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"title\":\"a b\",\"n\":1,\"g\":\"x\"}\n{\"index\":{\"_id\":\"2\"}}\n{\"title\":\"a\",\"n\":2,\"g\":\"x\"}\n{\"index\":{\"_id\":\"3\"}}\n{\"title\":\"b c\",\"n\":3,\"g\":\"y\"}\n",
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-r4rs",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4rs",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4rs",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rs/_search",
+      "body" : {
+        "query" : {
+          "match" : {
+            "title" : "a b"
+          }
+        },
+        "rescore" : [
+          {
+            "window_size" : 1,
+            "script" : {
+              "script" : {
+                "source" : "doc['n'].value * params.m + _score",
+                "params" : {
+                  "m" : 10
+                }
+              }
+            }
+          },
+          {
+            "window_size" : 2,
+            "query" : {
+              "rescore_query" : {
+                "match" : {
+                  "title" : "c"
+                }
+              },
+              "query_weight" : 0.7,
+              "rescore_query_weight" : 1.2,
+              "score_mode" : "max"
+            }
+          }
+        ],
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 7.60824,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4rs",
+              "_id" : "1",
+              "_score" : 7.60824
+            },
+            {
+              "_index" : "es-docs-r4rs",
+              "_id" : "2",
+              "_score" : 0.39337257
+            },
+            {
+              "_index" : "es-docs-r4rs",
+              "_id" : "3",
+              "_score" : 0.30411997
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rs/_search?explain=true",
+      "body" : {
+        "query" : {
+          "match" : {
+            "title" : "a b"
+          }
+        },
+        "rescore" : [
+          {
+            "window_size" : 2,
+            "query" : {
+              "rescore_query" : {
+                "match" : {
+                  "title" : "c"
+                }
+              },
+              "query_weight" : 0.7,
+              "rescore_query_weight" : 1.2,
+              "score_mode" : "total"
+            }
+          }
+        ],
+        "_source" : false
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 0.60823995,
+          "hits" : [
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "1",
+              "_score" : 0.60823995,
+              "_explanation" : {
+                "value" : 0.60823995,
+                "description" : "product of:",
+                "details" : [
+                  {
+                    "value" : 0.86891425,
+                    "description" : "sum of:",
+                    "details" : [
+                      {
+                        "value" : 0.43445712,
+                        "description" : "weight(title:a in 0) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.43445712,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "value" : 0.43445712,
+                        "description" : "weight(title:b in 0) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.43445712,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "value" : 0.7,
+                    "description" : "primaryWeight",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "2",
+              "_score" : 0.39337257,
+              "_explanation" : {
+                "value" : 0.39337257,
+                "description" : "product of:",
+                "details" : [
+                  {
+                    "value" : 0.5619608,
+                    "description" : "sum of:",
+                    "details" : [
+                      {
+                        "value" : 0.5619608,
+                        "description" : "weight(title:a in 1) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.5619608,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.54347825,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "value" : 0.7,
+                    "description" : "primaryWeight",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "3",
+              "_score" : 0.30411997,
+              "_explanation" : {
+                "value" : 0.30411997,
+                "description" : "product of:",
+                "details" : [
+                  {
+                    "value" : 0.43445712,
+                    "description" : "sum of:",
+                    "details" : [
+                      {
+                        "value" : 0.43445712,
+                        "description" : "weight(title:b in 2) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.43445712,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "value" : 0.7,
+                    "description" : "primaryWeight",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rs/_search?explain=true",
+      "body" : {
+        "query" : {
+          "match" : {
+            "title" : "a b"
+          }
+        },
+        "rescore" : [
+          {
+            "window_size" : 2,
+            "query" : {
+              "rescore_query" : {
+                "match" : {
+                  "title" : "c"
+                }
+              },
+              "query_weight" : 0.7,
+              "rescore_query_weight" : 1.2,
+              "score_mode" : "multiply"
+            }
+          }
+        ],
+        "_source" : false
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 5,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 0.60823995,
+          "hits" : [
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "1",
+              "_score" : 0.60823995,
+              "_explanation" : {
+                "value" : 0.60823995,
+                "description" : "product of:",
+                "details" : [
+                  {
+                    "value" : 0.86891425,
+                    "description" : "sum of:",
+                    "details" : [
+                      {
+                        "value" : 0.43445712,
+                        "description" : "weight(title:a in 0) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.43445712,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "value" : 0.43445712,
+                        "description" : "weight(title:b in 0) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.43445712,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "value" : 0.7,
+                    "description" : "primaryWeight",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "2",
+              "_score" : 0.39337257,
+              "_explanation" : {
+                "value" : 0.39337257,
+                "description" : "product of:",
+                "details" : [
+                  {
+                    "value" : 0.5619608,
+                    "description" : "sum of:",
+                    "details" : [
+                      {
+                        "value" : 0.5619608,
+                        "description" : "weight(title:a in 1) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.5619608,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.54347825,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "value" : 0.7,
+                    "description" : "primaryWeight",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "3",
+              "_score" : 0.30411997,
+              "_explanation" : {
+                "value" : 0.30411997,
+                "description" : "product of:",
+                "details" : [
+                  {
+                    "value" : 0.43445712,
+                    "description" : "sum of:",
+                    "details" : [
+                      {
+                        "value" : 0.43445712,
+                        "description" : "weight(title:b in 2) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.43445712,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "value" : 0.7,
+                    "description" : "primaryWeight",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rs/_search?explain=true",
+      "body" : {
+        "query" : {
+          "match" : {
+            "title" : "a b"
+          }
+        },
+        "rescore" : [
+          {
+            "window_size" : 2,
+            "query" : {
+              "rescore_query" : {
+                "match" : {
+                  "title" : "c"
+                }
+              },
+              "query_weight" : 0.7,
+              "rescore_query_weight" : 1.2,
+              "score_mode" : "avg"
+            }
+          }
+        ],
+        "_source" : false
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 5,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 0.60823995,
+          "hits" : [
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "1",
+              "_score" : 0.60823995,
+              "_explanation" : {
+                "value" : 0.60823995,
+                "description" : "product of:",
+                "details" : [
+                  {
+                    "value" : 0.86891425,
+                    "description" : "sum of:",
+                    "details" : [
+                      {
+                        "value" : 0.43445712,
+                        "description" : "weight(title:a in 0) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.43445712,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "value" : 0.43445712,
+                        "description" : "weight(title:b in 0) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.43445712,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "value" : 0.7,
+                    "description" : "primaryWeight",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "2",
+              "_score" : 0.39337257,
+              "_explanation" : {
+                "value" : 0.39337257,
+                "description" : "product of:",
+                "details" : [
+                  {
+                    "value" : 0.5619608,
+                    "description" : "sum of:",
+                    "details" : [
+                      {
+                        "value" : 0.5619608,
+                        "description" : "weight(title:a in 1) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.5619608,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.54347825,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "value" : 0.7,
+                    "description" : "primaryWeight",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "3",
+              "_score" : 0.30411997,
+              "_explanation" : {
+                "value" : 0.30411997,
+                "description" : "product of:",
+                "details" : [
+                  {
+                    "value" : 0.43445712,
+                    "description" : "sum of:",
+                    "details" : [
+                      {
+                        "value" : 0.43445712,
+                        "description" : "weight(title:b in 2) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.43445712,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "value" : 0.7,
+                    "description" : "primaryWeight",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rs/_search?explain=true",
+      "body" : {
+        "query" : {
+          "match" : {
+            "title" : "a b"
+          }
+        },
+        "rescore" : [
+          {
+            "window_size" : 2,
+            "query" : {
+              "rescore_query" : {
+                "match" : {
+                  "title" : "c"
+                }
+              },
+              "query_weight" : 0.7,
+              "rescore_query_weight" : 1.2,
+              "score_mode" : "max"
+            }
+          }
+        ],
+        "_source" : false
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 0.60823995,
+          "hits" : [
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "1",
+              "_score" : 0.60823995,
+              "_explanation" : {
+                "value" : 0.60823995,
+                "description" : "product of:",
+                "details" : [
+                  {
+                    "value" : 0.86891425,
+                    "description" : "sum of:",
+                    "details" : [
+                      {
+                        "value" : 0.43445712,
+                        "description" : "weight(title:a in 0) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.43445712,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "value" : 0.43445712,
+                        "description" : "weight(title:b in 0) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.43445712,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "value" : 0.7,
+                    "description" : "primaryWeight",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "2",
+              "_score" : 0.39337257,
+              "_explanation" : {
+                "value" : 0.39337257,
+                "description" : "product of:",
+                "details" : [
+                  {
+                    "value" : 0.5619608,
+                    "description" : "sum of:",
+                    "details" : [
+                      {
+                        "value" : 0.5619608,
+                        "description" : "weight(title:a in 1) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.5619608,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.54347825,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "value" : 0.7,
+                    "description" : "primaryWeight",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "3",
+              "_score" : 0.30411997,
+              "_explanation" : {
+                "value" : 0.30411997,
+                "description" : "product of:",
+                "details" : [
+                  {
+                    "value" : 0.43445712,
+                    "description" : "sum of:",
+                    "details" : [
+                      {
+                        "value" : 0.43445712,
+                        "description" : "weight(title:b in 2) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.43445712,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "value" : 0.7,
+                    "description" : "primaryWeight",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rs/_search?explain=true",
+      "body" : {
+        "query" : {
+          "match" : {
+            "title" : "a b"
+          }
+        },
+        "rescore" : [
+          {
+            "window_size" : 2,
+            "query" : {
+              "rescore_query" : {
+                "match" : {
+                  "title" : "c"
+                }
+              },
+              "query_weight" : 0.7,
+              "rescore_query_weight" : 1.2,
+              "score_mode" : "min"
+            }
+          }
+        ],
+        "_source" : false
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 0.60823995,
+          "hits" : [
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "1",
+              "_score" : 0.60823995,
+              "_explanation" : {
+                "value" : 0.60823995,
+                "description" : "product of:",
+                "details" : [
+                  {
+                    "value" : 0.86891425,
+                    "description" : "sum of:",
+                    "details" : [
+                      {
+                        "value" : 0.43445712,
+                        "description" : "weight(title:a in 0) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.43445712,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "value" : 0.43445712,
+                        "description" : "weight(title:b in 0) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.43445712,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "value" : 0.7,
+                    "description" : "primaryWeight",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "2",
+              "_score" : 0.39337257,
+              "_explanation" : {
+                "value" : 0.39337257,
+                "description" : "product of:",
+                "details" : [
+                  {
+                    "value" : 0.5619608,
+                    "description" : "sum of:",
+                    "details" : [
+                      {
+                        "value" : 0.5619608,
+                        "description" : "weight(title:a in 1) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.5619608,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.54347825,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "value" : 0.7,
+                    "description" : "primaryWeight",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "3",
+              "_score" : 0.30411997,
+              "_explanation" : {
+                "value" : 0.30411997,
+                "description" : "product of:",
+                "details" : [
+                  {
+                    "value" : 0.43445712,
+                    "description" : "sum of:",
+                    "details" : [
+                      {
+                        "value" : 0.43445712,
+                        "description" : "weight(title:b in 2) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.43445712,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.47000363,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 2,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "value" : 0.7,
+                    "description" : "primaryWeight",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rs/_search?explain=true",
+      "body" : {
+        "query" : {
+          "match" : {
+            "title" : "c"
+          }
+        },
+        "rescore" : [
+          {
+            "window_size" : 3,
+            "script" : {
+              "script" : {
+                "source" : "_score * 2"
+              }
+            }
+          }
+        ],
+        "_source" : false
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "_node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.8132977,
+          "hits" : [
+            {
+              "_shard" : "[es-docs-r4rs][0]",
+              "_node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "_index" : "es-docs-r4rs",
+              "_id" : "3",
+              "_score" : 1.8132977,
+              "_explanation" : {
+                "value" : 1.8132977,
+                "description" : "script score function, computed with script:\"Script{type=inline, lang='painless', idOrCode='_score * 2', options={}, params={}}\", computed as:",
+                "details" : [
+                  {
+                    "value" : 0.9066489,
+                    "description" : "_score: ",
+                    "details" : [
+                      {
+                        "value" : 0.9066489,
+                        "description" : "weight(title:c in 2) [PerFieldSimilarity], result of:",
+                        "details" : [
+                          {
+                            "value" : 0.9066489,
+                            "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                            "details" : [
+                              {
+                                "value" : 2.2,
+                                "description" : "boost",
+                                "details" : [ ]
+                              },
+                              {
+                                "value" : 0.98082924,
+                                "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1,
+                                    "description" : "n, number of documents containing term",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 3,
+                                    "description" : "N, total number of documents with field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              },
+                              {
+                                "value" : 0.42016804,
+                                "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                "details" : [
+                                  {
+                                    "value" : 1.0,
+                                    "description" : "freq, occurrences of term within document",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.2,
+                                    "description" : "k1, term saturation parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 0.75,
+                                    "description" : "b, length normalization parameter",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 2.0,
+                                    "description" : "dl, length of field",
+                                    "details" : [ ]
+                                  },
+                                  {
+                                    "value" : 1.6666666,
+                                    "description" : "avgdl, average length of field",
+                                    "details" : [ ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rs/_search",
+      "body" : {
+        "retriever" : {
+          "rescorer" : {
+            "rescore" : {
+              "window_size" : 10,
+              "script" : {
+                "script" : {
+                  "source" : "doc['n'].value"
+                }
+              }
+            },
+            "retriever" : {
+              "standard" : {
+                "query" : {
+                  "match" : {
+                    "title" : "a b c"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "collapse" : {
+          "field" : "g"
+        },
+        "size" : 2,
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 3.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4rs",
+              "_id" : "3",
+              "_score" : 3.0,
+              "fields" : {
+                "g" : [
+                  "y"
+                ]
+              }
+            },
+            {
+              "_index" : "es-docs-r4rs",
+              "_id" : "2",
+              "_score" : 2.0,
+              "fields" : {
+                "g" : [
+                  "x"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rs/_search",
+      "body" : {
+        "query" : {
+          "match" : {
+            "title" : "a b c"
+          }
+        },
+        "collapse" : {
+          "field" : "g"
+        },
+        "rescore" : {
+          "window_size" : 10,
+          "script" : {
+            "script" : {
+              "source" : "doc['n'].value"
+            }
+          }
+        },
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 3.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4rs",
+              "_id" : "3",
+              "_score" : 3.0,
+              "fields" : {
+                "g" : [
+                  "y"
+                ]
+              }
+            },
+            {
+              "_index" : "es-docs-r4rs",
+              "_id" : "1",
+              "_score" : 1.0,
+              "fields" : {
+                "g" : [
+                  "x"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rs/_search",
+      "body" : {
+        "collapse" : {
+          "field" : "g"
+        },
+        "sort" : [
+          {
+            "g" : "desc"
+          }
+        ],
+        "search_after" : [
+          "y"
+        ],
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 7,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4rs",
+              "_id" : "1",
+              "_score" : null,
+              "fields" : {
+                "g" : [
+                  "x"
+                ]
+              },
+              "sort" : [
+                "x"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rs/_search",
+      "body" : {
+        "collapse" : {
+          "field" : "g"
+        },
+        "sort" : [
+          {
+            "n" : "desc"
+          }
+        ],
+        "search_after" : [
+          3
+        ],
+        "_source" : false
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cannot use [collapse] in conjunction with [search_after] unless the search is sorted on the same field. Multiple sort fields are not allowed."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r4rs",
+              "node" : "P6jyOsRcSgKUfyBbxJNHCQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Cannot use [collapse] in conjunction with [search_after] unless the search is sorted on the same field. Multiple sort fields are not allowed."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Cannot use [collapse] in conjunction with [search_after] unless the search is sorted on the same field. Multiple sort fields are not allowed.",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cannot use [collapse] in conjunction with [search_after] unless the search is sorted on the same field. Multiple sort fields are not allowed."
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rs/_search",
+      "body" : {
+        "collapse" : {
+          "field" : "g",
+          "inner_hits" : {
+            "collapse" : {
+              "field" : "g"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:64] [collapse] failed to parse field [inner_hits]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:64] [collapse] failed to parse field [inner_hits]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "inner_hits must have a [name]; set the [name] field in the inner_hits definition"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4rs/_search",
+      "body" : {
+        "collapse" : {
+          "field" : "g",
+          "inner_hits" : {
+            "name" : "a",
+            "collapse" : {
+              "field" : "g",
+              "inner_hits" : {
+                "name" : "b"
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took",
+        "reason",
+        "col"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "Invalid token in the inner collapse",
+              "line" : 1,
+              "col" : 75
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:75] [collapse] failed to parse field [inner_hits]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:75] [inner_hits] failed to parse field [collapse]",
+            "caused_by" : {
+              "type" : "parsing_exception",
+              "reason" : "Invalid token in the inner collapse",
+              "line" : 1,
+              "col" : 75
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r4rs",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4b1",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "aliases" : {
+          "es-docs-r4al1" : { }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r4b1"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4b2",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r4b2"
+      }
+    },
+    {
+      "req" : "POST /_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_index\":\"es-docs-r4b1\",\"_id\":\"1\"}}\n{\"foo\":\"bar\"}\n{\"index\":{\"_index\":\"es-docs-r4b2\",\"_id\":\"1\"}}\n{\"foo\":\"bar\"}\n",
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-r4b1",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4b2",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4b*/_search",
+      "body" : {
+        "indices_boost" : [
+          {
+            "es-docs-r4al1" : 2.0
+          }
+        ],
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 24,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 2.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4b1",
+              "_id" : "1",
+              "_score" : 2.0
+            },
+            {
+              "_index" : "es-docs-r4b2",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4b*/_search",
+      "body" : {
+        "indices_boost" : [
+          {
+            "*b2" : 3.0
+          },
+          {
+            "es-docs-r4al1" : 1.0
+          }
+        ],
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 3.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4b2",
+              "_id" : "1",
+              "_score" : 3.0
+            },
+            {
+              "_index" : "es-docs-r4b1",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4b*/_search",
+      "body" : {
+        "indices_boost" : [
+          {
+            "es-docs-r4nope" : 2.0
+          },
+          {
+            "es-docs-r4b2" : 2.0
+          }
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [es-docs-r4nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "es-docs-r4nope",
+              "index_uuid" : "_na_",
+              "index" : "es-docs-r4nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [es-docs-r4nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "es-docs-r4nope",
+          "index_uuid" : "_na_",
+          "index" : "es-docs-r4nope"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4b*/_search?ignore_unavailable=true",
+      "body" : {
+        "indices_boost" : [
+          {
+            "es-docs-r4nope" : 2.0
+          },
+          {
+            "es-docs-r4b2" : 2.0
+          }
+        ],
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 2.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4b2",
+              "_id" : "1",
+              "_score" : 2.0
+            },
+            {
+              "_index" : "es-docs-r4b1",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4b*/_search?ignore_unavailable=true",
+      "body" : {
+        "indices_boost" : [
+          {
+            "remote1:x" : 2.0
+          }
+        ]
+      },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cross-cluster calls are not supported in this context but remote indices were requested: [remote1:x]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Cross-cluster calls are not supported in this context but remote indices were requested: [remote1:x]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4b2/_close",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "indices" : {
+          "es-docs-r4b2" : {
+            "closed" : true
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4b*/_search?expand_wildcards=open,closed",
+      "body" : { },
+      "mask" : [
+        "_id",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_closed_exception",
+              "reason" : "closed",
+              "index_uuid" : "wqKPEQWmQ721i8fdEX6KMA",
+              "index" : "es-docs-r4b2"
+            }
+          ],
+          "type" : "index_closed_exception",
+          "reason" : "closed",
+          "index_uuid" : "wqKPEQWmQ721i8fdEX6KMA",
+          "index" : "es-docs-r4b2"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r4b1,es-docs-r4b2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

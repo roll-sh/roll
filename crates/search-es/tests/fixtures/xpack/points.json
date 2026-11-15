@@ -1,0 +1,1857 @@
+{
+  "description" : "Document parsing of point and geo_point values (GenericPointParser: z values dropped unless ignore_z_value is false, error texts and locations), and how ES|QL and the fields API read them back",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-points?filter_path=errors,acknowledged,error",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "p" : {
+              "type" : "point"
+            },
+            "g" : {
+              "type" : "geo_point"
+            },
+            "pz" : {
+              "type" : "point",
+              "ignore_z_value" : false
+            },
+            "gz" : {
+              "type" : "geo_point",
+              "ignore_z_value" : false
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/0?filter_path=result,error",
+      "body" : {
+        "p" : {
+          "x" : 1.5,
+          "y" : 2.5,
+          "z" : 3
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/1?filter_path=result,error",
+      "body" : {
+        "p" : [
+          1.5,
+          2.5,
+          3.5
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/2?filter_path=result,error",
+      "body" : {
+        "p" : "POINT (1 2 3)"
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/3?filter_path=result,error",
+      "body" : {
+        "p" : "1.5,2.5,3.5"
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/4?filter_path=result,error",
+      "body" : {
+        "p" : "u0vt"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "unsupported symbol [u] in point [u0vt]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "unsupported symbol [u] in point [u0vt]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/5?filter_path=result,error",
+      "body" : {
+        "p" : [
+          1.5,
+          "2"
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/6?filter_path=result,error",
+      "body" : {
+        "p" : {
+          "x" : "a",
+          "y" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[x] must be a valid double value"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:20] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[x] must be a valid double value",
+            "caused_by" : {
+              "type" : "number_format_exception",
+              "reason" : "For input string: \"a\""
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/7?filter_path=result,error",
+      "body" : {
+        "p" : {
+          "x" : "1.5",
+          "y" : "2"
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/8?filter_path=result,error",
+      "body" : {
+        "p" : [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ]
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/9?filter_path=result,error",
+      "body" : {
+        "p" : [
+          {
+            "x" : 1,
+            "y" : 2
+          },
+          "3,4"
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/10?filter_path=result,error",
+      "body" : {
+        "p" : {
+          "type" : "Point",
+          "coordinates" : [
+            1,
+            2,
+            3
+          ]
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/11?filter_path=result,error",
+      "body" : {
+        "p" : "1,2,3,4"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "failed to parse [[1, 2, 3, 4]], expected 2 or 3 coordinates but found: [4]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "failed to parse [[1, 2, 3, 4]], expected 2 or 3 coordinates but found: [4]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/12?filter_path=result,error",
+      "body" : {
+        "p" : [
+          1
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:8] failed to parse: [1:9] Current token (END_ARRAY) not numeric, can not use numeric value accessors\n at [Source: (byte[])\"{\"p\":[1]}\"; line: 1, column: 9]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:8] failed to parse: [1:9] Current token (END_ARRAY) not numeric, can not use numeric value accessors\n at [Source: (byte[])\"{\"p\":[1]}\"; line: 1, column: 9]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:9] Current token (END_ARRAY) not numeric, can not use numeric value accessors\n at [Source: (byte[])\"{\"p\":[1]}\"; line: 1, column: 9]",
+            "caused_by" : {
+              "type" : "json_parse_exception",
+              "reason" : "Current token (END_ARRAY) not numeric, can not use numeric value accessors\n at [Source: (byte[])\"{\"p\":[1]}\"; line: 1, column: 9]"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/13?filter_path=result,error",
+      "body" : {
+        "p" : [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "point expected"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:13] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "point expected"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/14?filter_path=result,error",
+      "body" : {
+        "p" : "a,b"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[x] must be a number"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[x] must be a number"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/15?filter_path=result,error",
+      "body" : {
+        "p" : "1, 2"
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/16?filter_path=result,error",
+      "body" : {
+        "pz" : {
+          "x" : 1.5,
+          "y" : 2.5,
+          "z" : 3
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "Exception parsing coordinates: found Z value [3.0] but [ignore_z_value] parameter is [false]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:29] failed to parse field [pz] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "Exception parsing coordinates: found Z value [3.0] but [ignore_z_value] parameter is [false]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/17?filter_path=result,error",
+      "body" : {
+        "pz" : [
+          1.5,
+          2.5,
+          3.5
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "Exception parsing coordinates: found Z value [3.5] but [ignore_z_value] parameter is [false]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:16] failed to parse: Exception parsing coordinates: found Z value [3.5] but [ignore_z_value] parameter is [false]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "Exception parsing coordinates: found Z value [3.5] but [ignore_z_value] parameter is [false]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/18?filter_path=result,error",
+      "body" : {
+        "pz" : "POINT (1 2 3)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "Invalid WKT format"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:7] failed to parse field [pz] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "Invalid WKT format",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "found Z value [3.0] but [ignore_z_value] parameter is [false]"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/19?filter_path=result,error",
+      "body" : {
+        "pz" : "1.5,2.5,3.5"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "Exception parsing coordinates: found Z value [3.5] but [ignore_z_value] parameter is [false]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:7] failed to parse field [pz] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "Exception parsing coordinates: found Z value [3.5] but [ignore_z_value] parameter is [false]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/20?filter_path=result,error",
+      "body" : {
+        "g" : {
+          "lat" : 1,
+          "lon" : 2,
+          "z" : 3
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/21?filter_path=result,error",
+      "body" : {
+        "g" : "1,2,3"
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/22?filter_path=result,error",
+      "body" : {
+        "g" : "POINT (1 2 3)"
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/23?filter_path=result,error",
+      "body" : {
+        "g" : [
+          1,
+          2,
+          3
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/24?filter_path=result,error",
+      "body" : {
+        "g" : {
+          "type" : "Point",
+          "coordinates" : [
+            1,
+            2,
+            3
+          ]
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/25?filter_path=result,error",
+      "body" : {
+        "gz" : {
+          "lat" : 1,
+          "lon" : 2,
+          "z" : 3
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "Exception parsing coordinates: found Z value [3.0] but [ignore_z_value] parameter is [false]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:29] failed to parse field [gz] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "Exception parsing coordinates: found Z value [3.0] but [ignore_z_value] parameter is [false]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/26?filter_path=result,error",
+      "body" : {
+        "gz" : "1,2,3"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "Exception parsing coordinates: found Z value [3.0] but [ignore_z_value] parameter is [false]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:7] failed to parse field [gz] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "Exception parsing coordinates: found Z value [3.0] but [ignore_z_value] parameter is [false]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/27?filter_path=result,error",
+      "body" : {
+        "gz" : "POINT (1 2 3)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "Invalid WKT format"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:7] failed to parse field [gz] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "Invalid WKT format",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "found Z value [3.0] but [ignore_z_value] parameter is [false]"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/28?filter_path=result,error",
+      "body" : {
+        "gz" : [
+          1,
+          2,
+          3
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "Exception parsing coordinates: found Z value [3.0] but [ignore_z_value] parameter is [false]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:12] failed to parse: Exception parsing coordinates: found Z value [3.0] but [ignore_z_value] parameter is [false]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "Exception parsing coordinates: found Z value [3.0] but [ignore_z_value] parameter is [false]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/29?filter_path=result,error",
+      "body" : {
+        "g" : [
+          1,
+          "2"
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/30?filter_path=result,error",
+      "body" : {
+        "g" : [
+          "1",
+          "2"
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/31?filter_path=result,error",
+      "body" : {
+        "p" : {
+          "x" : 1,
+          "y" : 2,
+          "q" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "field [q] not supported - must be one of: x, y, z, type, coordinates"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:24] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "field [q] not supported - must be one of: x, y, z, type, coordinates"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/32?filter_path=result,error",
+      "body" : {
+        "p" : true
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "point expected"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "point expected"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/33?filter_path=result,error",
+      "body" : {
+        "p" : 5
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "point expected"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "point expected"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/34?filter_path=result,error",
+      "body" : {
+        "g" : "POINT (1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "Invalid WKT format"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [g] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "Invalid WKT format",
+            "caused_by" : {
+              "type" : "parse_exception",
+              "reason" : "expected number but found: END-OF-STREAM"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/35?filter_path=result,error",
+      "body" : {
+        "p" : "POINT (1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "Invalid WKT format"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "Invalid WKT format",
+            "caused_by" : {
+              "type" : "parse_exception",
+              "reason" : "expected number but found: END-OF-STREAM"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/36?filter_path=result,error",
+      "body" : {
+        "p" : "LINESTRING (1 2, 3 4)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[x] must be a number"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[x] must be a number"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/37?filter_path=result,error",
+      "body" : {
+        "g" : "LINESTRING (1 2, 3 4)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "latitude must be a number"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [g] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "latitude must be a number"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/38?filter_path=result,error",
+      "body" : {
+        "p" : "1.5"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "failed to parse [1.5], expected 2 or 3 coordinates but found: [1]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "failed to parse [1.5], expected 2 or 3 coordinates but found: [1]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/39?filter_path=result,error",
+      "body" : {
+        "p" : "1,a"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[y] must be a number"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[y] must be a number"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/40?filter_path=result,error",
+      "body" : {
+        "p" : "1,2,a"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[y] must be a number"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[y] must be a number"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/41?filter_path=result,error",
+      "body" : {
+        "p" : "Infinity,2"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "invalid [x] value [Infinity]; must be between -3.4028234663852886E38 and 3.4028234663852886E38"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "invalid [x] value [Infinity]; must be between -3.4028234663852886E38 and 3.4028234663852886E38"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/42?filter_path=result,error",
+      "body" : {
+        "p" : {
+          "x" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "Required [y]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:12] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "Required [y]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/43?filter_path=result,error",
+      "body" : {
+        "p" : {
+          "x" : 1,
+          "y" : 2,
+          "type" : "Point",
+          "coordinates" : [
+            1,
+            2
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "fields matching more than one point format"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:53] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "fields matching more than one point format"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/44?filter_path=result,error",
+      "body" : {
+        "p" : {
+          "type" : "Point"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "Required [coordinates]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:21] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "Required [coordinates]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/45?filter_path=result,error",
+      "body" : {
+        "p" : {
+          "coordinates" : [
+            1,
+            2
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "Required [type]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:26] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "Required [type]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/46?filter_path=result,error",
+      "body" : {
+        "p" : {
+          "type" : "Line",
+          "coordinates" : [
+            1,
+            2
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[type] for point can only be 'Point'"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:40] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[type] for point can only be 'Point'"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/47?filter_path=result,error",
+      "body" : {
+        "p" : {
+          "type" : "Point",
+          "coordinates" : [
+            1,
+            2,
+            3,
+            4
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[point] field type does not accept > 3 dimensions"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:45] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[point] field type does not accept > 3 dimensions"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/48?filter_path=result,error",
+      "body" : {
+        "p" : {
+          "type" : "Point",
+          "coordinates" : [
+            1
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[coordinates] must contain at least two values"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:39] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[coordinates] must contain at least two values"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/49?filter_path=result,error",
+      "body" : {
+        "p" : {
+          "x" : true,
+          "y" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "x must be a number"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:21] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "x must be a number"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/50?filter_path=result,error",
+      "body" : {
+        "p" : {
+          "x" : [
+            1
+          ],
+          "y" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "x must be a number"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:20] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "x must be a number"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/51?filter_path=result,error",
+      "body" : {
+        "p" : {}
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "field must be either lat/lon or type/coordinates"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:7] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "field must be either lat/lon or type/coordinates"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/52?filter_path=result,error",
+      "body" : {
+        "p" : [
+          {
+            "x" : 1,
+            "y" : 2
+          },
+          5
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "point expected"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:21] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "point expected"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/53?filter_path=result,error",
+      "body" : {
+        "p" : [
+          "1,2",
+          "3,4"
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/54?filter_path=result,error",
+      "body" : {
+        "p" : [
+          true
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "point expected"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:7] failed to parse field [p] of type [point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "point expected"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/55?filter_path=result,error",
+      "body" : {
+        "p" : "point (1 2)"
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/56?filter_path=result,error",
+      "body" : {
+        "p" : "  1 , 2 "
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/57?filter_path=result,error",
+      "body" : {
+        "g" : {
+          "lat" : 1,
+          "lon" : 2,
+          "geohash" : "u0"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "field [geohash] not supported - must be one of: lon, lat, z, type, coordinates"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:37] failed to parse field [g] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "field [geohash] not supported - must be one of: lon, lat, z, type, coordinates"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/58?filter_path=result,error",
+      "body" : {
+        "g" : "u0vt"
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/59?filter_path=result,error",
+      "body" : {
+        "g" : {
+          "geohash" : "u0"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "field [geohash] not supported - must be one of: lon, lat, z, type, coordinates"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:21] failed to parse field [g] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "field [geohash] not supported - must be one of: lon, lat, z, type, coordinates"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/60?filter_path=result,error",
+      "body" : {
+        "g" : {
+          "lat" : "a",
+          "lon" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[latitude] must be a valid double value"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:24] failed to parse field [g] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[latitude] must be a valid double value",
+            "caused_by" : {
+              "type" : "number_format_exception",
+              "reason" : "For input string: \"a\""
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/61?filter_path=result,error",
+      "body" : {
+        "g" : {
+          "lat" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "Required [lon]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:14] failed to parse field [g] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "Required [lon]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/62?filter_path=result,error",
+      "body" : {
+        "g" : {}
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "field must be either lat/lon, geohash string or type/coordinates"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:7] failed to parse field [g] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "field must be either lat/lon, geohash string or type/coordinates"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/63?filter_path=result,error",
+      "body" : {
+        "g" : {
+          "lat" : 1,
+          "lon" : 2,
+          "type" : "Point",
+          "coordinates" : [
+            1,
+            2
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "fields matching more than one point format"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:57] failed to parse field [g] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "fields matching more than one point format"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/64?filter_path=result,error",
+      "body" : {
+        "g" : {
+          "type" : "Point",
+          "coordinates" : [
+            1,
+            2,
+            3,
+            4
+          ]
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[geo_point] field type does not accept > 3 dimensions"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:45] failed to parse field [g] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "[geo_point] field type does not accept > 3 dimensions"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/65?filter_path=result,error",
+      "body" : {
+        "g" : {
+          "lat" : true,
+          "lon" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "latitude must be a number"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:25] failed to parse field [g] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "latitude must be a number"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/66?filter_path=result,error",
+      "body" : {
+        "g" : {
+          "lat" : 1,
+          "lon" : 2,
+          "x" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "field [x] not supported - must be one of: lon, lat, z, type, coordinates"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:28] failed to parse field [g] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "field [x] not supported - must be one of: lon, lat, z, type, coordinates"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/67?filter_path=result,error",
+      "body" : {
+        "g" : {
+          "lat" : "1.5",
+          "lon" : "2"
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "result" : "created"
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/68?filter_path=result,error",
+      "body" : {
+        "g" : {
+          "lat" : 100,
+          "lon" : 2
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:24] failed to parse field [g] of type [geo_point]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:24] failed to parse field [g] of type [geo_point]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "illegal latitude value [100.0] for g"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/69?filter_path=result,error",
+      "body" : {
+        "g" : "1,a"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "longitude must be a number"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [g] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "longitude must be a number"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-points/_doc/70?filter_path=result,error",
+      "body" : {
+        "g" : "1.5"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "unsupported symbol [.] in geohash [1.5]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:6] failed to parse field [g] of type [geo_point]",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "unsupported symbol [.] in geohash [1.5]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "unsupported symbol [.] in geohash [1.5]"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-points/_refresh?filter_path=_shards.failed",
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "failed" : 0
+        }
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-points METADATA _id | EVAL n = TO_INTEGER(_id) | SORT n | KEEP n, p, g"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "n",
+            "type" : "integer"
+          },
+          {
+            "name" : "p",
+            "type" : "cartesian_point"
+          },
+          {
+            "name" : "g",
+            "type" : "geo_point"
+          }
+        ],
+        "values" : [
+          [
+            0,
+            "POINT (1.5 2.5)",
+            null
+          ],
+          [
+            1,
+            "POINT (1.5 2.5)",
+            null
+          ],
+          [
+            2,
+            "POINT (1.0 2.0)",
+            null
+          ],
+          [
+            3,
+            "POINT (1.5 2.5)",
+            null
+          ],
+          [
+            5,
+            "POINT (1.5 2.0)",
+            null
+          ],
+          [
+            7,
+            "POINT (1.5 2.0)",
+            null
+          ],
+          [
+            8,
+            [
+              "POINT (1.0 2.0)",
+              "POINT (3.0 4.0)"
+            ],
+            null
+          ],
+          [
+            9,
+            [
+              "POINT (1.0 2.0)",
+              "POINT (3.0 4.0)"
+            ],
+            null
+          ],
+          [
+            10,
+            "POINT (1.0 2.0)",
+            null
+          ],
+          [
+            15,
+            "POINT (1.0 2.0)",
+            null
+          ],
+          [
+            20,
+            null,
+            "POINT (2.0 1.0)"
+          ],
+          [
+            21,
+            null,
+            "POINT (2.0 1.0)"
+          ],
+          [
+            22,
+            null,
+            "POINT (1.0 2.0)"
+          ],
+          [
+            23,
+            null,
+            "POINT (1.0 2.0)"
+          ],
+          [
+            24,
+            null,
+            "POINT (1.0 2.0)"
+          ],
+          [
+            29,
+            null,
+            "POINT (1.0 2.0)"
+          ],
+          [
+            30,
+            null,
+            [
+              "POINT (-135.0 -90.0)",
+              "POINT (-180.0 -45.0)"
+            ]
+          ],
+          [
+            53,
+            [
+              "POINT (1.0 2.0)",
+              "POINT (3.0 4.0)"
+            ],
+            null
+          ],
+          [
+            55,
+            "POINT (1.0 2.0)",
+            null
+          ],
+          [
+            56,
+            "POINT (1.0 2.0)",
+            null
+          ],
+          [
+            58,
+            null,
+            "POINT (7.734375 50.09765625)"
+          ],
+          [
+            67,
+            null,
+            "POINT (2.0 1.5)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-points/_search?filter_path=hits.hits._id,hits.hits.fields",
+      "body" : {
+        "fields" : [
+          "p",
+          "g"
+        ],
+        "_source" : false,
+        "sort" : [
+          {
+            "_id" : "asc"
+          }
+        ],
+        "size" : 100
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "compat-xpack-points",
+              "node" : "MCtCIdghTD2is_3rAMHDFQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-points?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

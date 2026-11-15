@@ -1,0 +1,394 @@
+{
+ "found": {
+  "case": 45,
+  "case_seed": 113000384,
+  "seed": 113
+ },
+ "signature": "POST _search .aggregations.terms.buckets[].nested.top_hits.hits.hits[].sort[]",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "bool0": {
+       "type": "boolean"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dbl0": {
+       "type": "double"
+      },
+      "geo0": {
+       "type": "geo_point"
+      },
+      "ip0": {
+       "type": "ip"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "kwl0": {
+       "normalizer": "lowercase",
+       "type": "keyword"
+      },
+      "n": {
+       "properties": {
+        "kw0": {
+         "type": "keyword"
+        },
+        "long0": {
+         "type": "long"
+        },
+        "text0": {
+         "analyzer": "simple",
+         "term_vector": "with_positions_offsets",
+         "type": "text"
+        }
+       },
+       "type": "nested"
+      },
+      "o": {
+       "properties": {
+        "int0": {
+         "type": "integer"
+        },
+        "kw0": {
+         "type": "keyword"
+        }
+       }
+      },
+      "text0": {
+       "analyzer": "simple",
+       "type": "text"
+      },
+      "ulong0": {
+       "type": "unsigned_long"
+      },
+      "wild0": {
+       "type": "wildcard"
+      }
+     }
+    },
+    "settings": {
+     "merge.policy.segments_per_tier": 20,
+     "number_of_replicas": 0,
+     "number_of_shards": 5,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m2-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m2-a"
+  },
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "bool0": {
+       "type": "boolean"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dbl0": {
+       "type": "double"
+      },
+      "geo0": {
+       "type": "geo_point"
+      },
+      "ip0": {
+       "type": "ip"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "kwl0": {
+       "normalizer": "lowercase",
+       "type": "keyword"
+      },
+      "n": {
+       "properties": {
+        "kw0": {
+         "type": "keyword"
+        },
+        "long0": {
+         "type": "long"
+        },
+        "text0": {
+         "analyzer": "simple",
+         "term_vector": "with_positions_offsets",
+         "type": "text"
+        }
+       },
+       "type": "nested"
+      },
+      "o": {
+       "properties": {
+        "int0": {
+         "type": "integer"
+        },
+        "kw0": {
+         "type": "keyword"
+        }
+       }
+      },
+      "text0": {
+       "analyzer": "simple",
+       "type": "text"
+      },
+      "ulong0": {
+       "type": "unsigned_long"
+      },
+      "wild0": {
+       "type": "wildcard"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 5,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m2-b",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m2-b"
+  },
+  {
+   "body": {
+    "bool0": true,
+    "date0": null,
+    "ip0": "10.2.3.182",
+    "kw0": null,
+    "kw1": [
+     "pi",
+     "gamma"
+    ],
+    "kwl0": "omega",
+    "n": [
+     {
+      "kw0": "",
+      "long0": 18,
+      "text0": "fox search roll dog jumps banana"
+     },
+     {
+      "kw0": "x-1",
+      "long0": 52,
+      "text0": "of shard and red fox brown brown cherry score"
+     }
+    ],
+    "o": {
+     "int0": 186,
+     "kw0": "user@example.com"
+    },
+    "text0": "banana lazy ran slow index green data of",
+    "ulong0": 68
+   },
+   "es": {
+    "body": {
+     "_id": "39",
+     "_index": "diff-m2-b",
+     "_primary_term": 1,
+     "_seq_no": 0,
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "_version": 1,
+     "forced_refresh": true,
+     "result": "created"
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 201
+   },
+   "method": "PUT",
+   "path": "/diff-m2-b/_doc/39?refresh=true"
+  },
+  {
+   "body": {
+    "aggs": {
+     "terms_9": {
+      "aggs": {
+       "nested_10": {
+        "aggs": {
+         "top_hits_11": {
+          "top_hits": {
+           "sort": [
+            {
+             "ulong0": {}
+            }
+           ]
+          }
+         }
+        },
+        "nested": {
+         "path": "n"
+        }
+       }
+      },
+      "terms": {
+       "field": "o.kw0"
+      }
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 10,
+      "total": 10
+     },
+     "aggregations": {
+      "terms_9": {
+       "buckets": [
+        {
+         "doc_count": 1,
+         "key": "user@example.com",
+         "nested_10": {
+          "doc_count": 2,
+          "top_hits_11": {
+           "hits": {
+            "hits": [
+             {
+              "_id": "39",
+              "_index": "diff-m2-b",
+              "_nested": {
+               "field": "n",
+               "offset": 0
+              },
+              "_score": null,
+              "_source": {
+               "kw0": "",
+               "long0": 18,
+               "text0": "fox search roll dog jumps banana"
+              },
+              "sort": [
+               9223372036854775807
+              ]
+             },
+             {
+              "_id": "39",
+              "_index": "diff-m2-b",
+              "_nested": {
+               "field": "n",
+               "offset": 1
+              },
+              "_score": null,
+              "_source": {
+               "kw0": "x-1",
+               "long0": 52,
+               "text0": "of shard and red fox brown brown cherry score"
+              },
+              "sort": [
+               9223372036854775807
+              ]
+             }
+            ],
+            "max_score": null,
+            "total": {
+             "relation": "eq",
+             "value": 2
+            }
+           }
+          }
+         }
+        }
+       ],
+       "doc_count_error_upper_bound": 0,
+       "sum_other_doc_count": 0
+      }
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "39",
+        "_index": "diff-m2-b",
+        "_score": 1.0,
+        "_source": {
+         "bool0": true,
+         "date0": null,
+         "ip0": "10.2.3.182",
+         "kw0": null,
+         "kw1": [
+          "pi",
+          "gamma"
+         ],
+         "kwl0": "omega",
+         "n": [
+          {
+           "kw0": "",
+           "long0": 18,
+           "text0": "fox search roll dog jumps banana"
+          },
+          {
+           "kw0": "x-1",
+           "long0": 52,
+           "text0": "of shard and red fox brown brown cherry score"
+          }
+         ],
+         "o": {
+          "int0": 186,
+          "kw0": "user@example.com"
+         },
+         "text0": "banana lazy ran slow index green data of",
+         "ulong0": 68
+        }
+       }
+      ],
+      "max_score": 1.0,
+      "total": {
+       "relation": "eq",
+       "value": 1
+      }
+     },
+     "timed_out": false,
+     "took": 2
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m2-*/_search"
+  }
+ ]
+}

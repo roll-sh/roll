@@ -1,0 +1,44 @@
+# Environment skips of the `rank-rrf` extended suite: tests that fail on a private single-node
+# Elasticsearch 9.5.5 in Docker for a reason outside the server under test (scripts/search-yaml-suites.sh
+# es-extended-baseline). Format: `<glob over test ids>  # reason`; roll skips them too.
+
+rank-rrf:linear/20_linear_retriever_simplified/Can query date fields  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Can query keyword fields  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Can query sparse vector fields  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Cannot mix simplified query format with custom sub-retrievers  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Cannot query dense vector fields  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Conflicting boosts for inference fields in default_field  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Filters are propagated  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Ignores default_field if a list of fields is provided  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Lexical match per-field boosting using the simplified format  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Missing required params  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Queries multiple indices using default_field  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Queries multiple indices with a list of fields  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Queries multiple indices with a list of fields with weights  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Query all fields using the simplified format  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Semantic match per-field boosting using the simplified format  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Uses default_field setting when no fields are provided  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Wildcard field patterns that do not resolve to any field are handled gracefully  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:linear/20_linear_retriever_simplified/Wildcard index patterns that do not resolve to any index are handled gracefully  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Can query date fields  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Can query keyword fields  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Can query semantic text fields  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Can query sparse vector fields  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Can query text fields  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Cannot mix simplified query format with custom sub-retrievers  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Cannot query dense vector fields  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Expansion to equivalent custom sub-retrievers returns the same results  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Filters are propagated  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Lexical match per-field boosting using the simplified format  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Missing required params  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Negative weight validation  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Queries multiple indices using default_field  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Queries multiple indices with a list of fields  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Query all fields using the simplified format  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Semantic match per-field boosting using the simplified format  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Wildcard field patterns that do not resolve to any field are handled gracefully  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/310_rrf_retriever_simplified/Wildcard index patterns that do not resolve to any index are handled gracefully  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/800_rrf_with_text_similarity_reranker_retriever/Text similarity reranker on top of an RRF retriever  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/800_rrf_with_text_similarity_reranker_retriever/explain using rrf retriever and text-similarity  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/800_rrf_with_text_similarity_reranker_retriever/rrf retriever with a nested text similarity reranker  # needs the inference-service-test plugin of Elasticsearch's test build
+rank-rrf:rrf/800_rrf_with_text_similarity_reranker_retriever/rrf retriever with failed text similarity reranker  # needs the inference-service-test plugin of Elasticsearch's test build

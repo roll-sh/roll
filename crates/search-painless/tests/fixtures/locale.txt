@@ -1,0 +1,41 @@
+return [Locale.forLanguageTag('en_US'), Locale.forLanguageTag('EN-us'), Locale.forLanguageTag('zh-hant-tw'), Locale.forLanguageTag('de-1996'), Locale.forLanguageTag('de-DE-1996-x-foo'), Locale.forLanguageTag('en-US-u-ca-buddhist-nu-thai'), Locale.forLanguageTag('i-klingon'), Locale.forLanguageTag('zh-yue-HK'), Locale.forLanguageTag('ja-JP-x-lvariant-JP'), Locale.forLanguageTag('und-US'), Locale.forLanguageTag('')]
+----
+return [Locale.forLanguageTag('en-US-u-ca-buddhist-nu-thai').toLanguageTag(), Locale.forLanguageTag('de-1996').toLanguageTag(), new Locale('iw').toLanguageTag(), new Locale('IW', 'il'), new Locale('no', 'NO', 'NY').toLanguageTag(), new Locale('en', 'US', 'WIN_x'), new Locale('en', 'US', 'WIN_x').toLanguageTag(), new Locale('', 'US').toLanguageTag(), new Locale('', '', 'X').toLanguageTag()]
+----
+return [new Locale('ja', 'JP', 'JP'), new Locale('th', 'TH', 'TH'), new Locale('ja', 'JP', 'JP').getUnicodeLocaleType('ca'), new Locale('ja', 'JP', 'JP').getExtensionKeys(), new Locale('ja', 'JP', 'JP').getExtension((char) 117)]
+----
+Locale l = Locale.forLanguageTag('sr-Latn-RS-u-nu-latn-x-priv'); return [l, l.getLanguage(), l.getScript(), l.getCountry(), l.getVariant(), l.getDisplayName(), l.getDisplayScript(), l.hasExtensions(), l.stripExtensions(), l.getUnicodeLocaleKeys(), l.getExtension((char) 120), l.toLanguageTag()]
+----
+Locale l = Locale.forLanguageTag('sr-Latn-RS-u-nu-latn-x-priv'); return [l, l.getLanguage(), l.getScript(), l.getCountry(), l.getVariant(), l.getDisplayName(), l.getDisplayScript(), l.hasExtensions(), l.stripExtensions(), l.getUnicodeLocaleKeys(), l.getExtension((char) 120), l.toLanguageTag()]
+----
+return [new Locale('en', 'US').getDisplayName(), new Locale('fr', 'CA').getDisplayName(Locale.FRENCH), new Locale('xx', 'YY').getDisplayName(), new Locale('haw').getDisplayLanguage(), new Locale('en').getISO3Language(), new Locale('en', 'GB').getISO3Country(), Locale.US.getDisplayCountry(Locale.GERMAN)]
+----
+return new Locale('xx').getISO3Language()
+----
+return new Locale('en', 'XX').getISO3Country()
+----
+return [Locale.getISOCountries().length, Locale.getISOLanguages().length, Locale.getAvailableLocales().length, Locale.getDefault(), Locale.getDefault(Locale.Category.FORMAT), Locale.getDefault(Locale.Category.DISPLAY)]
+----
+return new Locale.Builder().setLanguage('sr').setScript('Latn').setRegion('RS').setVariant('ekavsk').setExtension((char) 117, 'nu-latn').build()
+----
+return new Locale.Builder().setLanguage('sr').setScript('Latn').setRegion('RS').setUnicodeLocaleKeyword('nu', 'latn').addUnicodeLocaleAttribute('foo').build().toLanguageTag()
+----
+return new Locale.Builder().setLanguage('1').build()
+----
+return new Locale.Builder().setLanguageTag('en-US').setRegion('GB').build()
+----
+return new Locale.Builder().setLocale(Locale.FRANCE).clear().build()
+----
+return new Locale.Builder().setRegion('USA').build()
+----
+return [Locale.US == Locale.US, Locale.US.equals(new Locale('en', 'US')), Locale.US.hashCode(), new Locale('EN', 'us').equals(Locale.US)]
+----
+return Locale.forLanguageTag('en-US').toString() + Locale.forLanguageTag('en-Latn').toString() + Locale.forLanguageTag('x-whatever').toString() + '|' + Locale.forLanguageTag('x-whatever').toLanguageTag()
+----
+return [new Locale('en', 'US', 'POSIX').getDisplayName(), new Locale('ca', 'ES', 'VALENCIA').getDisplayVariant(), Locale.forLanguageTag('zh-Hant-TW').getDisplayName(), Locale.ROOT.getDisplayName(), Locale.ROOT.toLanguageTag()]
+----
+return Locale.lookupTag([new Locale.LanguageRange('fr-CA')], ['fr', 'fr-CA', 'en'])
+----
+return Locale.filter(Locale.LanguageRange.parse('fr-*,en;q=0.5'), [Locale.FRANCE, Locale.CANADA_FRENCH, Locale.US, Locale.GERMANY])
+----
+return Locale.FRANCE.getDisplayLanguage(Locale.FRANCE) + Locale.GERMANY.getDisplayCountry(Locale.GERMANY)

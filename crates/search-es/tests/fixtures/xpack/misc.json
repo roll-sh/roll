@@ -1,0 +1,476 @@
+{
+  "description" : "logstash pipelines, xpack info, license, migration, ES|QL and SQL async queries",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-m",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "user" : {
+              "type" : "keyword"
+            },
+            "n" : {
+              "type" : "long"
+            },
+            "ts" : {
+              "type" : "date"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-m"
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-m/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"0\"}}\n{\"user\": \"alice\", \"n\": 1, \"ts\": \"2024-01-01T00:00:00Z\"}\n{\"index\": {\"_id\": \"1\"}}\n{\"user\": \"bob\", \"n\": 2, \"ts\": \"2024-01-02T00:00:00Z\"}\n{\"index\": {\"_id\": \"2\"}}\n{\"user\": \"alice\", \"n\": 3, \"ts\": \"2024-01-03T00:00:00Z\"}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "PUT /_logstash/pipeline/compat-xpack-lp",
+      "body" : {
+        "description" : "d",
+        "last_modified" : "2024-01-01T00:00:00.000Z",
+        "pipeline" : "input {} output {}",
+        "pipeline_metadata" : {
+          "type" : "logstash_pipeline",
+          "version" : 1
+        },
+        "pipeline_settings" : {
+          "pipeline.workers" : 1
+        },
+        "username" : "u"
+      },
+      "status" : 201
+    },
+    {
+      "req" : "GET /_logstash/pipeline/compat-xpack-lp",
+      "status" : 200,
+      "response" : {
+        "compat-xpack-lp" : {
+          "description" : "d",
+          "last_modified" : "2024-01-01T00:00:00.000Z",
+          "pipeline" : "input {} output {}",
+          "pipeline_metadata" : {
+            "type" : "logstash_pipeline",
+            "version" : 1
+          },
+          "pipeline_settings" : {
+            "pipeline.workers" : 1
+          },
+          "username" : "u"
+        }
+      }
+    },
+    {
+      "req" : "PUT /_logstash/pipeline/compat-xpack-lp2",
+      "body" : {
+        "pipeline" : "x"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Required [last_modified, pipeline_metadata, username, pipeline_settings]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Required [last_modified, pipeline_metadata, username, pipeline_settings]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_logstash/pipeline/compat-xpack-lp3",
+      "body" : {
+        "description" : "d",
+        "last_modified" : "2024-01-01T00:00:00.000Z",
+        "pipeline" : "x",
+        "pipeline_metadata" : { },
+        "pipeline_settings" : { },
+        "username" : "u",
+        "bogus" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "strict_dynamic_mapping_exception",
+              "reason" : "[1:147] mapping set to strict, dynamic introduction of [bogus] within [_doc] is not allowed"
+            }
+          ],
+          "type" : "strict_dynamic_mapping_exception",
+          "reason" : "[1:147] mapping set to strict, dynamic introduction of [bogus] within [_doc] is not allowed"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /_logstash/pipeline/compat-xpack-nope",
+      "status" : 404,
+      "response" : { }
+    },
+    {
+      "req" : "DELETE /_logstash/pipeline/compat-xpack-lp",
+      "status" : 200
+    },
+    {
+      "req" : "DELETE /_logstash/pipeline/compat-xpack-lp",
+      "status" : 404
+    },
+    {
+      "req" : "GET /_xpack?filter_path=features.security,features.ml.available,features.esql,features.graph,license.status",
+      "status" : 200,
+      "response" : {
+        "license" : {
+          "status" : "active"
+        },
+        "features" : {
+          "esql" : {
+            "available" : true,
+            "enabled" : true
+          },
+          "graph" : {
+            "available" : true,
+            "enabled" : true
+          },
+          "ml" : {
+            "available" : true
+          },
+          "security" : {
+            "available" : true,
+            "enabled" : true
+          }
+        }
+      }
+    },
+    {
+      "req" : "GET /_xpack?categories=bogus",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No enum constant org.elasticsearch.protocol.xpack.XPackInfoRequest.Category.BOGUS"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No enum constant org.elasticsearch.protocol.xpack.XPackInfoRequest.Category.BOGUS"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /_license?filter_path=license.status",
+      "status" : 200,
+      "response" : {
+        "license" : {
+          "status" : "active"
+        }
+      }
+    },
+    {
+      "req" : "GET /_migration/deprecations?filter_path=cluster_settings,ml_settings",
+      "status" : 200,
+      "response" : {
+        "cluster_settings" : [ ],
+        "ml_settings" : [ ]
+      }
+    },
+    {
+      "req" : "POST /_query/async?filter_path=is_running,columns,values",
+      "body" : {
+        "query" : "FROM compat-xpack-m | STATS c = COUNT(*) BY user | SORT user",
+        "wait_for_completion_timeout" : "10s"
+      },
+      "skip" : "timing: Elasticsearch may still be planning the first query of the index when wait_for_completion_timeout elapses",
+      "status" : 200,
+      "response" : {
+        "is_running" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "user",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            2,
+            "alice"
+          ],
+          [
+            1,
+            "bob"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query/async?filter_path=is_running,columns,values,id",
+      "body" : {
+        "query" : "FROM compat-xpack-m | WHERE n > 1 | KEEP user, n | SORT n DESC",
+        "wait_for_completion_timeout" : "10s",
+        "keep_on_completion" : false
+      },
+      "status" : 200,
+      "response" : {
+        "is_running" : false,
+        "columns" : [
+          {
+            "name" : "user",
+            "type" : "keyword"
+          },
+          {
+            "name" : "n",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            "alice",
+            3
+          ],
+          [
+            "bob",
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query/async?filter_path=is_running,columns",
+      "body" : {
+        "query" : "ROW a = 1",
+        "wait_for_completion_timeout" : "10s",
+        "keep_on_completion" : true
+      },
+      "status" : 200,
+      "response" : {
+        "is_running" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "integer"
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query/async",
+      "body" : {
+        "query" : "FROM compat-xpack-m | EVAL x = n * 2 | KEEP x | SORT x | LIMIT 2",
+        "bogus" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:77] [esql/async_query] unknown field [bogus]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:77] [esql/async_query] unknown field [bogus]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /_query/async/FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc=",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "DELETE /_query/async/FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc=",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /_query/async/FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc=/stop",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,is_running,is_partial",
+      "body" : {
+        "query" : "SELECT user, COUNT(*) AS c FROM \"compat-xpack-m\" GROUP BY user ORDER BY user",
+        "wait_for_completion_timeout" : "10s"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "is_running" : false,
+        "columns" : [
+          {
+            "name" : "user",
+            "type" : "keyword"
+          },
+          {
+            "name" : "c",
+            "type" : "long"
+          }
+        ],
+        "rows" : [
+          [
+            "alice",
+            2
+          ],
+          [
+            "bob",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "GET /_sql/async/FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc=",
+      "headers" : {
+        "Accept" : "*/*"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid request content type: Accept=[*/*], Content-Type=[null], format=[null]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid request content type: Accept=[*/*], Content-Type=[null], format=[null]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /_sql/async/status/FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc=",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "DELETE /_sql/async/delete/FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc=",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /_sql?format=txt",
+      "body" : {
+        "query" : "SELECT user, n FROM \"compat-xpack-m\" ORDER BY n",
+        "fetch_size" : 2
+      },
+      "status" : 200
+    },
+    {
+      "req" : "POST /_ilm/stop",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "GET /_ilm/status",
+      "skip" : "timing: Elasticsearch reports STOPPING until its ILM runner notices; roll stops at once (STOPPED)",
+      "status" : 200,
+      "response" : {
+        "operation_mode" : "STOPPING"
+      }
+    },
+    {
+      "req" : "POST /_ilm/start",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "GET /_ilm/status",
+      "status" : 200,
+      "response" : {
+        "operation_mode" : "RUNNING"
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-m",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

@@ -1,0 +1,231 @@
+#defaults: {"context": "keyword_field", "setup": {"index": "painless-docs", "document": {}}}
+emit(String.valueOf(grok('%{WORD:w}').extract('héllo wörld')))
+----
+emit(String.valueOf(grok('%{WORD:w}').extract('é a')))
+----
+emit(String.valueOf(grok('%{WORD:w}').extract('éa b')))
+----
+emit(String.valueOf(grok('%{IP:client} %{WORD:method} %{URIPATHPARAM:request} %{NUMBER:bytes} %{NUMBER:duration}').extract('55.3.244.1 GET /index.html 15824 0.043')))
+----
+emit(String.valueOf(grok('%{NUMBER:n:int} %{NUMBER:f:float} %{NUMBER:d:double} %{NUMBER:l:long} %{WORD:b:boolean}').extract('5 1.5 2.25 9 true')))
+----
+emit(String.valueOf(grok('%{WORD:a} %{WORD:a}').extract('x y')))
+----
+emit(String.valueOf(grok('%{WORD:a}(?: %{WORD:a})?').extract('x')))
+----
+emit(String.valueOf(grok('%{WORD:z} %{WORD:a} %{WORD:m}').extract('1 2 3')))
+----
+emit(String.valueOf(grok('%{NUMBER}').extract('42')))
+----
+emit(String.valueOf(grok('%{NUMBER:x}').extract('nope')))
+----
+emit(String.valueOf(grok('(?<named>\\d+)-%{WORD:w}').extract('12-ab')))
+----
+emit(String.valueOf(grok('%{COMBINEDAPACHELOG}').extract('127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET /apache_pb.gif HTTP/1.0" 200 2326 "http://www.example.com/start.html" "Mozilla/4.08"')))
+----
+emit(String.valueOf(grok('%{FOO:x}').extract('a')))
+----
+emit(String.valueOf(grok('%{WORD:x').extract('a')))
+----
+emit(String.valueOf(grok('(%{WORD:x}').extract('a')))
+----
+String p = '%{WORD:x}'; emit(String.valueOf(grok(p).extract('a')))
+----
+emit(String.valueOf(grok('%{NUMBER:n:int}').extract('1.5')))
+----
+emit(String.valueOf(grok('%{NUMBER:n:long}').extract('1.5')))
+----
+emit(String.valueOf(grok('(?<n:x:float>\\w+)').extract('abc')))
+----
+emit(String.valueOf(grok('(?<n:x:double>\\w+)').extract('abc')))
+----
+emit(String.valueOf(grok('%{TIMESTAMP_ISO8601:ts}').extract('at 2021-01-02T03:04:05.678Z done')))
+----
+emit(String.valueOf(grok('%{GREEDYDATA:all}').extract('')))
+----
+emit(String.valueOf(grok('%{SYSLOGBASE}').extract('Mar  1 12:00:00 host sshd[123]: msg')))
+----
+emit(String.valueOf(grok('%{SHOREWALL}').extract('x')))
+----
+emit(String.valueOf(grok('(?<x>a?*)').extract('aa')))
+----
+emit(String.valueOf(grok('(?<x>(?:a*)*)').extract('aa')))
+----
+emit(String.valueOf(grok('(?<x>(?:a??)*)').extract('aa')))
+----
+emit(String.valueOf(grok('(?<x>(?:a+?)*)').extract('aa')))
+----
+emit(String.valueOf(grok('(?<x>a*+)').extract('aa')))
+----
+emit(String.valueOf(grok('(?<x>a{2}*)').extract('aa')))
+----
+emit(String.valueOf(grok('(?<x>(a*)*)').extract('aa')))
+----
+emit(String.valueOf(grok('(?<x>\\Qa.b\\E)').extract('a.b')))
+----
+emit(String.valueOf(grok('(?<x>\\d+)').extract('x٣٤y')))
+----
+emit(String.valueOf(grok('(?<x>\\Aab)').extract('ab')))
+----
+emit(String.valueOf(grok('(?<x>[[:alpha:]]+)').extract('ab1é')))
+----
+emit(String.valueOf(grok('(?<x>\\h+)').extract('xa1fz')))
+----
+emit(String.valueOf(grok('(?<x>a{)').extract('a{')))
+----
+emit(String.valueOf(grok('(?<x>a{,2})').extract('aaa')))
+----
+emit(String.valueOf(grok('(?<x>\\b\\w+\\b)').extract('ü-ab')))
+----
+emit(String.valueOf(grok('(?i)(?<x>[a-z]+)').extract('ABC')))
+----
+emit(String.valueOf(grok('(?<x:int>\\d+)').extract('12')))
+----
+emit(String.valueOf(grok('(?<x:y:z>\\d+)').extract('12')))
+----
+emit(String.valueOf(grok('(?<a>\\d)(?<a>\\d)').extract('12')))
+----
+emit(String.valueOf(grok('(?<x>\\p{Alpha}+)').extract('abé')))
+----
+emit(String.valueOf(grok('(?<x>\\x{41})').extract('A')))
+----
+emit(String.valueOf(grok('(?<x>\\u0041)').extract('A')))
+----
+emit(String.valueOf(grok('a)').extract('a')))
+----
+emit(String.valueOf(grok('[a').extract('a')))
+----
+emit(String.valueOf(grok('(?<>a)').extract('a')))
+----
+emit(String.valueOf(grok('(?<x').extract('a')))
+----
+emit(String.valueOf(grok('\\').extract('a')))
+----
+emit(String.valueOf(grok('a{2,1}').extract('a')))
+----
+emit(String.valueOf(grok('(?z)').extract('a')))
+----
+emit(String.valueOf(grok('(?<x>(?s)a.b)').extract('a')))
+----
+#params: {"s": "a\nb"}
+emit(String.valueOf(grok('(?<x>(?m)a.b)').extract(params.s)))
+----
+#params: {"s": "ab\ncd"}
+emit(String.valueOf(grok('^(?<x>\\w+)$').extract(params.s)))
+----
+#params: {"s": "ab\ncd\n"}
+emit(String.valueOf(grok('(?<x>\\w+)\\Z').extract(params.s)))
+----
+#params: {"s": "ab\ncd\n"}
+emit(String.valueOf(grok('(?<x>\\w+)\\z').extract(params.s)))
+----
+#params: {"s": "a\rb"}
+emit(String.valueOf(grok('(?<x>a.b)').extract(params.s)))
+----
+#params: {"s": "a b"}
+emit(String.valueOf(grok('(?<x>\\s+)').extract(params.s)))
+----
+#params: {"s": "a  b"}
+emit(String.valueOf(grok('(?<x>[[:space:]]+)').extract(params.s)))
+----
+#params: {"s": "line1\nline2"}
+emit(String.valueOf(grok('%{GREEDYDATA:m}').extract(params.s)))
+----
+emit(String.valueOf(grok('%{WORD:w}').extract(null)))
+----
+emit(String.valueOf(grok('%{WORD:w}').extract(5)))
+----
+emit(String.valueOf(grok(5)))
+----
+emit(String.valueOf(grok()))
+----
+emit(String.valueOf(grok(null)))
+----
+emit(String.valueOf(grok('%{WORD:w}' + ' %{WORD:v}').extract('a b')))
+----
+def g = grok('%{WORD:w}'); emit(g.extract('ab').w)
+----
+Map m = grok('%{WORD:w} %{NUMBER:n:int}').extract('ab 12'); emit(String.valueOf(m.n + 1))
+----
+emit(String.valueOf(grok('%{WORD:w}').extract('ab').getClass()))
+----
+emit(String.valueOf(dissect('%{a} %{b}').extract('x y')))
+----
+emit(String.valueOf(dissect('%{a} %{+a}').extract('x y')))
+----
+emit(String.valueOf(dissect('%{a} %{+a}', '-').extract('x y')))
+----
+emit(String.valueOf(dissect('%{?skip} %{b}').extract('x y')))
+----
+emit(String.valueOf(dissect('%{*k} %{&k}').extract('key val')))
+----
+emit(String.valueOf(dissect('%{a->} %{b}').extract('x      y')))
+----
+emit(String.valueOf(dissect('%{a} %{b}').extract('nospace')))
+----
+emit(String.valueOf(dissect('%{a}').extract('')))
+----
+emit(String.valueOf(dissect('%{+a/2} %{+a/1}').extract('x y')))
+----
+emit(String.valueOf(dissect('no keys').extract('x')))
+----
+emit(String.valueOf(dissect('%{a} %{a}').extract('x y')))
+----
+emit(String.valueOf(dissect('[%{ts}] %{level}: %{msg}').extract('[2021-01-01] WARN: disk 90% full')))
+----
+emit(String.valueOf(dissect('%{a},%{b},%{c}').extract('1,,3')))
+----
+emit(String.valueOf(dissect('%{a} %{b}').extract(null)))
+----
+emit(String.valueOf(dissect('%{a}-%{b}', null).extract('x-y')))
+----
+String s = '%{WORD:w}'; emit(String.valueOf(dissect(s).extract('a')))
+----
+emit(String.valueOf(dissect('%{+a/99999}').extract('a')))
+----
+emit(String.valueOf(dissect('%{*a} %{b}').extract('a')))
+----
+emit(String.valueOf(dissect('%{a/1}').extract('a')))
+----
+emit(String.valueOf(dissect('%{+?a}').extract('a')))
+----
+emit(String.valueOf(dissect('%{}x%{b}').extract('axb')))
+----
+emit(String.valueOf(dissect('pre %{a}').extract('pre x')))
+----
+emit(String.valueOf(dissect('pre %{a}').extract('pre')))
+----
+emit(String.valueOf(dissect('%{a} %{b} %{c}').extract('1 2 3 4 5')))
+----
+emit(String.valueOf(dissect('%{a}  %{b}').extract('1    2')))
+----
+emit(String.valueOf(dissect('%{a->}  %{b}').extract('1      2')))
+----
+emit(String.valueOf(dissect('%{k1}=%{v1}&%{k2}=%{v2}').extract('a=1&b=2')))
+----
+emit(String.valueOf(dissect('%{+a} %{+a/3} %{+a/1}').extract('x y z')))
+----
+emit(String.valueOf(dissect('%{é} %{ü}').extract('ä ö')))
+----
+emit(String.valueOf(dissect('%{a}é%{b}').extract('xéy')))
+----
+#context: long_field
+emit(grok('%{NUMBER:n:long}').extract('7').n)
+----
+#context: double_field
+emit(grok('%{NUMBER:n:double}').extract('7.5').n)
+----
+#context: boolean_field
+emit(grok('%{WORD:b:boolean}').extract('TRUE').b)
+----
+#context: ip_field
+emit(grok('%{IP:ip}').extract('from 10.1.2.3 to').ip)
+----
+#context: date_field
+emit(parse(grok('%{TIMESTAMP_ISO8601:t}').extract('at 2021-01-02T03:04:05Z').t))
+----
+#context: score
+return grok('%{WORD:w}').extract('a') == null ? 0 : 1
+----
+#context: painless_test
+return dissect('%{a}').extract('a')
