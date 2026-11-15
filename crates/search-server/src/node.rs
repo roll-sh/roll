@@ -2157,7 +2157,9 @@ mod tests {
         let (n, _) = node(NodeConfig { idle_unload: None, ..NodeConfig::default() });
         assert_eq!(n.handle(req("/", Some(basic("c1", "pw1")))).await.status, 200);
         let l = n.get_loaded("c1").unwrap();
-        let idle = Duration::from_millis(60);
+        // Wide enough that a loaded host's late wake-ups (the gate runs beside builds) can't
+        // move a sleep across a boundary: a check fails only after a 150 ms stall.
+        let idle = Duration::from_millis(300);
         {
             let _task = l.cluster.tasks.register("indices:data/write/reindex", "long", None, Vec::new());
             tokio::time::sleep(idle * 2).await;
