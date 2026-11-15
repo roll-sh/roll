@@ -354,6 +354,8 @@ export function parseAllowList(text: string): IpRule[] {
 
 export interface EnvironmentPut {
   branch?: string | null;
+  /** Its name on the roll domain (`<hostname>.<domain>`): the old one stops answering. */
+  hostname?: string;
   ephemeral?: boolean;
   /** Private: visitors need `?roll_access=<token>` once; null makes it public again. */
   access?: { token: string; bypass_sha256?: string } | null;

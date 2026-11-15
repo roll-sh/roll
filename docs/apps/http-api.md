@@ -276,6 +276,12 @@ type ServicePatch = { name?: string; source?: Source; build?: Patch<Build>; run?
 type EnvironmentPut = {
   branch?: string | null;
   ephemeral?: boolean;
+  /** Its name on the roll domain (`<hostname>.<domain>`): 3–56 of a-z, 0-9 and -, not starting or
+   *  ending with -, never `--`, not roll's own (400); another environment's is 409, and so is any
+   *  name while custom domains' CNAMEs point at the old one (no fixed `cname_target`). The old name
+   *  stops answering at once (within a second on other nodes); the app's `ROLL_PUBLIC_URL` follows
+   *  at its next deploy. */
+  hostname?: string;
   /** Private (previews): visitors need `?roll_access=<token>` once (a host-only HttpOnly cookie
    *  `roll_access_<env>`, then a 302 to the URL without it), else a 401, before anything wakes.
    *  The token is 20–200 of [A-Za-z0-9_-]; only its SHA-256 is stored, and the app never sees

@@ -1987,6 +1987,18 @@ impl Store {
         Ok(())
     }
 
+    /// A new generated name for an environment: refused when another environment has it.
+    pub fn set_slug(&self, service: &str, env: &str, slug: &str) -> Result<()> {
+        self.db.write(|c| {
+            let taken = c.query_row("SELECT 1 FROM environments WHERE slug = ? AND NOT (service = ? AND name = ?)", params![slug, service, env], |_| Ok(())).optional()?.is_some();
+            if taken {
+                return Err(Error::Conflict(format!("{slug} is taken")));
+            }
+            c.execute("UPDATE environments SET slug = ? WHERE service = ? AND name = ?", params![slug, service, env])?;
+            Ok(())
+        })
+    }
+
     pub fn set_maintenance(&self, service: &str, env: &str, message: Option<&str>) -> Result<()> {
         self.db.execute("UPDATE environments SET maintenance = ? WHERE service = ? AND name = ?", params![message, service, env])?;
         Ok(())

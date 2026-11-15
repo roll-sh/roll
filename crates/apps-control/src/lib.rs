@@ -996,14 +996,40 @@ impl Apps {
 
     /// `PUT …/environments/{env}`: make it (a preview environment, a staging one) or change its
     /// branch.
+    /// A new generated name (`<hostname>.<domain>`): the old one stops answering at once, here
+    /// and within a second on other nodes. Where custom domains' CNAMEs name it (no fixed
+    /// `cname_target`), it's refused while the environment has any: they'd stop routing.
+    async fn set_hostname(self: &Arc<Self>, service: &str, env: &str, h: &str) -> Result<()> {
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (row, domains) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.domains(&sid, &e)?))).await?;
+        if row.slug == h {
+            return Ok(());
+        }
+        if self.cfg.cname_target.is_none() && domains.iter().any(|d| d.kind == DomainKind::Custom) {
+            return Err(Error::Conflict(format!("custom domains point at {}.{}: remove them first, or add them again after", row.slug, self.cfg.domain)));
+        }
+        let (sid, e, h2) = (service.to_string(), env.to_string(), h.to_string());
+        self.db(move |s| s.set_slug(&sid, &e, &h2)).await?;
+        self.changed(service);
+        Ok(())
+    }
+
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused", "held"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused", "held", "hostname"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
         // The new settings are checked before anything is written: a 400 changes nothing.
+        let hostname = match o.get("hostname") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(h)) => {
+                crate::model::check_slug(h)?;
+                Some(h.clone())
+            }
+            Some(_) => return Err(Error::BadRequest("hostname is the environment's name on the roll domain".into())),
+        };
         // Resume deploys held after a rollback (`false`); a hold is only ever a rollback's.
         match o.get("held") {
             None => {}
@@ -1183,6 +1209,9 @@ impl Apps {
             return Err(Error::BadRequest("follow_tag is for an image service whose image has a tag (not a digest)".into()));
         }
         self.ensure_environment(&svc, env, branch.as_ref().map(|b| b.as_deref()), ephemeral, &pname).await?;
+        if let Some(h) = hostname {
+            self.set_hostname(service, env, &h).await?;
+        }
         if let Some(vars) = copied.filter(|v| !v.is_empty()) {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.change_variables(&sid, &e, &vars, &[], &BTreeSet::new())).await?;

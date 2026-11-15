@@ -160,6 +160,13 @@ pub enum Domains {
         #[command(flatten)]
         target: Target,
     },
+    /// Change the environment's name on the roll domain (`<name>.<domain>`); the old one stops
+    /// answering at once.
+    Rename {
+        name: String,
+        #[command(flatten)]
+        target: Target,
+    },
     /// Make a custom domain redirect to another of the environment's hostnames (308), or serve
     /// again with `--to none`.
     Redirect {
@@ -2049,6 +2056,15 @@ pub async fn domains(api: &Api, json_out: bool, d: Domains) -> anyhow::Result<()
             let svc = service(api, &target).await?;
             api.call(reqwest::Method::DELETE, &format!("{}/domains/{}", env_path(&svc, &target.env), enc(&hostname)), None).await?;
             json!({ "removed": hostname })
+        }
+        Domains::Rename { name, target } => {
+            let svc = service(api, &target).await?;
+            let e = api.call(reqwest::Method::PUT, &env_path(&svc, &target.env), Some(json!({ "hostname": name }))).await?;
+            if !json_out {
+                println!("{}  (redeploy to give the app its new ROLL_PUBLIC_URL)", s(&e["url"]));
+                return Ok(());
+            }
+            e
         }
         Domains::Redirect { hostname, to, target } => {
             let svc = service(api, &target).await?;

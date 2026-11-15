@@ -1474,6 +1474,27 @@ pub struct Domain {
 /// A hostname a user may add: lowercase labels of `[a-z0-9-]`, at least two, at most 253
 /// characters, not an IP address and not under roll's own domains; or `*.` and one (a wildcard:
 /// every name one label under it).
+/// Generated names nobody takes: they'd read as roll's own on its shared domain.
+const RESERVED_LABELS: [&str; 12] = ["www", "api", "app", "admin", "dashboard", "status", "mail", "roll", "edge", "cdn", "docs", "help"];
+
+/// An environment's generated name (`<name>.<domain>`, Railway's editable domain): 3–56 of
+/// a–z, 0–9 and `-`, not starting or ending with one, never `--` (a deployment's own name is
+/// `<id>--<name>`), and not one of roll's.
+pub fn check_slug(s: &str) -> Result<()> {
+    let ok = (3..=56).contains(&s.len())
+        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && !s.contains("--");
+    if !ok {
+        return Err(Error::BadRequest("hostname is 3–56 of a-z, 0-9 and -, not starting or ending with -, without --".into()));
+    }
+    if RESERVED_LABELS.contains(&s) {
+        return Err(Error::BadRequest(format!("{s} is roll's own")));
+    }
+    Ok(())
+}
+
 pub fn check_hostname(h: &str, reserved: &[&str]) -> Result<String> {
     let h = h.trim().trim_end_matches('.').to_ascii_lowercase();
     if let Some(base) = h.strip_prefix("*.") {
@@ -1730,6 +1751,10 @@ mod tests {
         assert!(check_hostname("www.example.com", &["roll.site"]).is_ok());
         assert!(check_hostname("x.up.roll.site", &["roll.site"]).is_err());
         assert!(check_hostname("localhost", &[]).is_err());
+        assert!(check_slug("shop-eu").is_ok());
+        for bad in ["ab", "Shop", "-shop", "shop-", "dep--shop", "www", "shop.eu"] {
+            assert!(check_slug(bad).is_err(), "{bad}");
+        }
         assert!(check_hostname("1.2.3.4", &[]).is_err());
         assert!(check_name("service", "My-App").is_err());
         assert!(check_var_name("DATABASE_URL").is_ok() && check_var_name("1X").is_err());

@@ -3776,3 +3776,29 @@ async fn every_starter_template_imports() {
     }
     assert!(n >= 5, "{n} templates in {}", dir.display());
 }
+
+/// An environment's generated name can be changed (Railway's): the new one serves at once and
+/// the old one is a 404; a name another environment has, or roll's own, is refused; with custom
+/// domains whose CNAMEs name it, it's refused until they're gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environments_generated_name_can_be_changed() {
+    let w = world().await;
+    let (svc, d) = image_service(&w, "api", json!({"port": 80})).await;
+    let (other, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let old = host(&svc["environments"][0]["url"]);
+    visit_deployment(&w, &old, d["id"].as_str().unwrap()).await;
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"hostname": "shop-eu"}))).await;
+    assert_eq!(st, StatusCode::OK, "{env}");
+    assert!(env["url"].as_str().unwrap().starts_with("http://shop-eu.apps.localhost"), "{env}");
+    assert_eq!(visit(&w, "shop-eu.apps.localhost", "/").await.0, StatusCode::OK);
+    assert_eq!(visit(&w, &old, "/").await.0, StatusCode::NOT_FOUND, "the old name is let go");
+    let taken = host(&other["environments"][0]["url"]).split('.').next().unwrap().to_string();
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"hostname": taken}))).await.0, StatusCode::CONFLICT);
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"hostname": "www"}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"hostname": "a--b"}))).await.0, StatusCode::BAD_REQUEST);
+    call(&w.api, "POST", &format!("{base}/domains"), Some(json!({"hostname": "shop.example.com"}))).await;
+    let (st, v) = call(&w.api, "PUT", &base, Some(json!({"hostname": "shop-us"}))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "a custom domain's CNAME names it: {v}");
+}
