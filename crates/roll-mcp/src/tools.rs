@@ -498,6 +498,17 @@ static TOOLS: &[Tool] = &[
     t("streams_get_group", "Get a consumer group", "A group's members and its committed offset and lag on each partition.", "streams", "GET", "/v1/streams/{stream}/groups/{group}", &[STREAM, req("group", "Group id")]),
     t("streams_branch", "Branch a stream", "A new stream with this one's topics, records (shared, not copied) and committed offsets; its first key's secret comes back once (reveal).", "streams", "POST", "/v1/streams/{stream}/branches", &[STREAM, breq("name", Ty::Str, "Branch name")]),
     t("streams_usage", "Stream usage", "A stream's usage and throughput.", "streams", "GET", "/v1/streams/{stream}/usage", &[STREAM, q("hours", Ty::Int, "Hours of history")]),
+    t("streams_update", "Change a stream's settings", "Change some of a stream's settings (as streams_get shows them: retention, throughput limits…); the rest stay.", "streams", "PATCH", "/v1/streams/{stream}", &[STREAM, breq("settings", Ty::Obj, "The settings to change")]),
+    t(
+        "streams_update_topic",
+        "Change a topic",
+        "Grow a topic's partitions or change its configs, online.",
+        "streams",
+        "PATCH",
+        "/v1/streams/{stream}/topics/{topic}",
+        &[STREAM, TOPIC, b("partitions", Ty::Int, "Grow to this many (partitions never shrink)"), b("configs", Ty::Obj, "Kafka configs, e.g. {\"retention.ms\": \"86400000\"}; null removes an override")],
+    ),
+    t("streams_delete_group", "Delete a consumer group", "Delete a group and its committed offsets (refused while it has members).", "streams", "DELETE", "/v1/streams/{stream}/groups/{group}", &[STREAM, req("group", "Consumer group")]).destructive(),
     // ── NoSQL ──
     t("nosql_list_databases", "List NoSQL databases", "ScyllaDB/Cassandra-compatible databases.", "nosql", "GET", "/v1/nosql/databases", &[]),
     t("nosql_get_database", "Get a NoSQL database", "A database's settings and endpoints (credentials need reveal).", "nosql", "GET", "/v1/nosql/databases/{database}", &[NOSQL]),
