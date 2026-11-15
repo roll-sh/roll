@@ -357,6 +357,45 @@ pub fn cast_value(
     ctx: &FormatCtx,
     explicit: bool,
 ) -> Result<Value> {
+    cast_value_here(v, from, to, ctx, explicit).map_err(|e| cast_routine(e, from, to))
+}
+
+/// A failing cast's error named by PostgreSQL's cast function (int84, dtoi4,
+/// numeric_int4_opt_error, ...), for its location (`error_location`).
+#[cold]
+#[inline(never)]
+fn cast_routine(e: Error, from: &DataType, to: &DataType) -> Error {
+    use DataType as T;
+    if e.objects.as_ref().is_some_and(|o| o.routine.is_some())
+        || !(e.message.ends_with(" out of range") || e.message.starts_with("cannot convert NaN to "))
+    {
+        return e;
+    }
+    let r = match (from, to) {
+        (T::Int4, T::Int2) => "i4toi2",
+        (T::Int8, T::Int2) => "int82",
+        (T::Int8, T::Int4) => "int84",
+        (T::Float8, T::Int2) => "dtoi2",
+        (T::Float8, T::Int4) => "dtoi4",
+        (T::Float8, T::Int8) => "dtoi8",
+        (T::Float4, T::Int2) => "ftoi2",
+        (T::Float4, T::Int4) => "ftoi4",
+        (T::Float4, T::Int8) => "ftoi8",
+        (T::Numeric(_), T::Int2) => "numeric_int2",
+        (T::Numeric(_), T::Int4) => "numeric_int4_opt_error",
+        (T::Numeric(_), T::Int8) => "numeric_int8_opt_error",
+        _ => return e,
+    };
+    e.routine(r)
+}
+
+fn cast_value_here(
+    v: Value,
+    from: &DataType,
+    to: &DataType,
+    ctx: &FormatCtx,
+    explicit: bool,
+) -> Result<Value> {
     use DataType as T;
     if v.is_null() {
         return Ok(Value::Null);
@@ -849,7 +888,11 @@ fn timestamp_date(t: i64, tz: Option<&datetime::TimeZone>) -> Result<i32> {
 
 fn jsonb_to_scalar(j: &Jsonb, to: &DataType) -> Result<Value> {
     let tname = to.display();
-    let what = j.type_name();
+    // (cannotCastJsonbValue's names: jsonb_typeof's but `numeric`.)
+    let what = match j.type_name() {
+        "number" => "numeric",
+        w => w,
+    };
     let fail = || {
         err!(
             INVALID_PARAMETER_VALUE,

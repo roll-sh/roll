@@ -155,6 +155,11 @@ struct PlanUses {
     /// Whether a custom plan folds parameter values into constants that may fail
     /// (`fold::param_folds` of the generic binding), found at the first Bind with values.
     param_folds: Option<bool>,
+    /// Its Parse binding left PL/pgSQL calls for planning (`Procs::deferred`): a Bind plans it.
+    proc_deferred: bool,
+    /// A binding of it ran or left PL/pgSQL calls (`Procs`): each custom plan is bound
+    /// afresh, running them again (`litplan::param_custom`, `values_custom`).
+    procs: bool,
 }
 
 /// RevalidateCachedQuery's error: a prepared statement whose result row the catalog changed
@@ -380,6 +385,9 @@ pub struct Session {
     /// Binding infers `$n` parameter types (Parse, PREPARE, EXPLAIN GENERIC_PLAN); otherwise a
     /// statement run without parameters can't reference any.
     infer_params: bool,
+    /// Binding a statement only analyzed (Parse, PREPARE, Describe): immutable PL/pgSQL
+    /// calls over constants stay calls (`Binder::defer_procs`) until it is planned.
+    defer_procs: bool,
     /// Running a simple query of several statements (an implicit transaction block).
     multi_stmt: bool,
     /// An Execute completed since the last Sync (XACT_FLAGS_PIPELINING): what follows in
@@ -566,6 +574,7 @@ impl Session {
             listener: std::cell::OnceCell::new(),
             notices: Vec::new(),
             infer_params: false,
+            defer_procs: false,
             multi_stmt: false,
             pipelining: false,
             extended: false,
@@ -1861,11 +1870,14 @@ impl Session {
             .with_catalog(|cat| (cat.version, self.state.current_role(cat)));
         let path = self.state.shared_search_path();
         let who = (role, self.state.settings.borrow().hot().row_security);
+        // (A binding that left its PL/pgSQL calls for planning is only an analysis: a plan
+        // to run is bound again, running them.)
         if !cursor
             && let Some((v, sp, w, b)) = &*p.bound.lock()
             && *v == version
             && *sp == path
             && *w == who
+            && (!b.procs.deferred || self.defer_procs)
         {
             return Ok(b.clone());
         }
@@ -1883,9 +1895,11 @@ impl Session {
                 .unwrap_or(0.1)
         });
         let keep_unplanned = self.infer_params && !cursor;
+        let defer_procs = self.defer_procs;
         let (b, unplanned) = self.with_ctx_path(params, Some(path.clone()), |ctx| {
             let mut b = Binder::new(ctx, types);
             b.no_params = no_params;
+            b.defer_procs = defer_procs;
             b.param_domains = domains;
             // (The query's own level: 1.)
             if let Some(f) = fraction {
@@ -1913,6 +1927,9 @@ impl Session {
         let b = Arc::new(b);
         if cursor {
             return Ok(b);
+        }
+        if b.procs.folded || b.procs.deferred {
+            p.plans.lock().procs = true;
         }
         *p.bound.lock() = Some((version, path, who, b.clone()));
         Ok(b)
@@ -2606,6 +2623,8 @@ impl Session {
             }
             p.param_types = parsed.param_types;
             let mut plans = p.plans.lock();
+            plans.proc_deferred = parsed.bq.procs.deferred;
+            plans.procs = parsed.bq.procs.deferred || parsed.bq.procs.folded;
             plans.param_oids = parsed.param_oids;
             plans.fixed_result = parsed.fixed_result;
             plans.parse_oids = Some(param_oids.into());
@@ -2625,11 +2644,13 @@ impl Session {
                     .collect();
             }
             self.infer_params = true;
+            self.defer_procs = true;
             let notices = self.notices.len();
             let (b, reads) = crate::sql::literals::recording(|| self.bound(&p, &stmt, &[]));
             let unplanned = self.last_unplanned.take();
             let keep = b.is_ok() && self.notices.len() == notices;
             self.infer_params = false;
+            self.defer_procs = false;
             p.param_types = match b {
                 Ok(b) => {
                     let cat = self.visible_catalog();
@@ -2646,6 +2667,8 @@ impl Session {
                     }
                     let mut plans = p.plans.lock();
                     plans.param_oids = oids;
+                    plans.proc_deferred = b.procs.deferred;
+                    plans.procs = b.procs.deferred || b.procs.folded;
                     plans.fixed_result = Some(result_row(&b.cols));
                     drop(plans);
                     b.params.clone()
@@ -2792,7 +2815,11 @@ impl Session {
 
     /// Result columns of a statement, without running it.
     pub fn describe(&mut self, p: &Arc<Prepared>) -> Result<Option<Arc<[OutCol]>>> {
-        crate::stack::grow(|| self.describe_here(p))
+        // (Describe doesn't plan: PL/pgSQL calls the planner runs wait for the Bind.)
+        let defer = std::mem::replace(&mut self.defer_procs, true);
+        let r = crate::stack::grow(|| self.describe_here(p));
+        self.defer_procs = defer;
+        r
     }
 
     fn describe_here(&mut self, p: &Arc<Prepared>) -> Result<Option<Arc<[OutCol]>>> {
@@ -2995,9 +3022,9 @@ impl Session {
         let mut values = Vec::with_capacity(params.len());
         // Parameters of a domain type: their input is domain_in / domain_recv, which checks
         // the domain's constraints here, whether or not the statement reads them.
-        let (domains, param_folds) = {
+        let (domains, param_folds, procs) = {
             let plans = p.plans.lock();
-            ((!plans.param_oids.is_empty()).then(|| plans.param_oids.clone()), plans.param_folds)
+            ((!plans.param_oids.is_empty()).then(|| plans.param_oids.clone()), plans.param_folds, plans.proc_deferred)
         };
         for (i, &raw) in params.iter().enumerate() {
             let f = match formats.len() {
@@ -3102,9 +3129,11 @@ impl Session {
                 p.plans.lock().param_folds = Some(f);
                 f
             });
+        // (A statement whose analysis left PL/pgSQL calls for the planner, `procs`: planning
+        // runs them, at the Bind.)
         let mut planned = None;
         if p.is_query()
-            && (mismatch || generic_failed || folds)
+            && (mismatch || generic_failed || folds || procs)
             && let Some(stmt) = p.stmt.as_ref()
         {
             self.ensure_txn();
@@ -3497,12 +3526,14 @@ impl Session {
                     return self.chain(true);
                 }
                 let failed = self.status == TxnStatus::Failed;
-                // (An implicit transaction, of a multi-statement query too, isn't one.)
+                // (An implicit transaction, of a multi-statement query too, isn't one:
+                // EndTransactionBlock's TBLOCK_IMPLICIT_INPROGRESS or TBLOCK_STARTED.)
                 if self.status == TxnStatus::Idle {
-                    self.raise_notice(warning(
-                        code::NO_ACTIVE_SQL_TRANSACTION,
-                        "there is no transaction in progress",
-                    ));
+                    let line = if self.multi_stmt || self.pipelining { 4073 } else { 4152 };
+                    self.raise_notice(
+                        warning(code::NO_ACTIVE_SQL_TRANSACTION, "there is no transaction in progress")
+                            .routine_at("EndTransactionBlock", line),
+                    );
                 }
                 self.finish_txn_untimed(!failed)?;
                 Ok(QueryResult::command(if failed {

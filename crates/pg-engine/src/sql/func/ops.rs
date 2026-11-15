@@ -357,6 +357,38 @@ fn i(a: &Value) -> i128 {
     a.as_i64().unwrap_or(0) as i128
 }
 
+/// PostgreSQL's function for integer operator `op` (+, -, *, /, %) over operands of these
+/// types, which an error names as its routine (int4pl, int48mi, ...; `%` has no mixed
+/// forms: the wider operand's type's).
+#[cold]
+#[inline(never)]
+fn int_op_error(e: crate::error::Error, op: u8, x: &Value, y: &Value) -> crate::error::Error {
+    const NAMES: [[&str; 9]; 5] = [
+        ["int2pl", "int24pl", "int28pl", "int42pl", "int4pl", "int48pl", "int82pl", "int84pl", "int8pl"],
+        ["int2mi", "int24mi", "int28mi", "int42mi", "int4mi", "int48mi", "int82mi", "int84mi", "int8mi"],
+        ["int2mul", "int24mul", "int28mul", "int42mul", "int4mul", "int48mul", "int82mul", "int84mul", "int8mul"],
+        ["int2div", "int24div", "int28div", "int42div", "int4div", "int48div", "int82div", "int84div", "int8div"],
+        ["int2mod", "int4mod", "int8mod", "int4mod", "int4mod", "int8mod", "int8mod", "int8mod", "int8mod"],
+    ];
+    let k = |v: &Value| match v {
+        Value::Int2(_) => 0,
+        Value::Int4(_) => 1,
+        _ => 2,
+    };
+    e.routine(NAMES[op as usize][k(x) * 3 + k(y)])
+}
+
+/// The routine of a one-operand integer function's error (`-`, abs) by its operand's type.
+#[cold]
+#[inline(never)]
+fn int_unary_error(e: crate::error::Error, names: [&'static str; 3], x: &Value) -> crate::error::Error {
+    e.routine(match x {
+        Value::Int2(_) => names[0],
+        Value::Int4(_) => names[1],
+        _ => names[2],
+    })
+}
+
 fn int_add(a: &[Value], c: &FnCtx) -> Result<Value> {
     p_int_add(&a[0], &a[1], c.ret)
 }
@@ -369,28 +401,21 @@ fn int_mul(a: &[Value], c: &FnCtx) -> Result<Value> {
 fn int_div(a: &[Value], c: &FnCtx) -> Result<Value> {
     let d = i(&a[1]);
     if d == 0 {
-        let e = err!(DIVISION_BY_ZERO, "division by zero");
-        // (The routine of PostgreSQL's operator for the operands' types.)
-        return Err(match (&a[0], &a[1]) {
-            (Value::Int4(_), Value::Int4(_)) => e.routine("int4div"),
-            (Value::Int2(_), Value::Int2(_)) => e.routine("int2div"),
-            (Value::Int8(_), Value::Int4(_)) => e.routine("int84div"),
-            _ => e,
-        });
+        return Err(int_op_error(err!(DIVISION_BY_ZERO, "division by zero"), 3, &a[0], &a[1]));
     }
-    int_result(i(&a[0]) / d, c.ret)
+    int_result(i(&a[0]) / d, c.ret).map_err(|e| int_op_error(e, 3, &a[0], &a[1]))
 }
 fn int_mod(a: &[Value], c: &FnCtx) -> Result<Value> {
     p_int_mod(&a[0], &a[1], c.ret)
 }
 fn int_neg(a: &[Value], c: &FnCtx) -> Result<Value> {
-    int_result(-i(&a[0]), c.ret)
+    int_result(-i(&a[0]), c.ret).map_err(|e| int_unary_error(e, ["int2um", "int4um", "int8um"], &a[0]))
 }
 fn identity(a: &[Value], _: &FnCtx) -> Result<Value> {
     Ok(a[0].clone())
 }
 fn int_abs(a: &[Value], c: &FnCtx) -> Result<Value> {
-    int_result(i(&a[0]).abs(), c.ret)
+    int_result(i(&a[0]).abs(), c.ret).map_err(|e| int_unary_error(e, ["int2abs", "int4abs", "int8abs"], &a[0]))
 }
 fn int_and(a: &[Value], c: &FnCtx) -> Result<Value> {
     int_result(i(&a[0]) & i(&a[1]), c.ret)
@@ -478,7 +503,7 @@ fn fl_div(a: &[Value], c: &FnCtx) -> Result<Value> {
     let (x, y) = (f(&a[0]), f(&a[1]));
     // float8_div: NaN / 0 is NaN.
     if y == 0.0 && !x.is_nan() {
-        return Err(err!(DIVISION_BY_ZERO, "division by zero"));
+        return Err(err!(DIVISION_BY_ZERO, "division by zero").routine("float_zero_divide_error"));
     }
     float_result(
         x / y,
@@ -1402,18 +1427,18 @@ fn p_bp_ge(x: &Value, y: &Value, _: &T) -> Result<Value> {
     Ok(Value::Bool(p_bpcmp(x, y) != Ordering::Less))
 }
 fn p_int_add(x: &Value, y: &Value, r: &T) -> Result<Value> {
-    int_result(i(x) + i(y), r)
+    int_result(i(x) + i(y), r).map_err(|e| int_op_error(e, 0, x, y))
 }
 fn p_int_sub(x: &Value, y: &Value, r: &T) -> Result<Value> {
-    int_result(i(x) - i(y), r)
+    int_result(i(x) - i(y), r).map_err(|e| int_op_error(e, 1, x, y))
 }
 fn p_int_mul(x: &Value, y: &Value, r: &T) -> Result<Value> {
-    int_result(i(x) * i(y), r)
+    int_result(i(x) * i(y), r).map_err(|e| int_op_error(e, 2, x, y))
 }
 fn p_int_mod(x: &Value, y: &Value, r: &T) -> Result<Value> {
     let d = i(y);
     if d == 0 {
-        return Err(err!(DIVISION_BY_ZERO, "division by zero"));
+        return Err(int_op_error(err!(DIVISION_BY_ZERO, "division by zero"), 4, x, y));
     }
     // (int8 minimum % -1 is 0, as Postgres has it, not an overflow.)
     int_result(i(x).wrapping_rem(d), r)

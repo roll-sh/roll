@@ -561,6 +561,8 @@ impl Ddl<'_, '_> {
         let ta = Arc::new(t.clone());
         let mut b = self.binder();
         b.cat = Arc::new(self.cat.clone());
+        // (Its PL/pgSQL calls run where the build runs them, as the table's owner.)
+        b.skip_procs = true;
         let Some(pred) = b
             .bound_indexes_all(&ta)?
             .into_iter()
@@ -648,6 +650,9 @@ impl Ddl<'_, '_> {
         };
         let ta = Arc::new(t.clone());
         let mut b = self.binder();
+        // (CREATE INDEX analyzes its expressions without planning them: their PL/pgSQL calls
+        // run in the build, as the table's owner, a security-restricted operation.)
+        b.skip_procs = true;
         let mut columns = Vec::new();
         let mut key_types = Vec::new();
         let mut name_parts: Vec<String> = Vec::new();
