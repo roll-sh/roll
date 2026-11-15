@@ -35,6 +35,8 @@ type Client struct {
 
 	once    sync.Mutex
 	project string
+	// login renews the token of a client a workload identity's login made.
+	login *relogin
 }
 
 // Problem is a key that didn't resolve (a reference to nothing, a cycle, a link that failed).
@@ -83,6 +85,26 @@ func New(api, token string) *Client {
 }
 
 func (c *Client) call(ctx context.Context, method, path string, body, out any) error {
+	if c.login == nil {
+		return c.send(ctx, c.Token, method, path, body, out)
+	}
+	token, err := c.login.token(ctx, c, "")
+	if err != nil {
+		return err
+	}
+	err = c.send(ctx, token, method, path, body, out)
+	// Refused: revoked, or ended early. One new login, then once more.
+	var e *Error
+	if errors.As(err, &e) && e.Status == http.StatusUnauthorized {
+		if token, err = c.login.token(ctx, c, token); err != nil {
+			return err
+		}
+		return c.send(ctx, token, method, path, body, out)
+	}
+	return err
+}
+
+func (c *Client) send(ctx context.Context, token, method, path string, body, out any) error {
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -95,8 +117,8 @@ func (c *Client) call(ctx context.Context, method, path string, body, out any) e
 	if err != nil {
 		return err
 	}
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
