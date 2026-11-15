@@ -50,7 +50,7 @@ func TestABoxSealedByRollOpensOnlyForItsContext(t *testing.T) {
 // digest that moves when the values change.
 func TestAWorkloadLogsInReadsSealedValuesAndWatchesForChanges(t *testing.T) {
 	var mu sync.Mutex
-	digest, value := "d1", "one"
+	digest, value, current, logins := "d1", "one", "rlt_workload", 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -65,8 +65,9 @@ func TestAWorkloadLogsInReadsSealedValuesAndWatchesForChanges(t *testing.T) {
 				write(map[string]string{"error": "no identity idn_ci takes this token", "code": "unauthorized"})
 				return
 			}
-			write(map[string]any{"token": "rlt_workload", "project": "prj_a", "expires_at": 1})
-		case auth != "Bearer rlt_workload":
+			logins++
+			write(map[string]any{"token": current, "project": "prj_a", "expires_at": time.Now().Add(time.Hour).UnixMilli()})
+		case auth != "Bearer "+current:
 			w.WriteHeader(http.StatusUnauthorized)
 		case r.URL.Path == "/v1/secrets/projects/prj_a/environments/production/digest":
 			write(map[string]string{"digest": digest})
@@ -121,6 +122,18 @@ func TestAWorkloadLogsInReadsSealedValuesAndWatchesForChanges(t *testing.T) {
 	if got := <-seen; got != "two" {
 		t.Fatalf("after the change %q", got)
 	}
+	// The roll token stops working (revoked, ended): the client logs in again and keeps watching.
+	mu.Lock()
+	digest, value, current = "d3", "three", "rlt_workload2"
+	mu.Unlock()
+	if got := <-seen; got != "three" {
+		t.Fatalf("after a new login %q", got)
+	}
+	mu.Lock()
+	if logins != 2 {
+		t.Fatalf("%d logins, not 2", logins)
+	}
+	mu.Unlock()
 	select {
 	case got := <-seen:
 		t.Fatalf("an unchanged digest delivered %q again", got)

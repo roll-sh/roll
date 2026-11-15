@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
@@ -30,7 +31,7 @@ class Rolld(BaseHTTPRequestHandler):
     """rolld as the client sees it: a workload identity's login, whoami, values, a sealed resolve,
     and a digest that moves when the values change."""
 
-    state = {"digest": "d1", "value": "one"}
+    state = {"digest": "d1", "value": "one", "token": "rlt_workload", "logins": 0}
 
     def log_message(self, *_):
         pass
@@ -51,8 +52,9 @@ class Rolld(BaseHTTPRequestHandler):
             b = self.body()
             if (b.get("identity"), b.get("token")) != ("idn_ci", "the-oidc-token"):
                 return self.answer(401, {"error": "no identity idn_ci takes this token", "code": "unauthorized"})
-            return self.answer(200, {"token": "rlt_workload", "project": "prj_a", "expires_at": 1})
-        if self.headers.get("Authorization") != "Bearer rlt_workload":
+            Rolld.state["logins"] += 1
+            return self.answer(200, {"token": Rolld.state["token"], "project": "prj_a", "expires_at": int(time.time() * 1000) + 3_600_000})
+        if self.headers.get("Authorization") != "Bearer " + Rolld.state["token"]:
             return self.answer(401)
         if self.path == env + "/resolve":
             b = self.body()
@@ -63,7 +65,7 @@ class Rolld(BaseHTTPRequestHandler):
 
     def do_GET(self):
         env = "/v1/secrets/projects/prj_a/environments/production"
-        if self.headers.get("Authorization") != "Bearer rlt_workload":
+        if self.headers.get("Authorization") != "Bearer " + Rolld.state["token"]:
             return self.answer(401)
         if self.path == env + "/digest":
             return self.answer(200, {"digest": Rolld.state["digest"]})
@@ -82,8 +84,11 @@ class AWorkload(unittest.TestCase):
             with self.assertRaises(roll_secrets.SecretsError) as e:
                 roll_secrets.from_env()
             self.assertEqual(e.exception.status, 401)
-        with mock.patch.dict(os.environ, {"ROLL_API_URL": api, "ROLL_IDENTITY": "idn_ci", "ROLL_OIDC_TOKEN": "the-oidc-token"}, clear=False):
-            c = roll_secrets.from_env()
+        # Kept for the whole test: a new login reads the OIDC token again.
+        env = mock.patch.dict(os.environ, {"ROLL_API_URL": api, "ROLL_IDENTITY": "idn_ci", "ROLL_OIDC_TOKEN": "the-oidc-token"}, clear=False)
+        env.start()
+        self.addCleanup(env.stop)
+        c = roll_secrets.from_env()
 
         sealed = c.resolve_sealed("production", "app:web", KEY)
         self.assertEqual((sealed.values, sealed.linked), ({"DB_URL": "postgres://db/shop"}, ["DB_URL"]))
@@ -91,9 +96,11 @@ class AWorkload(unittest.TestCase):
         seen, stop = [], threading.Event()
         first, changed = threading.Event(), threading.Event()
 
+        relogged = threading.Event()
+
         def on_change(v):
             seen.append(v.values["A"])
-            (first if len(seen) == 1 else changed).set()
+            (first if len(seen) == 1 else changed if len(seen) == 2 else relogged).set()
 
         watching = threading.Thread(target=c.watch, args=("production", on_change), kwargs={"every": 0.01, "stop": stop})
         watching.start()
@@ -104,6 +111,10 @@ class AWorkload(unittest.TestCase):
         self.assertTrue(changed.wait(5))
         threading.Event().wait(0.05)
         self.assertEqual(seen, ["one", "two"], "an unchanged digest delivers nothing again")
+        # The roll token stops working (revoked, ended): the client logs in again and keeps watching.
+        Rolld.state.update(digest="d3", value="three", token="rlt_workload2")
+        self.assertTrue(relogged.wait(5))
+        self.assertEqual((seen[-1], Rolld.state["logins"]), ("three", 2))
 
 
 if __name__ == "__main__":
