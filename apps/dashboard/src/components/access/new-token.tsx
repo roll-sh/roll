@@ -1,6 +1,6 @@
 import { HorizonMark } from "@roll/brand";
 import { useEffect, useState } from "react";
-import { accessApi, EXPIRIES, ipProblems, parseRate, presetRules, type Catalog, type Grant, type Rule } from "@/lib/access-api";
+import { accessApi, catalogFor, waitsForAdmin, type Me, EXPIRIES, ipProblems, parseRate, presetRules, type Catalog, type Grant, type Rule } from "@/lib/access-api";
 import { Link } from "../link";
 import { btn, Connecting, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 import { Builder } from "./builder";
@@ -10,10 +10,13 @@ import { AccessShell } from "./shell";
 /** `/dashboard/access/new`: the permission builder, then the token, shown once. */
 export function NewToken() {
   const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [me, setMe] = useState<Me | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [rules, setRules] = useState<Rule[]>([]);
   const [expiry, setExpiry] = useState(1);
+  // A start later on (Cloudflare's TTL start): the expiry counts from it.
+  const [starts, setStarts] = useState("");
   const [ips, setIps] = useState("");
   const [rateText, setRateText] = useState("");
   const [askOtherwise, setAskOtherwise] = useState(false);
@@ -23,7 +26,10 @@ export function NewToken() {
   useEffect(() => {
     accessApi
       .catalog()
-      .then((c) => {
+      .then(async (c) => {
+        const me = await accessApi.me().catch(() => null);
+        setMe(me);
+        c = catalogFor(c, me);
         setCatalog(c);
         const start = c.presets.find((p) => p.id === "read-only") ?? c.presets[0];
         if (start) setRules(presetRules(start));
@@ -33,7 +39,9 @@ export function NewToken() {
 
   const ipList = ips.split(/[\s,]+/).filter(Boolean);
   const rate = parseRate(rateText);
+  const startMs = starts ? new Date(starts).getTime() : null;
   const problems = [
+    ...(startMs !== null && !(startMs > Date.now()) ? ["The start has to be later than now"] : []),
     ...(name.trim() ? [] : ["Name the token"]),
     ...(rules.length ? [] : ["Allow at least one action"]),
     ...ipProblems(ipList),
@@ -45,7 +53,7 @@ export function NewToken() {
     setError(null);
     try {
       const ms = EXPIRIES[expiry].ms;
-      setMade(await accessApi.create({ name: name.trim(), rules, expires_at: ms === null ? null : Date.now() + ms, ip_allow: ipList, rate_per_minute: rate.rate, ask_otherwise: askOtherwise }));
+      setMade(await accessApi.create({ name: name.trim(), rules, not_before: startMs, expires_at: ms === null ? null : (startMs ?? Date.now()) + ms, ip_allow: ipList, rate_per_minute: rate.rate, ask_otherwise: askOtherwise }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -100,6 +108,10 @@ export function NewToken() {
                   </select>
                 </label>
                 <label className="block space-y-1.5">
+                  <span className="block text-[12px] text-subtle">Starts (optional: it works only from then on)</span>
+                  <input type="datetime-local" value={starts} onChange={(e) => setStarts(e.target.value)} className={`${input} w-full font-mono text-[12px]`} />
+                </label>
+                <label className="block space-y-1.5">
                   <span className="block text-[12px] text-subtle">Only from (optional)</span>
                   <input value={ips} onChange={(e) => setIps(e.target.value)} placeholder="10.0.0.0/8, 203.0.113.4" className={`${input} w-full font-mono text-[12px]`} />
                 </label>
@@ -118,6 +130,9 @@ export function NewToken() {
                 Cancel
               </Link>
               {problems.length > 0 && <span className="text-[12px] text-subtle">{problems[0]}</span>}
+              {problems.length === 0 && waitsForAdmin(me, rules, askOtherwise) && (
+                <span className="text-[12px] text-accent">It reaches what an admin approves first: it works once one does (they're mailed).</span>
+              )}
             </div>
           </>
         )}
