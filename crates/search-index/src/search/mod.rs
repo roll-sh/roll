@@ -621,6 +621,11 @@ pub type QueryRef = Arc<dyn Query>;
 /// Collects the matches of one segment.
 pub trait LeafCollector {
     fn collect(&mut self, doc: u32, scorer: &mut dyn Scorable) -> Result<()>;
+    /// Lucene's `LeafCollector.setScorer`: a bulk scorer hands over the scorable it will
+    /// collect with before scoring the segment, so a collector that already has a minimum
+    /// competitive score (top hits whose queue filled in an earlier segment) announces it
+    /// before the first window is scored rather than on the first collected doc.
+    fn set_scorer(&mut self, _scorer: &mut dyn Scorable) {}
     /// Collects `docs` (ascending, all live), every one scoring the constant `score`: Lucene's
     /// `collect(DocIdStream)` for constant-score bulk scorers (`match_all`, and any scorer with a
     /// [`Scorer::constant_score`] under [`DefaultBulkScorer`]), so a collector takes a block at

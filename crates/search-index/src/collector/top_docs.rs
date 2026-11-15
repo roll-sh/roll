@@ -292,12 +292,18 @@ impl LeafCollector for TopScoreLeaf<'_> {
         Ok(())
     }
 
-    #[inline]
-    fn collect(&mut self, doc: u32, scorer: &mut dyn Scorable) -> Result<()> {
+    fn set_scorer(&mut self, scorer: &mut dyn Scorable) {
         if self.min_announced < 0.0 {
             self.min_announced = 0.0;
             self.update_min(scorer);
             self.read_shared(scorer);
+        }
+    }
+
+    #[inline]
+    fn collect(&mut self, doc: u32, scorer: &mut dyn Scorable) -> Result<()> {
+        if self.min_announced < 0.0 {
+            self.set_scorer(scorer);
         }
         // A pure hit count (`size: 0`) never asks for the score: scoring may fail (a function
         // score returning NaN) where Elasticsearch, which doesn't score there, succeeds.
@@ -381,7 +387,7 @@ impl Collector for TopScoreCollector {
         if (self.heap.len() >= self.n && self.n > 0 && self.global_total() > self.threshold)
             || self.shared.as_ref().is_some_and(|sh| sh.bar.load(AtomicOrdering::Relaxed) != 0)
         {
-            // The leaf's scorer learns the bar on its first collected doc.
+            // The leaf's scorer learns the bar from `set_scorer`, or on its first collected doc.
             min_announced = -1.0;
         }
         Ok(Box::new(TopScoreLeaf { c: self, base, min_announced }))
