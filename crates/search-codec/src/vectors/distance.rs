@@ -39,6 +39,10 @@ pub fn dot_f32(a: &[u8], b: &[u8]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]
     {
+        if has_avx512() {
+            // SAFETY: the AVX-512 features were detected; equal lengths.
+            return unsafe { x86_512::dot_f32(a, b) };
+        }
         if has_avx2_fma() {
             // SAFETY: AVX2 and FMA were detected; lengths are equal and reads stay in bounds.
             return unsafe { x86::dot_f32(a, b) };
@@ -59,6 +63,10 @@ pub fn l2sq_f32(a: &[u8], b: &[u8]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]
     {
+        if has_avx512() {
+            // SAFETY: the AVX-512 features were detected; equal lengths.
+            return unsafe { x86_512::l2sq_f32(a, b) };
+        }
         if has_avx2_fma() {
             // SAFETY: as for `dot_f32`.
             return unsafe { x86::l2sq_f32(a, b) };
@@ -79,6 +87,10 @@ pub fn dot_i8(a: &[u8], b: &[u8]) -> i32 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]
     {
+        if has_avx512() {
+            // SAFETY: the AVX-512 features were detected; equal lengths.
+            return unsafe { x86_512::dot_i8(a, b) };
+        }
         if has_avx2_fma() {
             // SAFETY: AVX2 detected; equal lengths.
             return unsafe { x86::dot_i8(a, b) };
@@ -123,6 +135,10 @@ pub fn dot_u8(a: &[u8], b: &[u8]) -> i32 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]
     {
+        if has_avx512_vnni() {
+            // SAFETY: the AVX-512 features were detected; equal lengths.
+            return unsafe { x86_512::dot_u8(a, b) };
+        }
         if has_avx2_fma() {
             // SAFETY: AVX2 detected; equal lengths.
             return unsafe { x86::dot_u8(a, b) };
@@ -143,6 +159,10 @@ pub fn l2sq_u8(a: &[u8], b: &[u8]) -> i32 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]
     {
+        if has_avx512_vnni() {
+            // SAFETY: the AVX-512 features were detected; equal lengths.
+            return unsafe { x86_512::l2sq_u8(a, b) };
+        }
         if has_avx2_fma() {
             // SAFETY: AVX2 detected; equal lengths.
             return unsafe { x86::l2sq_u8(a, b) };
@@ -175,6 +195,10 @@ pub fn dot_u4(a: &[u8], b: &[u8]) -> i32 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]
     {
+        if has_avx512_vnni() {
+            // SAFETY: the AVX-512 features were detected; equal lengths.
+            return unsafe { x86_512::dot_u4(a, b) };
+        }
         if has_avx2_fma() {
             // SAFETY: AVX2 detected; equal lengths.
             return unsafe { x86::dot_u4(a, b) };
@@ -206,6 +230,10 @@ pub fn l2sq_u4(a: &[u8], b: &[u8]) -> i32 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]
     {
+        if has_avx512_vnni() {
+            // SAFETY: the AVX-512 features were detected; equal lengths.
+            return unsafe { x86_512::l2sq_u4(a, b) };
+        }
         if has_avx2_fma() {
             // SAFETY: AVX2 detected; equal lengths.
             return unsafe { x86::l2sq_u4(a, b) };
@@ -324,13 +352,246 @@ fn has_avx2_fma() -> bool {
     std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
 }
 
+/// AVX-512 Foundation and Byte/Word (every AVX-512 CPU since Skylake-SP), with FMA.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn has_avx512() -> bool {
+    // MEASUREMENT KNOB (not for landing): ROLL_NO_AVX512.
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*OFF.get_or_init(|| std::env::var_os("ROLL_NO_AVX512").is_some()) && std::arch::is_x86_feature_detected!("avx512f") && std::arch::is_x86_feature_detected!("avx512bw") && has_avx2_fma()
+}
+
+/// [`has_avx512`] plus VNNI (`vpdpbusd`: Cascade Lake, Ice Lake, Zen 4 and later).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn has_avx512_vnni() -> bool {
+    has_avx512() && std::arch::is_x86_feature_detected!("avx512vnni")
+}
+
+/// AVX-512 kernels. The float kernels keep the AVX2 kernels' summation order exactly (each
+/// 512-bit accumulator holds two of AVX2's four 256-bit ones, folded the same way), so scores
+/// are bit-identical on either path while every step issues half the loads and FMAs. The
+/// integer kernels are exact in any order: 64 bytes per step, `vpdpbusd` multiplying unsigned
+/// by signed bytes and adding groups of four into 32-bit lanes (VNNI), masked loads instead of
+/// scalar tails.
+#[cfg(target_arch = "x86_64")]
+mod x86_512 {
+    use std::arch::x86_64::*;
+
+    /// The upper 256 bits of `v`.
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    unsafe fn hi256(v: __m512) -> __m256 {
+        _mm256_castpd_ps(_mm512_extractf64x4_pd::<1>(_mm512_castps_pd(v)))
+    }
+
+    #[target_feature(enable = "avx512f,avx2,fma")]
+    pub unsafe fn dot_f32(a: &[u8], b: &[u8]) -> f32 {
+        let n = a.len().min(b.len()) / 4;
+        let (pa, pb) = (a.as_ptr() as *const f32, b.as_ptr() as *const f32);
+        // SAFETY: all offsets are < n floats, within both slices; loads are unaligned.
+        unsafe {
+            // z0 = AVX2's acc[0] | acc[1], z1 = acc[2] | acc[3].
+            let (mut z0, mut z1) = (_mm512_setzero_ps(), _mm512_setzero_ps());
+            let mut i = 0;
+            while i + 32 <= n {
+                z0 = _mm512_fmadd_ps(_mm512_loadu_ps(pa.add(i)), _mm512_loadu_ps(pb.add(i)), z0);
+                z1 = _mm512_fmadd_ps(_mm512_loadu_ps(pa.add(i + 16)), _mm512_loadu_ps(pb.add(i + 16)), z1);
+                i += 32;
+            }
+            let mut a0 = _mm512_castps512_ps256(z0);
+            while i + 8 <= n {
+                a0 = _mm256_fmadd_ps(_mm256_loadu_ps(pa.add(i)), _mm256_loadu_ps(pb.add(i)), a0);
+                i += 8;
+            }
+            let v = _mm256_add_ps(_mm256_add_ps(a0, hi256(z0)), _mm256_add_ps(_mm512_castps512_ps256(z1), hi256(z1)));
+            let mut s = super::x86::hsum(v);
+            while i < n {
+                s += pa.add(i).read_unaligned() * pb.add(i).read_unaligned();
+                i += 1;
+            }
+            s
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx2,fma")]
+    pub unsafe fn l2sq_f32(a: &[u8], b: &[u8]) -> f32 {
+        let n = a.len().min(b.len()) / 4;
+        let (pa, pb) = (a.as_ptr() as *const f32, b.as_ptr() as *const f32);
+        // SAFETY: as in `dot_f32`.
+        unsafe {
+            let (mut z0, mut z1) = (_mm512_setzero_ps(), _mm512_setzero_ps());
+            let mut i = 0;
+            while i + 32 <= n {
+                let d0 = _mm512_sub_ps(_mm512_loadu_ps(pa.add(i)), _mm512_loadu_ps(pb.add(i)));
+                let d1 = _mm512_sub_ps(_mm512_loadu_ps(pa.add(i + 16)), _mm512_loadu_ps(pb.add(i + 16)));
+                z0 = _mm512_fmadd_ps(d0, d0, z0);
+                z1 = _mm512_fmadd_ps(d1, d1, z1);
+                i += 32;
+            }
+            let mut a0 = _mm512_castps512_ps256(z0);
+            while i + 8 <= n {
+                let d = _mm256_sub_ps(_mm256_loadu_ps(pa.add(i)), _mm256_loadu_ps(pb.add(i)));
+                a0 = _mm256_fmadd_ps(d, d, a0);
+                i += 8;
+            }
+            let v = _mm256_add_ps(_mm256_add_ps(a0, hi256(z0)), _mm256_add_ps(_mm512_castps512_ps256(z1), hi256(z1)));
+            let mut s = super::x86::hsum(v);
+            while i < n {
+                let d = pa.add(i).read_unaligned() - pb.add(i).read_unaligned();
+                s += d * d;
+                i += 1;
+            }
+            s
+        }
+    }
+
+    /// The bytes `i..min(i + 64, n)` of `p`, zero past `n`.
+    #[inline]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    unsafe fn load64(p: &[u8], i: usize, n: usize) -> __m512i {
+        let left = n - i;
+        // SAFETY: masked lanes are never read, so the load stays inside `p`.
+        unsafe {
+            if left >= 64 {
+                _mm512_loadu_si512(p.as_ptr().add(i) as *const _)
+            } else {
+                _mm512_maskz_loadu_epi8((1u64 << left) - 1, p.as_ptr().add(i) as *const i8)
+            }
+        }
+    }
+
+    /// Signed bytes: widened to 16 bits, multiplied and added in pairs (`vpmaddwd`).
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub unsafe fn dot_i8(a: &[u8], b: &[u8]) -> i32 {
+        let n = a.len().min(b.len());
+        // SAFETY: 32-byte loads at i + 32 <= n; the tail is masked.
+        unsafe {
+            let mut acc = _mm512_setzero_si512();
+            let mut i = 0;
+            while i < n {
+                let left = n - i;
+                let m = if left >= 32 { u32::MAX } else { (1u32 << left) - 1 };
+                let x = _mm512_cvtepi8_epi16(_mm256_maskz_loadu_epi8(m, a.as_ptr().add(i) as *const i8));
+                let y = _mm512_cvtepi8_epi16(_mm256_maskz_loadu_epi8(m, b.as_ptr().add(i) as *const i8));
+                acc = _mm512_add_epi32(acc, _mm512_madd_epi16(x, y));
+                i += 32;
+            }
+            _mm512_reduce_add_epi32(acc)
+        }
+    }
+
+    /// Codes are at most 127, so they read the same as signed bytes for `vpdpbusd`.
+    #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+    pub unsafe fn dot_u8(a: &[u8], b: &[u8]) -> i32 {
+        let n = a.len().min(b.len());
+        // SAFETY: `load64` stays inside both slices.
+        unsafe {
+            let mut acc = _mm512_setzero_si512();
+            let mut i = 0;
+            while i < n {
+                acc = _mm512_dpbusd_epi32(acc, load64(a, i, n), load64(b, i, n));
+                i += 64;
+            }
+            _mm512_reduce_add_epi32(acc)
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+    pub unsafe fn l2sq_u8(a: &[u8], b: &[u8]) -> i32 {
+        let n = a.len().min(b.len());
+        // SAFETY: `load64` stays inside both slices.
+        unsafe {
+            let mut acc = _mm512_setzero_si512();
+            let mut i = 0;
+            while i < n {
+                let d = _mm512_abs_epi8(_mm512_sub_epi8(load64(a, i, n), load64(b, i, n)));
+                acc = _mm512_dpbusd_epi32(acc, d, d);
+                i += 64;
+            }
+            _mm512_reduce_add_epi32(acc)
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+    pub unsafe fn dot_u4(a: &[u8], b: &[u8]) -> i32 {
+        let n = a.len().min(b.len());
+        // SAFETY: `load64` stays inside both slices.
+        unsafe {
+            let mask = _mm512_set1_epi8(0x0F);
+            let mut acc = _mm512_setzero_si512();
+            let mut i = 0;
+            while i < n {
+                let (x, y) = (load64(a, i, n), load64(b, i, n));
+                acc = _mm512_dpbusd_epi32(acc, _mm512_and_si512(x, mask), _mm512_and_si512(y, mask));
+                let (xh, yh) = (_mm512_and_si512(_mm512_srli_epi16::<4>(x), mask), _mm512_and_si512(_mm512_srli_epi16::<4>(y), mask));
+                acc = _mm512_dpbusd_epi32(acc, xh, yh);
+                i += 64;
+            }
+            _mm512_reduce_add_epi32(acc)
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+    pub unsafe fn l2sq_u4(a: &[u8], b: &[u8]) -> i32 {
+        let n = a.len().min(b.len());
+        // SAFETY: `load64` stays inside both slices.
+        unsafe {
+            let mask = _mm512_set1_epi8(0x0F);
+            let mut acc = _mm512_setzero_si512();
+            let mut i = 0;
+            while i < n {
+                let (x, y) = (load64(a, i, n), load64(b, i, n));
+                let dl = _mm512_abs_epi8(_mm512_sub_epi8(_mm512_and_si512(x, mask), _mm512_and_si512(y, mask)));
+                let dh = _mm512_abs_epi8(_mm512_sub_epi8(
+                    _mm512_and_si512(_mm512_srli_epi16::<4>(x), mask),
+                    _mm512_and_si512(_mm512_srli_epi16::<4>(y), mask),
+                ));
+                acc = _mm512_dpbusd_epi32(acc, dl, dl);
+                acc = _mm512_dpbusd_epi32(acc, dh, dh);
+                i += 64;
+            }
+            _mm512_reduce_add_epi32(acc)
+        }
+    }
+
+    /// Measurement only: four 512-bit accumulators (64 floats per step), a different
+    /// summation order than the AVX2 kernel.
+    #[cfg(test)]
+    #[target_feature(enable = "avx512f,avx2,fma")]
+    pub unsafe fn dot_f32_wide(a: &[u8], b: &[u8]) -> f32 {
+        let n = a.len().min(b.len()) / 4;
+        let (pa, pb) = (a.as_ptr() as *const f32, b.as_ptr() as *const f32);
+        unsafe {
+            let mut acc = [_mm512_setzero_ps(); 4];
+            let mut i = 0;
+            while i + 64 <= n {
+                for (k, z) in acc.iter_mut().enumerate() {
+                    *z = _mm512_fmadd_ps(_mm512_loadu_ps(pa.add(i + 16 * k)), _mm512_loadu_ps(pb.add(i + 16 * k)), *z);
+                }
+                i += 64;
+            }
+            while i + 16 <= n {
+                acc[0] = _mm512_fmadd_ps(_mm512_loadu_ps(pa.add(i)), _mm512_loadu_ps(pb.add(i)), acc[0]);
+                i += 16;
+            }
+            let mut s = _mm512_reduce_add_ps(_mm512_add_ps(_mm512_add_ps(acc[0], acc[1]), _mm512_add_ps(acc[2], acc[3])));
+            while i < n {
+                s += pa.add(i).read_unaligned() * pb.add(i).read_unaligned();
+                i += 1;
+            }
+            s
+        }
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 mod x86 {
     use std::arch::x86_64::*;
 
     #[inline]
     #[target_feature(enable = "avx2,fma")]
-    unsafe fn hsum(v: __m256) -> f32 {
+    pub(super) unsafe fn hsum(v: __m256) -> f32 {
         let lo = _mm256_castps256_ps128(v);
         let hi = _mm256_extractf128_ps::<1>(v);
         let s = _mm_add_ps(lo, hi);
@@ -908,6 +1169,80 @@ mod tests {
             let h: u32 = ia.iter().zip(&ib).map(|(x, y)| (x ^ y).count_ones()).sum();
             assert_eq!(hamming(&ia, &ib), h);
             assert_eq!(hamming_portable(&ia, &ib), h);
+        }
+    }
+
+    /// The AVX2 and AVX-512 kernels, called directly (the dispatchers pick only the widest):
+    /// float results bit for bit equal, integer results equal to the portable code.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn x86_paths_agree() {
+        if !has_avx2_fma() {
+            return;
+        }
+        let mut rng = StdRng::seed_from_u64(9);
+        for dims in [0usize, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 384, 1000, 1027] {
+            let a: Vec<f32> = (0..dims).map(|_| rng.gen_range(-1.0..1.0)).collect();
+            let b: Vec<f32> = (0..dims).map(|_| rng.gen_range(-1.0..1.0)).collect();
+            let (ab, bb) = (bytes(&a), bytes(&b));
+            let ia: Vec<u8> = (0..dims).map(|_| rng.r#gen()).collect();
+            let ib: Vec<u8> = (0..dims).map(|_| rng.r#gen()).collect();
+            let ua: Vec<u8> = ia.iter().map(|x| x & 127).collect();
+            let ub: Vec<u8> = ib.iter().map(|x| x & 127).collect();
+            // SAFETY: each kernel runs only when its features were detected.
+            unsafe {
+                let (d2, l2) = (x86::dot_f32(&ab, &bb), x86::l2sq_f32(&ab, &bb));
+                assert_eq!(x86::dot_i8(&ia, &ib), dot_i8_portable(&ia, &ib));
+                assert_eq!(x86::dot_u8(&ua, &ub), dot_u8_portable(&ua, &ub));
+                assert_eq!(x86::l2sq_u8(&ua, &ub), l2sq_u8_portable(&ua, &ub));
+                assert_eq!(x86::dot_u4(&ia, &ib), dot_u4_portable(&ia, &ib));
+                assert_eq!(x86::l2sq_u4(&ia, &ib), l2sq_u4_portable(&ia, &ib));
+                if has_avx512() {
+                    assert_eq!(x86_512::dot_f32(&ab, &bb).to_bits(), d2.to_bits(), "dims {dims}");
+                    assert_eq!(x86_512::l2sq_f32(&ab, &bb).to_bits(), l2.to_bits(), "dims {dims}");
+                    assert_eq!(x86_512::dot_i8(&ia, &ib), dot_i8_portable(&ia, &ib));
+                }
+                if has_avx512_vnni() {
+                    assert_eq!(x86_512::dot_u8(&ua, &ub), dot_u8_portable(&ua, &ub));
+                    assert_eq!(x86_512::l2sq_u8(&ua, &ub), l2sq_u8_portable(&ua, &ub));
+                    assert_eq!(x86_512::dot_u4(&ia, &ib), dot_u4_portable(&ia, &ib));
+                    assert_eq!(x86_512::l2sq_u4(&ia, &ib), l2sq_u4_portable(&ia, &ib));
+                }
+            }
+        }
+    }
+
+    /// `cargo test --release -p search-codec bench_dot_variants -- --ignored --nocapture`:
+    /// ns per 384-dim float dot product, AVX2 against AVX-512 (same order, and four
+    /// accumulators), over a hot working set (L2) and a cold one (random rows of 600 MB).
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[ignore]
+    fn bench_dot_variants() {
+        if !has_avx512() {
+            return;
+        }
+        let dims = 384;
+        let mut rng = StdRng::seed_from_u64(2);
+        for (rows, reps) in [(512usize, 2000usize), (400_000, 4)] {
+            let data: Vec<u8> = (0..rows * dims).flat_map(|_| rng.gen_range(-1.0f32..1.0).to_le_bytes()).collect();
+            let order: Vec<usize> = (0..rows * reps).map(|_| rng.gen_range(0..rows)).collect();
+            let q: Vec<u8> = data[..dims * 4].to_vec();
+            let row = |i: usize| &data[i * dims * 4..(i + 1) * dims * 4];
+            type K = unsafe fn(&[u8], &[u8]) -> f32;
+            let kernels: [(&str, K); 3] = [("avx2", x86::dot_f32), ("avx512", x86_512::dot_f32), ("avx512 wide", x86_512::dot_f32_wide)];
+            for round in 0..3 {
+                for (name, k) in kernels {
+                    let t = std::time::Instant::now();
+                    let mut s = 0f32;
+                    for &i in &order {
+                        // SAFETY: AVX-512 was detected (and implies AVX2).
+                        s += unsafe { k(&q, row(i)) };
+                    }
+                    let ns = t.elapsed().as_nanos() as f64 / order.len() as f64;
+                    println!("rows {rows} round {round} {name}: {ns:.2} ns ({s})");
+                }
+            }
         }
     }
 

@@ -370,7 +370,27 @@ pub(crate) fn write_vectors(
             {
                 g.seed(sg, &seed.ords, &sim);
             }
-            g.build(&sim, threads);
+            // The bytes `sim(_, o)` reads of `o`, prefetched before a step scores its neighbors.
+            let prefetch = |o: u32| {
+                // MEASUREMENT KNOB (not for landing): ROLL_BUILD_NO_PREFETCH.
+                static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                if *OFF.get_or_init(|| std::env::var_os("ROLL_BUILD_NO_PREFETCH").is_some()) {
+                    return;
+                }
+                static LINES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+                let lines = *LINES.get_or_init(|| std::env::var("ROLL_PREFETCH_LINES").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX));
+                let o = o as usize;
+                let b: &[u8] = match &build {
+                    BuildQuant::Scalar { q, section, at } => {
+                        let stride = q.code_len(dims) + 4;
+                        &section[at + o * stride..at + (o + 1) * stride]
+                    }
+                    BuildQuant::Binary { q, section, at, .. } => &section[at + o * q.stride()..at + (o + 1) * q.stride()],
+                    BuildQuant::None => vec_at(o as u32),
+                };
+                distance::prefetch(&b[..b.len().min(lines.saturating_mul(64))])
+            };
+            g.build(&sim, &prefetch, threads);
             let mut gb = Vec::new();
             g.write(&mut gb);
             Some(gb)
@@ -452,6 +472,12 @@ enum Quantized {
         q: BinaryQuantizer,
         records: Slice,
     },
+}
+
+/// MEASUREMENT KNOB (not for landing): how many of the best estimated candidates are rescored.
+fn rescore_count(k: usize) -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    k.max(*N.get_or_init(|| std::env::var("ROLL_KNN_RESCORE").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX)))
 }
 
 /// Reads one vector field. Cheap to clone; `Send + Sync`.
@@ -841,6 +867,11 @@ impl VectorsReader {
 
     /// Rescores candidates with exact scores and keeps the best `k`.
     fn rescore(&self, q: &PreparedQuery, cands: &[Scored], k: usize) -> Vec<KnnHit> {
+        if q.quant.is_none() || self.quant.is_none() {
+            // Steered with exact scores already (`cands` is best first).
+            return self.hits(cands.iter().take(k).copied().collect());
+        }
+        let cands = &cands[..cands.len().min(rescore_count(k))];
         for s in cands {
             distance::prefetch(self.vector(s.ord));
         }
@@ -1015,6 +1046,127 @@ mod tests {
     use crate::info::HnswParams;
     use super::hnsw::Adjacency;
     use rand::{Rng, SeedableRng, rngs::StdRng};
+
+    /// `VEC_NPY=<.npy> VEC_QUERIES=<queries.json> VEC_N=200000 VEC_OFF=0 VEC_GRAPH=est|exact
+    /// cargo test --release -p search-codec bench_bbq_recall -- --ignored --nocapture` (with or
+    /// without `ROLL_BBQ_LEGACY=1`): one graph built on one thread (deterministic) from the
+    /// one-bit estimates as indexing builds it (or from exact distances), searched with the
+    /// estimates (ef 100) unfiltered and with random 10% and 1% filters, recall@10 against the
+    /// exact answer when the best R of the beam are rescored with floats.
+    #[test]
+    #[ignore]
+    fn bench_bbq_recall() {
+        let (Ok(path), Ok(qpath)) = (std::env::var("VEC_NPY"), std::env::var("VEC_QUERIES")) else { return };
+        let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let (n, off) = (env("VEC_N", 200_000), env("VEC_OFF", 0));
+        let exact_graph = std::env::var("VEC_GRAPH").as_deref() == Ok("exact");
+        let dims = 384usize;
+        let raw = std::fs::read(&path).unwrap();
+        let unit = |v: &mut [f32]| {
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            v.iter_mut().for_each(|x| *x /= norm);
+        };
+        let at = 128 + off * dims * 4;
+        let mut xs: Vec<f32> = raw[at..at + n * dims * 4].as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+        drop(raw);
+        xs.chunks_mut(dims).for_each(unit);
+        let qs: Vec<Vec<f32>> = serde_json::from_slice::<serde_json::Value>(&std::fs::read(&qpath).unwrap()).unwrap().as_array().unwrap().iter()
+            .map(|q| {
+                let mut v: Vec<f32> = q["v"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap() as f32).collect();
+                unit(&mut v);
+                v
+            })
+            .collect();
+        let x = |i: u32| &xs[i as usize * dims..(i as usize + 1) * dims];
+        let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(p, q)| p * q).sum::<f32>();
+        let bq = BinaryQuantizer::train(&mut (0..n as u32).map(|i| x(i).to_vec()), dims, VectorSimilarity::DotProduct);
+        let mut recs = Vec::with_capacity(n * bq.stride());
+        let mut scratch = Vec::new();
+        let mut inserted = Vec::with_capacity(n);
+        for i in 0..n as u32 {
+            bq.encode(x(i), &mut scratch, &mut recs);
+            let mut q = BinaryQuery::default();
+            bq.query(x(i), &mut scratch, &mut q);
+            inserted.push(q);
+        }
+        let rec = |i: u32| &recs[i as usize * bq.stride()..(i as usize + 1) * bq.stride()];
+        let mut g = GraphBuilder::new(n, 16, 100);
+        let t = std::time::Instant::now();
+        if exact_graph {
+            g.build(&|a: u32, b: u32| dot(x(a), x(b)), &|_| {}, 1);
+        } else {
+            g.build(&|a: u32, b: u32| bq.estimate(&inserted[a as usize], rec(b)), &|_| {}, 1);
+        }
+        drop(inserted);
+        let mut gb = Vec::new();
+        g.write(&mut gb);
+        drop(g);
+        let h = gb.iter().fold(0xcbf29ce484222325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+        println!("graph ({}) built in {:?}, hash {h:016x}", if exact_graph { "exact" } else { "estimates" }, t.elapsed());
+        let graph = GraphReader::open(Slice::from(gb)).unwrap();
+        let rs = [10usize, 20, 30, 50, 100];
+        let mut rng = StdRng::seed_from_u64(off as u64 + 7);
+        for (name, p) in [("none", 1.0f64), ("10%", 0.1), ("1%", 0.01)] {
+            let keep: Vec<bool> = (0..n).map(|_| rng.gen_bool(p)).collect();
+            let accepted = keep.iter().filter(|&&k| k).count();
+            let mut hit = vec![0usize; rs.len()];
+            for q in &qs {
+                let mut exact: Vec<(f32, u32)> = (0..n as u32).filter(|&i| keep[i as usize]).map(|i| (dot(q, x(i)), i)).collect();
+                exact.sort_by(|a, b| b.0.total_cmp(&a.0));
+                let truth: std::collections::HashSet<u32> = exact[..10].iter().map(|e| e.1).collect();
+                let mut query = BinaryQuery::default();
+                bq.query(q, &mut scratch, &mut query);
+                let mut score = |i: u32| bq.estimate(&query, rec(i));
+                let beam = if p >= 1.0 {
+                    search_graph(&graph, n, &mut score, &|_| {}, 100, None, usize::MAX).0
+                } else {
+                    let (b, _, complete) = search_graph_filtered(&graph, n, 16, &mut score, &|_| {}, 100, &|o: u32| keep[o as usize], accepted, accepted + 1);
+                    assert!(complete, "filtered search fell back");
+                    b
+                };
+                for (j, &r) in rs.iter().enumerate() {
+                    let mut v: Vec<(f32, u32)> = beam.iter().take(r).map(|s| (dot(q, x(s.ord)), s.ord)).collect();
+                    v.sort_by(|a, b| b.0.total_cmp(&a.0));
+                    hit[j] += v.iter().take(10).filter(|e| truth.contains(&e.1)).count();
+                }
+            }
+            let legacy = std::env::var_os("ROLL_BBQ_LEGACY").is_some();
+            let d = (qs.len() * 10) as f64;
+            let row: Vec<String> = rs.iter().zip(&hit).map(|(r, h)| format!("{r}:{:.4}", *h as f64 / d)).collect();
+            println!("RECALL legacy={legacy} off {off} filter {name}: {}", row.join(" "));
+        }
+    }
+
+    /// `VEC_NPY=<float32 .npy> VEC_N=50000 VEC_QUANT=none|int8|bbq cargo test --release -p
+    /// search-codec bench_build_graph -- --ignored --nocapture`: one graph built on one thread
+    /// (deterministic, so variants build the same graph: compare the hash), wall time.
+    #[test]
+    #[ignore]
+    fn bench_build_graph() {
+        let Ok(path) = std::env::var("VEC_NPY") else { return };
+        let n: usize = std::env::var("VEC_N").ok().and_then(|v| v.parse().ok()).unwrap_or(50_000);
+        let dims = 384usize;
+        let raw = std::fs::read(&path).unwrap();
+        let data = &raw[128..128 + n * dims * 4];
+        let quantization = match std::env::var("VEC_QUANT").as_deref() {
+            Ok("int8") => VectorQuantization::Scalar { bits: 7, confidence_interval: None },
+            Ok("bbq") => VectorQuantization::Binary,
+            _ => VectorQuantization::None,
+        };
+        let spec = VectorSpec {
+            dims: dims as u32,
+            element: VectorElement::Float32,
+            similarity: VectorSimilarity::Cosine,
+            hnsw: Some(HnswParams { m: 16, ef_construction: 100 }),
+            quantization,
+        };
+        let docs: Vec<u32> = (0..n as u32).collect();
+        let t = std::time::Instant::now();
+        let (_, graph, _) = write_vectors(&spec, &docs, data, n as u32, None, 1).unwrap();
+        let e = t.elapsed();
+        let h = graph.unwrap().iter().fold(0xcbf29ce484222325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+        println!("BUILD n {n} {:?}: {:.1} us/vector, graph hash {h:016x}", spec.quantization, e.as_micros() as f64 / n as f64);
+    }
 
     fn spec(
         sim: VectorSimilarity,

@@ -1,11 +1,10 @@
 //! Binary quantization of float vectors (Elasticsearch's `bbq_hnsw` / `bbq_flat`).
 //!
 //! Vectors are centered on the segment's centroid `c` (of unit vectors for cosine fields), and
-//! each residual `r = x - c` keeps one bit per dimension: `x̂ᵢ = l + bᵢ·Δ`, where `l` and
-//! `l + Δ` are the two centers of a 1-D 2-means clustering of the residual's components (the
-//! least-squares optimal one-bit reconstruction of that vector, refined from a split at the
-//! mean). Queries are quantized asymmetrically, to 4 bits per dimension over their own
-//! `[min, max]`, stored as 4 bit planes, so
+//! each residual `r = x - c` keeps one bit per dimension: `x̂ᵢ = l + bᵢ·Δ`, over the interval
+//! `[l, l + Δ]` Elasticsearch's optimized scalar quantization picks for that vector (see
+//! [`optimized_interval`]). Queries are quantized asymmetrically, to 4 bits per dimension over
+//! their own optimized interval, stored as 4 bit planes, so
 //!
 //! ```text
 //! r_q·r_x ≈ d·l_q·l_x + l_q·Δ_x·Σb + l_x·Δ_q·ΣQ + Δ_q·Δ_x·Σₖ 2ᵏ·popcount(planeₖ ∧ b)
@@ -93,30 +92,8 @@ impl BinaryQuantizer {
     pub(crate) fn encode(&self, v: &[f32], scratch: &mut Vec<f32>, out: &mut Vec<u8>) {
         self.residual(v, scratch);
         let r = &scratch[..];
-        // 1-D 2-means: start from a split at the mean, then alternate assignment and centers.
-        let d = r.len().max(1) as f32;
-        let mean = r.iter().sum::<f32>() / d;
-        let (mut lo, mut hi) = (mean, mean);
-        let mut threshold = mean;
-        for _ in 0..6 {
-            let (mut s0, mut n0, mut s1, mut n1) = (0f32, 0u32, 0f32, 0u32);
-            for &x in r {
-                if x > threshold {
-                    s1 += x;
-                    n1 += 1;
-                } else {
-                    s0 += x;
-                    n0 += 1;
-                }
-            }
-            lo = if n0 > 0 { s0 / n0 as f32 } else { mean };
-            hi = if n1 > 0 { s1 / n1 as f32 } else { mean };
-            let t = (lo + hi) / 2.0;
-            if t == threshold {
-                break;
-            }
-            threshold = t;
-        }
+        let (lo, hi) = if legacy() { legacy_two_means(r) } else { optimized_interval(r, 1) };
+        let threshold = lo + (hi - lo) * 0.5;
         let mut ones = 0u32;
         for chunk in r.chunks(64) {
             let mut word = 0u64;
@@ -142,22 +119,14 @@ impl BinaryQuantizer {
         self.residual(v, scratch);
         let r = &scratch[..];
         let words = self.words();
-        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-        for &x in r {
-            lo = lo.min(x);
-            hi = hi.max(x);
-        }
-        if !lo.is_finite() || !hi.is_finite() || hi <= lo {
-            lo = if lo.is_finite() { lo } else { 0.0 };
-            hi = lo;
-        }
+        let (lo, hi) = if legacy() { legacy_min_max(r) } else { optimized_interval(r, 4) };
         let step = if hi > lo { (hi - lo) / 15.0 } else { 0.0 };
         let inv = if step > 0.0 { 1.0 / step } else { 0.0 };
         out.planes.clear();
         out.planes.resize(4 * words, 0);
         let mut sum = 0u32;
         for (i, &x) in r.iter().enumerate() {
-            let q = ((x - lo) * inv).round().clamp(0.0, 15.0) as u32;
+            let q = ((x.clamp(lo, hi) - lo) * inv).round().clamp(0.0, 15.0) as u32;
             sum += q;
             for k in 0..4 {
                 if q >> k & 1 != 0 {
@@ -212,6 +181,142 @@ impl BinaryQuantizer {
         let c_dot_c = r.f32().ok()?;
         Some((BinaryQuantizer { dims, sim, centroid, c_dot_c }, r.pos()))
     }
+}
+
+/// MEASUREMENT KNOB (not for landing): ROLL_BBQ_LEGACY selects the previous intervals.
+fn legacy() -> bool {
+    static L: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *L.get_or_init(|| std::env::var_os("ROLL_BBQ_LEGACY").is_some())
+}
+
+fn legacy_two_means(r: &[f32]) -> (f32, f32) {
+    let d = r.len().max(1) as f32;
+    let mean = r.iter().sum::<f32>() / d;
+    let (mut lo, mut hi) = (mean, mean);
+    let mut threshold = mean;
+    for _ in 0..6 {
+        let (mut s0, mut n0, mut s1, mut n1) = (0f32, 0u32, 0f32, 0u32);
+        for &x in r {
+            if x > threshold {
+                s1 += x;
+                n1 += 1;
+            } else {
+                s0 += x;
+                n0 += 1;
+            }
+        }
+        lo = if n0 > 0 { s0 / n0 as f32 } else { mean };
+        hi = if n1 > 0 { s1 / n1 as f32 } else { mean };
+        let t = (lo + hi) / 2.0;
+        if t == threshold {
+            break;
+        }
+        threshold = t;
+    }
+    (lo, hi)
+}
+
+fn legacy_min_max(r: &[f32]) -> (f32, f32) {
+    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for &x in r {
+        lo = lo.min(x);
+        hi = hi.max(x);
+    }
+    if !lo.is_finite() || !hi.is_finite() || hi <= lo {
+        lo = if lo.is_finite() { lo } else { 0.0 };
+        hi = lo;
+    }
+    (lo, hi)
+}
+
+/// The interval `[a, b]` a residual is quantized over with `bits` bits per dimension
+/// (`x̂ᵢ = a + qᵢ·(b - a)/(2ᵇⁱᵗˢ - 1)`), chosen as Elasticsearch's optimized scalar quantization
+/// chooses it: start from the interval that minimizes the squared error of a normal
+/// distribution with the residual's mean and deviation (`μ ± g·σ`, Lloyd-Max), then alternate
+/// assigning codes and solving for the `(a, b)` that minimize the anisotropic loss
+/// `(1 - λ)·(r·e)²/|r|² + λ·|e|²` (`e = r - x̂`, λ = 0.1) in closed form, while the loss falls.
+/// Weighting the error along `r` more than the rest is what ranks dot products well: a query
+/// near `r` sees mostly that component (Guo et al., "Accelerating Large-Scale Inference with
+/// Anisotropic Vector Quantization", 2020). A plain least-squares fit (λ = 1) shrinks `x̂`
+/// toward the centroid and underestimates every long residual.
+fn optimized_interval(r: &[f32], bits: u32) -> (f32, f32) {
+    const LAMBDA: f64 = 0.1;
+    const ITERS: usize = 5;
+    let levels = ((1u32 << bits) - 1) as f64;
+    let grid = match bits {
+        1 => 0.798,
+        2 => 1.493,
+        3 => 2.051,
+        _ => 2.514,
+    };
+    let d = r.len().max(1) as f64;
+    let (mut min, mut max, mut sum, mut norm2) = (f32::INFINITY, f32::NEG_INFINITY, 0f64, 0f64);
+    for &x in r {
+        min = min.min(x);
+        max = max.max(x);
+        sum += x as f64;
+        norm2 += x as f64 * x as f64;
+    }
+    if !(min.is_finite() && max.is_finite()) || max <= min {
+        let v = if min.is_finite() { min } else { 0.0 };
+        return (v, v);
+    }
+    let mean = sum / d;
+    let sd = (norm2 / d - mean * mean).max(0.0).sqrt();
+    let (min, max) = (min as f64, max as f64);
+    let mut a = (mean - grid * sd).clamp(min, max);
+    let mut b = (mean + grid * sd).clamp(min, max);
+    if !(a.is_finite() && b.is_finite()) || b <= a {
+        (a, b) = (min, max);
+    }
+    // The code fraction `sᵢ ∈ [0, 1]` of each component under `[a, b]`.
+    let frac = |x: f64, a: f64, b: f64| -> f64 {
+        let t = (x.clamp(a, b) - a) / (b - a);
+        if bits == 1 { (t > 0.5) as u8 as f64 } else { (t * levels).round() / levels }
+    };
+    let loss = |a: f64, b: f64| -> f64 {
+        let (mut par, mut iso) = (0f64, 0f64);
+        for &x in r {
+            let x = x as f64;
+            let s = frac(x, a, b);
+            let e = x - (a + (b - a) * s);
+            par += x * e;
+            iso += e * e;
+        }
+        (1.0 - LAMBDA) * par * par / norm2 + LAMBDA * iso
+    };
+    let mut best = loss(a, b);
+    for _ in 0..ITERS {
+        // x̂ = a·(1 - s) + b·s: the loss is a quadratic in (a, b) for fixed codes.
+        let (mut xu, mut xv, mut uu, mut uv, mut vv) = (0f64, 0f64, 0f64, 0f64, 0f64);
+        for &x in r {
+            let x = x as f64;
+            let s = frac(x, a, b);
+            let u = 1.0 - s;
+            xu += x * u;
+            xv += x * s;
+            uu += u * u;
+            uv += u * s;
+            vv += s * s;
+        }
+        let w = (1.0 - LAMBDA) / norm2;
+        let (a11, a12, a22) = (LAMBDA * uu + w * xu * xu, LAMBDA * uv + w * xu * xv, LAMBDA * vv + w * xv * xv);
+        let (b1, b2) = (LAMBDA * xu + w * norm2 * xu, LAMBDA * xv + w * norm2 * xv);
+        let det = a11 * a22 - a12 * a12;
+        if det.abs() <= f64::EPSILON * (a11 * a22).abs() {
+            break;
+        }
+        let (na, nb) = ((b1 * a22 - b2 * a12) / det, (a11 * b2 - a12 * b1) / det);
+        if !(na.is_finite() && nb.is_finite()) || nb <= na {
+            break;
+        }
+        let l = loss(na, nb);
+        if l >= best {
+            break;
+        }
+        (a, b, best) = (na, nb, l);
+    }
+    (a as f32, b as f32)
 }
 
 /// `Σₖ 2ᵏ·popcount(planeₖ ∧ code)`: the dot product of a 4-bit query and a one-bit code.
