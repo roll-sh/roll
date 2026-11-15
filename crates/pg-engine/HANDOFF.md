@@ -11072,6 +11072,136 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Short write transactions, round 6 (agent 235)
+
+BENCH.md "Short write transactions, round 6" has the same-day table and the pairs. Kept, each
+its own commit (`ff6ccea30`, `70e7b9906` on `7c1493375`; measured as `5dc14d2ec`, `1799da4ea`
+on `2947ce5a4`, then again rebased):
+
+1. *An UPDATE's or DELETE's index scan of one unique key reads it with the point probe*
+   (`scan::unique_point_plan` no longer refuses `with_key`). At an MVCC snapshot the scan of an
+   UPDATE's or DELETE's rows has at most one visible row of a unique key, as any other scan
+   has; the newer version of that row is followed after the scan, by the row lock
+   (`Locked::Newer`) and the plan's recheck (ExecUpdate's EvalPlanQual), never by the scan.
+   short_txn's UPDATE found its row through a merging range scan of the primary key's entries
+   (`open_range` 4.0 + `TxnScan::fill_batch` 5.3 µs of 196 in the LBR profile) where the
+   SELECT of the same key took one probe (`point_probe`, 5.2 µs); the UPDATE's scan went from
+   14.7% to 11.1% of user cycles.
+2. *A group commit's fsync wakes the commits it covered and the next one to fsync*. Commits
+   waiting for another's WAL fsync slept on one condvar and `notify_all` woke them all after
+   every fsync: with ~0.77 fsyncs a commit at 8 clients most found they weren't covered and
+   each took the condvar's mutex to sleep again (parking_lot spinning, `sched_yield`, a
+   context switch). Now a waiter goes on `Store::durable_waiters` (timestamp, thread) and
+   parks; `wake_durable` unparks the ones `durable` covers and the first one it doesn't, which
+   fsyncs next (pgrust's directed completion and next-leader handoff: the idea, not its code).
+   Whoever lets go of `sync_lock` wakes, also a commit that took it and found itself durable
+   already: the first build missed that path, and waiters that had gone to sleep seeing the
+   lock held slept the 50 ms park bound (8 clients -15% to -38% tps; caught by the gate).
+   Durability is unchanged: `durable` moves only after the fsync, the WAL write and the
+   timestamp read are under the commit lock as before; a waiter re-checks after it goes on
+   the list, parks at most 50 ms, a closed store wakes all.
+
+Measured (BENCH.md has every pair): the stack against the origin head, plain dist, 4 pairs
+each: instructions per transaction -1.43% (8 clients) and -2.16% (32), down in every pair;
+cycles -3.7% and -5.3%; tps +3.1% and +5.7%; p50 -4.1% and -2.9%. Under PGO (each side its own
+profile), 3 pairs each: instructions -0.67% and -2.26%, cycles -5.1% and -6.8% (every pair),
+tps +1.8% and +2.6%. Point reads: instructions unchanged (-0.00% at the median, 4 pairs).
+Same-day three-server table (BENCH, medians of three rounds): this round's PGO build 14,285
+tps at 8 clients against PostgreSQL 12,631 (1.13x) and pgrust 14,270 (1.00x); at 32 clients
+14,710 against 13,482 (1.09x) and 16,278 (0.90x); at 1 client 3,452 against 2,011 and 2,183.
+The plain dist build: 12,408 at 8 (0.98x PostgreSQL, 0.87x pgrust), 12,417 at 32 (0.92x,
+0.76x), 2,902 at 1. Verification train on the stack (`1799da4ea`, then again after each
+rebase): release, clippy (20 warnings, the baseline), crash_random 1-30 x 4, the power stage
+with and without async commits, debug, regress (0 newly differing), isolation 1647/1648,
+pg_dump_tap 14,609.
+
+What is left, by size:
+
+- **Group commit groups half as much as PostgreSQL's and pgrust's at 32 clients**: fdatasync
+  per commit 0.52-0.57 against 0.26 and 0.25 (8 clients: all about 0.72), context switches a
+  transaction 9.3-10.6 against 6.9 and 6.8. That is the 32-client gap to pgrust (0.90x under
+  PGO): every second commit pays an fsync's kernel time and a sleep. PostgreSQL flushes the
+  WAL inserted up to the moment its flusher gets WALWriteLock, and its waiters
+  (LWLockAcquireOrWait) return when that covered them; roll's leader takes `assigned` under
+  the commit lock before the write. Measure how long the fsync takes against the commit
+  cycle and whether commits appended during the leader's write could join it (a flusher
+  that writes again before it syncs when more arrived, or a short delay while others are
+  inside `append_grouped`, PostgreSQL's commit_siblings idea without its default delay of 0).
+- **An admission limit for many connections on few CPUs**: the dropped nextval step showed a
+  throttle saving 6-13% at 32 clients on 4 CPUs (fewer runnable threads, less system time).
+  A limit on transactions executing at once (a counting semaphore in front of statement
+  execution, about 2x the CPUs) would take that on purpose, and then the nextval step can
+  land for its 8-client gain (+10.7% tps).
+- The per-transaction costs are thin now: the size models (`sizing::updated` 7.3 µs,
+  `inserted_with` 10.5, `Kills` 6.6, `fetched_at` 4 of 196), the memtable's four inserts
+  under the commit lock (`search_position`'s cache misses, 5.6 µs), allocations (mimalloc's
+  pop 17.6 µs self), lock bookkeeping (`Txn::lock` 8.3, `release_locks` 4.4). Profiles in
+  `~/.cache/a235/runs/prof-base-c8/` (base) and `runs/offl/` (the point probe step).
+- PostgreSQL's per-transaction user instructions on the lane are 253k (8 clients) against
+  roll's 279k under PGO and 305k plain (all tasks on the server CPUs).
+
+Dropped (patches in `~/.cache/a235/patches/`):
+
+- *The commit that fsyncs next woken first* (`wake-next-first.patch`, on step 2): against the
+  rebased stack neutral at 8 clients (tps +0.1%, instructions -0.92%, cycles -1.4%, 4 pairs)
+  and at 32 (tps +2.6%, instructions +0.65%, cycles 0.0%, 3 pairs).
+
+- *nextval's logged-ahead value written without waiting for an fsync*
+  (`nextval-unwaited-log.patch`, with a power-cut case `power_cut_keeps_returned_sequence_values`
+  that fails without its commit-side wait). Every 32nd value `Database::nextval` commits the
+  sequence's record as a group commit of its own and waits for its fsync holding the
+  database's sequence mutex: every session's INSERT stops for an fsync. The patch appends it
+  unwaited (`Store::commit_unwaited`) and makes the transaction's synchronous commit wait for
+  it (`Txn::seq_logged`; nextval_internal's xid makes PostgreSQL's commit flush the record).
+  Measured against its base: 8 clients tps +10.7% (every pair up), CPU -3.9%, p50 -5.7%;
+  32 clients tps -6% to -9% with CPU +5% to +6% in the clean pairs, and the stack with it
+  against the origin head at 32 clients -13% and -6% tps, CPU +12% and +8% (user work flat:
+  system time). The stall was an accidental admission limit: 32 connections' threads on 4
+  CPUs contend less while every 32nd INSERT holds them all for an fsync. It can land once
+  the engine limits how many transactions run at once (a deliberate admission control, or a
+  run queue in front of the executor), not before.
+- *The memtable's skiplist read under one epoch pin* (`memtable-epoch-reads.patch`):
+  crossbeam's `SkipMap` takes and drops a count on every entry it hands out (two atomic
+  writes and two pins a lookup); base `SkipList` with the guard API. 8 clients -1.2%
+  instructions, -1.3% cycles (every pair down); 32 clients neutral over four pairs (+0.5%
+  cycles). Not a clear win.
+
+Agent 233's commits (`5526bfef4..7c1493375`, the coordinator's request; BENCH has the pairs):
+about +1% instructions per transaction (8 clients +0.95%, 32 clients +1.44% at the median of
+five clean pairs each, 7 of 10 up), no cycles or tps cost (-0.3% / 0.0% cycles, +1.2% / 0.0%
+tps). The bisection puts it at `f0813f84d` (planning-time PL/pgSQL calls: +1.39%; the next two
+commits add nothing beyond the noise). Instructions sampled by symbol differ only in the
+store's SST read path (`sst::Block::seek` and its callers, about +0.85%), which the commit
+doesn't touch, with the same SST files in the store at every run's start for both builds;
+nothing the commit added shows on short_txn's path. Not fixed: there is no work of the commit
+on the path to take back. Check it again with longer runs on a quiet host before acting on it
+(a layout effect of the fat LTO build is the leading guess: `BoundQuery` and `Binder` grew).
+
+Method notes for the next round:
+
+- The harness's instruction counts were wrong in three ways, each found by repeating one
+  binary: (a) a per-thread window divided by tps × window; (b) three perf sessions at once
+  multiplexing the counters (each counted ~a third, scaled); (c) flushes and compactions run
+  on a `roll-flush` thread a connection spawns, folded into that connection's count, and a
+  whole-process count also takes in other variable work (+7% between runs of one binary).
+  Now (`~/.cache/a235/bench`): `perf record -e instructions:u,cycles:u -c 100003 -p <server>`
+  over the whole run, inherited, samples counted by thread name: foreground = every thread
+  but `roll-flush` (a connection is sampled as `roll-engine` until it names itself), divided
+  by the run's exact transaction count. One binary repeats within about ±1.5% (instructions)
+  and ±4% (cycles) on a loaded host.
+- The lane is shared with unpinned work (other sessions' builds at nice 19, a java process at
+  ~4 cores, load averages of 40-70 in the evening): the servers ran with `--cpu-shares 2`
+  (cgroup weight 1, below a nice-19 task's 15) and lost their CPUs to it; now the default
+  weight for all three servers. Pairs wait for the machine's load average below 32 and are
+  redone above 1.0 foreign core (4 tries); at 1 client almost every run has more (the server
+  leaves 3 of the lane's 4 CPUs idle and others fill them), so 1-client cells can't be gated
+  on this host while it is busy.
+- Ports 54710-54729 are inside the ephemeral range (32768-60999): a client connection can
+  hold one as its local port, and a server binding it fails ("Address already in use"; it
+  stopped the first train's isolation step). The harness rotates ports and retries.
+- The connection threads poll up to 50 µs before sleeping: those instructions count as user
+  work and move with load and latency (a change that removes a wait can add instructions).
+
 ## Short write transactions, round 5 (agent 218)
 
 **Landed by agent 225** (2026-11-13), the ten steps below plus a clippy commit, gated on
