@@ -190,6 +190,10 @@ async fn a_local_tree_is_planned_before_anything_is_made() {
     let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).args(["up", "empty", "-p", "acme"]).current_dir(t.work.path()).env("ROLL_API_URL", &t.api).env_remove("ROLL_API_KEY").output().await.unwrap();
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("couldn't tell how to build"), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(t.json(&["list"]).await, serde_json::json!([]), "nothing made");
+    // Every command completes in a shell.
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).args(["completion", "zsh"]).output().await.unwrap();
+    let script = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && script.contains("#compdef roll") && script.contains("routes"), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
