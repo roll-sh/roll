@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -66,6 +67,12 @@ func (f *fakeRolld) rest(w http.ResponseWriter, r *http.Request, kind string, it
 		switch kind {
 		case "cas":
 			b["certificate"], b["max_days"] = "-----BEGIN CERTIFICATE-----", 90
+			// As roll keeps them: lowercase, without a trailing dot.
+			var ds []any
+			for _, d := range b["domains"].([]any) {
+				ds = append(ds, strings.TrimSuffix(strings.ToLower(d.(string)), "."))
+			}
+			b["domains"] = ds
 		case "ssh-cas":
 			b["public_key"], b["max_hours"], b["max_host_days"] = "ssh-ed25519 AAAA roll-secrets:"+b["name"].(string), 24, 90
 		case "transit":
@@ -74,6 +81,10 @@ func (f *fakeRolld) rest(w http.ResponseWriter, r *http.Request, kind string, it
 			f.adminURLs = append(f.adminURLs, b["url"].(string))
 			delete(b, "url")
 			b["host"] = "db.example.com"
+			// Trimmed, as roll keeps it.
+			if ca, ok := b["ca"].(string); ok {
+				b["ca"] = strings.TrimSpace(ca)
+			}
 		}
 		items[b["id"].(string)] = b
 		answer := map[string]any{}
@@ -329,7 +340,8 @@ func TestRegistrationsAsCode(t *testing.T) {
 	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
-	config := fmt.Sprintf(`
+	config := func(vault string) string {
+		return fmt.Sprintf(`
 provider "roll" {
   api_url = %q
   token   = "rlt_terraform"
@@ -337,7 +349,7 @@ provider "roll" {
 }
 resource "roll_secrets_ca" "internal" {
   name    = "internal"
-  domains = ["svc.internal"]
+  domains = ["Svc.Internal."]
 }
 resource "roll_secrets_ssh_ca" "fleet" {
   name         = "fleet"
@@ -345,20 +357,31 @@ resource "roll_secrets_ssh_ca" "fleet" {
   host_domains = ["svc.internal"]
 }
 resource "roll_secrets_transit_key" "cards" {
-  name = "cards"
+  name                = "cards"
+  deletion_protection = false
 }
+%s
 resource "roll_secrets_outside_database" "rds" {
   name                 = "rds"
   admin_url_wo         = "postgres://admin:s3cret@db.example.com:5432/app"
   admin_url_wo_version = 1
   roles                = ["app_blue", "app_green"]
+  ca                   = "-----BEGIN CERTIFICATE-----\n"
 }
-`, srv.URL)
+`, srv.URL, vault)
+	}
+	protected := `resource "roll_secrets_transit_key" "vault" {
+  name = "vault"
+}`
+	unprotected := `resource "roll_secrets_transit_key" "vault" {
+  name                = "vault"
+  deletion_protection = false
+}`
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){"roll": providerserver.NewProtocol6WithError(New("test")())},
 		TerraformVersionChecks:   []tfversion.TerraformVersionCheck{tfversion.SkipBelow(tfversion.Version1_11_0)},
 		Steps: []resource.TestStep{{
-			Config: config,
+			Config: config(protected),
 			Check: resource.ComposeAggregateTestCheckFunc(
 				resource.TestCheckResourceAttr("roll_secrets_ca.internal", "certificate", "-----BEGIN CERTIFICATE-----"),
 				resource.TestCheckResourceAttr("roll_secrets_ca.internal", "max_days", "90"),
@@ -378,6 +401,17 @@ resource "roll_secrets_outside_database" "rds" {
 					return nil
 				},
 			),
+		}, {
+			// Values roll keeps normalised, as configured: nothing to change.
+			Config:   config(protected),
+			PlanOnly: true,
+		}, {
+			// A protected key isn't destroyed (a rename, or taking it out of the configuration)…
+			Config:      config(""),
+			ExpectError: regexp.MustCompile("deletion_protection"),
+		}, {
+			// …until protection is turned off, in place.
+			Config: config(unprotected),
 		}},
 		CheckDestroy: func(*terraform.State) error {
 			f.mu.Lock()

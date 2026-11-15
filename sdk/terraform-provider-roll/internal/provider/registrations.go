@@ -4,11 +4,13 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
@@ -34,6 +36,8 @@ type registration[M any] struct {
 	fill func(m *M, v map[string]any)
 	// deletePath is the DELETE path under the project, when it isn't route/id.
 	deletePath func(m *M) string
+	// guard refuses a delete with its reason (deletion protection), or "".
+	guard func(m *M) string
 }
 
 func (r *registration[M]) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -113,8 +117,13 @@ func (r *registration[M]) Read(ctx context.Context, req resource.ReadRequest, re
 	resp.State.RemoveResource(ctx)
 }
 
-func (r *registration[M]) Update(_ context.Context, _ resource.UpdateRequest, resp *resource.UpdateResponse) {
-	resp.Diagnostics.AddError(r.what+"s don't change in place", "every attribute replaces it")
+// Update only changes what roll doesn't keep (deletion protection): everything else replaces it.
+func (r *registration[M]) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var m M
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &m)...)
+	if !resp.Diagnostics.HasError() {
+		resp.Diagnostics.Append(resp.State.Set(ctx, m)...)
+	}
 }
 
 func (r *registration[M]) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -122,6 +131,12 @@ func (r *registration[M]) Delete(ctx context.Context, req resource.DeleteRequest
 	resp.Diagnostics.Append(req.State.Get(ctx, &m)...)
 	if resp.Diagnostics.HasError() {
 		return
+	}
+	if r.guard != nil {
+		if why := r.guard(&m); why != "" {
+			resp.Diagnostics.AddError("the "+r.what+" is protected", why)
+			return
+		}
 	}
 	proj, id := r.keys(&m)
 	p := r.base(proj.ValueString()) + "/" + url.PathEscape(id.ValueString())
@@ -190,6 +205,38 @@ func jList(v map[string]any, k string, keepNull types.List) types.List {
 	return listOf(out, keepNull)
 }
 
+// sameString keeps the configured value when the server's is it normalised (trimmed): Terraform
+// requires what's applied to match the configuration.
+func sameString(configured, answered types.String) types.String {
+	if !configured.IsNull() && !configured.IsUnknown() && strings.TrimSpace(configured.ValueString()) == strings.TrimSpace(answered.ValueString()) {
+		return configured
+	}
+	return answered
+}
+
+// sameDomains keeps the configured domains when the server's are them normalised (lowercase,
+// without a trailing dot).
+func sameDomains(ctx context.Context, configured types.List, answered map[string]any, k string) types.List {
+	got := jList(answered, k, configured)
+	if configured.IsNull() || configured.IsUnknown() {
+		return got
+	}
+	var want []string
+	if configured.ElementsAs(ctx, &want, false).HasError() {
+		return got
+	}
+	var have []string
+	if got.ElementsAs(ctx, &have, false).HasError() || len(have) != len(want) {
+		return got
+	}
+	for i := range want {
+		if strings.TrimSuffix(strings.ToLower(strings.TrimSpace(want[i])), ".") != have[i] {
+			return got
+		}
+	}
+	return configured
+}
+
 // optional sets body[k] when v is known and set.
 func setInt(body map[string]any, k string, v types.Int64) {
 	if !v.IsNull() && !v.IsUnknown() {
@@ -227,7 +274,7 @@ func newCaResource() resource.Resource {
 		},
 		fill: func(m *caModel, v map[string]any) {
 			m.ID, m.Name, m.Certificate, m.AllowIP, m.MaxDays = jStr(v, "id"), jStr(v, "name"), jStr(v, "certificate"), jBool(v, "allow_ip"), jInt(v, "max_days")
-			m.Domains = jList(v, "domains", m.Domains)
+			m.Domains = sameDomains(context.Background(), m.Domains, v, "domains")
 		},
 	}
 }
@@ -270,17 +317,18 @@ func newSshCaResource() resource.Resource {
 		},
 		fill: func(m *sshCaModel, v map[string]any) {
 			m.ID, m.Name, m.PublicKey, m.KnownHosts, m.MaxHours, m.MaxHostDays = jStr(v, "id"), jStr(v, "name"), jStr(v, "public_key"), jStr(v, "known_hosts"), jInt(v, "max_hours"), jInt(v, "max_host_days")
-			m.Principals, m.HostDomains = jList(v, "principals", m.Principals), jList(v, "host_domains", m.HostDomains)
+			m.Principals, m.HostDomains = jList(v, "principals", m.Principals), sameDomains(context.Background(), m.HostDomains, v, "host_domains")
 		},
 	}
 }
 
 // roll_secrets_transit_key: a named encryption key that never leaves roll.
 type transitKeyModel struct {
-	ID            types.String `tfsdk:"id"`
-	Project       types.String `tfsdk:"project"`
-	Name          types.String `tfsdk:"name"`
-	LatestVersion types.Int64  `tfsdk:"latest_version"`
+	ID                 types.String `tfsdk:"id"`
+	Project            types.String `tfsdk:"project"`
+	Name               types.String `tfsdk:"name"`
+	LatestVersion      types.Int64  `tfsdk:"latest_version"`
+	DeletionProtection types.Bool   `tfsdk:"deletion_protection"`
 }
 
 func newTransitKeyResource() resource.Resource {
@@ -290,6 +338,8 @@ func newTransitKeyResource() resource.Resource {
 		schema: map[string]schema.Attribute{
 			"name":           reqString("The key's name (what clients call transit(name) with)."),
 			"latest_version": schema.Int64Attribute{Computed: true, Description: "Its newest version (rotations add one).", PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()}},
+			"deletion_protection": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(true),
+				Description: "Refuse to destroy the key (default true): what it encrypted can't be read after, and a rename would destroy it. Set false and apply first."},
 		},
 		keys: func(m *transitKeyModel) (*types.String, *types.String) { return &m.Project, &m.ID },
 		body: func(_ context.Context, m *transitKeyModel, _ func(string) types.String, _ *diag.Diagnostics) map[string]any {
@@ -297,6 +347,12 @@ func newTransitKeyResource() resource.Resource {
 		},
 		fill: func(m *transitKeyModel, v map[string]any) {
 			m.ID, m.Name, m.LatestVersion = jStr(v, "id"), jStr(v, "name"), jInt(v, "latest_version")
+		},
+		guard: func(m *transitKeyModel) string {
+			if m.DeletionProtection.ValueBool() {
+				return "roll_secrets_transit_key." + m.Name.ValueString() + " has deletion_protection: what it encrypted can't be read once it's destroyed. Set deletion_protection = false and apply first."
+			}
+			return ""
 		},
 		// By name, with the name as its confirmation (what it encrypted can't be read after).
 		deletePath: func(m *transitKeyModel) string {
@@ -351,10 +407,10 @@ func newOutsideDatabaseResource() resource.Resource {
 			m.ID, m.Name, m.Host, m.AdminURLWO = jStr(v, "id"), jStr(v, "name"), jStr(v, "host"), types.StringNull()
 			m.Roles = jList(v, "roles", m.Roles)
 			if g := jStr(v, "group"); !g.IsNull() || !m.Group.IsNull() {
-				m.Group = g
+				m.Group = sameString(m.Group, g)
 			}
 			if c := jStr(v, "ca"); !c.IsNull() || !m.CA.IsNull() {
-				m.CA = c
+				m.CA = sameString(m.CA, c)
 			}
 		},
 	}

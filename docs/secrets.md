@@ -131,8 +131,9 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
 - **`data.roll_secrets_values`** is an environment's resolved values, for another provider.
 - **What a project registers itself**: **`roll_secrets_ca`** (domains, `allow_ip`, `max_days`; the
   CA's `certificate` out), **`roll_secrets_ssh_ca`** (principals, host domains; its `public_key` and
-  `known_hosts` out), **`roll_secrets_transit_key`** (an encryption key; destroying it confirms with
-  its name, and what it encrypted can't be read after) and **`roll_secrets_outside_database`**
+  `known_hosts` out), **`roll_secrets_transit_key`** (an encryption key, with `deletion_protection` on by
+  default: what it encrypted can't be read once it's destroyed, so a rename or removal fails until
+  it's turned off) and **`roll_secrets_outside_database`**
   (roles, group, CA; its admin URL `admin_url_wo` is write-only, Terraform 1.11+: sent once and
   sealed in roll, never in the state, and bumping `admin_url_wo_version` registers it again). roll
   changes none in place, so every attribute replaces them; keys link to them as to any resource.
