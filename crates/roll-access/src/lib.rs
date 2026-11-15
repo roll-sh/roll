@@ -246,6 +246,8 @@ pub struct Config {
     pub metadata_allow_private: bool,
     /// Where GitHub's secret scanning keys are fetched from (tests point it elsewhere).
     pub github_keys_url: String,
+    /// How often a device signing in may poll (RFC 8628's `interval`; tests shorten it).
+    pub device_interval: std::time::Duration,
 }
 
 impl Default for Config {
@@ -262,6 +264,7 @@ impl Default for Config {
             refresh_grace: std::time::Duration::from_millis(store::REFRESH_GRACE_MS as u64),
             metadata_allow_private: false,
             github_keys_url: leaks::GITHUB_KEYS.into(),
+            device_interval: std::time::Duration::from_secs(5),
         }
     }
 }
@@ -446,13 +449,45 @@ impl Resolver for Fns {
     }
 }
 
-/// Open registrations by network, each with its last minute's times: a sliding window, so a burst
-/// across a minute's edge counts as one minute (a fixed window let through twice the limit there).
+/// What a key (a network, a caller) did in the last minute: a sliding window, so a burst across a
+/// minute's edge counts as one minute (a fixed window let through twice the limit there). Open
+/// registration, device requests and wrong device codes each keep one.
 #[derive(Default)]
-pub(crate) struct Registrations {
-    /// When the map was last swept of networks idle a minute (one sweep a minute, no scan per request).
-    pub swept: i64,
-    pub by: std::collections::HashMap<String, std::collections::VecDeque<i64>>,
+pub(crate) struct Window {
+    /// When the map was last swept of keys idle a minute (one sweep a minute, no scan per request).
+    swept: i64,
+    by: std::collections::HashMap<String, std::collections::VecDeque<i64>>,
+}
+
+/// Why a [`Window`] refused.
+pub(crate) enum Refused {
+    /// The map is full of other keys (at most 10,000).
+    Busy,
+    /// This key used its minute.
+    Key,
+}
+
+impl Window {
+    /// Count one for `key` now, unless it already has `per_minute` in the last minute.
+    pub(crate) fn admit(&mut self, key: &str, now: i64, per_minute: usize) -> std::result::Result<(), Refused> {
+        let minute_ago = now - 60_000;
+        if self.swept < minute_ago {
+            self.by.retain(|_, times| times.back().is_some_and(|t| *t > minute_ago));
+            self.swept = now;
+        }
+        if !self.by.contains_key(key) && self.by.len() >= 10_000 {
+            return Err(Refused::Busy);
+        }
+        let times = self.by.entry(key.to_string()).or_default();
+        while times.front().is_some_and(|t| *t <= minute_ago) {
+            times.pop_front();
+        }
+        if times.len() >= per_minute {
+            return Err(Refused::Key);
+        }
+        times.push_back(now);
+        Ok(())
+    }
 }
 
 /// The access service: the store, the catalogue and the resolvers.
@@ -477,9 +512,12 @@ pub struct Access {
     pub(crate) mail_gate: std::sync::Mutex<MailGate>,
     /// GitHub's secret scanning keys, cached.
     pub(crate) github_keys: leaks::GithubKeys,
-    /// OAuth registrations lately, per network: their times in the last minute (open
-    /// registration's limit).
-    pub(crate) registrations: std::sync::Mutex<Registrations>,
+    /// OAuth registrations lately, per network (open registration's limit).
+    pub(crate) registrations: std::sync::Mutex<Window>,
+    /// Device requests lately, per network (RFC 8628's device authorization is open too).
+    pub(crate) device_starts: std::sync::Mutex<Window>,
+    /// Wrong device codes entered lately, per caller: a user code is short, so guessing is bounded.
+    pub(crate) device_guesses: std::sync::Mutex<Window>,
     /// The token policy as last read (`policy_now`).
     policy_cache: std::sync::Mutex<Option<(std::time::Instant, Policy)>>,
 }
@@ -499,7 +537,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.

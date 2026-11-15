@@ -19,6 +19,7 @@ import { Route as DashboardDatabasesRouteImport } from './routes/dashboard/datab
 import { Route as DashboardStreamsRouteImport } from './routes/dashboard/streams'
 import { Route as DashboardTasksRouteImport } from './routes/dashboard/tasks'
 import { Route as OauthAuthorizeRouteImport } from './routes/oauth/authorize'
+import { Route as OauthDeviceRouteImport } from './routes/oauth/device'
 import { Route as OwnerRepoIndexRouteImport } from './routes/$owner/$repo/index'
 import { Route as OwnerRepoGitReceivePackRouteImport } from './routes/$owner/$repo/git-receive-pack'
 import { Route as OwnerRepoGitUploadPackRouteImport } from './routes/$owner/$repo/git-upload-pack'
@@ -118,6 +119,11 @@ const DashboardTasksRoute = DashboardTasksRouteImport.update({
 const OauthAuthorizeRoute = OauthAuthorizeRouteImport.update({
   id: '/oauth/authorize',
   path: '/oauth/authorize',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OauthDeviceRoute = OauthDeviceRouteImport.update({
+  id: '/oauth/device',
+  path: '/oauth/device',
   getParentRoute: () => rootRouteImport,
 } as any)
 const OwnerRepoIndexRoute = OwnerRepoIndexRouteImport.update({
@@ -393,6 +399,7 @@ export interface FileRoutesByFullPath {
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
+  '/oauth/device': typeof OauthDeviceRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
   '/$owner/$repo/git-receive-pack': typeof OwnerRepoGitReceivePackRoute
@@ -454,6 +461,7 @@ export interface FileRoutesByTo {
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
+  '/oauth/device': typeof OauthDeviceRoute
   '/$owner': typeof OwnerIndexRoute
   '/dashboard': typeof DashboardIndexRoute
   '/$owner/$repo/git-receive-pack': typeof OwnerRepoGitReceivePackRoute
@@ -517,6 +525,7 @@ export interface FileRoutesById {
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
+  '/oauth/device': typeof OauthDeviceRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
   '/$owner/$repo/git-receive-pack': typeof OwnerRepoGitReceivePackRoute
@@ -581,6 +590,7 @@ export interface FileRouteTypes {
     | '/dashboard/streams'
     | '/dashboard/tasks'
     | '/oauth/authorize'
+    | '/oauth/device'
     | '/$owner/'
     | '/dashboard/'
     | '/$owner/$repo/git-receive-pack'
@@ -642,6 +652,7 @@ export interface FileRouteTypes {
     | '/dashboard/streams'
     | '/dashboard/tasks'
     | '/oauth/authorize'
+    | '/oauth/device'
     | '/$owner'
     | '/dashboard'
     | '/$owner/$repo/git-receive-pack'
@@ -704,6 +715,7 @@ export interface FileRouteTypes {
     | '/dashboard/streams'
     | '/dashboard/tasks'
     | '/oauth/authorize'
+    | '/oauth/device'
     | '/$owner/'
     | '/dashboard/'
     | '/$owner/$repo/git-receive-pack'
@@ -767,6 +779,7 @@ export interface RootRouteChildren {
   DashboardStreamsRoute: typeof DashboardStreamsRoute
   DashboardTasksRoute: typeof DashboardTasksRoute
   OauthAuthorizeRoute: typeof OauthAuthorizeRoute
+  OauthDeviceRoute: typeof OauthDeviceRoute
   OwnerIndexRoute: typeof OwnerIndexRoute
   DashboardIndexRoute: typeof DashboardIndexRoute
   DashboardAccessApprovalsRoute: typeof DashboardAccessApprovalsRoute
@@ -878,6 +891,13 @@ declare module '@tanstack/react-router' {
       path: '/oauth/authorize'
       fullPath: '/oauth/authorize'
       preLoaderRoute: typeof OauthAuthorizeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/oauth/device': {
+      id: '/oauth/device'
+      path: '/oauth/device'
+      fullPath: '/oauth/device'
+      preLoaderRoute: typeof OauthDeviceRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/$owner/$repo/': {
@@ -1287,6 +1307,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardStreamsRoute: DashboardStreamsRoute,
   DashboardTasksRoute: DashboardTasksRoute,
   OauthAuthorizeRoute: OauthAuthorizeRoute,
+  OauthDeviceRoute: OauthDeviceRoute,
   OwnerIndexRoute: OwnerIndexRoute,
   DashboardIndexRoute: DashboardIndexRoute,
   DashboardAccessApprovalsRoute: DashboardAccessApprovalsRoute,

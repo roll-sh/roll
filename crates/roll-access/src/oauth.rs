@@ -33,6 +33,7 @@ pub fn public_router(access: Arc<Access>) -> Router {
         .route("/v1/access/oauth/register", post(register))
         .route("/v1/access/oauth/token", post(token))
         .route("/v1/access/oauth/revoke", post(revoke))
+        .route("/v1/access/oauth/device_authorization", post(device_authorization))
         // GitHub's secret scanning reports: their signature is the credential.
         .route("/v1/access/leaks/github", post(crate::leaks::github))
         .with_state(access)
@@ -69,9 +70,10 @@ async fn server_metadata(State(a): S) -> Json<Value> {
         "token_endpoint": format!("{api}/v1/access/oauth/token"),
         "registration_endpoint": format!("{api}/v1/access/oauth/register"),
         "revocation_endpoint": format!("{api}/v1/access/oauth/revoke"),
+        "device_authorization_endpoint": format!("{api}/v1/access/oauth/device_authorization"),
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
-        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "grant_types_supported": ["authorization_code", "refresh_token", DEVICE_GRANT],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
         "revocation_endpoint_auth_methods_supported": ["none"],
@@ -110,6 +112,10 @@ struct Registration {
     grant_types: Option<Vec<String>>,
 }
 
+fn too_many(desc: &str) -> Response {
+    (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "60")], Json(json!({ "error": "too_many_requests", "error_description": desc }))).into_response()
+}
+
 fn reg_error(code: &'static str, desc: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": code, "error_description": desc }))).into_response()
 }
@@ -121,41 +127,27 @@ const REGISTER_PER_MINUTE: u32 = 20;
 async fn register(State(a): S, req: axum::extract::Request) -> Response {
     let ip = crate::evaluate::client_ip(&req, &a.config);
     let network = ip.and_then(|i| crate::store::network_of(&i.to_string())).unwrap_or_else(|| "unknown".into());
-    {
-        let now = code_sql::now_ms();
-        let minute_ago = now - 60_000;
-        let mut seen = a.registrations.lock().unwrap_or_else(|e| e.into_inner());
-        // Networks with nothing in the last minute go once a minute; the map holds at most 10,000
-        // and refuses the rest.
-        if seen.swept < minute_ago {
-            seen.by.retain(|_, times| times.back().is_some_and(|t| *t > minute_ago));
-            seen.swept = now;
-        }
-        if !seen.by.contains_key(&network) && seen.by.len() >= 10_000 {
-            return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "60")], Json(json!({ "error": "too_many_requests", "error_description": "too many registrations lately: try again in a minute" }))).into_response();
-        }
-        let times = seen.by.entry(network).or_default();
-        while times.front().is_some_and(|t| *t <= minute_ago) {
-            times.pop_front();
-        }
-        if times.len() >= REGISTER_PER_MINUTE as usize {
-            return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "60")], Json(json!({ "error": "too_many_requests", "error_description": "too many registrations from this network: try again in a minute" }))).into_response();
-        }
-        times.push_back(now);
+    let admitted = a.registrations.lock().unwrap_or_else(|e| e.into_inner()).admit(&network, code_sql::now_ms(), REGISTER_PER_MINUTE as usize);
+    match admitted {
+        Ok(()) => {}
+        Err(crate::Refused::Busy) => return too_many("too many registrations lately: try again in a minute"),
+        Err(crate::Refused::Key) => return too_many("too many registrations from this network: try again in a minute"),
     }
     let Ok(body) = axum::body::to_bytes(req.into_body(), (16 << 10) + 1).await else { return reg_error("invalid_client_metadata", "the registration is too large") };
     if body.len() > 16 << 10 {
         return reg_error("invalid_client_metadata", "the registration is too large");
     }
     let Ok(r) = serde_json::from_slice::<Registration>(&body) else { return reg_error("invalid_client_metadata", "the body must be JSON client metadata") };
-    if r.redirect_uris.is_empty() || r.redirect_uris.len() > 10 || !r.redirect_uris.iter().all(|u| redirect_ok(u)) {
+    // A client that only signs devices in (RFC 8628) has nowhere to be sent back to.
+    let device_only = r.grant_types.as_ref().is_some_and(|g| g.iter().any(|t| t == DEVICE_GRANT) && !g.iter().any(|t| t == "authorization_code"));
+    if (r.redirect_uris.is_empty() && !device_only) || r.redirect_uris.len() > 10 || !r.redirect_uris.iter().all(|u| redirect_ok(u)) {
         return reg_error("invalid_redirect_uri", "redirect_uris: 1-10 URIs, each https, http on localhost, or an app scheme");
     }
     if r.token_endpoint_auth_method.as_deref().is_some_and(|m| m != "none") {
         return reg_error("invalid_client_metadata", "only public clients (token_endpoint_auth_method \"none\", with PKCE) can register");
     }
-    if r.grant_types.as_ref().is_some_and(|g| g.iter().any(|t| t != "authorization_code" && t != "refresh_token")) {
-        return reg_error("invalid_client_metadata", "grant_types: authorization_code and refresh_token");
+    if r.grant_types.as_ref().is_some_and(|g| g.iter().any(|t| t != "authorization_code" && t != "refresh_token" && t != DEVICE_GRANT)) {
+        return reg_error("invalid_client_metadata", "grant_types: authorization_code, refresh_token and urn:ietf:params:oauth:grant-type:device_code");
     }
     // A name as consent and agents show it: no control or invisible characters, no backticks, at
     // most 64 (what a token's name may be).
@@ -172,8 +164,8 @@ async fn register(State(a): S, req: axum::extract::Request) -> Response {
         "client_id": client.id,
         "client_name": client.name,
         "redirect_uris": client.redirect_uris,
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
+        "grant_types": if device_only { json!([DEVICE_GRANT, "refresh_token"]) } else { json!(["authorization_code", "refresh_token"]) },
+        "response_types": if device_only { json!([]) } else { json!(["code"]) },
         "token_endpoint_auth_method": "none",
         "client_id_issued_at": client.created_at / 1000,
     });
@@ -195,6 +187,13 @@ pub struct Consent {
     pub state: Option<String>,
     #[serde(default)]
     pub resource: Option<String>,
+    #[serde(flatten)]
+    pub allowed: Allowed,
+}
+
+/// What a person allows a client, on the consent screen or for a device.
+#[derive(Deserialize)]
+pub struct Allowed {
     /// The connection's name (default: the client's).
     #[serde(default)]
     pub name: Option<String>,
@@ -211,14 +210,21 @@ pub struct Consent {
     pub ask_otherwise: bool,
 }
 
-/// The consent screen's answer, from the operator or a signed-in user (whose connection is
-/// their own: it acts as them): a code for the client, in the redirect the dashboard sends the
-/// browser to.
-pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
-    // A person's connection past what the policy has an admin approve waits for one, as their
-    // tokens do (`asker`: their handle, for the admins' mail).
+/// A consent's grant, before it's written: whose it is, and whether it waits for an admin.
+struct Consented {
+    new: NewGrant,
+    by: String,
+    user: Option<String>,
+    /// The person's handle when it waits for an admin (for the admins' mail).
+    asker: Option<String>,
+}
+
+/// Who consents and what their grant is: the operator's or a person's (whose connection acts as
+/// them, and waits for an admin past what the policy has one approve, as their tokens do); never
+/// a token's.
+fn consented(a: &Arc<Access>, ext: &Extensions, client: &crate::store::Client, allowed: &Allowed) -> crate::Result<Consented> {
     let mut asker = None;
-    let user = match crate::api::who(&a, &ext)? {
+    let user = match crate::api::who(a, ext)? {
         // A signed-in admin's connection is theirs (it acts as the operator while they're one).
         crate::api::Who::Operator => ext.get::<roll_auth::SignedIn>().map(|u| u.user.clone()),
         crate::api::Who::User(u) => {
@@ -227,6 +233,34 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
         }
         crate::api::Who::Grant(_) => return Err(Error::Forbidden("a token never connects an MCP client".into())),
     };
+    a.check_policy(allowed.expires_at)?;
+    let new = NewGrant {
+        name: allowed.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()),
+        rules: allowed.rules.clone(),
+        expires_at: allowed.expires_at,
+        ip_allow: allowed.ip_allow.clone(),
+        rate_per_minute: allowed.rate_per_minute,
+        ask_otherwise: allowed.ask_otherwise,
+        ..Default::default()
+    };
+    let asker = asker.filter(|_| a.policy_now().needs_approval(&new.rules, new.ask_otherwise));
+    Ok(Consented { new: NewGrant { pending: asker.is_some(), ..new }, by: crate::api::actor(ext), user, asker })
+}
+
+/// Mail the admins about a connection that waits for one of them.
+async fn tell_if_waiting(a: &Arc<Access>, asker: Option<String>, grant_id: String) {
+    if let Some(handle) = asker {
+        let a2 = a.clone();
+        if let Ok(Ok(g)) = tokio::task::spawn_blocking(move || a2.store.get(&grant_id)).await {
+            a.tell_admins_waiting(&g, &handle);
+        }
+    }
+}
+
+/// The consent screen's answer, from the operator or a signed-in user (whose connection is
+/// their own: it acts as them): a code for the client, in the redirect the dashboard sends the
+/// browser to.
+pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
     let c: Consent = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
     if c.code_challenge_method.as_deref().unwrap_or("S256") != "S256" {
         return Err(Error::BadRequest("code_challenge_method must be S256".into()));
@@ -239,26 +273,16 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
     {
         return Err(Error::BadRequest(format!("resource must be {}", resource(&a))));
     }
-    let a2 = a.clone();
-    let cid = c.client_id.clone();
-    let client = known_client(&a2, &cid).await?.ok_or_else(|| Error::BadRequest("unknown client_id".into()))?;
+    let client = known_client(&a, &c.client_id).await?.ok_or_else(|| Error::BadRequest("unknown client_id".into()))?;
     if !client.redirect_uris.contains(&c.redirect_uri) {
         return Err(Error::BadRequest("redirect_uri isn't one the client registered".into()));
     }
-    a.check_policy(c.expires_at)?;
-    let new = NewGrant { name: c.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()), rules: c.rules.clone(), expires_at: c.expires_at, not_before: None, ip_allow: c.ip_allow.clone(), rate_per_minute: c.rate_per_minute, ask_otherwise: c.ask_otherwise, pending: false };
-    let asker = asker.filter(|_| a.policy_now().needs_approval(&new.rules, new.ask_otherwise));
-    let new = NewGrant { pending: asker.is_some(), ..new };
-    let (a2, cl, uri, ch, res, by) = (a.clone(), client.clone(), c.redirect_uri.clone(), c.code_challenge.clone(), Some(resource(&a)), crate::api::actor(&ext));
+    let Consented { new, by, user, asker } = consented(&a, &ext, &client, &c.allowed)?;
+    let (a2, cl, uri, ch, res) = (a.clone(), client.clone(), c.redirect_uri.clone(), c.code_challenge.clone(), Some(resource(&a)));
     let (code, grant_id) = tokio::task::spawn_blocking(move || a2.store.issue_code(&cl, &new, crate::store::Issuer { created_by: &by, user: user.as_deref() }, &uri, &ch, res.as_deref()))
         .await
         .map_err(|e| Error::Internal(e.to_string()))??;
-    if let Some(handle) = asker {
-        let a3 = a.clone();
-        if let Ok(Ok(g)) = tokio::task::spawn_blocking(move || a3.store.get(&grant_id)).await {
-            a.tell_admins_waiting(&g, &handle);
-        }
-    }
+    tell_if_waiting(&a, asker, grant_id).await;
     let mut redirect = url::Url::parse(&c.redirect_uri).map_err(|_| Error::BadRequest("redirect_uri isn't a URL".into()))?;
     {
         let mut q = redirect.query_pairs_mut();
@@ -384,7 +408,12 @@ async fn token(State(a): S, headers: HeaderMap, Form(f): Form<HashMap<String, St
             let Some(refresh) = get("refresh_token") else { return Error::OAuth("invalid_request", "refresh_token is required".into()).into_response() };
             tokio::task::spawn_blocking(move || a.store.refresh(&refresh, &client_id, a.config.refresh_grace.as_millis() as i64)).await
         }
-        _ => return Error::OAuth("unsupported_grant_type", "grant_type is authorization_code or refresh_token".into()).into_response(),
+        Some(DEVICE_GRANT) => {
+            let Some(device_code) = get("device_code") else { return Error::OAuth("invalid_request", "device_code is required".into()).into_response() };
+            let interval = a.config.device_interval.as_millis() as i64;
+            tokio::task::spawn_blocking(move || a.store.poll_device(&device_code, &client_id, interval)).await
+        }
+        _ => return Error::OAuth("unsupported_grant_type", "grant_type is authorization_code, refresh_token or urn:ietf:params:oauth:grant-type:device_code".into()).into_response(),
     };
     match r {
         Ok(Ok((grant, access, refresh))) => token_answer(&grant, access, refresh),
@@ -399,6 +428,114 @@ async fn revoke(State(a): S, Form(f): Form<HashMap<String, String>>) -> Response
         let _ = tokio::task::spawn_blocking(move || a.store.revoke_secret(&t)).await;
     }
     StatusCode::OK.into_response()
+}
+
+/// RFC 8628's grant type: a device's poll with its device code.
+pub const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+/// Device requests from one network a minute at most (the endpoint is open, as registration is).
+const DEVICES_PER_MINUTE: usize = 10;
+/// Wrong user codes one caller may enter a minute: 34 bits of code against 10 guesses a minute.
+const GUESSES_PER_MINUTE: usize = 10;
+
+/// RFC 8628 3.1: a device asks to sign in, and gets the code its person enters on roll.
+async fn device_authorization(State(a): S, req: axum::extract::Request) -> Response {
+    let ip = crate::evaluate::client_ip(&req, &a.config);
+    let network = ip.and_then(|i| crate::store::network_of(&i.to_string()));
+    let admitted = a.device_starts.lock().unwrap_or_else(|e| e.into_inner()).admit(network.as_deref().unwrap_or("unknown"), code_sql::now_ms(), DEVICES_PER_MINUTE);
+    if admitted.is_err() {
+        return too_many("too many devices signing in from this network: try again in a minute");
+    }
+    let Ok(body) = axum::body::to_bytes(req.into_body(), 4 << 10).await else { return Error::OAuth("invalid_request", "the request is too large".into()).into_response() };
+    let f: HashMap<String, String> = url::form_urlencoded::parse(&body).into_owned().collect();
+    let Some(client_id) = f.get("client_id").filter(|c| !c.trim().is_empty()).cloned() else { return Error::OAuth("invalid_request", "client_id is required".into()).into_response() };
+    // A scope is a hint for the page's preset: words only.
+    let scope = f.get("scope").filter(|s| s.len() <= 200 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | ':'))).cloned();
+    match known_client(&a, &client_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Error::OAuth("invalid_client", "unknown client_id: register first".into()).into_response(),
+        Err(e) => return e.into_response(),
+    }
+    let a2 = a.clone();
+    let made = tokio::task::spawn_blocking(move || a2.store.start_device(&client_id, scope.as_deref(), network.as_deref())).await;
+    let (device_code, user_code) = match made {
+        Ok(Ok(m)) => m,
+        Ok(Err(e)) => return e.into_response(),
+        Err(e) => return Error::Internal(e.to_string()).into_response(),
+    };
+    let shown = crate::store::show_user_code(&user_code);
+    let page = format!("{}/oauth/device", a.config.web_url.trim_end_matches('/'));
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({
+            "device_code": device_code,
+            "user_code": shown,
+            "verification_uri": page,
+            "verification_uri_complete": format!("{page}?code={shown}"),
+            "expires_in": crate::store::DEVICE_TTL_MS / 1000,
+            "interval": a.config.device_interval.as_secs().max(1),
+        })),
+    )
+        .into_response()
+}
+
+/// The device request a signed-in person's code names, counting a wrong code against them. A
+/// token never looks one up: only a person decides what a device may do.
+async fn device_lookup(a: &Arc<Access>, ext: &Extensions, typed: &str) -> crate::Result<crate::store::DeviceRequest> {
+    if let crate::api::Who::Grant(_) = crate::api::who(a, ext)? {
+        return Err(Error::Forbidden("a token never signs a device in".into()));
+    }
+    let found = match crate::store::normalize_user_code(typed) {
+        Some(code) => {
+            let a2 = a.clone();
+            tokio::task::spawn_blocking(move || a2.store.device_request(&code)).await.map_err(|e| Error::Internal(e.to_string()))??
+        }
+        None => None,
+    };
+    if let Some(r) = found {
+        return Ok(r);
+    }
+    if a.device_guesses.lock().unwrap_or_else(|e| e.into_inner()).admit(&crate::api::actor(ext), code_sql::now_ms(), GUESSES_PER_MINUTE).is_err() {
+        return Err(Error::TooMany("too many wrong codes: wait a minute".into()));
+    }
+    Err(Error::NotFound("no device waits for that code: check it on the device, or start again there".into()))
+}
+
+/// `GET /v1/access/oauth/devices/{code}`: what's asking, from where and since when, for the page.
+pub async fn device_view(State(a): S, ext: Extensions, axum::extract::Path(code): axum::extract::Path<String>) -> crate::Result<Json<Value>> {
+    let r = device_lookup(&a, &ext, &code).await?;
+    let client = known_client(&a, &r.client_id).await?.ok_or_else(|| Error::NotFound("the device's client is gone".into()))?;
+    Ok(Json(json!({
+        "user_code": crate::store::show_user_code(&r.user_code),
+        "client": { "id": client.id, "name": client.name, "uri": client.uri },
+        "scope": r.scope,
+        "network": r.network,
+        "created_at": r.created_at,
+        "expires_at": r.expires_at,
+    })))
+}
+
+/// `POST /v1/access/oauth/devices/{code}`: the person allows the device what the body says (as
+/// the consent screen's `Allowed`); its next poll takes the tokens.
+pub async fn device_approve(State(a): S, ext: Extensions, axum::extract::Path(code): axum::extract::Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
+    let allowed: Allowed = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
+    let r = device_lookup(&a, &ext, &code).await?;
+    let client = known_client(&a, &r.client_id).await?.ok_or_else(|| Error::NotFound("the device's client is gone".into()))?;
+    let Consented { new, by, user, asker } = consented(&a, &ext, &client, &allowed)?;
+    let waits = asker.is_some();
+    let a2 = a.clone();
+    let grant_id = tokio::task::spawn_blocking(move || a2.store.approve_device(&r.user_code, &client, &new, crate::store::Issuer { created_by: &by, user: user.as_deref() }))
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))??;
+    tell_if_waiting(&a, asker, grant_id.clone()).await;
+    Ok(Json(json!({ "grant_id": grant_id, "pending": waits })))
+}
+
+/// `DELETE /v1/access/oauth/devices/{code}`: the person refuses it.
+pub async fn device_deny(State(a): S, ext: Extensions, axum::extract::Path(code): axum::extract::Path<String>) -> crate::Result<StatusCode> {
+    let r = device_lookup(&a, &ext, &code).await?;
+    let a2 = a.clone();
+    tokio::task::spawn_blocking(move || a2.store.deny_device(&r.user_code)).await.map_err(|e| Error::Internal(e.to_string()))??;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Whether a client's name keeps `c`: not a control character, a backtick, or one a person can't

@@ -14,7 +14,7 @@ async fn serve() -> (String, tempfile::TempDir) {
     let workspace = Arc::new(roll_workspace::Workspace::new(ws).unwrap());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://{}", listener.local_addr().unwrap());
-    let config = roll_access::Config { locked: true, approval_wait: std::time::Duration::from_secs(20), api_url: api.clone(), ..Default::default() };
+    let config = roll_access::Config { locked: true, approval_wait: std::time::Duration::from_secs(20), api_url: api.clone(), device_interval: std::time::Duration::from_secs(1), ..Default::default() };
     let access = roll_access::Access::open(&code_sql::Target::Sqlite(dir.path().join("access.db")), Default::default(), config, Default::default()).unwrap();
     let gate = roll_auth::Gate::new(Some(roll_auth::AdminToken::new(OPERATOR).unwrap()), Vec::new());
     gate.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
@@ -106,7 +106,8 @@ async fn a_token_from_the_cli_is_held_to_its_rules() {
 
 /// `roll login` signs a person's CLI in through the browser: it registers itself, the consent
 /// screen's answer comes back to its loopback port, commands with no token set use the login
-/// (within what was allowed), and `roll logout` revokes the connection.
+/// (within what was allowed), and `roll logout` revokes the connection. With no browser here
+/// (`--no-browser`, SSH) it signs in with a code entered on roll instead (RFC 8628).
 #[tokio::test(flavor = "multi_thread")]
 async fn roll_login_signs_the_cli_in_through_the_browser() {
     use std::io::BufRead;
@@ -117,7 +118,8 @@ async fn roll_login_signs_the_cli_in_through_the_browser() {
         c.env_clear().env("PATH", std::env::var("PATH").unwrap_or_default()).env("ROLL_API_URL", &api).env("XDG_CONFIG_HOME", home.path()).args(args);
         c
     };
-    let mut login = bare(&["login", "--no-browser"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    // A browser that opened, as far as the CLI can tell (`$BROWSER`, as gh reads it).
+    let mut login = bare(&["login"]).env("BROWSER", "true").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
     let mut lines = std::io::BufReader::new(login.stderr.take().unwrap()).lines();
     let address = lines.by_ref().map_while(Result::ok).find_map(|l| l.trim().contains("code_challenge=").then(|| l.trim().to_string())).expect("the address to open");
     let asked = url::Url::parse(&address).unwrap();
@@ -156,4 +158,16 @@ async fn roll_login_signs_the_cli_in_through_the_browser() {
     let g: Value = http.get(format!("{api}/v1/access/tokens/{id}")).bearer_auth(OPERATOR).send().await.unwrap().json().await.unwrap();
     assert!(g["revoked_at"].is_number(), "{g}");
     assert!(!bare(&["db", "list"]).output().unwrap().status.success());
+
+    // No browser here: a code to enter on roll, allowed by a person; the CLI's poll takes it.
+    let mut login = bare(&["login", "--no-browser"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let mut lines = std::io::BufReader::new(login.stderr.take().unwrap()).lines();
+    let said = lines.by_ref().map_while(Result::ok).find(|l| l.contains("enter the code")).expect("a code to enter");
+    let code = said.split("enter the code ").nth(1).unwrap().split('.').next().unwrap().trim().to_string();
+    let allow = json!({ "rules": [{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }] });
+    let r = http.post(format!("{api}/v1/access/oauth/devices/{code}")).bearer_auth(OPERATOR).json(&allow).send().await.unwrap();
+    assert!(r.status().is_success(), "{:?}", r.text().await);
+    let out = tokio::task::spawn_blocking(move || login.wait_with_output()).await.unwrap().unwrap();
+    assert!(out.status.success() && String::from_utf8_lossy(&out.stdout).contains("Signed in"), "{out:?}");
+    assert!(bare(&["db", "list"]).output().unwrap().status.success());
 }
