@@ -2779,6 +2779,18 @@ Merging the stack in order (2026-11-14) found what no single pull request could:
   were checked against the landing branch afterwards; everything else is there or extended.
 - Additive everywhere else: routes, catalogue rows, `Options` fields, types and this document.
 
+A sixteenth independent review (2026-11-15, of #63–#72) found three high-severity bugs, all
+fixed on their pull requests: a watch on a caching client delivering old values and stopping
+(#65: watches read fresh, answers with problems aren't kept, and a 304 records one
+`secrets.revalidate` row a day so health and insights still see the reads), the maker chain stopping
+at tokens (#64: resolved through roll-access, and reach judges tokens as their requests are), and
+Terraform refusing values roll normalises (#72, with encryption keys now protected from destroy). Also
+fixed: restarts on unchanged data (#69), leases a read token couldn't end (#66), a decoy check
+passed by throttling (#68), the CSI provider's API over plain HTTP or any host (#63), a signing
+secret printed for SIEM sinks (#70) and system indices for search sinks (#71). Merging #70 and #71
+together: both add `with_project` to rolld's `syncs.rs` (keep one) and change the stream form's
+`urlOk` (keep #71's targets with #70's formats).
+
 A fifteenth independent review (2026-11-14, against Doppler, Infisical, Vault, 1Password, AWS
 Secrets Manager and Akeyless, and the other threads' heads) found two high-severity issues, both
 fixed: roll apps showed sensitive values to whoever could reveal (`ForApps` never set
