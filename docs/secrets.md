@@ -2726,8 +2726,9 @@ user's call).
    resource (dynamic credentials revoked when the run closes) and a write-only `value_wo`. Next:
    resources for CAs, SSH CAs, encryption keys and outside databases. Transit in the Go and Python
    clients is #67.
-5. **AWS through roll's own issuer** (`AssumeRoleWithWebIdentity` with roll's token, the trust
-   policy pinning `sub`, as GCP and Azure already work): no roll credential in AWS at all.
+5. **AWS through roll's own issuer** (#68, on #62): `trust: "oidc"` roles, assumed with
+   `AssumeRoleWithWebIdentity` and a token roll's issuer signs for the project (`sub` pinned, as GCP
+   and Azure): no AWS credential of roll's at all.
 6. **The operator restarts what reads a Secret** when it changes (`spec.rolloutRestart`, as
    Infisical's reload annotation and Vault Secrets Operator's `rolloutRestartTargets`).
 7. **Audit sinks SIEMs take**: headers, and Splunk HEC and Datadog presets (Doppler, Infisical),
