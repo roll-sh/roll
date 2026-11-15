@@ -284,7 +284,13 @@ impl Apps for FakeApps {
         let api = opts.openapi.as_ref().and_then(|_| revs.iter().find_map(|r| self.api.lock().get(r).cloned()));
         self.shots.lock().push(preview.to_string());
         self.states.lock().extend(opts.states.iter().map(|s| s.name.clone()));
-        let pages = opts.pages.iter().map(|p| roll_previews::ports::PageShot { path: p.clone(), png: png.clone(), errors: 0, report: Default::default() }).collect();
+        let pages = opts
+            .pages
+            .iter()
+            .cloned()
+            .chain(opts.browsers.iter().map(|b| format!("browser:{b}")))
+            .map(|path| roll_previews::ports::PageShot { path, png: png.clone(), errors: 0, report: Default::default() })
+            .collect();
         Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None, api }))
     }
     fn status(&self, _: &str, _: &str) -> Option<ServiceState> {

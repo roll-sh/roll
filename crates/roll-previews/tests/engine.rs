@@ -342,8 +342,8 @@ async fn the_seed_runs_once_on_fresh_data_before_services_deploy() {
 }
 
 #[tokio::test]
-async fn a_page_state_is_taken_and_compared_like_a_page() {
-    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "states": [{ "name": "cart", "page": "/", "steps": [{ "click": "#open" }] }] } }));
+async fn page_states_and_other_browsers_are_taken_and_compared_like_pages() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "states": [{ "name": "cart", "page": "/", "steps": [{ "click": "#open" }] }], "browsers": ["firefox"] } }));
     let mut png = Vec::new();
     image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     *e.apps.shot.lock() = Some(png);
@@ -360,6 +360,9 @@ async fn a_page_state_is_taken_and_compared_like_a_page() {
     }
     assert_eq!(state.map(|p| p.base_percent), Some(Some(0.0)), "taken, kept and compared with main's same state");
     assert!(e.apps.states.lock().iter().any(|n| n == "cart"), "the screenshot was asked to reach it");
+    // Another browser's first page the same way.
+    let firefox = e.code.last_report("chg_st").pages.into_iter().find(|p| p.path == "browser:firefox").map(|p| p.base_percent);
+    assert_eq!(firefox, Some(Some(0.0)), "Firefox's first page, compared with main's in Firefox");
 }
 
 #[tokio::test]

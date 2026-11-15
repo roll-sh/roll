@@ -183,6 +183,8 @@ pub struct ShotOptions {
     pub endpoints: Vec<String>,
     /// The first service's page states (`github.states`), by name: `state:<name>` in `pages`.
     pub states: Vec<crate::settings::StateRule>,
+    /// More browsers the first page is taken in (`github.browsers`): `browser:<name>` pages.
+    pub browsers: Vec<String>,
 }
 
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.
