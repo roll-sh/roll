@@ -1289,6 +1289,10 @@ Ranked by what a person notices first. Done so far:
   at a time whatever runs side by side;
 - dynamic credentials (roll secrets' leases) issued to each start of a service and each job,
   renewed while it runs, revoked when it stops (a sleeping preview holds none);
+- with roll apps' #26 on main: Promote (a trusted change's preview's build deployed to
+  production as is, through roll apps' own promote with `expect`, as the person), screenshots of a
+  roll apps service in its instance's network on one node (`Apps::reachable`), and the feedback
+  button on its environment;
 - alarms on previews' failures in the cloud stack (`preview-converge-failures`,
   `preview-screenshot-failures`: most of a quarter-hour's runs failing, never rolling a deploy back);
 - search masks on an index whose name has dots (`logs.2024`): split off at the longest index name
@@ -1436,18 +1440,7 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Promote a preview's deployment to production on roll apps** (Vercel's promote): built on
-   the stacked `feature/roll-previews-on-apps`. The sheet's "Promote <service> to production"
-   (its name typed to confirm) calls roll apps' own `POST …/environments/production/promote`
-   with `from: pv-<id>` as the signed-in person, so roll apps decides who may deploy production
-   (a `deploy`); previews holds no power of its own there. Production gets the preview's image
-   as is (no build) with its own variables (live in `scripts/preview-apps.sh`: production served
-   main, then the change's page). Only a trusted change's preview offers it (a fork's code never
-   gets production's variables), and only for the build the sheet showed: it sends that
-   deployment as roll apps' `expect` (fc6fbf48c), so a newer push deployed since is a 409 from
-   the same read the promotion is made of (live: a promote expecting another deployment refused).
-   It merges into #28 with #26.
-2. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
+1. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
    (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
@@ -1463,34 +1456,31 @@ Ranked by what a person notices first. Done so far:
    host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
    every product port (an image of its own, and roll code's runner changed); on the cloud fleet
    it's security groups, with the cloud thread.
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+3. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-5. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
-   the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
-   #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
-   instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
-   its environment for a visitor through roll, the page's notes from previews). It merges into #28 once #26
-   is on main. On a fleet an instance runs on its service's holder, and Fargate has no container
-   to join: previews' own internal screenshot route, run on the holder through
+4. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node
+   they're done (`Reach` = roll apps' `Apps::reachable`; `scripts/preview-apps.sh`: the apps
+   service screenshotted in its instance's network, main's baseline on roll apps, the feedback
+   button on its environment). On a fleet an instance runs on its service's holder, and Fargate
+   has no container to join: previews' own internal screenshot route, run on the holder through
    `cluster.dispatch(&apps_control::lease_key(service), …)` (the apps thread's advice), joins the
    instance where `reachable` answers (Docker) and else loads the environment's URL through its
-   access link, in the browser container.
-   Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
-   rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
-   Docker-fleet half waits on #26 too.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+   access link, in the browser container. Ranked lower: the cloud fleet runs instances on
+   Fargate, where neither `reachable` nor rolld's Docker screenshot works (a browser task of its
+   own, with the cloud thread).
+5. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+6. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.
