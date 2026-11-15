@@ -2307,7 +2307,7 @@ isn't in the workspace is 404.
 | `GET /links` | | `LinkTarget[]` |
 | `GET /leases` | | `Lease[]` |
 | `DELETE /leases/{id}` | | 204 (whoever may delete there, or the caller it was issued to while it may still reveal there; 403 for another's) |
-| `POST /leases/{id}/renew` | `{ttl_minutes?}` | `Lease` (`reveal` on its environment) |
+| `POST /leases/{id}/renew` | `{ttl_minutes?}` | `Lease` (as ending one: `delete` there, or the caller it was issued to with `reveal`) |
 | `GET /tokens` | | `Token[]` |
 | `POST /tokens` | `NewToken` | 201 `Token & {token}` (shown once) |
 | `DELETE /tokens/{id}` | | 204 |

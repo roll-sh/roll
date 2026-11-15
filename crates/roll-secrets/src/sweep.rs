@@ -161,7 +161,16 @@ impl Secrets {
         let l = self.lease(project, id)?;
         let handle: Option<String> = self.db.read(|c| c.query_row("SELECT handle FROM leases WHERE id = ?", [id], |r| r.get(0)).optional())?;
         let (env, kind, issued_at, expires_at, revoked_at) = (l.environment.clone(), l.kind.clone(), l.issued_at, l.expires_at, l.revoked_at);
-        caller.need(Action::Reveal, &Scope::at(project, &env, &l.path))?;
+        // As ending one: whoever may delete there, or the caller it was issued to while it may
+        // still reveal there (keeping another's credential alive is as much theirs to decide).
+        let at = Scope::at(project, &env, &l.path);
+        if !caller.allows(Action::Delete, &at) {
+            caller.need(Action::Reveal, &at)?;
+            let by: Option<String> = self.db.read(|c| c.query_row("SELECT issued_by FROM leases WHERE id = ?", [id], |r| r.get(0)))?;
+            if by.as_deref() != Some(caller.principal.as_str()) {
+                return Err(Error::Forbidden(format!("{id} wasn't issued to you: renewing another's lease needs delete on {env}")));
+            }
+        }
         if kind != "dynamic" {
             return Err(Error::BadRequest(format!("{id} is a retired credential's: only dynamic leases renew")));
         }

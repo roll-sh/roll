@@ -836,6 +836,7 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     let mine = api.req(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "app:web" })), reader["token"].as_str()).await.1;
     let other = b["leases"][0].as_str().unwrap();
     assert_eq!(api.req(Method::DELETE, &format!("/leases/{other}"), None, reader["token"].as_str()).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(api.req(Method::POST, &format!("/leases/{other}/renew"), None, reader["token"].as_str()).await.0, StatusCode::FORBIDDEN, "nor keep it alive");
     assert_eq!(api.req(Method::DELETE, &format!("/leases/{}", mine["leases"][0].as_str().unwrap()), None, reader["token"].as_str()).await.0, StatusCode::NO_CONTENT);
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
     // Whoever may delete there ends any.
