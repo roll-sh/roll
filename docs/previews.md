@@ -1424,7 +1424,8 @@ Ranked by what a person notices first. Done so far:
    `[[…states]]`), which roll apps allows and leaves opaque (`apps_build::app::screenshots`);
    previews reads it from the tree at the preview's own revision (`<tree>/<source.root>/roll.toml`,
    never the catalog's default-branch copy), checks it with code_preview's rules, and joins it
-   with the project's. On the stacked branch once apps' commit is on `-next`.
+   with the project's. Parsed and checked on #28 (`code_preview::config::Screenshots`,
+   `Source::screenshots`); read for a roll apps service on the stacked branch (apps' 60dd4071a).
 3. **Dynamic credentials a preview renews** (roll secrets' leases): a preview resolves with
    `dynamic: false` today, so a dynamic link inherited from its base is named as a problem.
    Previews converges every few minutes, so it could hold such a lease itself: resolve the

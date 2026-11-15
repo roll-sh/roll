@@ -46,6 +46,50 @@ pub struct RollToml {
     pub preview: Option<PreviewSpec>,
     pub queue: QueueSettings,
     pub main: MainSettings,
+    /// roll apps' `[app.previews.screenshots]`: what roll previews' screenshots of the service do
+    /// (its pages, what to blank, its states), checked here, the rest of `[app]` roll apps' own.
+    pub app_screenshots: Option<Screenshots>,
+}
+
+/// What a service's preview screenshots take beyond its first page, from its repo: `[preview]`'s
+/// `pages`, `hide` and `[[states]]`, or roll apps' `[app.previews.screenshots]`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Screenshots {
+    pub pages: Vec<String>,
+    pub hide: Vec<String>,
+    pub states: Vec<StateRule>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawScreenshots {
+    #[serde(default)]
+    pages: Vec<String>,
+    #[serde(default)]
+    hide: Vec<String>,
+    #[serde(default)]
+    states: Vec<StateRule>,
+}
+
+/// `pages`, `hide` and `states` within roll previews' rules, or what's wrong, under `at`.
+fn screenshot_rules(at: &str, pages: &[String], hide: &[String], states: &[StateRule]) -> Result<(), String> {
+    if pages.len() > 10 || pages.iter().any(|x| !page_path_ok(x) || x == "/") {
+        return Err(format!("{FILE} {at}: pages are at most 10 paths besides / (each starting with /, no spaces, quotes or #)"));
+    }
+    let selector_ok = |s: &str| !s.trim().is_empty() && s.len() <= 200 && !s.contains(['{', '}', '<', ';', '\\']) && !s.contains("/*") && !s.chars().any(char::is_control);
+    if hide.len() > 20 || !hide.iter().all(|s| selector_ok(s)) {
+        return Err(format!("{FILE} {at}: hide is at most 20 CSS selectors"));
+    }
+    let bad_state = states.iter().enumerate().any(|(i, s)| {
+        !state_name_ok(&s.name) || states[..i].iter().any(|o| o.name == s.name) || !page_path_ok(&s.page) || s.steps.is_empty() || s.steps.len() > MAX_STEPS || !s.steps.iter().all(step_ok)
+    });
+    if states.len() > MAX_STATES || bad_state {
+        return Err(format!(
+            "{FILE} {at}: states are at most {MAX_STATES}, each a name (a-z, 0-9, -), a page (a path) and 1 to {MAX_STEPS} steps: click or type on a selector, press one of {}, or wait up to 5000 ms",
+            STEP_KEYS.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -146,8 +190,8 @@ struct RawFile {
     preview: Option<RawPreview>,
     queue: Option<RawQueue>,
     main: Option<RawMain>,
-    /// roll apps' section (`apps_control::config`): read there, only allowed here.
-    #[allow(dead_code)]
+    /// roll apps' section (`apps_control::config`): read there; here only its
+    /// `previews.screenshots`, roll previews'.
     app: Option<toml::Table>,
 }
 
@@ -255,22 +299,7 @@ impl RollToml {
                 if p.name.as_deref().is_some_and(|n| !label(n)) {
                     return Err(format!("{FILE} {at}: name is 1-20 characters of a-z, 0-9 and -"));
                 }
-                let bad_state = p.states.iter().enumerate().any(|(i, s)| {
-                    !state_name_ok(&s.name) || p.states[..i].iter().any(|o| o.name == s.name) || !page_path_ok(&s.page) || s.steps.is_empty() || s.steps.len() > MAX_STEPS || !s.steps.iter().all(step_ok)
-                });
-                if p.pages.len() > 10 || p.pages.iter().any(|x| !page_path_ok(x) || x == "/") {
-                    return Err(format!("{FILE} {at}: pages are at most 10 paths besides / (each starting with /, no spaces, quotes or #)"));
-                }
-                let selector_ok = |s: &str| !s.trim().is_empty() && s.len() <= 200 && !s.contains(['{', '}', '<', ';', '\\']) && !s.contains("/*") && !s.chars().any(char::is_control);
-                if p.hide.len() > 20 || !p.hide.iter().all(|s| selector_ok(s)) {
-                    return Err(format!("{FILE} {at}: hide is at most 20 CSS selectors"));
-                }
-                if p.states.len() > MAX_STATES || bad_state {
-                    return Err(format!(
-                        "{FILE} {at}: states are at most {MAX_STATES}, each a name (a-z, 0-9, -), a page (a path) and 1 to {MAX_STEPS} steps: click or type on a selector, press one of {}, or wait up to 5000 ms",
-                        STEP_KEYS.join(", ")
-                    ));
-                }
+                screenshot_rules(at, &p.pages, &p.hide, &p.states)?;
                 Some(PreviewSpec {
                     name: p.name,
                     image: image(at, p.image)?,
@@ -303,7 +332,17 @@ impl RollToml {
             return Err(format!("{FILE} [queue]: checks names {missing:?}, which isn't a [checks.{missing}] table"));
         }
         let main = raw.main.map(code_control::settings::main).unwrap_or_default();
-        Ok(RollToml { checks, preview, queue, main })
+        // roll apps' `[app.previews.screenshots]`, the rest of `[app]` left to roll apps.
+        let app_screenshots = match raw.app.as_ref().and_then(|a| a.get("previews")).and_then(|p| p.get("screenshots")) {
+            None => None,
+            Some(v) => {
+                let at = "[app.previews.screenshots]";
+                let s: RawScreenshots = v.clone().try_into().map_err(|e| format!("{FILE} {at}: {e}"))?;
+                screenshot_rules(at, &s.pages, &s.hide, &s.states)?;
+                Some(Screenshots { pages: s.pages, hide: s.hide, states: s.states })
+            }
+        };
+        Ok(RollToml { checks, preview, queue, main, app_screenshots })
     }
 }
 
@@ -426,6 +465,11 @@ mod tests {
         assert_eq!(t.queue.batch_size, 4);
         assert!(t.queue.require_change_checks);
         assert!(t.main.auto_revert);
+        assert_eq!(t.app_screenshots, None);
+        // roll apps' service names what roll previews' screenshots do under [app.previews.screenshots].
+        let a = RollToml::parse("[app]\nbuild = \"x\"\n[app.previews.screenshots]\npages = [\"/pricing\"]\nhide = [\".clock\"]\n[[app.previews.screenshots.states]]\nname = \"cart\"\npage = \"/\"\nsteps = [{ press = \"Tab\" }]\n").unwrap();
+        let s = a.app_screenshots.unwrap();
+        assert_eq!((s.pages, s.hide, s.states.len()), (vec!["/pricing".to_string()], vec![".clock".to_string()], 1));
     }
 
     #[test]
@@ -451,6 +495,8 @@ mod tests {
             ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\nhide = [\"a{}\"]", "hide"),
             ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\npages = [\"pricing\"]", "pages"),
             ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\n[[preview.states]]\nname = \"cart\"\npage = \"/\"\nsteps = [{ press = \"F12\" }]", "states"),
+            ("[app.previews.screenshots]\npages = [\"pricing\"]", "[app.previews.screenshots]"),
+            ("[app.previews.screenshots]\nbogus = 1", "[app.previews.screenshots]"),
             ("[queue]\nbatch_size = 0", "batch_size"),
             ("[queue]\nbogus = 1", "bogus"),
             ("[queue]\nchecks = [\"nope\"]", "[checks.nope]"),

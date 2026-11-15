@@ -277,6 +277,17 @@ impl Source for CodeSource {
         Ok(specs)
     }
 
+    async fn screenshots(&self, repo: &str, revision: &str, root: &str) -> anyhow::Result<Option<code_preview::config::Screenshots>> {
+        // A root inside the repo only (`apps/web`), never out of it.
+        let root = root.trim_matches('/');
+        anyhow::ensure!(!root.split('/').any(|p| p == ".." || p == "."), "a service's root stays in its repo: {root:?}");
+        let r = self.repo(repo)?;
+        let cs = self.code.store.resolve_or_404(&r.id, revision)?;
+        let tree = self.code.checkout(&r.id, &cs).await?;
+        let dir = if root.is_empty() { tree.path().to_path_buf() } else { tree.path().join(root) };
+        Ok(RollToml::load(&dir).map_err(anyhow::Error::msg)?.and_then(|t| t.app_screenshots))
+    }
+
     async fn paths(&self, repo: &str, head: &str) -> anyhow::Result<Option<Vec<String>>> {
         let r = self.repo(repo)?;
         let Some(cs) = self.code.store.resolve(&r.id, head)? else { return Ok(None) };
