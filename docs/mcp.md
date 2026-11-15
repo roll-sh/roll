@@ -542,7 +542,7 @@ previews are listed once those products are on.
 | `secrets_transit_hmac` | An HMAC-SHA256 of input by a project's key (input is base64). | `POST /v1/secrets/projects/{project}/transit/{name}/hmac` |
 | `secrets_transit_hmac_verify` | Whether an HMAC of input is the key's. | `POST /v1/secrets/projects/{project}/transit/{name}/hmac/verify` |
 | `secrets_transit_datakey` | A fresh data key for encrypting locally: its plaintext and the same key encrypted by the project's key (store that one). Audited. | `POST /v1/secrets/projects/{project}/transit/{name}/datakey` |
-| `secrets_version_value` | One earlier version's value of a secret (secrets_versions lists them), to compare or roll back. | `GET /v1/secrets/projects/{project}/environments/{env}/secrets/{key}/versions/{v}/value` |
+| `secrets_version_value` | One earlier version's value of a secret (secrets_versions lists them), to compare or roll back. | `GET /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions/{v}/value` |
 | `secrets_renew_lease` | Push a dynamic credential's expiry out, as a long-running consumer does instead of restarting. | `POST /v1/secrets/projects/{project}/leases/{id}/renew` |
 | `secrets_reach` | Who reaches a folder or key, where it flows, who read it (names only; admin): after a leak. | `GET /v1/secrets/projects/{project}/environments/{env}/reach` |
 | `secrets_folder_policies` | An environment's approval policies per folder. | `GET /v1/secrets/projects/{project}/environments/{env}/folder-policies` |
