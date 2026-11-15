@@ -148,21 +148,40 @@ async fn overview(State(apps): S) -> R {
 /// A project in one file, read (no service made): a roll.toml's `[apps]` and `[databases]`, or
 /// a Compose file turned into them, checked as `roll up --all` checks them. The dashboard's import
 /// plans against the project with it and makes what's missing through the usual routes.
-async fn import(b: Bytes) -> R {
-    use apps_build::project::{compose_to_toml, entry_kind, entry_run, parse_project};
+async fn import(State(apps): S, b: Bytes) -> R {
+    use apps_build::project::{VarSpec, compose_to_toml, entry_kind, entry_run, parse_project};
     let v = body(&b)?;
     let text = |k: &str| v.get(k).and_then(Value::as_str);
     if [text("roll_toml"), text("compose")].into_iter().flatten().any(|t| t.len() > 1 << 20) {
         return Err(Error::BadRequest("the file is at most 1 MiB".into()));
     }
-    let (toml_text, notes) = match (text("roll_toml"), text("compose")) {
-        (Some(t), None) => (t.to_string(), Vec::new()),
+    // A repo's own roll.toml (a "deploy to roll" link): its root's, at a revision or its head.
+    let from_repo = match text("repo") {
+        None => None,
+        Some(repo) => {
+            let sources = apps.deps.sources.clone().ok_or_else(|| Error::BadRequest("roll code isn't on this node".into()))?;
+            let rev = match text("revision") {
+                Some(r) => sources.revision(repo, r).await,
+                None => sources.resolve(repo, None).await,
+            }
+            .map_err(|e| Error::BadRequest(format!("{repo}: {e}")))?;
+            let bytes = sources.read_file(repo, &rev.sha, "roll.toml").await.map_err(|e| Error::BadRequest(format!("{repo}: {e}")))?;
+            let bytes = bytes.ok_or_else(|| Error::BadRequest(format!("{repo} has no roll.toml at its root to deploy from")))?;
+            if bytes.len() > 1 << 20 {
+                return Err(Error::BadRequest("the file is at most 1 MiB".into()));
+            }
+            Some(String::from_utf8(bytes).map_err(|_| Error::BadRequest(format!("{repo}'s roll.toml isn't UTF-8")))?)
+        }
+    };
+    let (toml_text, notes) = match (from_repo, text("roll_toml"), text("compose")) {
+        (Some(t), None, None) => (t, Vec::new()),
+        (None, Some(t), None) => (t.to_string(), Vec::new()),
         // Off the runtime's threads: a large file is a few hundred milliseconds of parsing.
-        (None, Some(c)) => {
+        (None, None, Some(c)) => {
             let c = c.to_string();
             tokio::task::spawn_blocking(move || compose_to_toml(&c)).await.map_err(|e| Error::Internal(e.to_string()))?.map_err(|e| Error::BadRequest(e.to_string()))?
         }
-        _ => return Err(Error::BadRequest("give roll_toml or compose".into())),
+        _ => return Err(Error::BadRequest("give one of roll_toml, compose or repo".into())),
     };
     let f = parse_project(&toml_text).map_err(|e| Error::BadRequest(e.to_string()))?;
     let apps: serde_json::Map<String, Value> = f
@@ -175,7 +194,19 @@ async fn import(b: Bytes) -> R {
                 _ => json!({ "kind": "upload", "root": a.root.as_deref().unwrap_or(".") }),
             };
             let links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "name": l })).collect();
-            (n.clone(), json!({ "source": source, "branch": a.branch, "run": entry_run(a), "links": links, "variables": a.variables }))
+            // What to set as it is, what to make (a secret, once), and what to ask whoever makes it.
+            let mut fixed = serde_json::Map::new();
+            let (mut generate, mut ask) = (Vec::new(), Vec::new());
+            for (k, spec) in &a.variables {
+                match spec {
+                    VarSpec::Value(val) => {
+                        fixed.insert(k.clone(), json!(val));
+                    }
+                    VarSpec::Generate(_) => generate.push(json!(k)),
+                    VarSpec::Ask(q) => ask.push(json!({ "name": k, "ask": q.ask, "default": q.default })),
+                }
+            }
+            (n.clone(), json!({ "source": source, "branch": a.branch, "run": entry_run(a), "links": links, "variables": fixed, "generate": generate, "ask": ask }))
         })
         .collect();
     ok(json!({ "roll_toml": toml_text, "notes": notes, "apps": apps, "databases": f.databases }))

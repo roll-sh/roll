@@ -1,5 +1,5 @@
 import { FileUp } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { appsApi, type Link, type ProjectImport, type Service } from "@/lib/apps-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { redisApi } from "@/lib/redis-api";
@@ -118,7 +118,24 @@ function fileOf(text: string, filename: string): { roll_toml: string } | { compo
  * against what the project has (as `roll up --all` plans it), and applied with the usual calls:
  * databases made and placed first, so their variables are in the services' first deploys.
  */
-export function ImportPane({ project, spot, onDone }: { project: WorkspaceProject; spot: { x: number; y: number }; onDone: (made: Service[]) => void }) {
+/** 32 random bytes in hex: a `generate = "secret"` variable, made here, once. */
+export function secretValue(): string {
+  const b = new Uint8Array(32);
+  crypto.getRandomValues(b);
+  return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+/** A new service's variables: the file's values, its secrets made, its questions' answers. */
+export function variablesFor(app: ProjectImport["apps"][string], answers: Record<string, string>, made: () => string = secretValue): Record<string, string> {
+  const out: Record<string, string> = { ...app.variables };
+  for (const name of app.generate ?? []) out[name] = made();
+  for (const q of app.ask ?? []) out[q.name] = answers[q.name] ?? q.default ?? "";
+  return out;
+}
+
+/** `repo`: its own roll.toml (a "deploy to roll" link), read at once, with no file to paste. */
+export function ImportPane({ project, spot, onDone, repo }: { project: WorkspaceProject; spot: { x: number; y: number }; onDone: (made: Service[]) => void; repo?: string }) {
+  const [answers, setAnswers] = useState<Record<string, Record<string, string>>>({});
   const [text, setText] = useState("");
   const [filename, setFilename] = useState("");
   const [read, setRead] = useState<{ imp: ProjectImport; have: ImportHave; steps: ImportStep[] } | null>(null);
@@ -134,7 +151,7 @@ export function ImportPane({ project, spot, onDone }: { project: WorkspaceProjec
     setBusy("reading");
     setError(null);
     try {
-      const imp = await appsApi.importProject(fileOf(text, filename));
+      const imp = await appsApi.importProject(repo ? { repo } : fileOf(text, filename));
       const services = new Map<string, { service: Service; links: Link[] }>();
       for (const s of await appsApi.services(project.id)) services.set(s.name, { service: s, links: await appsApi.links(s.id) });
       // Its databases are the ones on its canvas (another project's `db` is never this one's),
@@ -189,7 +206,8 @@ export function ImportPane({ project, spot, onDone }: { project: WorkspaceProjec
           const at = taken.length === project.resources.length + 1 ? spot : freeSpot(taken);
           taken.push(at);
           const source = a.source.kind === "repo" ? { kind: "repo" as const, repo: a.source.repo, ...(a.source.root ? { root: a.source.root } : {}) } : a.source.kind === "image" ? { kind: "image" as const, image: a.source.image } : { kind: "upload" as const };
-          const s = await appsApi.create({ project: project.id, name, source, ...(Object.keys(a.run).length ? { run: a.run } : {}), ...(Object.keys(a.variables).length ? { variables: a.variables } : {}), ...(links.length ? { links } : {}), ...(a.branch ? { branch: a.branch } : {}), ...at });
+          const variables = variablesFor(a, answers[name] ?? {});
+          const s = await appsApi.create({ project: project.id, name, source, ...(Object.keys(a.run).length ? { run: a.run } : {}), ...(Object.keys(variables).length ? { variables } : {}), ...(links.length ? { links } : {}), ...(a.branch ? { branch: a.branch } : {}), ...at });
           workspace.added(project.id, serviceView(s), at.x, at.y);
           made.push(s);
           continue;
@@ -223,11 +241,26 @@ export function ImportPane({ project, spot, onDone }: { project: WorkspaceProjec
     }
   };
 
+  // A repo's file is read at once: nothing to paste.
+  useEffect(() => {
+    if (repo) void look();
+    // Once per repo.
+  }, [repo]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Questions for the services it makes (one already here keeps its variables).
+  const asks = read ? Object.entries(read.imp.apps).filter(([n]) => !read.have.services.has(n)).flatMap(([n, a]) => (a.ask ?? []).map((q) => ({ app: n, ...q }))) : [];
+  const madeSecrets = read ? Object.entries(read.imp.apps).filter(([n]) => !read.have.services.has(n)).flatMap(([n, a]) => (a.generate ?? []).map((g) => `${n}: ${g}`)) : [];
+  const unanswered = asks.some((q) => !(answers[q.app]?.[q.name] ?? q.default ?? "").trim());
   const stops = read?.steps.some((s) => s.op === "conflict") ?? false;
   const todo = read?.steps.filter((s) => s.op !== "have-db" && s.op !== "have-service" && s.op !== "note").length ?? 0;
 
   return (
     <>
+      {repo ? (
+        <p className="text-[12px] text-muted">
+          <span className="font-mono text-fg">{repo}</span>'s roll.toml, read by rolld; nothing is made until you apply.
+        </p>
+      ) : (
+      <>
       <Label>
         roll.toml or Compose file <span className="font-normal">read by rolld; nothing is made until you apply</span>
       </Label>
@@ -270,6 +303,9 @@ export function ImportPane({ project, spot, onDone }: { project: WorkspaceProjec
           {busy === "reading" ? <span className="shimmer">Reading…</span> : "Read it"}
         </button>
       </div>
+      </>
+      )}
+      {repo && busy === "reading" && <p className="mt-2 text-[12px] text-subtle"><span className="shimmer">Reading it…</span></p>}
       {error && <p className="mt-2 text-[11.5px] text-danger">{error}</p>}
       {read && (
         <div className="rise mt-3">
@@ -292,7 +328,30 @@ export function ImportPane({ project, spot, onDone }: { project: WorkspaceProjec
               ))}
             </ul>
           )}
-          {"compose" in fileOf(text, filename) && (
+          {asks.length > 0 && (
+            <div className="mt-3">
+              <Label>It asks</Label>
+              <div className="space-y-2">
+                {asks.map((q) => (
+                  <label key={`${q.app}.${q.name}`} className="block">
+                    <span className="text-[11.5px] text-muted">
+                      <span className="font-mono text-fg">{q.name}</span> for {q.app}: {q.ask}
+                    </span>
+                    <input
+                      value={answers[q.app]?.[q.name] ?? q.default ?? ""}
+                      onChange={(e) => setAnswers((all) => ({ ...all, [q.app]: { ...all[q.app], [q.name]: e.target.value } }))}
+                      spellCheck={false}
+                      autoComplete="off"
+                      aria-label={`${q.name} for ${q.app}`}
+                      className="mt-1 h-8 w-full rounded-md border border-line-2 bg-canvas px-2 font-mono text-[12px] outline-none focus:border-accent/60"
+                    />
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+          {madeSecrets.length > 0 && <p className="mt-2 text-[11px] text-subtle">Made for you, once, never shown: {madeSecrets.join(", ")}</p>}
+          {!repo && "compose" in fileOf(text, filename) && (
             <a
               href={`data:text/plain;charset=utf-8,${encodeURIComponent(read.imp.roll_toml)}`}
               download="roll.toml"
@@ -303,7 +362,7 @@ export function ImportPane({ project, spot, onDone }: { project: WorkspaceProjec
           )}
           <div className="mt-3 flex items-center gap-2">
             {step ? <span className="shimmer text-[11.5px] text-muted">{step}</span> : <span className="text-[11px] text-subtle">{stops ? "Rename the service in the file, or in roll, then read it again." : todo ? "Nothing is ever deleted: what the file leaves out stays." : "Everything in it is already here."}</span>}
-            <button type="button" disabled={stops || !todo || busy !== ""} onClick={() => void apply()} className="ml-auto inline-flex h-7 items-center rounded-md bg-fg px-2.5 text-[12px] font-medium text-bg disabled:opacity-50">
+            <button type="button" disabled={stops || !todo || unanswered || busy !== ""} onClick={() => void apply()} className="ml-auto inline-flex h-7 items-center rounded-md bg-fg px-2.5 text-[12px] font-medium text-bg disabled:opacity-50">
               {busy === "applying" ? "Applying…" : "Apply"}
             </button>
           </div>

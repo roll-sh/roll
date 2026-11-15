@@ -149,7 +149,12 @@ export interface ProjectImport {
       branch: string | null;
       run: Partial<Run>;
       links: { kind: "postgres" | "redis"; name: string }[];
+      /** What it's set to as it is. */
       variables: Record<string, string>;
+      /** Made once, when the service is (`{ generate = "secret" }`): 32 random bytes in hex. */
+      generate: string[];
+      /** Asked of whoever makes it (`{ ask = "…" }`), its default offered. */
+      ask: { name: string; ask: string; default: string | null }[];
     }
   >;
   databases: Record<string, { kind: "postgres" | "redis" }>;
@@ -762,7 +767,7 @@ export const appsApi = {
   /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
   exportProject: (project: string, databases: Record<string, string>) => call<{ roll_toml: string; notes: string[] }>("POST", `/v1/apps/projects/${enc(project)}/export`, { databases }),
   /** A roll.toml or Compose file read as a project (nothing made). */
-  importProject: (file: { roll_toml: string } | { compose: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
+  importProject: (file: { roll_toml: string } | { compose: string } | { repo: string; revision?: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
 
   services: (project?: string) => call<Service[]>("GET", `/v1/apps/services${qs({ project })}`),
   /** Makes the service and places its card; a repo or an image source deploys to production at once. */

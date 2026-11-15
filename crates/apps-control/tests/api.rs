@@ -61,6 +61,9 @@ impl Sources for FakeCode {
         }
         Ok(Revision { sha: rev.to_string(), message: format!("at {rev}") })
     }
+    async fn read_file(&self, _repo: &str, _revision: &str, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self.files.lock().get(path).map(|v| v.as_bytes().to_vec()))
+    }
     async fn materialize(&self, _repo: &str, _revision: &str, dir: &Path) -> anyhow::Result<()> {
         for (k, v) in self.files.lock().iter() {
             let p = dir.join(k);
@@ -3633,4 +3636,18 @@ async fn files_go_to_and_from_an_instance() {
     assert_eq!(raw("GET", format!("{files}?path=data"), vec![]).await.unwrap().status(), StatusCode::BAD_REQUEST);
     let (_, trail) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
     assert!(trail.to_string().contains("audit.files.written") && trail.to_string().contains("audit.files.read"), "{trail}");
+}
+
+/// A "deploy to roll" link reads a repo's own roll.toml: what to set, what to make (a secret),
+/// what to ask whoever deploys it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_repos_roll_toml_is_read_for_a_deploy_link() {
+    let w = world().await;
+    w.code.files.lock().insert("roll.toml".into(), "[apps.web]\nrepo = \"acme/site\"\n[apps.web.variables]\nNODE_ENV = \"production\"\nSESSION_SECRET = { generate = \"secret\" }\nSTRIPE_KEY = { ask = \"Your Stripe secret key\" }\n".into());
+    let (st, imp) = call(&w.api, "POST", "/v1/apps/import", Some(json!({"repo": "acme/site"}))).await;
+    assert_eq!(st, StatusCode::OK, "{imp}");
+    let web = &imp["apps"]["web"];
+    assert_eq!((&web["variables"], &web["generate"], &web["ask"][0]["name"]), (&json!({"NODE_ENV": "production"}), &json!(["SESSION_SECRET"]), &json!("STRIPE_KEY")), "{imp}");
+    w.code.files.lock().insert("roll.toml".into(), "[apps.web]\nrepo = \"acme/site\"\n[apps.web.variables]\nX = { generate = \"uuid\" }\n".into());
+    assert_eq!(call(&w.api, "POST", "/v1/apps/import", Some(json!({"repo": "acme/site"}))).await.0, StatusCode::BAD_REQUEST, "only secrets are made");
 }

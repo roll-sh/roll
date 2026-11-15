@@ -25,7 +25,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps` | | `Overview` | read |
 | `POST /v1/apps/plan` | `PlanRequest` | `Plan` | read |
 | `POST /v1/apps/projects/{project}/export` | `{ databases? }` (`{"postgres:<ref>": "db"}`: the names of the databases its services link, as the caller lists them; one not named is named after its ref) | `{ roll_toml, notes }`: its services (source, branch, the run settings that differ from a new service's), the postgres and redis databases they link, variables by name only in its header; read back with the parser `roll up --all` uses before it's answered; 409 for a project with no service | read |
-| `POST /v1/apps/import` | `{ roll_toml }` or `{ compose }` (each at most 1 MiB) | `ProjectImport` (read, nothing made: checked as `roll up --all` checks it; 400 says what's wrong) | read |
+| `POST /v1/apps/import` | `{ roll_toml }`, `{ compose }` (each at most 1 MiB), or `{ repo, revision? }` (that roll code repo's root roll.toml, at its default branch's head unless a revision is named: a "deploy to roll" link) | `ProjectImport` (read, nothing made: checked as `roll up --all` checks it; 400 says what's wrong) | read |
 | `GET /v1/apps/services?project=` | | `Service[]` | read |
 | `POST /v1/apps/services` | `NewService` | 201 `Service` | deploy* (a repo or image source deploys production at once; write for an upload source) |
 | `GET /v1/apps/projects/{project}/services` | | `Service[]` | read |
@@ -416,6 +416,8 @@ type ProjectImport = {
     run: Patch<Run>;          // the run settings the entry names
     links: { kind: "postgres" | "redis"; name: string }[]; // databases below, by name
     variables: { [name: string]: string }; // set when the service is made, never over what it has
+    generate: string[];       // `{ generate = "secret" }`: 32 random bytes in hex, made by whoever makes the service, once
+    ask: { name: string; ask: string; default: string | null }[]; // `{ ask = "…" }`: asked of whoever makes it
   } };
   databases: { [name: string]: { kind: "postgres" | "redis" } };
 };

@@ -1666,6 +1666,41 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
 /// `web:`); a roll.toml `[app]` isn't applied.
 /// What a build of `dir` would detect in `env`: its roll.toml `[app]` checked (an error before
 /// anything is pushed) and applied, its lines first in the notes.
+/// A new service's variables from its project file: values as they are, `generate = "secret"` as
+/// 32 random bytes in hex (made here, once), and `ask` asked on this terminal (its default on
+/// Enter); without a terminal an asked one is an error naming it.
+fn fill_vars(app: &str, vars: &std::collections::BTreeMap<String, apps_build::project::VarSpec>) -> anyhow::Result<serde_json::Map<String, Value>> {
+    use apps_build::project::VarSpec;
+    use std::io::{BufRead, IsTerminal, Write};
+    let mut out = serde_json::Map::new();
+    for (k, spec) in vars {
+        let value = match spec {
+            VarSpec::Value(v) => v.clone(),
+            VarSpec::Generate(_) => {
+                let mut b = [0u8; 32];
+                getrandom::fill(&mut b).map_err(|e| anyhow::anyhow!("{e}"))?;
+                b.iter().map(|x| format!("{x:02x}")).collect()
+            }
+            VarSpec::Ask(q) => {
+                anyhow::ensure!(std::io::stdin().is_terminal(), "{app}'s {k} is asked ({}): run this on a terminal", q.ask);
+                let hint = q.default.as_deref().map(|d| format!(" [{d}]")).unwrap_or_default();
+                eprint!("{app} {k}: {}{hint}: ", q.ask);
+                std::io::stderr().flush()?;
+                let mut line = String::new();
+                std::io::stdin().lock().read_line(&mut line)?;
+                let line = line.trim_end_matches(['\r', '\n']).to_string();
+                match (line.is_empty(), &q.default) {
+                    (true, Some(d)) => d.clone(),
+                    (true, None) => bail!("{app}'s {k} needs a value"),
+                    _ => line,
+                }
+            }
+        };
+        out.insert(k.clone(), json!(value));
+    }
+    Ok(out)
+}
+
 fn local_plan(dir: &Path, env: &str) -> anyhow::Result<apps_build::Plan> {
     anyhow::ensure!(dir.is_dir(), "{} isn't a directory", dir.display());
     let base = apps_build::Overrides { process: Some("web".into()), ..Default::default() };
@@ -1785,7 +1820,7 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                     body["run"] = Value::Object(run);
                 }
                 if !a.variables.is_empty() {
-                    body["variables"] = json!(a.variables);
+                    body["variables"] = Value::Object(fill_vars(n, &a.variables)?);
                 }
                 let svc = api.post("/v1/apps/services", body).await?;
                 eprintln!("made service {n}");

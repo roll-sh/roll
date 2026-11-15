@@ -107,9 +107,10 @@ enum Cmd {
     /// roll's MCP server: client config, approvals waiting for you, the audit log.
     #[command(subcommand)]
     Mcp(access::Mcp),
-    /// Shell completions for every command and flag: `roll completion zsh > ~/.zfunc/_roll`
+    /// Shell completions for every command and flag: `roll completions zsh > ~/.zfunc/_roll`
     /// (bash, zsh, fish, powershell, elvish), as `fly completion` and `railway completion`.
-    Completion { shell: clap_complete::Shell },
+    #[command(visible_alias = "completion")]
+    Completions { shell: clap_complete::Shell },
 }
 
 #[derive(Subcommand)]
@@ -416,7 +417,7 @@ async fn main() -> anyhow::Result<()> {
     let admin = cli.roll_token.filter(|t| !t.trim().is_empty()).or(cli.admin_token.filter(|t| !t.trim().is_empty()));
     let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: admin.clone().or(cli.api_key), headers: Vec::new() };
     let cmd = match cli.cmd {
-        Cmd::Completion { shell } => {
+        Cmd::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "roll", &mut std::io::stdout());
             return Ok(());
         }
