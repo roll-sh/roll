@@ -10367,6 +10367,84 @@ entries; the format can now change the restart interval per block, but the study
 misses, not the interval, are the cost); (4) the in-memory column cache (design item 4) against
 a cache sized to the data.
 
+## Storage format v2 landed: review and gates on the rebased head (agent 239)
+
+Agent 231 stopped before pushing; agent 239 took its three commits over (`wip/a231-takeover`),
+rebased them on `bf9366246`, reviewed them, re-ran the gates and the train, and pushed them.
+BENCH "Storage format v2, re-confirmed (agent 239)" has the numbers.
+
+**The upgrade is one-way for data directories.** The first manifest a format 2 build writes
+records `format: 2`, and from then on the store's flushes and compactions write format 2 files.
+A build from before format 2 (anything before this push) cannot read such a store: a client
+connecting to an upgraded database gets `ERROR: sst …/<id>.sst has a bad footer`. There is no
+downgrade tool. Format 1 files are read forever and rewritten lazily; a store stays readable by
+older builds only until a format 2 build writes a file in it (a flush, the flush of WAL replayed
+at open, a compaction): older builds ignore the manifest's `format` and fail on the first file.
+
+- **Train 4's `debug 101`** (agent 231's last train, `1d0dc6602`) was the two load-sensitive wire
+  tests, not the format work: `big_bytea_values_go_out_in_linear_time` (20.23 s against its
+  20 s bound) and `parallel_workers_seen_by_others` (`wait_event` NULL where it waits for
+  PgSleep). On the rebased tree every debug crate test passed, `wire` included.
+- **The 4 kB target fix** of `format_1_files_read_beside_format_2` (231's notes) is in
+  `1d021ce69` (`target_file_bytes: 4 << 10`).
+- **Review** (second pair of eyes on the on-disk change; nothing needed fixing):
+  - Crash safety: a format 2 file is fsynced before its rename, the directory before the
+    manifest's replace (as format 1). The manifest's format is raised in memory at open
+    (`max(manifest, StoreOptions::format)`), so every manifest written after it, the first one
+    naming a format 2 file included, says 2; a crash before that leaves the new files unnamed,
+    and the next open deletes them.
+  - Mixed stores: the reader decides per file, from its footer (format 1's six words or format
+    2's seven), and the bloom hash per file (`hash64` / `hash64_2`) on both the write and the
+    read side; no hash is computed once for several files. Linked runs (`txn::spill`,
+    `create_run`) stay format 1, and a format 2 file with a `commit_ts` is refused at open.
+  - Lazy migration under concurrent compaction: the writer's format comes from
+    `StoreOptions::format`, a constant, not from the inputs, so a compaction of mixed inputs
+    writes format 2 whatever it merges; `block_format.rs`'s `kill_during_upgrade_compactions`
+    (kill -9 during them, three rounds) and the train's crash and power-cut stages cover it.
+  - An old binary on a new store, checked by hand (`~/.cache/a239/scripts/oldbin.sh`): a
+    data directory written and cleanly closed by the head (`format: 2` in every manifest), then
+    `5526bfef4` started on it: it starts, a connection to the database fails with "bad footer",
+    every store file is byte for byte unchanged (only `databases.json`'s LSN counters advance,
+    as at every start), and the head then reads all 171,429 rows with the same checksum. The
+    refusal happens at `SstReader::open`, before WAL replay or any write: nothing is lost.
+  - Corruption: format 2 blocks keep format 1's crc32 over the stored bytes (checked at every
+    read, XX001 `checksum mismatch`). The index, the bloom filter and the footer have no
+    checksum, in either format. `Block::load` trusts a body whose crc holds but still checks the
+    trailer (restart log, restart count, offsets in range); the store code has no `unsafe`, so a
+    body that passed the crc yet is wrong would panic, not read out of bounds. No test covered a
+    corrupted block in either format: added `sst::tests::corrupted_format2_blocks_are_refused`
+    (a flipped byte, raw and zstd: XX001; a zeroed restart log with its crc redone: "bad sst
+    block").
+  - Backup and restore: nothing outside `storage/` parses store files (`pg_backup_start` /
+    `pg_backup_stop`, `CREATE DATABASE`'s template copy `engine::copy_dir` and pg-control's
+    reflink clone of a stopped branch take the files as they are), so they need no change; a
+    restored or cloned upgraded directory is format 2 like its source.
+- **Gates** on plain dist builds of `5526bfef4` (`b239`) and the head (`h239`): bulk -2.0%
+  instructions in every round (compaction after the DELETE -8.2%, VACUUM -10.6%, MB written
+  -4.1%, no step up); TPC-H SF1 at 2 GB level (+0.11 / -0.02 / +0.03%, cycles -2 to -3%), at
+  256 MB -14.3 to -14.8% in all seven rounds (wall 44.4 -> 38.8 s); the data directory after the
+  TPC-H load 638 -> 561 MB; point and range reads and short transactions level (cached reads run
+  the same code on the same bytes; in-process point reads -1.5%, every pair lower; over the wire
+  point select +0.5 / +0.6% at 8 / 32 clients, inside its pairs' spread, and an instruction
+  profile of each server shows no storage symbol among the differences). One figure to watch: the 256 MB pass's VmHWM, median 616 -> 631 MB over seven
+  rounds with overlapping ranges (598-648 against 600-645): no mechanism found (the cache holds
+  the same bytes in exact-size allocations in both); 2 GB, bulk and idle memory are equal.
+- **Dropped**: nothing.
+- **Left**: 231's "Next" list above, item 0 (the small cache) first; then the bulk DELETE and
+  its compaction (13.5 G user instructions against PostgreSQL's 1.7 G on the 1M-row script).
+  Item 0 measured on h239 (TPC-H SF1, 256 MB cache, lane C, `perf record -F 999` of the engine
+  over two runs each of q07 and q09): zstd is 58-60% of the samples of both. 45% is
+  `ZSTD_decompressSequences` (a whole 16 kB block decompressed for the entry or two a probe
+  wants), about 12% the entropy tables each block's header makes a fresh decoder build
+  (`ZSTD_buildFSETable` 5.3-5.4%, `HUF_readDTableX1` 2.4-2.9%, `FSE_readNCount` 1.4%,
+  `FSE_decompress_wksp` 1.4-1.6%, `HUF_readStats` 0.9-1.1%); creating the decompression
+  context per block (`zstd::bulk::decompress`) does not show (no symbol of it at 0.5%), so a
+  reused context alone is not the lever. The levers by that profile: a zstd dictionary per file
+  (its prebuilt tables replace the per-block builds, and 16 kB blocks compress better with one),
+  smaller blocks or none compressed for the files point probes read (the pread then copies what
+  the probe needs from the OS page cache, as PostgreSQL's 8 kB page), each a format change for
+  its own round.
+
 ## Analytic path against pgrust (agent 220)
 
 TPC-H SF1 on lane C (servers on CPUs 14,15,32,33, i.e. two cores with their hyperthreads;
