@@ -418,6 +418,8 @@ if [ -n "$PG_BRANCH" ]; then
   APP_ROLE=$(echo "$APP_DB2" | sed -E 's#^postgres://([^:]+):.*#\1#')
   PLANTED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB2" -Atc "CREATE FUNCTION public.pg_get_indexdef(oid) RETURNS text LANGUAGE plpgsql AS \$f\$ BEGIN EXECUTE 'ALTER ROLE $APP_ROLE SUPERUSER'; RETURN 'x'; END \$f\$; ALTER DATABASE main SET search_path = public, pg_catalog" 2>&1 | tail -1 || true)
   [ "$PLANTED" = "ALTER DATABASE" ] || { echo "the hostile function should have been planted: $PLANTED (env.txt: $(echo "$ENV_TXT" | head -c 300))"; exit 1; }
+  # A note left open across the push: the next head's screenshot run crops its element.
+  api POST "/v1/code/changes/$CHG/reviews" "{\"verdict\":\"comment\",\"body\":\"**Feedback on the preview** · [\`/\`](http://x/) · \`body\`\\n\\nThe whole page\"}" >/dev/null
   api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"New page, again","files":{"index.html":{"content":"preview of change 1, again"},'"$OPENAPI_CHG"'}}' >/dev/null
   SCHEMA=""
   for _ in $(seq 1 120); do
@@ -664,6 +666,17 @@ done
 PHONE=$(curl -sS "http://$API/v1/previews/$PV/screenshot?view=phone" | python3 -c "import sys, struct; b=sys.stdin.buffer.read(); print(f'{struct.unpack(\">I\", b[16:20])[0]} px wide, PNG' if b[:4]==b'\x89PNG' else 'not a PNG')")
 case "$PHONE" in "780 px wide, PNG") ;; *) echo "the phone-width screenshot should be 390 px at twice the density: $PHONE"; exit 1;; esac
 
+say "the open note's element, cropped by the next head's screenshot run"
+CROP_NOTE=""
+for _ in $(seq 1 240); do
+  CROP_NOTE=$(api GET "/v1/previews/$PV/notes" | jq_ "([n['id'] for n in d['notes'] if n.get('crop')] or [''])[0]")
+  [ -n "$CROP_NOTE" ] && break
+  sleep 0.5
+done
+[ -n "$CROP_NOTE" ] || { echo "the open note should get a picture of its element: $(api GET "/v1/previews/$PV/notes")"; exit 1; }
+CROP=$(curl -sS "http://$API/v1/previews/$PV/notes/$CROP_NOTE/crop" | head -c 8 | od -An -tx1 | tr -d ' \n')
+[ "$CROP" = 89504e470d0a1a0a ] || { echo "the note's crop should be a PNG: $CROP"; exit 1; }
+
 say "[skip preview] in the title removes the preview; without it, a new one comes"
 api PATCH "/v1/code/changes/$CHG" '{"title":"New page [skip preview]"}' >/dev/null
 for _ in $(seq 1 120); do
@@ -724,6 +737,7 @@ BRANCHES_LEFT=$(api GET /v1/redis/databases | jq_ "len([x for x in d if x['name'
 cat <<EOF
 | What | Measured |
 | --- | --- |
+| A note's element, cropped by the next head's screenshot run (a PNG) | $CROP_NOTE |
 | A visit to a service frozen after sleep_after (it read as sleeping), instead of a cold start | $((T7 - T6)) ms, the same container |
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |

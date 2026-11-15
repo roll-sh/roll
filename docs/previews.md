@@ -743,6 +743,15 @@ land on the change.
   dismissed; from a terminal `roll preview notes` lists the open ones and `--resolve <id>`
   resolves one), so the button stops listing it. The page holds no credential for this either
   (live: a resolved note folds away).
+- A note shows what it's about (Vercel's comments carry a picture): the next screenshot run of
+  the change's preview crops each open note's element from its page by its selector, in the
+  screenshot's own container at the desktop width (scrolled into view, a 24 px margin, at most
+  1280 by 800). The visitor's browser runs no capture code, so the page's code can't forge the
+  picture, and a selector roll refuses (`selector_ok`) is never sent. At most 10 notes a run,
+  each picture at most 512 KiB, 50 kept a preview; a note already cropped isn't asked again, and
+  one whose element isn't on the page has none. `GET …/notes/{note}/crop` serves it, the notes
+  list says `crop`, and the sheet shows it with the note.
+  `a_notes_element_is_cropped_by_the_next_screenshot`.
 - A note is a thread (Vercel Comments' replies): its Reply opens roll (`?fb_reply=<review id>`)
   on the same view, the note with its replies, a reply box and Resolve. A reply is a `comment`
   review on the change starting "**Reply on the preview** · `<the note's id>`"
@@ -816,7 +825,8 @@ and admins see every project.
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each) | `{vars}`: the preview's own variables; its services redeploy with them |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
-| `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}]}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500) |
+| `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of its element is kept |
+| `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page; 404 until one has |
 | `POST /v1/previews/{id}/notes/{note}/resolve` | | `{resolved}`: a note on the preview's page (its review's id) resolved, so the page stops listing it; 404 for a note that isn't the change's |
 | `GET /v1/previews/{id}/mail` | | `{mail: [{id, at, from, to, subject, size}]}`: what its services sent, caught (newest first, the last 50) |
 | `GET /v1/previews/{id}/mail/{mail}` | | One caught message as sent, as `text/plain` (never rendered) |
@@ -1307,6 +1317,10 @@ Ranked by what a person notices first. Done so far:
   `preview-screenshot-failures`: most of a quarter-hour's runs failing, never rolling a deploy back);
 - idle services frozen before they stop, so a visit in the next half hour is back in tens of
   milliseconds instead of a 3–4 s cold start;
+- a picture of each note's element, cropped by the next screenshot run and shown with the note;
+- the sheet leads with what changed (a verdict strip: failed services, breaking API changes,
+  migration risks, new problems, pages to review, slower endpoints, pages that move by
+  themselves; most serious first, each jumping to its section; `lib/preview-verdict.ts`);
 - search masks on an index whose name has dots (`logs.2024`): split off at the longest index name
   the cluster has, for masking and for the check when set;
 - a tenth review (states, browsers, search masks) and its fixes: a dialog a state's step opens

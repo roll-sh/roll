@@ -922,13 +922,52 @@ async fn a_roll_apps_preview_costs_what_it_runs_with() {
 
 /// The notes on a page, by the preview's environment name (how roll apps' proxy asks for them):
 /// that page's only, nothing for an environment that isn't a preview's.
+/// A note left with the page's Feedback button gets a picture of its element: the next screenshot
+/// run crops it by its selector (only selectors roll accepts, from the preview's code), keeps it
+/// with the note and lists it; a note already cropped isn't asked again, and one whose element
+/// isn't on the page has none.
+#[tokio::test]
+async fn a_notes_element_is_cropped_by_the_next_screenshot() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true } }));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png.clone());
+    let note = |id: &str, selector: &str| roll_previews::notes::Note { id: id.into(), path: "/".into(), selector: selector.into(), note: "look".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false };
+    e.code.feedback.lock().insert("chg_cr".into(), vec![note("rv_h1", "body > h1"), note("rv_gone", "#missing"), note("rv_bad", "h1 { color: red }")]);
+    e.code.open(change("chg_cr", 4));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_cr").unwrap().unwrap();
+    let mut listed = Vec::new();
+    for _ in 0..3000 {
+        listed = e.engine.open_notes(&p.id).await.unwrap();
+        if listed.iter().any(|n| n.crop) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let crop_of = |id: &str| listed.iter().find(|n| n.id == id).map(|n| n.crop);
+    assert_eq!((crop_of("rv_h1"), crop_of("rv_gone"), crop_of("rv_bad")), (Some(true), Some(false), Some(false)));
+    assert_eq!(e.engine.store.note_crop(&p.id, "rv_h1").unwrap(), Some(png));
+    assert_eq!(*e.apps.crops_asked.lock(), ["rv_h1", "rv_gone"], "a selector roll refuses is never sent to the page");
+    // The next head's run asks only for what has no picture yet.
+    e.code.edit("chg_cr", |c| c.head = "cs_5a".into());
+    e.engine.pass().await.unwrap();
+    for _ in 0..3000 {
+        if e.apps.crops_asked.lock().len() > 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(*e.apps.crops_asked.lock(), ["rv_h1", "rv_gone", "rv_gone"]);
+}
+
 #[tokio::test]
 async fn a_pages_notes_by_its_environment_name() {
     let e = env(json!({ "enabled": true }));
     e.code.open(change("chg_n", 4));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_n").unwrap().unwrap();
-    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1, replies: Vec::new() };
+    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false };
     e.code.feedback.lock().insert("chg_n".into(), vec![note("/", "Too big"), note("/about", "Typo")]);
     let env_name = roll_previews::branch_name(&p.id);
     let got = e.engine.notes_for(&env_name, "/").await.unwrap();

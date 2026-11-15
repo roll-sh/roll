@@ -179,6 +179,13 @@ CREATE TABLE IF NOT EXISTS bypass (
     hash TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS note_crops (
+    preview_id TEXT NOT NULL,
+    note_id TEXT NOT NULL,
+    png TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, note_id)
+);
 CREATE TABLE IF NOT EXISTS leases (
     preview_id TEXT NOT NULL,
     service TEXT NOT NULL,
@@ -191,6 +198,13 @@ CREATE TABLE IF NOT EXISTS leases (
 
 /// How long a screenshot link (in a pull request comment) works after the screenshot was taken.
 pub const SCREENSHOT_LINK_MS: i64 = 30 * 24 * 3_600_000;
+
+/// The largest crop of a note's element kept (a PNG).
+pub const CROP_MAX: usize = 512 << 10;
+/// The most crops kept per preview.
+pub const CROPS_KEPT: usize = 50;
+/// The most notes cropped in one screenshot run.
+pub const CROPS_PER_RUN: usize = 10;
 
 /// The newest activity lines kept per preview.
 pub const ACTIVITY_KEEP: i64 = 200;
@@ -765,7 +779,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1859,6 +1873,39 @@ impl Store {
             }
             Ok::<_, Error>(old.into_iter().map(|rev| format!("{service}@{rev}")).collect())
         })
+    }
+
+    // ── note crops: a picture of each note's element, cropped by a screenshot run ──
+
+    /// Keep a note's crop (a PNG of at most [`CROP_MAX`] bytes; a bigger one is dropped), at
+    /// most [`CROPS_KEPT`] a preview (the oldest go).
+    pub fn set_note_crop(&self, id: &str, note: &str, png: &[u8]) -> Result<()> {
+        if png.len() > CROP_MAX || !png.starts_with(b"\x89PNG") {
+            return Ok(());
+        }
+        let now = self.now_ms()?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO note_crops (preview_id, note_id, png, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id, note_id) DO UPDATE SET png = excluded.png, at = excluded.at",
+                params![id, note, b64, now],
+            )?;
+            c.execute(
+                "DELETE FROM note_crops WHERE preview_id = ? AND note_id NOT IN (SELECT note_id FROM note_crops WHERE preview_id = ? ORDER BY at DESC, note_id LIMIT ?)",
+                params![id, id, CROPS_KEPT as i64],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The notes of `id` that have a crop.
+    pub fn cropped_notes(&self, id: &str) -> Result<std::collections::HashSet<String>> {
+        Ok(self.db.read(|c| c.query("SELECT note_id FROM note_crops WHERE preview_id = ?", [id], |r| r.get(0)))?.into_iter().collect())
+    }
+
+    pub fn note_crop(&self, id: &str, note: &str) -> Result<Option<Vec<u8>>> {
+        let row: Option<String> = self.db.read(|c| c.query_row("SELECT png FROM note_crops WHERE preview_id = ? AND note_id = ?", [id, note], |r| r.get(0)).optional())?;
+        Ok(row.and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok()))
     }
 
     // ── leases: the dynamic credentials a service started with (roll secrets'; ids only) ──

@@ -175,6 +175,17 @@ pub struct Shot {
     pub links: Option<crate::PageLinks>,
     /// The service's API operations (`GET /users/{id}`, sorted), from its OpenAPI document.
     pub api: Option<Vec<String>>,
+    /// The notes' elements it cropped ([`ShotOptions::crops`]), by note: PNGs of at most
+    /// [`crate::store::CROP_MAX`] bytes. A note whose element wasn't found is left out.
+    pub crops: Vec<(String, Vec<u8>)>,
+}
+
+/// A note's element to crop in a screenshot run: its page and its selector, both checked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CropAsk {
+    pub note: String,
+    pub path: String,
+    pub selector: String,
 }
 
 /// What a screenshot run takes: the project's other pages, and what it blanks first.
@@ -190,6 +201,9 @@ pub struct ShotOptions {
     pub states: Vec<crate::settings::StateRule>,
     /// More browsers the first page is taken in (`github.browsers`): `browser:<name>` pages.
     pub browsers: Vec<String>,
+    /// The open notes' elements to crop in the first service's run (Vercel's comments show what
+    /// they're about), at most [`crate::store::CROPS_PER_RUN`].
+    pub crops: Vec<CropAsk>,
 }
 
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.

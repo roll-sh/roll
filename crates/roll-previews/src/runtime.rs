@@ -794,7 +794,7 @@ pub const SCREENSHOT_MAX: usize = 2 << 20;
 /// pages'), each at most this, and everything it writes: every PNG it can take, in base64, and
 /// those lines.
 const SHOT_REPORT_MAX: usize = 4 << 20;
-const SHOT_OUTPUT_MAX: usize = (crate::settings::MAX_PAGES + 2) * SCREENSHOT_MAX * 4 / 3 + 2 * SHOT_REPORT_MAX + (64 << 10);
+const SHOT_OUTPUT_MAX: usize = (crate::settings::MAX_PAGES + 2) * SCREENSHOT_MAX * 4 / 3 + 3 * SHOT_REPORT_MAX + crate::store::CROPS_PER_RUN * crate::store::CROP_MAX * 4 / 3 + (64 << 10);
 
 /// The header automation sends a project's bypass secret in (docs/previews.md, "Safety").
 pub const BYPASS_HEADER: &str = "x-roll-preview-bypass";
@@ -1100,6 +1100,17 @@ impl Runtime {
         if !endpoints.is_empty() {
             args.extend(["--env".into(), format!("ENDPOINTS={}", serde_json::to_string(&endpoints)?)]);
         }
+        // The notes' elements to crop, checked again (they come from the preview's code).
+        let crops: Vec<serde_json::Value> = opts
+            .crops
+            .iter()
+            .filter(|c| crate::settings::page_path_ok(&c.path) && crate::settings::selector_ok(&c.selector) && !c.note.is_empty() && c.note.len() <= 64)
+            .take(crate::store::CROPS_PER_RUN)
+            .map(|c| serde_json::json!({ "note": c.note, "path": c.path, "selector": c.selector }))
+            .collect();
+        if !crops.is_empty() {
+            args.extend(["--env".into(), format!("CROPS={}", serde_json::to_string(&crops)?)]);
+        }
         // The PNG on the first line, the timings (if the command wrote them) on the second, the
         // phone-width PNG (if it took one) on the third, then the other pages: what each said,
         // and their PNGs a line each.
@@ -1109,7 +1120,8 @@ impl Runtime {
             "-c".into(),
             format!(
                 "cat > /tmp/axe.js; {} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
-                 && echo && (cat /tmp/s.png.pages.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.$n.png 2>/dev/null || true; done",
+                 && echo && (cat /tmp/s.png.pages.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.$n.png 2>/dev/null || true; done \
+                 && echo && (cat /tmp/s.png.crops.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.crop.$n.png 2>/dev/null || true; done",
                 self.cfg.screenshot_command
             ),
         ]);
@@ -1117,7 +1129,8 @@ impl Runtime {
         // Each other page is taken and checked too (accessibility, links up to 20 s, SEO, words).
         // A page state's steps take up to about 25 s more.
         let state_pages = pages.iter().filter(|p| crate::settings::state_entry(p).is_some()).count() as u64;
-        let within = Duration::from_secs(90 + 30 * pages.len() as u64 + 25 * state_pages + if endpoints.is_empty() { 0 } else { 25 });
+        // A crop loads its page again: about 15 s each.
+        let within = Duration::from_secs(90 + 30 * pages.len() as u64 + 25 * state_pages + 15 * crops.len() as u64 + if endpoints.is_empty() { 0 } else { 25 });
         let chromium = std::time::Instant::now();
         // The other browsers the project asked for, in a run of their own alongside Chromium's (a
         // container each in the service's network): the slot is held for the longer, not both.
@@ -1150,7 +1163,22 @@ impl Runtime {
         let png = b64e.decode(b64.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
         anyhow::ensure!(png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX, "the screenshot isn't a PNG of at most {SCREENSHOT_MAX} bytes");
         let phone = b64e.decode(phone.trim()).ok().filter(|p| p.starts_with(b"\x89PNG") && p.len() <= SCREENSHOT_MAX);
-        let mut shot = crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed), a11y: crate::PageA11y::parse(speed), text: crate::page_text(speed), links: crate::PageLinks::parse(speed), api: crate::openapi::lines(speed), phone, pages: page_shots(&pages, said, lines) };
+        // Ten page lines, then what the crops said and their PNGs.
+        let page_lines: Vec<&str> = lines.by_ref().take(10).collect();
+        let crops_said = report(lines.next());
+        let asked: Vec<&str> = crops.iter().filter_map(|c| c["note"].as_str()).collect();
+        let mut shot = crate::ports::Shot {
+            png,
+            speed: crate::PageSpeed::parse(speed),
+            health: crate::PageHealth::parse(speed),
+            a11y: crate::PageA11y::parse(speed),
+            text: crate::page_text(speed),
+            links: crate::PageLinks::parse(speed),
+            api: crate::openapi::lines(speed),
+            phone,
+            pages: page_shots(&pages, said, page_lines.into_iter()),
+            crops: note_crops(&asked, crops_said, lines),
+        };
         // The other browsers', best effort: Chromium's screenshot stands.
         match more {
             Some(Ok(more)) => shot.pages.extend(more),
@@ -1263,6 +1291,32 @@ impl Runtime {
             Phase::Failed(_) => ServiceState::Failed,
         })
     }
+}
+
+/// The notes' crops a screenshot run took: which note each line is (`[{note, n}]`, each `n` the
+/// crop's line), and the PNGs a line each. Only notes that were asked for, each once, each a PNG
+/// within [`crate::store::CROP_MAX`].
+fn note_crops<'a>(asked: &[&str], said: &str, pngs: impl Iterator<Item = &'a str>) -> Vec<(String, Vec<u8>)> {
+    #[derive(serde::Deserialize)]
+    struct Said {
+        note: String,
+        n: usize,
+    }
+    use base64::Engine as _;
+    let said: Vec<Said> = serde_json::from_str(said.trim()).unwrap_or_default();
+    let pngs: Vec<&str> = pngs.take(crate::store::CROPS_PER_RUN).collect();
+    let b64e = base64::engine::general_purpose::STANDARD;
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    for s in said {
+        if !asked.contains(&s.note.as_str()) || out.iter().any(|(n, _)| *n == s.note) {
+            continue;
+        }
+        let Some(png) = pngs.get(s.n).and_then(|l| b64e.decode(l.trim()).ok()) else { continue };
+        if png.starts_with(b"\x89PNG") && png.len() <= crate::store::CROP_MAX {
+            out.push((s.note, png));
+        }
+    }
+    out
 }
 
 /// The other pages a screenshot run took: what it said about each (`[{path, errors}]`, in order)
