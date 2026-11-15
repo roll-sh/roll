@@ -633,14 +633,10 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Everyday routes with no tool**, now that search mode keeps a long list cheap
-   (`tool-gaps.py origin/main <product>`: rows on main no tool calls). Tasks first: dead letters
-   (list, retry, delete), topics (fan-out: list, get, put, publish), events (send, list, get), a
-   run's wait, cancelling a function's run, changing a schedule, health and usage. Then streams
-   (read a partition's records and its tail, change a stream's or topic's config, a consumer
-   group's offsets), storage (change a bucket, its rules, usage) and queues (health, connections,
-   policies). Leave out what only an operator does by hand (keys, accounts, IAM, roles, CDN,
-   migrations, rotations): a tool for it is one more thing an agent can be talked into.
+1. **Everyday routes with no tool:** tasks, streams, storage, queues, postgres, Redis and NoSQL have
+   theirs (`tool-gaps.py origin/main <product>` lists what's left). What's left is mostly what only
+   an operator does by hand: keys, passwords, accounts, IAM, roles, CDN, migrations, evict and
+   unload, which stay without tools. Recheck each product after its thread lands new routes.
 2. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
    automations that pick up issues and chat messages (the agents thread's call; tell it), and
    chat messages that reach an agent marked `outside` (an install's non-members can't drive
@@ -659,11 +655,11 @@ waits on a sibling PR reaching main is last.
    compare each product's routes with its tools (an everyday route with no tool is a gap: apps'
    were found this way). #24 and #25 are on main, so `feature/mcp-on-landing` is retired:
    secrets' #64 lands on main directly.
-5. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
-   `.index("name")` on the per-key routes and `Scope.key` in their own check (`GrantGrants` sets
-   `id` since #30's fix). The tools and the builder's key picker are in; check both live once the
-   rows land (a token on `prj_x/one-key` signs with it and is refused another key and the
-   project's environments).
+5. **Transit keys one at a time:** main's transit rows (`/v1/secrets/projects/{project}/transit/…`)
+   name only the project, so a token on a project reaches all of its keys. Per-key rules need
+   `.index("name")` on the per-key rows and `Scope.key` in roll-secrets' own check, plus a key
+   picker in the builder. Asked the secrets thread (2026-11-15) whether #47 still brings them or
+   the catalogue side should land here.
 6. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
