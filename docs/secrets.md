@@ -2723,9 +2723,9 @@ user's call).
    `…/values` (a 304 reads, issues and audits nothing; never for dynamic credentials), and a TTL
    cache in the TypeScript, Go and Python clients that revalidates with it.
 4. **Terraform without values in state** (#66, on #62): an `ephemeral "roll_secrets_values"`
-   resource (dynamic credentials revoked when the run closes) and a write-only `value_wo`. Next:
-   resources for CAs, SSH CAs, encryption keys and outside databases. Transit in the Go and Python
-   clients is #67.
+   resource (dynamic credentials revoked when the run closes) and a write-only `value_wo`. Resources for
+   CAs, SSH CAs, encryption keys and outside databases are #72; transit in the Go and Python clients
+   is #67.
 5. **AWS through roll's own issuer** (#68, on #62): `trust: "oidc"` roles, assumed with
    `AssumeRoleWithWebIdentity` and a token roll's issuer signs for the project (`sub` pinned, as GCP
    and Azure): no AWS credential of roll's at all.
