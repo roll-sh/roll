@@ -3301,10 +3301,24 @@ impl ScanNode {
     fn heap_mode(&mut self, ctx: &ExecCtx) {
         if self.sorted.is_none() && !self.streamed && self.in_order.is_none() {
             self.nblocks = super::sizing::modelled_blocks(self.plan.table.oid, ctx);
-            // A table whose heap isn't modelled (too big) has no heap order to put its
-            // rows in: they come as stored, read as they're asked for.
+            // A table whose heap isn't modelled (too big) has its rows as stored, read as
+            // they're asked for, unless some went in out of key order (an update's new
+            // versions at the end) and the estimate places every row (`EstOrder::Placed`): a
+            // plain scan then puts them in heap order (`next_heap_ordered`).
             if !super::sizing::heap_modelled(&self.plan.table, ctx) {
-                self.streamed = true;
+                // (Not an UPDATE's or DELETE's scan: their rows' order isn't seen.)
+                let plain = self.keys.is_none()
+                    && self.only.is_none()
+                    && self.sample.is_none()
+                    && self.plan.index.is_none()
+                    && self.ranges.len() <= 1
+                    && !self.plan.with_key;
+                let placed = matches!(super::sizing::estimated_order(&self.plan.table, ctx), Some((super::sizing::EstOrder::Placed, _)));
+                if plain && placed && ctx.snapshot().is_some() {
+                    self.in_order = Some(false);
+                } else {
+                    self.streamed = true;
+                }
             } else {
                 // (A plain sequential scan's: other reads take their rows in another order.)
                 let plain = self.keys.is_none() && self.only.is_none() && self.sample.is_none() && self.plan.index.is_none() && self.ranges.len() <= 1;
@@ -3995,7 +4009,8 @@ impl ScanNode {
                 && self.ranges.len() <= 1
                 && self.cur_range == 0
                 && self.iter.is_none()
-                && !super::sizing::heap_unstamped(&self.plan.table, ctx);
+                && (super::sizing::estimated_order(&self.plan.table, ctx).is_some()
+                    || !super::sizing::heap_unstamped(&self.plan.table, ctx));
             if !plain {
                 return Ok(None);
             }
@@ -4006,14 +4021,31 @@ impl ScanNode {
             match self.hstream.as_deref_mut().expect("a stream") {
                 Stream::Tids(tids) => {
                     let mut tids = std::mem::take(tids);
+                    // (A table too big to model: its rows ranked by the estimate's places,
+                    // kept for the merge; what the pass finds is kept for its next scans,
+                    // unless it is written meanwhile.)
+                    let est = super::sizing::estimated_order(&self.plan.table, ctx).map(|e| e.1);
+                    let mut last = None;
                     // (The batch's rows read where they are.)
                     while self.next_plain(ctx)? {
                         ctx.check()?;
                         loop {
-                            let Some(t) = self.rb.peek().and_then(|(_, v)| tid(v)) else {
-                                // (A row without its TID: all of them read and sorted.)
+                            let t = match est {
+                                Some(_) => self.rb.peek().and_then(|(k, v)| {
+                                    super::sizing::estimated_rank(&self.plan.table, k, v, &mut last, &ctx.sess.db)
+                                }),
+                                None => self.rb.peek().and_then(|(_, v)| tid(v)),
+                            };
+                            let Some(t) = t else {
+                                // (A row without its TID: all of them read and sorted; a
+                                // table too big to model's as stored, having no other place.)
                                 self.hstream = None;
                                 self.restart();
+                                if let Some(w) = est {
+                                    super::sizing::estimated_order_found(&self.plan.table, super::sizing::EstOrder::Unplaced, w, &ctx.sess.db);
+                                    self.streamed = true;
+                                    return self.next_plain(ctx).map(Some);
+                                }
                                 return Ok(None);
                             };
                             tids.push(t);
@@ -4024,10 +4056,13 @@ impl ScanNode {
                         }
                     }
                     let (bits, early_bits) = displaced(&tids);
-                    drop(tids);
+                    let ranks = if est.is_some() { tids } else { Vec::new() };
                     self.restart();
                     if bits.iter().all(|w| *w == 0) {
                         // (In heap order after all.)
+                        if let Some(w) = est {
+                            super::sizing::estimated_order_found(&self.plan.table, super::sizing::EstOrder::InOrder, w, &ctx.sess.db);
+                        }
                         self.hstream = None;
                         self.in_order = Some(true);
                         return self.next_raw_ref(ctx).map(Some);
@@ -4042,7 +4077,8 @@ impl ScanNode {
                                 at += 1;
                                 if is_set(&early_bits, at - 1) {
                                     let (k, v) = self.rb.take().expect("a row");
-                                    early.push((tid(&v).unwrap_or(u64::MAX), k, v));
+                                    let t = ranks.get(at - 1).copied().or_else(|| tid(&v));
+                                    early.push((t.unwrap_or(u64::MAX), k, v));
                                     if self.rb.remaining() == 0 {
                                         self.held = false;
                                         break;
@@ -4068,9 +4104,10 @@ impl ScanNode {
                         ready: None,
                         early: early.into(),
                         late: Default::default(),
+                        ranks,
                     }));
                 }
-                Stream::Merge { bits, early_bits, pos, ready, early, late } => {
+                Stream::Merge { bits, early_bits, pos, ready, early, late, ranks } => {
                     // A held row of a lesser TID than the run's next row first, else that row;
                     // with the run done, the held rows left, then the end.
                     if ready.is_some() || *pos == usize::MAX {
@@ -4095,24 +4132,27 @@ impl ScanNode {
                     }
                     // The run's next row; the late displaced rows before it held.
                     let (bits, early_bits, mut at) = (std::mem::take(bits), std::mem::take(early_bits), *pos);
+                    let ranks = std::mem::take(ranks);
                     let (mut next, mut met) = (None, Vec::new());
                     while self.next_plain(ctx)? {
                         at += 1;
                         if !is_set(&bits, at - 1) {
-                            next = Some(self.rb.peek().and_then(|(_, v)| tid(v)).unwrap_or(u64::MAX));
+                            let t = ranks.get(at - 1).copied().or_else(|| self.rb.peek().and_then(|(_, v)| tid(v)));
+                            next = Some(t.unwrap_or(u64::MAX));
                             self.held = false;
                             break;
                         }
                         if !is_set(&early_bits, at - 1) {
                             let (k, v) = self.rb.peek().expect("a row");
-                            met.push((tid(v).unwrap_or(u64::MAX), k.to_vec(), bytes::Bytes::copy_from_slice(v)));
+                            let t = ranks.get(at - 1).copied().or_else(|| tid(v));
+                            met.push((t.unwrap_or(u64::MAX), k.to_vec(), bytes::Bytes::copy_from_slice(v)));
                         }
                     }
-                    let Stream::Merge { bits: b, early_bits: eb, pos, ready, late, .. } = self.hstream.as_deref_mut().expect("a stream") else {
+                    let Stream::Merge { bits: b, early_bits: eb, pos, ready, late, ranks: rk, .. } = self.hstream.as_deref_mut().expect("a stream") else {
                         unreachable!()
                     };
                     late.extend(met.into_iter().map(std::cmp::Reverse));
-                    (*b, *eb, *ready) = (bits, early_bits, next);
+                    (*b, *eb, *ready, *rk) = (bits, early_bits, next, ranks);
                     *pos = if next.is_some() { at } else { usize::MAX };
                 }
             }
@@ -4919,6 +4959,17 @@ impl ScanNode {
             }
             self.in_order = Some(!reordered);
         } else {
+            // A table too big to model whose rows went in out of key order, every one placed
+            // (`EstOrder::Placed`): aggregation on this thread that sees its rows' order (a
+            // float sum) reads them in heap order, on the serial path, as PostgreSQL's
+            // serial scan gives them. Workers read chunks as stored: a parallel scan's
+            // rows come in no fixed order in PostgreSQL either.
+            if serial
+                && spec.as_ref().is_some_and(|s| !s.unordered)
+                && matches!(super::sizing::estimated_order(&p.table, ctx), Some((super::sizing::EstOrder::Placed, _)))
+            {
+                return Ok(None);
+            }
             self.streamed = true;
         }
         // A modelled heap stored in heap order under 8 MB of pages (min_parallel_table_

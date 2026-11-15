@@ -642,6 +642,40 @@ fn estimate_kept_across_restart() {
     });
 }
 
+/// The bulk script's history (an UPDATE of half the rows, a DELETE of a quarter, VACUUM) on
+/// a table too big to model: its btrees grow as PostgreSQL's (`sizing::btest`), the new
+/// versions are placed where PostgreSQL puts them, and a serial scan returns the rows in its
+/// heap order (a float sum's order). Expected values recorded from PostgreSQL 18.6.
+#[test]
+fn sizes_and_heap_order_past_the_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    with_max_versions(2000, || {
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        let one = |s: &mut Session, q: &str| rows(s, q).join("\n");
+        // (The heap's and t_a's pages exactly; t_id's within a page of PostgreSQL's 167: the
+        // summary estimates where its leaves split.)
+        let sizes = "SELECT concat_ws(' ', pg_relation_size('t') / 8192, pg_relation_size('t_a') / 8192, abs(pg_relation_size('t_id') / 8192 - 167) <= 1)";
+        run(&mut s, "CREATE TABLE t (id int NOT NULL, a int NOT NULL, b text, c float8) WITH (autovacuum_enabled = off);
+             INSERT INTO t SELECT g, g * 7919 % 3000, 'some text value ' || g, g / 7.0 FROM generate_series(1, 30000) g;
+             CREATE INDEX t_a ON t (a);
+             CREATE UNIQUE INDEX t_id ON t (id);
+             UPDATE t SET c = c + 1 WHERE id % 2 = 0");
+        assert_eq!(one(&mut s, sizes), r#"[Text("375 71 t")]"#);
+        run(&mut s, "DELETE FROM t WHERE id % 4 = 1;\nVACUUM t");
+        assert_eq!(one(&mut s, sizes), r#"[Text("375 71 t")]"#);
+        assert_eq!(
+            one(&mut s, "SELECT string_agg(concat_ws(' ', relname, CASE WHEN relname = 't_id' THEN abs(relpages - 167) <= 1 ELSE relpages > 0 END, relpages * (relname <> 't_id')::int, reltuples, relallvisible), ', ' ORDER BY relname) FROM pg_class WHERE relname IN ('t', 't_a', 't_id')"),
+            r#"[Text("t t 375 22500 375, t_a t 71 22500 0, t_id t 0 22500 0")]"#
+        );
+        run(&mut s, "SET max_parallel_workers_per_gather = 0");
+        assert_eq!(one(&mut s, "SELECT sum(c)::text || ' ' || avg(c)::text FROM t"), r#"[Text("48232500 2143.6666666666665")]"#);
+        assert_eq!(one(&mut s, "SELECT string_agg(id::text, ',') FROM (SELECT id FROM t LIMIT 6) s"), r#"[Text("3,7,11,15,19,23")]"#);
+        assert_eq!(one(&mut s, "SELECT md5(string_agg(id::text, ',')) FROM t"), r#"[Text("dac6087b4c96233c6601d1779252870e")]"#);
+        assert_eq!(one(&mut s, "EXPLAIN (COSTS OFF) SELECT count(*) FROM t"), "[Text(\"Aggregate\")]\n[Text(\"  ->  Seq Scan on t\")]");
+    });
+}
+
 #[test]
 fn estimate_rebuilt_with_higher_model_limit() {
     let dir = tempfile::tempdir().unwrap();
