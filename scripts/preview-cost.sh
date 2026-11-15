@@ -97,6 +97,8 @@ SEARCH_URL_PARENT=$(echo "$SEARCH_C" | jq_ "d['url'].replace('://', '://' + d['u
 curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/1?refresh=true" -H 'content-type: application/json' -d '{"name":"parent"}' >/dev/null
 # An address inside an array of objects, and one under a literal dotted key: masks reach both.
 curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/3?refresh=true" -H 'content-type: application/json' -d '{"name":"other","owner":[{"email":"ada@corp.example"}]}' >/dev/null
+# An index whose name has dots (logs.2024): its mask is split off at the whole name.
+curl -sf -XPUT "$SEARCH_URL_PARENT/logs.2024/_doc/1?refresh=true" -H 'content-type: application/json' -d '{"user":{"email":"eve@corp.example"}}' >/dev/null
 curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/4?refresh=true" -H 'content-type: application/json' -d '{"name":"dotted","owner.email":"bob@corp.example","stock":3}' >/dev/null
 PG=$(api POST /v1/projects '{"name":"shop-db"}' | jq_ "d['id']")
 # A real-looking row in the parent, which previews mask.
@@ -133,7 +135,7 @@ PRJ=$(api POST /v1/workspace/projects '{"name":"shop"}' | jq_ "d['id']")
 for r in "repo/acme%2Fweb" "repo/acme%2Fwiki" "postgres/$PG" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work" "search/$SEARCH"; do
   api PUT "/v1/workspace/projects/$PRJ/resources/$r" '{"x":0,"y":0}' >/dev/null
 done
-api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"SG.from-production\",\"SMTP_HOST\":\"smtp.sendgrid.net\"},\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\",\"products.owner.email\":\"redact\"}}}" >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"SG.from-production\",\"SMTP_HOST\":\"smtp.sendgrid.net\"},\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\",\"products.owner.email\":\"redact\",\"logs.2024.user.email\":\"redact\"}}}" >/dev/null
 # A mask on a key column can't hide it (the engine refuses to read such a table): the settings
 # name it instead of letting a preview's pages fail.
 KEY_MASK=$(curl -s -o /tmp/roll-previews-keymask.json -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' \
@@ -271,6 +273,9 @@ ES_PARENT=$(curl -sf "$SEARCH_URL_PARENT/products/_doc/1" | jq_ "d['_source']['n
 ES_DEEP=$( (curl -sf "$APP_ES/products/_doc/3" | jq_ "d['_source']['owner'][0]['email']"; curl -sf "$APP_ES/products/_doc/4" | jq_ "d['_source']['owner.email']") | paste -sd/)
 [ "$ES_DEEP" = "[masked]/[masked]" ] || { echo "a mask should reach a field in an array of objects and under a dotted key: $ES_DEEP"; exit 1; }
 [ "$(curl -sf "$SEARCH_URL_PARENT/products/_doc/3" | jq_ "d['_source']['owner'][0]['email']")" = "ada@corp.example" ] || { echo "the parent's address should stay (the check's premise)"; exit 1; }
+ES_DOTTED=$(curl -sf "$APP_ES/logs.2024/_doc/1" | jq_ "d['_source']['user']['email']")
+[ "$ES_DOTTED" = "[masked]" ] || { echo "a mask on an index whose name has dots (logs.2024) should reach it: $ES_DOTTED"; exit 1; }
+[ "$(curl -sf "$SEARCH_URL_PARENT/logs.2024/_doc/1" | jq_ "d['_source']['user']['email']")" = "eve@corp.example" ] || { echo "the parent's logs.2024 should keep its address"; exit 1; }
 # Nor can the preview's code read the masked value back out of the segments the branch shares
 # with its parent (a term dictionary keeps a replaced document's terms): the parent's has it,
 # the branch's doesn't.
@@ -738,6 +743,6 @@ cat <<EOF
 | The first page's speed, timed with its screenshot | $SPEED |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |
 | Search: products.name in the branch / in the parent / the branch's term dictionary | $ES_READ / $ES_PARENT / $ES_TERMS |
-| Search: an address in an array of objects / under a dotted key, in the branch | $ES_DEEP |
+| Search: an address in an array of objects / under a dotted key / in an index named logs.2024, in the branch | $ES_DEEP / $ES_DOTTED |
 | After landing: parents present / preview Redis branches left | $PARENTS_OK of 4 / $BRANCHES_LEFT |
 EOF

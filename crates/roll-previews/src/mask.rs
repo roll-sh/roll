@@ -118,12 +118,24 @@ pub fn nosql_key_masks(schema: &serde_json::Value, columns: &BTreeMap<String, St
     out
 }
 
+/// A search mask's index and field (`index.field`): an index name can hold dots (`logs.2024`), so
+/// the split is after the longest prefix that's one of `indices` (the cluster's), else at the
+/// first dot.
+pub fn split_mask<'a>(spec: &'a str, indices: &[String]) -> Option<(&'a str, &'a str)> {
+    let longest = spec.match_indices('.').map(|(i, _)| i).filter(|&i| indices.iter().any(|x| x == &spec[..i])).max();
+    match longest {
+        Some(i) => Some((&spec[..i], &spec[i + 1..])),
+        None => spec.split_once('.'),
+    }
+}
+
 /// Search field masks that can't work against a `_mapping` answer (index → `mappings`): `redact`
 /// and `email` write a string, which only a text-like field takes (a `dense_vector`, a number, a
 /// date would refuse it and fail the masking, and the preview with it); such a field can only be
 /// `remove`d. One line per problem; a field the mapping doesn't have yet (a document may add it)
 /// is none.
-pub fn search_field_masks(mapping: &serde_json::Value, fields: &BTreeMap<String, String>) -> Vec<String> {
+/// `indices`: the cluster's, so an index whose name has dots is split off whole ([`split_mask`]).
+pub fn search_field_masks(mapping: &serde_json::Value, fields: &BTreeMap<String, String>, indices: &[String]) -> Vec<String> {
     // The types a string goes into (`constant_keyword` takes only its one value, so not it).
     const TEXT: [&str; 8] = ["text", "keyword", "match_only_text", "wildcard", "search_as_you_type", "semantic_text", "completion", "token_count"];
     let mut out = Vec::new();
@@ -131,7 +143,7 @@ pub fn search_field_masks(mapping: &serde_json::Value, fields: &BTreeMap<String,
         if rule == "remove" {
             continue;
         }
-        let Some((index, path)) = spec.split_once('.') else { continue };
+        let Some((index, path)) = split_mask(spec, indices) else { continue };
         // The index as named, or every index an alias or pattern answered for (`GET /<it>/_mapping`
         // is keyed by the real names): the first that says the field isn't text.
         let named: Vec<&serde_json::Value> = match mapping.get(index) {
@@ -203,6 +215,16 @@ mod tests {
         assert!(super::postgres(&[("a.b.c".to_string(), "mask_default()".to_string())].into_iter().collect(), "s").is_err());
     }
 
+    /// An index whose name has dots is split off whole; with no such index, at the first dot.
+    #[test]
+    fn a_dotted_index_name_is_split_off_whole() {
+        let indices = vec!["logs".to_string(), "logs.2024".to_string()];
+        assert_eq!(super::split_mask("logs.2024.user.email", &indices), Some(("logs.2024", "user.email")));
+        assert_eq!(super::split_mask("logs.level", &indices), Some(("logs", "level")));
+        assert_eq!(super::split_mask("other.a.b", &indices), Some(("other", "a.b")));
+        assert_eq!(super::split_mask("nodot", &indices), None);
+    }
+
     /// A string mask on a vector, a number or an object is named with what it is; on text, or
     /// `remove` on anything, or a field the mapping doesn't have, it isn't.
     #[test]
@@ -219,7 +241,7 @@ mod tests {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
         assert_eq!(
-            super::search_field_masks(&mapping, &rules),
+            super::search_field_masks(&mapping, &rules, &[]),
             [
                 "products.emb is a dense_vector field: redact writes a string it won't take; use remove",
                 "products.owner is an object field: redact writes a string it won't take; use remove",
@@ -229,6 +251,6 @@ mod tests {
         // An alias answers with its real index's name: that one is checked.
         let aliased = serde_json::json!({ "products-v2": { "mappings": { "properties": { "emb": { "type": "dense_vector" } } } } });
         let rule: BTreeMap<String, String> = [("products.emb".to_string(), "redact".to_string())].into_iter().collect();
-        assert_eq!(super::search_field_masks(&aliased, &rule).len(), 1, "through the alias");
+        assert_eq!(super::search_field_masks(&aliased, &rule, &[]).len(), 1, "through the alias");
     }
 }
