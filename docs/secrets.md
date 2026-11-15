@@ -1020,7 +1020,9 @@ suffix such as `com`, `co.uk` or `github.io` is refused (from a built-in list of
 A key tagged `sensitive` (`roll secrets set KEY --tag sensitive`, or its tags in the dashboard) can be
 written but never read back by a person or a token, as Vercel's sensitive environment variables and
 Doppler's restricted secrets: only roll apps' builds and instances get its value (`ForApps`
-resolves as a runtime), where the service's code uses it.
+resolves as a runtime), where the service's code uses it. An untrusted ephemeral environment is
+read without it by everyone, roll apps included: a fork's preview deployed on roll apps doesn't get
+it, and leaves out dynamic keys and what doesn't resolve instead of failing the deploy.
 - Everything else is a person or acts for one, so it's withheld there. The operator is no exception.
   - `…/values` and `roll run` leave it out and name it in `withheld`, so `roll run` still starts,
     saying so. `…/secrets/{key}/value` answers 403, and so does every version of a key that's
