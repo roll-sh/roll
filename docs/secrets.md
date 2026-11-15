@@ -2734,8 +2734,9 @@ user's call).
    `rolloutRestartTargets`).
 7. **Audit sinks SIEMs take** (#70, on #62): Splunk HEC, Datadog and bearer formats with a sealed
    token (Doppler, Infisical). A sink into roll search is #71.
-8. **A live rotation that keeps the old password a while** where the resource can (Redis ACL users
-   hold two passwords), as managed rotation's grace already does.
+8. *Waits on roll redis and roll nosql:* a live rotation that keeps the old password a while (their
+   `POST …/password` taking a grace, as Redis ACL users can hold two passwords); roll secrets'
+   managed rotation already keeps a grace.
 9. **More dynamic credentials**: GitHub App installation tokens (one repository, narrowed
    permissions), Kubernetes service account tokens, Snowflake.
 10. **A gateway into private networks**: an agent in the customer's network that connects out and
