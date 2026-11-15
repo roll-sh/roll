@@ -2727,9 +2727,10 @@ App installation tokens (#73).
    credential however it changed (and #65's 304s come back for live links).
 2. **Rotating a registration's admin credential, and editing registrations in place** (built for
    databases outside roll, #75: `rotate-admin`, `PATCH`, checked live on Postgres and MySQL),
-   as Vault's `rotate-root`; next the same for AWS users and rotators, and Terraform updating
-   registrations in place (#72).
-3. **Syncs driven by changes** (building), not digest polling: a write marks its environment's syncs due, so
+   as Vault's `rotate-root`; next (building) the same for rotators (a new signing secret, a new
+   URL) and AWS roles and users (a new role ARN), then Terraform updating registrations in place
+   (#72, after #75).
+3. **Syncs driven by changes** (built, #76: a change reaches a webhook in about 2 s), not digest polling: a write marks its environment's syncs due, so
    a change reaches Vercel or GitHub in seconds however many syncs there are (Doppler, Infisical).
 4. **Metrics**: resolves, 304s, KMS refusals, sync failures and lag, leases, sweeper lag and
    rotation failures, in rolld's metrics (Vault telemetry, CloudWatch).
