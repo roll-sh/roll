@@ -665,6 +665,8 @@ static TOOLS: &[Tool] = &[
         b("firewall", Ty::Arr, "[{action: allow|deny, path?, methods?, user_agent?}], first match wins"),
         b("headers", Ty::Any, "Response header rules: [{path?, set: {name: value}, replace?}] (at most 20), or null for none"),
         b("paused", Ty::Bool, "Pause it (no deploys on push, nothing running) or resume it"),
+        // A rollback holds deploys (apps #26): false lets pushes and hooks deploy again.
+        b("held", Ty::Bool, "false: resume deploys a rollback held (held_after shows since when)"),
     ]),
     t("apps_update_service", "Update a service", "Change a service's name, source, build or run settings (fields given are changed; run takes alerts {memory_pct, error_pct, p95_ms} for metric alerts).", "apps", "PATCH", "/v1/apps/services/{service}", &[
         SERVICE,
