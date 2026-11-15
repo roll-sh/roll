@@ -1022,7 +1022,7 @@ impl Ddl<'_, '_> {
         };
         let allvisible = match &modelled {
             Some((_, av, _)) if !vacuum => *av,
-            _ if vacuum => pages,
+            _ if vacuum => pages - crate::exec::sizing::estimated_fresh_pages(t.oid, &self.ctx.sess.db).min(pages.max(0) as u32) as i32,
             _ => before.min(pages),
         };
         crate::exec::sizing::invalidated(t.oid, &self.ctx.sess.db);

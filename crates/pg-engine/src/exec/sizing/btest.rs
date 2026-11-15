@@ -233,11 +233,12 @@ impl BtEst {
         let room = self.room(rightmost);
         let dedup = self.dedup;
         let l = self.leaves.get_mut(&at).expect("a leaf");
-        // (A new key of a leaf with duplicates is one of its keys as often as its TIDs are.)
+        // (A row's key in a leaf of distinct keys is a new one; in a leaf whose keys have
+        // two TIDs or more each, one of its keys again: such an index's values repeat.)
         let new_key = if dup {
             0.0
         } else if dedup && l.tids > 0.0 {
-            l.keys / l.tids
+            (2.0 * l.keys / l.tids - 1.0).clamp(0.0, 1.0)
         } else {
             1.0
         };

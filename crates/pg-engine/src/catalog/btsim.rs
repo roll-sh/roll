@@ -242,6 +242,12 @@ impl KeyBytes {
         }
     }
 
+    /// Its key attributes' encodings and the whole tuple's size: what `sizing`'s estimate
+    /// of a table too big to model takes of an entry.
+    pub fn sort_and_size(&self, nkey: usize) -> (&[u8], usize) {
+        (self.key_bytes(nkey), self.size())
+    }
+
     /// The key attributes' encodings, as an index entry's storage key has them.
     fn key_bytes(&self, nkey: usize) -> &[u8] {
         let n = nkey.min(self.natts());
