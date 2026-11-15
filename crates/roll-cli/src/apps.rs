@@ -2977,7 +2977,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     println!("{:>7} {:>6} {:>7} {:>7}  route", "req", "5xx", "p50", "p95");
                 }
                 for r in rows.iter().take(30) {
-                    println!("{:>7} {:>6} {:>7} {:>7}  {} {}", r["requests"], r["errors"], format!("{}ms", r["p50_ms"]), format!("{}ms", r["p95_ms"]), s(&r["method"]), s(&r["route"]));
+                    // Numbers, not JSON values: a value's Display ignores the width.
+                    let num = |k: &str| r[k].as_u64().unwrap_or(0);
+                    println!("{:>7} {:>6} {:>7} {:>7}  {} {}", num("requests"), num("errors"), format!("{}ms", num("p50_ms")), format!("{}ms", num("p95_ms")), s(&r["method"]), s(&r["route"]));
                 }
                 if rows.is_empty() {
                     println!("no route to show");
