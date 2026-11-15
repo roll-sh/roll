@@ -92,10 +92,21 @@ impl T {
 async fn variables_and_an_environment_through_the_cli() {
     let t = start().await;
     t.ok(&["create", "web", "-p", "acme", "--image", "nginx:1.27", "--port", "80"]).await;
+    // Live first, so what's set next is the next deploy's.
+    for _ in 0..200 {
+        if t.json(&["deploys", "-s", "web", "-p", "acme"]).await[0]["status"] == "active" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     // Sealed: run with, never shown again, `--reveal` included; the rest reveal as a `.env`
     // `--from-file` reads back exactly (quotes, line breaks).
     let pem = "-----BEGIN-----\nab \"c\"\n-----END-----";
     t.ok(&["vars", "-s", "web", "-p", "acme", "API_KEY=sk-live-123", &format!("PEM={pem}"), "--seal", "API_KEY"]).await;
+    // What the next deploy changes, by name; and where it answers.
+    let pending = t.ok(&["pending", "-s", "web", "-p", "acme"]).await;
+    assert!(pending.contains("+ API_KEY") && pending.contains("+ PEM") && !pending.contains("sk-live"), "{pending}");
+    assert!(t.ok(&["open", "--print", "-s", "web", "-p", "acme"]).await.trim().starts_with("http"));
     let listed = t.ok(&["vars", "-s", "web", "-p", "acme"]).await;
     assert!(listed.lines().any(|l| l.starts_with("API_KEY") && l.ends_with("sealed")) && !listed.contains("sk-live-123"), "{listed}");
     let revealed = t.ok(&["vars", "-s", "web", "-p", "acme", "--reveal"]).await;

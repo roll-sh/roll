@@ -389,10 +389,27 @@ pub enum AppsCmd {
         #[arg(long, short = 'y')]
         yes: bool,
     },
-    /// Deployments, newest first.
+    /// Deployments, newest first; `--commits DEP`: what a repo deployment brings over the one
+    /// live before it, newest first.
     Deploys {
         #[command(flatten)]
         target: Target,
+        #[arg(long, value_name = "DEPLOYMENT")]
+        commits: Option<String>,
+    },
+    /// What the next deploy changes (Railway's staged changes): variables added, removed or
+    /// changed (names, never values), run settings the live deployment doesn't run with, and the
+    /// project's secrets.
+    Pending {
+        #[command(flatten)]
+        target: Target,
+    },
+    /// Open the environment's address in a browser (and print it); `--print` only prints it.
+    Open {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long)]
+        print: bool,
     },
     /// A cron service's runs, newest first; `--now` starts one, `--logs RUN` prints one's output
     /// (`--follow` until it ends), `--cancel RUN` stops one.
@@ -726,6 +743,9 @@ pub enum AppsCmd {
         /// Send one a test event now (not retried) and print how it answered.
         #[arg(long, value_name = "ID", conflicts_with_all = ["add", "remove", "edit"])]
         test: Option<String>,
+        /// A target's latest deliveries, newest first: what was sent, how it answered, the tries.
+        #[arg(long, value_name = "ID", conflicts_with_all = ["add", "remove", "edit", "test"])]
+        deliveries: Option<String>,
     },
     /// The project's spend limits this month: show them, or set `--alert` and `--hard` (dollars;
     /// `0` removes one). At the hard limit its services stop until it's raised.
@@ -2287,7 +2307,80 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             api.call(reqwest::Method::DELETE, &format!("/v1/apps/services/{}", enc(&s(&svc["id"]))), None).await?;
             json!({ "deleted": svc["id"] })
         }
-        AppsCmd::Deploys { target } => {
+        AppsCmd::Deploys { target, commits: Some(dep) } => {
+            let svc = service(api, &target).await?;
+            let c = api.get(&format!("{}/deploys/{}/commits", env_path(&svc, &target.env), enc(&dep))).await?;
+            if !json_out {
+                let Some(list) = c["commits"].as_array() else {
+                    println!("nothing to compare it with (not a repo deployment, or the first one live)");
+                    return Ok(());
+                };
+                if let Some(since) = c["since"].as_object() {
+                    let rev = since.get("revision").and_then(Value::as_str).unwrap_or("");
+                    println!("since {} ({})", since.get("id").and_then(Value::as_str).unwrap_or(""), &rev[..rev.len().min(8)]);
+                }
+                for x in list {
+                    let sha = s(&x["sha"]);
+                    println!("{}  {}  ({})", &sha[..sha.len().min(8)], s(&x["summary"]), s(&x["author"]));
+                }
+                if c["complete"] != true {
+                    eprintln!("not every commit: more than {}, or the one before isn't in its history (a rollback, another branch)", list.len());
+                }
+                return Ok(());
+            }
+            c
+        }
+        AppsCmd::Pending { target } => {
+            let svc = service(api, &target).await?;
+            let base = env_path(&svc, &target.env);
+            let v = api.get(&format!("{base}/pending")).await?;
+            if !json_out {
+                let mut any = false;
+                match v["variables"].as_object() {
+                    Some(vars) => {
+                        for (k, sign) in [("added", "+"), ("removed", "-"), ("changed", "~")] {
+                            for n in vars.get(k).and_then(Value::as_array).into_iter().flatten() {
+                                println!("{sign} {}", n.as_str().unwrap_or(""));
+                                any = true;
+                            }
+                        }
+                    }
+                    None => println!("variables: nothing kept at the live deployment to compare with"),
+                }
+                for f in v["run"].as_array().into_iter().flatten() {
+                    println!("~ run.{}", f.as_str().unwrap_or(""));
+                    any = true;
+                }
+                if v["secrets"] == true {
+                    println!("~ the project's secrets");
+                    any = true;
+                }
+                if !any {
+                    // Links move it too, unnamed.
+                    let e = api.get(&base).await?;
+                    println!("{}", if e["needs_deploy"] == true { "a link changed: the next deploy picks it up" } else { "nothing: the next deploy runs what's live" });
+                }
+                return Ok(());
+            }
+            v
+        }
+        AppsCmd::Open { target, print } => {
+            let svc = service(api, &target).await?;
+            let e = api.get(&env_path(&svc, &target.env)).await?;
+            let Some(url) = e["url"].as_str().map(str::to_string) else { bail!("{} has no address in {} (a worker or a cron)", s(&svc["name"]), target.env) };
+            if !print {
+                let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+                if std::process::Command::new(opener).arg(&url).status().is_err() {
+                    eprintln!("couldn't start {opener}: open it yourself");
+                }
+            }
+            if !json_out {
+                println!("{url}");
+                return Ok(());
+            }
+            json!({ "url": url })
+        }
+        AppsCmd::Deploys { target, commits: None } => {
             let svc = service(api, &target).await?;
             let v = api.get(&format!("{}/deploys", env_path(&svc, &target.env))).await?;
             if !json_out {
@@ -2779,7 +2872,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::Notifications { target, add, kind, events, only_env, only_service, previews, every_env, every_service, remove, test, edit } => {
+        AppsCmd::Notifications { target, add, kind, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries } => {
             if add.is_none() && edit.is_none() && (events.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some()) {
                 bail!("--events, --only-env, --only-service and --previews go with --add or --edit");
             }
@@ -2833,6 +2926,18 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             } else if let Some(id) = remove {
                 api.call(reqwest::Method::DELETE, &format!("{path}/{}", enc(&id)), None).await?;
                 json!({ "deleted": id })
+            } else if let Some(id) = deliveries {
+                let v = api.get(&format!("{path}/{}/deliveries", enc(&id))).await?;
+                if !json_out {
+                    for d in v.as_array().into_iter().flatten() {
+                        let t = d["at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
+                        let how = d["error"].as_str().map(str::to_string).or(d["code"].as_u64().map(|c| format!("answered {c}"))).unwrap_or_default();
+                        let tries = d["attempts"].as_u64().unwrap_or(0);
+                        println!("{t}  {:<9} {:<24} {tries} {}  {how}", s(&d["status"]), s(&d["kind"]), if tries == 1 { "try " } else { "tries" });
+                    }
+                    return Ok(());
+                }
+                v
             } else if let Some(id) = test {
                 let r = api.post(&format!("{path}/{}/test", enc(&id)), json!({})).await?;
                 if !json_out {
