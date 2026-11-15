@@ -3590,7 +3590,8 @@ async fn next_digests(c: &Client<'_>, follow: &[String], last: &Digests, every: 
     {
         let asked = std::time::Instant::now();
         let sep = if p.contains('?') { '&' } else { '?' };
-        let poll = c.call(Method::GET, &format!("{p}{sep}since={}&wait=25", enc(d)), None);
+        let url = format!("{p}{sep}since={}&wait=25", enc(d));
+        let poll = c.call(Method::GET, &url, None);
         // Held at most 25 s: past 40 the server (or what's between) isn't answering.
         let answer = match tokio::time::timeout(std::time::Duration::from_secs(40), poll).await {
             Ok(a) => a,
