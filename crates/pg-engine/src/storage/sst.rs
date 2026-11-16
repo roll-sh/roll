@@ -1116,6 +1116,28 @@ impl Block {
         }
     }
 
+    /// Where the value at `pos` is in the block's bytes, asked for (`prefetch`): None for a
+    /// deletion or a value made from the key (`value` makes those).
+    pub fn value_span(&self, pos: &BlockPos) -> Option<(u32, u32)> {
+        match pos.val_len {
+            TOMBSTONE | DERIVED => None,
+            n => {
+                prefetch(&self.data[pos.val_off as usize..(pos.val_off + n) as usize], 2);
+                Some((pos.val_off, n))
+            }
+        }
+    }
+
+    /// The value `value_span` gave, borrowed.
+    pub fn span_ref(&self, (off, n): (u32, u32)) -> &[u8] {
+        &self.data[off as usize..(off + n) as usize]
+    }
+
+    /// The value `value_span` gave.
+    pub fn span(&self, (off, n): (u32, u32)) -> Bytes {
+        self.data.slice(off as usize..(off + n) as usize)
+    }
+
     /// The value at `pos`, borrowed.
     pub fn value_ref<'a>(&'a self, pos: &'a BlockPos) -> Option<&'a [u8]> {
         match pos.val_len {
