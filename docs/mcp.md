@@ -528,6 +528,8 @@ previews are listed once those products are on.
 | `tasks_get_topic` | A topic and its endpoints. | `GET /v1/tasks/topics/{name}` |
 | `tasks_set_topic` | A topic with exactly these endpoints. | `PUT /v1/tasks/topics/{name}` |
 | `tasks_delete_topic` | Delete a topic; its pending messages stay. | `DELETE /v1/tasks/topics/{name}` |
+| `tasks_delete_queue` | Delete a queue; one with unfinished messages only with `force` (which cancels them). | `DELETE /v1/tasks/queues/{name}` |
+| `tasks_cancel_messages` | Cancel many messages: ids, or a queue's, URL's, topic's, label's or schedule's (or all). | `POST /v1/tasks/messages/cancel` |
 | `tasks_send_event` | An event that starts the functions it triggers (an id makes it idempotent). | `POST /v1/tasks/events` |
 | `tasks_list_events` | Events received, newest first. | `GET /v1/tasks/events` |
 | `tasks_get_event` | An event and the runs it started. | `GET /v1/tasks/events/{id}` |
