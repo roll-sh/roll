@@ -431,6 +431,7 @@ type ProjectImport = {
     branch: string | null;    // a repo's production branch
     run: Patch<Run>;          // the run settings the entry names
     links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "service"; name: string }[]; // databases below by name, or another app of the file (`service`)
+    environments: { [env: string]: { branch: string | null; run: object /* an environment's own run settings */; variables: { [name: string]: string } /* set when it's made */ } }; // besides production
     variables: { [name: string]: string }; // set when the service is made, never over what it has
     generate: string[];       // `{ generate = "secret" }`: 32 random bytes in hex, made by whoever makes the service, once
     ask: { name: string; ask: string; default: string | null }[]; // `{ ask = "…" }`: asked of whoever makes it

@@ -158,6 +158,8 @@ export interface ProjectImport {
       generate: string[];
       /** Asked of whoever makes it (`{ ask = "…" }`), its default offered. */
       ask: { name: string; ask: string; default: string | null }[];
+      /** Its other environments (`[apps.<name>.environments.<env>]`). */
+      environments?: Record<string, { branch: string | null; run: Partial<Record<EnvRunField, number>>; variables: Record<string, string> }>;
     }
   >;
   databases: Record<string, { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" }>;

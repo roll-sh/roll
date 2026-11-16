@@ -72,6 +72,27 @@ pub struct AppEntry {
     /// makes it says it): Heroku's `app.json` and Render's Blueprints.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub variables: BTreeMap<String, VarSpec>,
+    /// Environments besides production (Render's preview and staging environments, Railway's
+    /// environments): `[apps.web.environments.staging]`, made with the service and brought to
+    /// what the file says when it's read again.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environments: BTreeMap<String, EnvEntry>,
+}
+
+/// An environment of an app: the branch it follows, its own size and scale, and variables it
+/// starts with (as they are: a secret goes in roll secrets).
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Its own run settings over the app's: what an environment may set
+    /// (`min_instances`, `max_instances`, `cpu`, `memory_mb`, `concurrency`, `suspend_after_s`,
+    /// `sleep_after_s`; checked by the API).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<toml::Table>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variables: BTreeMap<String, String>,
 }
 
 /// A variable a project file gives its service.
@@ -154,6 +175,10 @@ pub fn parse_project(text: &str) -> Result<ProjectFile, ProjectError> {
         for l in &a.links {
             ensure(l != n, || format!("app {n} links itself"))?;
             ensure(f.databases.contains_key(l) || f.apps.contains_key(l), || format!("app {n} links {l}, which isn't in [databases] or [apps]"))?;
+        }
+        for (e, env) in &a.environments {
+            ensure(valid_name(e) && e != "production", || format!("app {n}: environment {e:?} is a-z, 0-9 and - (production is the app's own settings)"))?;
+            ensure(env.branch.is_none() || a.repo.is_some() || a.git.is_some(), || format!("app {n}: {e}'s branch is for a repo or git"))?;
         }
         for (k, v) in &a.variables {
             match v {
@@ -439,6 +464,11 @@ mod tests {
         assert!(parse_project("[apps.web]\nimage = \"a:1\"\nlinks = [\"web\"]\n").is_err(), "a self-link");
         assert!(parse_project("[apps.db]\nimage = \"a:1\"\n[databases.db]\nkind = \"redis\"\n").is_err(), "one name, two things");
         assert!(parse_project("[apps.web]\nimage = \"a:1\"\n[databases.q]\nkind = \"mysql\"\n").is_err(), "a kind roll doesn't have");
+        // Environments besides production: a branch (a repo's or a Git URL's), its own size.
+        let f = parse_project("[apps.web]\ngit = \"https://github.com/acme/site\"\n[apps.web.environments.staging]\nbranch = \"develop\"\nrun = { max_instances = 1 }\nvariables = { LOG_LEVEL = \"debug\" }\n").unwrap();
+        assert_eq!(f.apps["web"].environments["staging"].branch.as_deref(), Some("develop"));
+        assert!(parse_project("[apps.web]\nimage = \"a:1\"\n[apps.web.environments.production]\n").is_err(), "production is the app's own");
+        assert!(parse_project("[apps.web]\nimage = \"a:1\"\n[apps.web.environments.staging]\nbranch = \"x\"\n").is_err(), "an image has no branch");
     }
 
     #[test]

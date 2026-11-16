@@ -3405,6 +3405,8 @@ async fn a_project_is_written_as_roll_toml_that_reads_back() {
     let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "nightly", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "0 3 * * *"} }))).await;
     assert!(cron["id"].is_string(), "{cron}");
     call(&w.api, "PATCH", &format!("/v1/apps/services/{}/environments/production/variables", web["id"].as_str().unwrap()), Some(json!({"set": {"API_KEY": "sk-live-123"}}))).await;
+    // Another lasting environment, with its own size: written, and read back.
+    call(&w.api, "PUT", &format!("/v1/apps/services/{}/environments/staging", web["id"].as_str().unwrap()), Some(json!({"run": {"max_instances": 1}}))).await;
     let (st, out) = call(&w.api, "POST", &format!("/v1/apps/projects/{}/export", w.project), Some(json!({}))).await;
     assert_eq!(st, StatusCode::OK, "{out}");
     let text = out["roll_toml"].as_str().unwrap();
@@ -3415,6 +3417,7 @@ async fn a_project_is_written_as_roll_toml_that_reads_back() {
     assert_eq!(back["apps"]["web"]["source"], json!({"kind": "image", "image": "nginx:1.27"}), "{back}");
     assert_eq!((back["apps"]["web"]["run"]["port"].as_u64(), back["apps"]["web"]["run"]["min_instances"].as_u64(), back["apps"]["web"]["run"]["health_path"].as_str()), (Some(80), Some(1), Some("/healthz")), "{back}");
     assert_eq!((back["apps"]["nightly"]["run"]["type"].as_str(), back["apps"]["nightly"]["run"]["schedule"].as_str()), (Some("cron"), Some("0 3 * * *")), "{back}");
+    assert_eq!(back["apps"]["web"]["environments"]["staging"]["run"]["max_instances"], 1, "{back}\n{text}");
 }
 
 /// A rollback runs the old deployment's settings, but the volume is the service's as it is now:

@@ -1680,6 +1680,10 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
                 out.push(format!("~ settings {n} ({})", differs.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")));
             }
         }
+        for e in a.environments.keys() {
+            let there = have.is_some_and(|s| s["environments"].as_array().is_some_and(|l| l.iter().any(|x| x["name"] == e.as_str())));
+            out.push(format!("{} environment {e} of {n}", if there { "~" } else { "+" }));
+        }
         let image_moved = a.image.as_ref().is_some_and(|i| have.is_some_and(|s| s["source"]["image"].as_str() != Some(i.as_str())));
         if entry_kind(a) == "upload" || image_moved {
             out.push(format!("↑ deploy {n}"));
@@ -1942,6 +1946,24 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
             out.push(json!({ "service": n, "deployment": d["id"] }));
         }
         ids.insert(n.clone(), s(&svc["id"]));
+        // Its other environments: each put (made, or its branch and run settings set again),
+        // a new one's variables set as they are.
+        for (e, env) in &a.environments {
+            let there = svc["environments"].as_array().is_some_and(|l| l.iter().any(|x| x["name"] == e.as_str()));
+            let mut body = json!({});
+            if let Some(b) = &env.branch {
+                body["branch"] = json!(b);
+            }
+            if let Some(r) = &env.run {
+                body["run"] = serde_json::to_value(r)?;
+            }
+            let path = format!("/v1/apps/services/{}/environments/{}", enc(&s(&svc["id"])), enc(e));
+            api.call(reqwest::Method::PUT, &path, Some(body)).await?;
+            if !there && !env.variables.is_empty() {
+                api.call(reqwest::Method::PATCH, &format!("{path}/variables"), Some(json!({ "set": env.variables }))).await?;
+            }
+            eprintln!("{} {n}'s {e} environment", if there { "set" } else { "made" });
+        }
     }
     // Links to other apps of the file: their URLs (each made by now).
     for (n, a) in &f.apps {

@@ -232,7 +232,13 @@ async fn import(State(apps): S, b: Bytes) -> R {
                     VarSpec::Ask(q) => ask.push(json!({ "name": k, "ask": q.ask, "default": q.default })),
                 }
             }
-            (n.clone(), json!({ "source": source, "branch": branch, "run": entry_run(a), "links": links, "variables": fixed, "generate": generate, "ask": ask }))
+            // Its other environments: a branch, its own run settings, variables as they are.
+            let environments: serde_json::Map<String, Value> = a
+                .environments
+                .iter()
+                .map(|(e, env)| (e.clone(), json!({ "branch": env.branch, "run": env.run.as_ref().map(|t| serde_json::to_value(t).unwrap_or_default()).unwrap_or_else(|| json!({})), "variables": env.variables })))
+                .collect();
+            (n.clone(), json!({ "environments": environments, "source": source, "branch": branch, "run": entry_run(a), "links": links, "variables": fixed, "generate": generate, "ask": ask }))
         })
         .collect();
     ok(json!({ "roll_toml": toml_text, "notes": notes, "apps": apps, "databases": f.databases }))

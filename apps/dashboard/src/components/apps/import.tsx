@@ -24,6 +24,7 @@ export type ImportStep =
   | { op: "link"; service: string; db: string }
   | { op: "settings"; service: string; keys: string[] }
   | { op: "deploy"; service: string }
+  | { op: "environment"; service: string; env: string; make: boolean }
   | { op: "conflict"; service: string; text: string }
   | { op: "note"; service: string; text: string };
 
@@ -67,6 +68,7 @@ export function planImport(imp: ProjectImport, have: ImportHave): ImportStep[] {
     if (!there) {
       out.push({ op: "make-service", name, from, upload: a.source.kind === "upload" });
       for (const l of a.links) out.push({ op: "link", service: name, db: l.name });
+      for (const env of Object.keys(a.environments ?? {})) out.push({ op: "environment", service: name, env, make: true });
       continue;
     }
     // A link's target: a database by its name, or another app of the project.
@@ -86,6 +88,8 @@ export function planImport(imp: ProjectImport, have: ImportHave): ImportStep[] {
     const keys = Object.entries(a.run).filter(([k, v]) => !same(run[k], v)).map(([k]) => k);
     if (keys.length) out.push({ op: "settings", service: name, keys });
     if (a.source.kind === "image" && there.service.source.kind === "image" && there.service.source.image !== a.source.image) out.push({ op: "deploy", service: name });
+    // Its environments: made when missing, else brought to the file's branch and run settings.
+    for (const env of Object.keys(a.environments ?? {})) out.push({ op: "environment", service: name, env, make: !there.service.environments.some((e) => e.name === env) });
   }
   return out;
 }
@@ -106,6 +110,8 @@ export function stepLine(s: ImportStep): { mark: string; text: string } {
       return { mark: "~", text: `settings ${s.service} (${s.keys.join(", ")})` };
     case "deploy":
       return { mark: "↑", text: `deploy ${s.service}` };
+    case "environment":
+      return { mark: s.make ? "+" : "~", text: `environment ${s.env} of ${s.service}` };
     case "conflict":
       return { mark: "!", text: s.text };
     case "note":
@@ -126,6 +132,16 @@ function fileOf(text: string, filename: string): { roll_toml: string } | { compo
  * against what the project has (as `roll up --all` plans it), and applied with the usual calls:
  * databases made and placed first, so their variables are in the services' first deploys.
  */
+/** A service's environments as the file says: each put (made, or its branch and run settings
+ *  set again), and a new one's variables set as they are. */
+async function applyEnvironments(id: string, envs: ProjectImport["apps"][string]["environments"], have: Set<string>, step: (s: string) => void) {
+  for (const [env, e] of Object.entries(envs ?? {})) {
+    step(`Setting up ${env}…`);
+    await appsApi.putEnvironment(id, env, { ...(e.branch ? { branch: e.branch } : {}), ...(Object.keys(e.run).length ? { run: e.run } : {}) });
+    if (!have.has(env) && Object.keys(e.variables).length) await appsApi.setVariables(id, env, { set: e.variables });
+  }
+}
+
 /** 32 random bytes in hex: a `generate = "secret"` variable, made here, once. */
 export function secretValue(): string {
   const b = new Uint8Array(32);
@@ -252,8 +268,10 @@ export function ImportPane({ project, spot, onDone, repo, git, template }: { pro
           made.push(s);
           ids.set(name, s.id);
           for (const t of toApps) later.push({ id: s.id, target: t });
+          await applyEnvironments(s.id, a.environments, new Set(), setStep);
           continue;
         }
+        await applyEnvironments(there.service.id, a.environments, new Set(there.service.environments.map((e) => e.name)), setStep);
         for (const t of toApps) later.push({ id: there.service.id, target: t, there: there.links });
         const id = there.service.id;
         const run = there.service.run as unknown as Record<string, unknown>;

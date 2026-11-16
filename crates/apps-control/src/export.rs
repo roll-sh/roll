@@ -38,7 +38,7 @@ impl Apps {
         let mut file = ProjectFile::default();
         let mut notes = Vec::new();
         for svc in &services {
-            let mut a = AppEntry { root: None, image: None, repo: None, git: None, branch: None, kind: None, start: svc.run.start.clone(), schedule: svc.run.schedule.clone(), run: None, links: Vec::new(), port: svc.run.port, variables: BTreeMap::new() };
+            let mut a = AppEntry { root: None, image: None, repo: None, git: None, branch: None, kind: None, start: svc.run.start.clone(), schedule: svc.run.schedule.clone(), run: None, links: Vec::new(), port: svc.run.port, variables: BTreeMap::new(), environments: BTreeMap::new() };
             match &svc.source {
                 Source::Repo { repo, root } => {
                     a.repo = Some(repo.clone());
@@ -99,6 +99,12 @@ impl Apps {
             let vars: Vec<String> = self.db(move |s| s.variables(&sid, &e)).await.map(|v| v.into_keys().collect()).unwrap_or_default();
             if !vars.is_empty() {
                 notes.push(format!("{}: variables set by name only, never written here (`roll apps vars`): {}", svc.name, vars.join(", ")));
+            }
+            // Its other lasting environments (not previews): the branch and its own run settings.
+            let sid = svc.id.clone();
+            for env in self.db(move |s| s.environments(&sid)).await?.into_iter().filter(|e| e.name != PRODUCTION && !e.ephemeral) {
+                let run = (!env.run.is_empty()).then(|| toml::Value::try_from(&env.run).ok()).flatten().and_then(|v| v.as_table().cloned());
+                a.environments.insert(env.name.clone(), apps_build::project::EnvEntry { branch: env.branch.clone(), run, variables: BTreeMap::new() });
             }
             file.apps.insert(svc.name.clone(), a);
         }
