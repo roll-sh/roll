@@ -67,7 +67,7 @@ async fn numbers_are_unique_across_nodes() {
                     if k % 2 == 0 {
                         let _ = code.db.insert_change(&format!("ch_{i}_{k}"), &repo, &change(&title)).unwrap();
                     } else {
-                        let w = NewWork { title: &title, body: "", labels: &[], priority: 2, source: "native", github_url: None, state: WorkState::Open };
+                        let w = NewWork { title: &title, body: "", labels: &[], priority: 2, source: "native", github_url: None, state: WorkState::Open, outside: false };
                         code.db.insert_work(&format!("wi_{i}_{k}"), &repo, &w).unwrap();
                     }
                 }
