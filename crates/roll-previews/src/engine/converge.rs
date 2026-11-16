@@ -775,12 +775,21 @@ impl Engine {
     /// branch yet (their screenshots came first, as a new baseline's does) are now, and say so.
     async fn compare_waiting(&self, b: &Row) {
         let Ok(rows) = self.store.rows(Some(&b.project_id)) else { return };
+        // Every change again, not only those not compared yet: a change's screenshot run may
+        // have compared it while this baseline's was half kept (its first page in, its other
+        // pages not yet: screenshots run side by side), leaving pages uncompared for good. At the
+        // same merge base the answer is the same, so only a change whose comparison moved is
+        // reported.
+        let compared = |id: &str| {
+            self.store.row(id).and_then(|r| self.store.view(r)).ok().map(|p| {
+                let pages: Vec<(String, Option<f64>)> = p.pages.iter().map(|x| (x.path.clone(), x.base_percent)).collect();
+                serde_json::to_string(&(&p.base_change, pages)).unwrap_or_default()
+            })
+        };
         for r in rows.into_iter().filter(|x| x.change_id.is_some() && x.desired == Desired::Active) {
-            if !matches!(self.store.base_change(&r.id), Ok(None)) {
-                continue;
-            }
+            let before = compared(&r.id);
             self.compare_with_default_branch(&r).await;
-            if matches!(self.store.base_change(&r.id), Ok(Some(_))) {
+            if compared(&r.id) != before {
                 self.report(r).await;
             }
         }
