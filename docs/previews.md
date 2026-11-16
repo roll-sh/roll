@@ -328,7 +328,8 @@ behind the `Apps` trait:
 
 ## Git URL services on roll apps
 
-A roll apps service built from a public Git URL (roll apps' `Source::Git`, no roll code repo)
+A roll apps service built from a Git URL (roll apps' `Source::Git`, public or with a private
+repository login, no roll code repo)
 gets a preview per branch, as a roll code repo's branches do. roll apps' push hook (the
 repository's own webhook: GitHub, GitLab, Bitbucket) hands previews each push to a branch that
 none of the service's environments follows, after checking the branch really is at that commit
