@@ -42,6 +42,8 @@ cleanup() {
     wait "$PID" 2>/dev/null || true
     # Only what this daemon made: its service containers and its Postgres computes.
     for c in $(docker ps -aq --filter "label=sh.roll.code.home=$HOME_DIR") $(docker ps -aq --filter "label=roll.home=$HOME_DIR"); do docker rm -f "$c" >/dev/null 2>&1 || true; done
+    # And the previews' own networks (egress roll) a delete just before the stop didn't reach.
+    for n in $(docker network ls -q --filter "label=sh.roll.code.home=$HOME_DIR"); do docker network rm "$n" >/dev/null 2>&1 || true; done
   fi
 }
 trap cleanup EXIT
