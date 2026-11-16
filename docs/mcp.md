@@ -738,7 +738,7 @@ waits on a sibling PR reaching main is last.
    automations that pick up issues and chat messages (the agents thread's call; tell it), and
    chat messages that reach an agent marked `outside` (an install's non-members can't drive
    roll, so mostly members' text).
-7. **`apps_purge_cache`** once apps' #122 is on main: a sibling of `apps_restart` for
+7. **`apps_purge_cache`** once apps' #139 is on main: a sibling of `apps_restart` for
    `POST …/environments/{env}/cache/purge {paths?}` (deploy in production, write elsewhere, by
    the environment's prefix row).
 8. **More tools that wait:** `apps_wait_deploy` is in #108; branch backups and search reindexes
