@@ -120,7 +120,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
         )}
         <p className="px-5 pb-2 pt-5 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Deploys</p>
 
-        {repo && (
+        {(repo || service.source.kind === "git") && (
           <form
             className="flex flex-wrap items-end gap-3 px-5 py-4"
             onSubmit={(e) => {
@@ -154,6 +154,16 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
             <button className={btn} disabled={busy} onClick={() => runner.run("ci", () => appsApi.putEnvironment(service.id, env.name, { wait_for_ci: !env.wait_for_ci }))} aria-pressed={!!env.wait_for_ci}>
               {env.wait_for_ci ? "Deploy at once" : "Wait for checks"}
             </button>
+          </div>
+        )}
+
+        {service.source.kind === "git" && (
+          <div className="px-5 py-4">
+            <p className="text-[13px] font-medium">Wait for CI</p>
+            <p className="mt-1 text-[12px] text-muted">
+              To deploy only after your tests pass, deploy from the workflow with roll's GitHub Action (<span className="font-mono">sdk/apps-github-action</span>, after the test job), and
+              clear this environment's branch so a push doesn't deploy first.
+            </p>
           </div>
         )}
 

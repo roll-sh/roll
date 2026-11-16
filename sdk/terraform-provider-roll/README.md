@@ -56,10 +56,12 @@ data "roll_secrets_values" "production" {
   environment = "production"
 }
 
-# roll apps: a service, a variable, a custom domain (docs/apps/http-api.md).
+# roll apps: a service, a variable, a custom domain, an environment, a link and a notification
+# target (docs/apps/http-api.md).
 resource "roll_app_service" "web" {
   name          = "web"
   git_url       = "https://github.com/acme/web"   # or image, or repo (roll code); none: roll up
+  # git_username = "deploy"; git_token = var.gitlab_token   # a private repository's login
   max_instances = 3
 }
 
@@ -73,12 +75,38 @@ resource "roll_app_domain" "www" {
   service  = roll_app_service.web.id
   hostname = "www.example.com"   # point its CNAME at .target
 }
+
+resource "roll_app_environment" "staging" {
+  service = roll_app_service.web.id
+  name    = "staging"
+  branch  = "develop"            # none: it deploys only when asked
+}
+
+resource "roll_app_link" "orders" {
+  service = roll_app_service.web.id
+  kind    = "postgres"           # redis, bucket, stream, nosql, search, service
+  ref     = "orders"
+  prefix  = "ORDERS"             # ORDERS_DATABASE_URL; .vars names them
+}
+
+resource "roll_app_notification" "failures" {
+  kind   = "slack"
+  url    = var.slack_webhook
+  events = ["deploy.failed", "crash_loop"]
+}
+
+data "roll_app_service" "api" {
+  name = "api"                   # made elsewhere: .url, .environments
+}
 ```
 
 - An app's variable isn't read back (a sealed one never shows again): a change made outside
   Terraform is put back only when the value in the file changes. Its value lands in the state.
 
 - Identities, syncs and tokens don't change in place: every attribute replaces them.
+
+- A notification target's URL is never read back, and a new URL is a new target. A webhook's
+  signing secret is in `.secret` from when it's made. Filters left out are the defaults.
 
 - A key's value is read back on refresh, references as written, so a change made outside
   Terraform shows in the plan (the token needs `reveal`).
