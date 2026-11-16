@@ -2824,9 +2824,12 @@ Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs) and #14
    end-to-end `pulumi up`/`destroy` checked. Pulumi keeps every input in its state (encrypted), so
    values can't stay out of it as they do in Terraform. Next on it: a CI job, and publishing to
    the registries (public: the user's call).
-8. **Access requests**: a time-boxed `reveal` on a protected environment that an approver grants
-   (Infisical's and 1Password's). First check roll-access's `ask` rules (roll MCP's design), which
-   may already be the request; roll secrets should then only show and audit it.
+8. **Access requests**: roll-access's `ask` rules already are Infisical's and 1Password's
+   time-boxed requests for tokens and agents (a `reveal` held for an operator, approved once or
+   remembered for 1h/8h/1d), so roll secrets builds no second system. Left: auditing which
+   approval let a reveal through, asked of roll MCP (a `roll_auth::Approved` extension the gate sets);
+   roll secrets then records it in the audit row and the activity timeline. People's own requests
+   wait on projects having members.
 9. *To check against the real services (accounts, the user's call):* #113's STS login
    (`GetWebIdentityToken`) in an AWS account, Entra's answer for removing a secret that's already
    gone (#92), and #136's statements on a Snowflake account.
