@@ -111,6 +111,10 @@ pub struct Docker {
     /// a wake starts only the app, which joins the sandbox's network namespace, so Docker sets
     /// no network up on the wake's path. `ROLL_APPS_NETNS=0` turns it off.
     netns: bool,
+    /// Links to this host's loopback, served to containers through relays ([`super::links`]):
+    /// with the daemon on this host, except on macOS (Docker Desktop's `host.docker.internal`
+    /// reaches the host's loopback itself) or with `ROLL_APPS_LINK_RELAY=0`.
+    links: Option<super::links::Links>,
 }
 
 /// The sandbox holding `instance`'s network, its aliases and its published port.
@@ -129,7 +133,10 @@ impl Docker {
         // Env files a stopped process left behind (they hold variables' values).
         let _ = std::fs::remove_dir_all(&scratch);
         let netns = std::env::var("ROLL_APPS_NETNS").map_or(true, |v| v != "0");
-        Docker { known: Mutex::new(Known::default()), scratch, engine: Engine::local(), netns }
+        let engine = Engine::local();
+        let relay = engine.is_some() && !cfg!(target_os = "macos") && std::env::var("ROLL_APPS_LINK_RELAY").map_or(true, |v| v != "0");
+        let links = relay.then(|| super::links::Links::new(scratch.with_file_name("links")));
+        Docker { known: Mutex::new(Known::default()), scratch, engine, netns, links }
     }
 
     /// With or without network sandboxes, whatever `ROLL_APPS_NETNS` says (a measurement
@@ -282,6 +289,21 @@ impl Docker {
     }
 }
 
+/// A link's relay for `port` on `network`, running (made, or started again after a stop).
+async fn ensure_relay(links: &super::links::Links, network: &str, port: u16) -> anyhow::Result<()> {
+    let name = super::links::relay_name(network, port);
+    match docker(&["inspect", "-f", "{{.State.Running}}", &name]).await {
+        Ok(r) if r.trim() == "true" => Ok(()),
+        Ok(_) => docker(&["start", &name]).await.map(drop),
+        Err(_) => match docker(&super::links::relay_args(network, port, &links.socket_dir(port)).iter().map(String::as_str).collect::<Vec<_>>()).await {
+            Ok(_) => Ok(()),
+            // Another instance's create made it meanwhile.
+            Err(e) if e.to_string().contains("already in use") => Ok(()),
+            Err(e) => Err(e.context(format!("the link relay for port {port}"))),
+        },
+    }
+}
+
 /// Rewrite loopback hosts in a URL for a container (`host.docker.internal`).
 pub fn for_container(url: &str) -> String {
     let mut out = url.to_string();
@@ -369,6 +391,11 @@ impl Runtime for Docker {
     }
 
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()> {
+        if let (Some(links), Some(net)) = (&self.links, &spec.network) {
+            for port in super::links::ports(&spec.vars) {
+                ensure_relay(links, net, port).await?;
+            }
+        }
         let host_port = match spec.port {
             Some(_) => Some(free_port()?),
             None => None,
@@ -672,9 +699,16 @@ impl Runtime for Docker {
     async fn remove_network(&self, name: &str) {
         // Only one no container is on, stopped ones included (a stopped instance's start would
         // fail on a network gone, and Docker only refuses with running ones).
-        if name.starts_with(super::PREFIX)
-            && docker(&["ps", "-aq", "--filter", &format!("network={name}")]).await.is_ok_and(|ids| ids.trim().is_empty())
-        {
+        if !name.starts_with(super::PREFIX) {
+            return;
+        }
+        let Ok(on) = docker(&["ps", "-a", "--filter", &format!("network={name}"), "--format", "{{.Names}}"]).await else { return };
+        // Its link relays go with it: they serve only this network.
+        let (relays, others): (Vec<&str>, Vec<&str>) = on.lines().filter(|l| !l.trim().is_empty()).partition(|n| n.starts_with(super::links::NAME_PREFIX));
+        if others.is_empty() {
+            for r in relays {
+                let _ = docker(&["rm", "-f", r]).await;
+            }
             let _ = docker(&["network", "rm", name]).await;
         }
     }
@@ -772,7 +806,10 @@ impl Runtime for Docker {
     }
 
     fn reach(&self, url: &str) -> String {
-        for_container(url)
+        match &self.links {
+            Some(l) => l.reach(url),
+            None => for_container(url),
+        }
     }
 
     async fn shell(&self, name: &str, cols: u16, rows: u16) -> anyhow::Result<super::Shell> {
@@ -1103,6 +1140,17 @@ impl Builder for DockerBuilder {
         if image.starts_with(super::PREFIX) {
             let _ = docker(&["image", "rm", image]).await;
         }
+    }
+
+    async fn load(&self, archive: &std::path::Path, tag: &str, log: &LogSink) -> anyhow::Result<String> {
+        anyhow::ensure!(tag.starts_with(super::PREFIX), "{tag} isn't a roll apps image name");
+        let a = archive.to_string_lossy().to_string();
+        let out = docker_within(&["load", "-q", "-i", &a], Some(Duration::from_secs(600))).await.map_err(|e| anyhow::anyhow!("loading the image failed: {e}"))?;
+        // Its names were taken out: what's loaded is an image id.
+        let id = out.lines().filter_map(|l| l.trim().strip_prefix("Loaded image ID: ")).next_back().map(str::to_string).ok_or_else(|| anyhow::anyhow!("docker loaded no image by id: {}", out.trim()))?;
+        docker(&["tag", &id, tag]).await?;
+        log.line(format!("loaded {} as {tag}", id.chars().take(19).collect::<String>()));
+        Ok(tag.to_string())
     }
 }
 

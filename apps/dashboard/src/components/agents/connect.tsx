@@ -3,6 +3,7 @@ import { Check, KeyRound, Laptop } from "lucide-react";
 import { useEffect, useState } from "react";
 import { agentsApi, type MintedMachine, type PendingLogin } from "@/lib/agents-api";
 import { ApiError, codeApi, type Owner } from "@/lib/code-api";
+import { useInstallLine } from "@/lib/install-line";
 import { ROLL_API } from "@/lib/roll-api";
 import { btn, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 import { Select } from "./ui/select";
@@ -22,12 +23,6 @@ export function tokenLogin(m: MintedMachine, masked: boolean, api: string = ROLL
   return `roll agent login${apiFlag(api)} --machine-token ${token}\nroll agent up`;
 }
 
-/** The install line, from this web app (it serves `/install.sh`). */
-export function useInstallLine(): string {
-  const [origin, setOrigin] = useState("https://roll.sh");
-  useEffect(() => setOrigin(window.location.origin), []);
-  return `curl -fsSL ${origin}/install.sh | sh`;
-}
 
 const OS_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows", freebsd: "FreeBSD" };
 

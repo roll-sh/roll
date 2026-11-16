@@ -32,7 +32,7 @@ mod version;
 use serde::{Deserialize, Serialize};
 
 pub use caches::{LAYERS_ARG, isolate_caches};
-pub use tree::{DirTree, MapTree, Tree};
+pub use tree::{DirTree, MapTree, SubTree, Tree};
 pub use node::{WorkspaceApp, workspace_app};
 pub use uses::{Datastore, uses};
 /// A plan's start when it serves files from `/site` (busybox httpd): a static site.
@@ -159,6 +159,50 @@ pub enum Error {
 }
 
 /// Detects how `tree` builds and runs. `tree` is the service's root directory.
+/// A folder of a tree that builds on its own (Railway's monorepo import, Vercel's root picker).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Candidate {
+    pub root: String,
+    pub provider: Provider,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub framework: Option<String>,
+}
+
+/// The folders under the tree's root, up to three levels down, that plan as an app that runs or
+/// serves something (a start command, a framework, its own Dockerfile: a library package or a
+/// plain folder of HTML is left out), dependencies and build output skipped; at most 20,
+/// shallowest first.
+pub fn candidates(tree: &dyn Tree) -> Vec<Candidate> {
+    const SKIP: [&str; 16] = ["node_modules", ".git", "vendor", "target", "dist", "build", "out", ".next", "coverage", "test", "tests", "__tests__", "fixtures", "docs", ".github", "tmp"];
+    let mut out = Vec::new();
+    let mut level: Vec<String> = vec![String::new()];
+    for _ in 0..3 {
+        let mut next = Vec::new();
+        for dir in &level {
+            for name in tree.list(dir).into_iter().filter_map(|n| n.strip_suffix('/').map(str::to_string)) {
+                if SKIP.contains(&name.as_str()) || name.starts_with('.') {
+                    continue;
+                }
+                let path = if dir.is_empty() { name } else { format!("{dir}/{name}") };
+                let sub = SubTree { inner: tree, prefix: path.clone() };
+                if let Ok(p) = detect(&sub, &Overrides::default())
+                    && (p.provider == Provider::Dockerfile || p.framework.is_some() || (p.provider != Provider::Static && p.start.is_some()))
+                {
+                    out.push(Candidate { root: path.clone(), provider: p.provider, framework: p.framework });
+                    if out.len() == 20 {
+                        return out;
+                    }
+                    // An app's own folders aren't apps of their own.
+                    continue;
+                }
+                next.push(path);
+            }
+        }
+        level = next;
+    }
+    out
+}
+
 pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
     // A Procfile (Heroku's; Nixpacks and Railpack read it too) names the start command when
     // the service doesn't, unless the tree's own Dockerfile has its CMD.

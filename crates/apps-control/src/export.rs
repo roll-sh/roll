@@ -38,10 +38,16 @@ impl Apps {
         let mut file = ProjectFile::default();
         let mut notes = Vec::new();
         for svc in &services {
-            let mut a = AppEntry { root: None, image: None, repo: None, branch: None, kind: None, start: svc.run.start.clone(), schedule: svc.run.schedule.clone(), run: None, links: Vec::new(), port: svc.run.port, variables: BTreeMap::new() };
+            let mut a = AppEntry { root: None, image: None, repo: None, git: None, branch: None, kind: None, start: svc.run.start.clone(), schedule: svc.run.schedule.clone(), run: None, links: Vec::new(), port: svc.run.port, variables: BTreeMap::new(), environments: BTreeMap::new() };
             match &svc.source {
                 Source::Repo { repo, root } => {
                     a.repo = Some(repo.clone());
+                    a.root = root.clone();
+                    let (sid, e) = (svc.id.clone(), PRODUCTION.to_string());
+                    a.branch = self.db(move |s| s.environment(&sid, &e)).await.ok().and_then(|e| e.branch);
+                }
+                Source::Git { url, root } => {
+                    a.git = Some(url.clone());
                     a.root = root.clone();
                     let (sid, e) = (svc.id.clone(), PRODUCTION.to_string());
                     a.branch = self.db(move |s| s.environment(&sid, &e)).await.ok().and_then(|e| e.branch);
@@ -67,11 +73,17 @@ impl Apps {
                 }
             }
             a.run = (!table.is_empty()).then_some(table);
-            // Databases it links (postgres and redis: what a file can declare); the rest said.
+            // What it links that a file declares (databases, buckets, streams, NoSQL, another
+            // service of the project by its name); the rest said.
             let mut other = Vec::new();
             for l in self.links(&svc.id).await? {
                 let kind = l.kind.as_str();
-                if kind == "postgres" || kind == "redis" {
+                if kind == "service" {
+                    match services.iter().find(|s| s.id == l.r#ref) {
+                        Some(t) => a.links.push(t.name.clone()),
+                        None => other.push(format!("service {}", l.r#ref)),
+                    }
+                } else if apps_build::project::DB_KINDS.contains(&kind) {
                     let named = names.get(&format!("{kind}:{}", l.r#ref)).cloned().unwrap_or_else(|| l.r#ref.clone());
                     let name = name_of(&named);
                     file.databases.insert(name.clone(), DbEntry { kind: kind.to_string() });
@@ -87,6 +99,12 @@ impl Apps {
             let vars: Vec<String> = self.db(move |s| s.variables(&sid, &e)).await.map(|v| v.into_keys().collect()).unwrap_or_default();
             if !vars.is_empty() {
                 notes.push(format!("{}: variables set by name only, never written here (`roll apps vars`): {}", svc.name, vars.join(", ")));
+            }
+            // Its other lasting environments (not previews): the branch and its own run settings.
+            let sid = svc.id.clone();
+            for env in self.db(move |s| s.environments(&sid)).await?.into_iter().filter(|e| e.name != PRODUCTION && !e.ephemeral) {
+                let run = (!env.run.is_empty()).then(|| toml::Value::try_from(&env.run).ok()).flatten().and_then(|v| v.as_table().cloned());
+                a.environments.insert(env.name.clone(), apps_build::project::EnvEntry { branch: env.branch.clone(), run, variables: BTreeMap::new() });
             }
             file.apps.insert(svc.name.clone(), a);
         }
