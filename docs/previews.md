@@ -417,6 +417,42 @@ whose code adds or retypes a field says so (live: `+ field products.price float`
 preview wrote a document with a price). With several such resources, each one's lines follow a
 `# <kind>:<ref>` heading.
 
+## Egress
+
+A preview runs a change's code against real data, and caught mail and removed provider keys
+close only the commonest way it reaches real people. A webhook to a customer, or a call to a
+payment provider's live API, is still one line of code away. A project chooses what its
+previews' code may reach:
+
+- `egress: "open"` (the default, as before): anything.
+- `egress: "roll"`: only roll's own products (the preview's branches) and roll's proxy in front
+  of it. Nothing on the internet.
+
+**Decision (2026-11-16): enforce it on the node, with a Docker internal network per preview.**
+A preview whose project chooses `"roll"` gets its own network made with `--internal`, which has
+no route out. Its service containers join that network instead of the default bridge and
+publish no port. roll's proxy reaches each one at its address on that network, and a container
+reaches roll's products at that network's gateway (`host.docker.internal` points there, not at
+`docker0`). The screenshot run already joins the service's network, so the page's own code
+can't reach out either.
+
+Why this way, rather than the alternatives:
+
+- **Per-container firewall rules:** no. roll mustn't touch the host's firewall.
+- **The cloud fleet's security groups:** no. They exist only on AWS, they apply to a whole node
+  rather than one preview, and a single-node install would get nothing.
+- **An HTTP proxy in `HTTP_PROXY`:** advisory only, since code can ignore it. It comes later
+  for allowed hosts, but only behind the internal network, so it's the only way out.
+
+It's measured on ai-server: a container on such a network gets "network unreachable" for an
+outside address, and the host reaches its server at its address. Containers there can't reach
+the host either way (the host's firewall), so the products' reach is the same as on the default
+bridge. On the fleet, where products listen on every interface, the network's gateway reaches
+them. It's reversible: `"open"` is the default, and the setting only adds a network.
+
+Next: a list of allowed hosts (`egress: ["api.stripe.com"]`) through a forwarding proxy on the
+network's gateway, the only way out, with what it refused said in the activity.
+
 ## Safety
 
 - **Forks.** A change with `trusted: false` (a PR from a fork) gets a preview only for a head a
@@ -1477,22 +1513,8 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
-   a preview reaches real people, but its code can still call any API (a payment provider's
-   sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
-   (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
-   roll's runtime puts the containers on a network that allows only that (Docker's internal
-   networks plus a small forwarding proxy), and what was refused is said in the activity.
-   A second look (2026-11-14): roll's runtime makes service containers through `code-preview`'s
-   Docker isolation (shared with roll code's checks), publishes each one's port on 127.0.0.1 for
-   its proxy, and every data branch is reached at `host.docker.internal`. An internal network
-   can't publish ports, and cuts the host off, so it means the proxy reaching containers by their
-   address on that network and a forwarder for each product port: a change to the isolation
-   roll code shares, not to previews alone.
-   Ranked down after a look: enforcement needs either per-container firewall rules (not on a
-   host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
-   every product port (an image of its own, and roll code's runner changed); on the cloud fleet
-   it's security groups, with the cloud thread.
+1. **Egress rules for previews, being built** (see "Egress"): `egress: "roll"` puts a preview on
+   a Docker internal network; then a list of allowed hosts through a forwarding proxy.
 2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
