@@ -290,6 +290,10 @@ export type CloudAccount =
 export type NewCloudAccount = { name: string } & ({ cloud: "gcp"; audience: string; service_account: string } | { cloud: "azure"; tenant: string; client_id: string; scope?: string });
 /** A Postgres, MySQL, Redis or MongoDB server outside roll: two login roles that take turns (managed), a group dynamic logins join, or both; the admin URL stays sealed. */
 export type OutsideDatabase = { id: string; name: string; host: string; roles: string[]; group?: string; ca?: string; created_at: number; created_by: string };
+/** An LDAP or Active Directory server outside roll: one or two managed accounts (two take turns), a base dynamic users are made under (in `groups`), or both; the bind password stays sealed. */
+export type DirectoryFlavor = "openldap" | "active_directory";
+export type Directory = { id: string; name: string; url: string; flavor: DirectoryFlavor; bind_dn: string; user_base_dn?: string; managed_accounts: string[]; groups: string[]; ca?: string; created_at: number; created_by: string };
+export type NewDirectory = { name: string; url: string; bind_dn: string; bind_password: string; flavor: DirectoryFlavor; user_base_dn?: string; managed_accounts?: string[]; groups?: string[]; ca?: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 

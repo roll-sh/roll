@@ -926,6 +926,115 @@ rotation (the rotated login signs in), a dynamic login that signs in with the gr
 can't once dropped, and an untrusted certificate refused. With TLS 1.3 enabled on the server as
 well (`tlsprotocols = 1.2,1.3`), SQL Server 2022 on Linux refused TDS 7.4 logins, Microsoft's own
 `sqlcmd` included: such a server needs TLS 1.2 allowed.
+
+### Directories (LDAP and Active Directory)
+
+An OpenLDAP or Active Directory server roll doesn't run has its accounts' passwords rotated by roll
+itself, as Infisical's LDAP rotation does, and makes a user per lease, as Vault's LDAP secrets
+engine does. A project registers it (`POST …/directories`, `admin`; `roll secrets directories add
+NAME --url URL --bind-dn DN [--flavor active_directory] [--account DN…] [--user-base-dn DN]
+[--group DN…] [--ca FILE]`, the bind password on stdin; or the dashboard, next to databases outside roll):
+
+- `url` is `ldaps://host[:636]`, or `ldap://host[:389]`, which always starts with StartTLS: nothing
+  is ever sent in plain text, even where private addresses are allowed. Nothing follows the host
+  (no base DN, scope or filter).
+- `bind_dn` and `bind_password` are the account roll binds as. The password is sealed with the
+  project's data key, bound to the directory's row (only the DN is shown), and never returned,
+  logged or audited. The bind account can't be one of the managed accounts (rotating it would lock
+  roll out).
+- `flavor` is `openldap` (the default) or `active_directory`.
+- `managed_accounts` are one or two accounts' DNs (managed links); `user_base_dn` is where dynamic
+  users are made and `groups` the groups they join (dynamic links). One or both.
+- `ca` is the server's CA certificates (PEM), trusted as well as the system's: most domain
+  controllers have a certificate from the domain's own CA. The certificate must name the URL's
+  host in its subjectAltName (a name only in the subject's CN is refused): a Windows domain
+  controller's from AD CS does, but the one Samba makes for itself doesn't, so give Samba one
+  (`tls certfile`, `tls keyfile`).
+
+Registering binds once, outside any transaction, and finds every account, group and the base (a
+base search for each): a refusal is a 400 with the server's reason, never the password. One project
+can't register the same account on one host twice (the two would undo each other's passwords).
+
+It's the link kind `directory`, with fields `username` (the account's DN) and `password`, one
+credential (`login`), `managed` or `dynamic`; the dashboard suggests `LDAP_BIND_DN` and
+`LDAP_PASSWORD`. An Active Directory login also has `upn` (`LDAP_UPN`: its `userPrincipalName`,
+else the implicit `sAMAccountName@domain` every account has, the domain being its DN's `DC=`
+parts) and `account_name` (`LDAP_USERNAME`: its `sAMAccountName`), for applications that log in
+with those rather than a DN; a managed account's are read before its password changes. Linking
+them to an OpenLDAP directory is refused.
+
+**Managed.** With two accounts, they take turns exactly as a database's two roles do (above): each
+issue (linking, every `rotate_days`, `…/rotate`) sets a new password on the account not handed out
+last and hands it out, so the one in use keeps working until its grace period ends; then its
+password is replaced by one nobody knows. Rotating again within the grace period is a 409. **With one
+account there is no grace:** each rotation replaces its password at once, so whatever still holds
+the old one fails from that moment, and a second rotation within two minutes of the first is a 409
+(the first is still being stored). Either way a directory's managed credential serves one
+environment (409 elsewhere).
+
+**Dynamic.** Each lease gets `cn=roll-<lease>,<user_base_dn>` with a random password, its
+`description` naming the lease (`roll secrets lease lse_… (roll secrets staging LDAP_PASSWORD for
+job:sync)`), and membership of every group (`member`). Ending the lease (expiry, `DELETE
+…/leases/{id}`) deletes it; a user that's gone already counts as deleted. If making it fails midway
+(a group refused it), what was made is deleted before the resolve answers. On Active Directory the
+user is made disabled, given its password, then enabled; its `sAMAccountName` is `roll-` and 15
+characters of the lease id, its `userPrincipalName` that name at `user_base_dn`'s domain, and its
+`accountExpires` the lease's end plus five minutes, moved by each renewal, so the domain refuses it
+after the lease even if roll is down. OpenLDAP has no expiry
+for an entry: a user lasts until roll ends its lease. Checks, sandboxes and previews (untrusted)
+never get a dynamic user. Dynamic links work in any number of environments.
+
+**Passwords** are 32 characters with upper- and lowercase letters and digits; Active Directory's
+also hold a symbol from `!#%+-.:=?@^_~`, for its complexity policy. On OpenLDAP a password is set
+with the Password Modify extended operation (RFC 3062) where the root DSE lists it, so slapd hashes
+it as configured (`olcPasswordHash`), else by replacing `userPassword`. On Active Directory it's a
+replace of `unicodePwd` with the password in double quotes as UTF-16LE, which the domain accepts
+only over TLS. A domain keeps taking an account's previous password for a while after a reset
+(NTLM's old password allowed period, an hour by default; Samba accepts it for simple binds too), so
+roll sets a throwaway password first and then the new one: the password it replaces stops working
+at once, as above.
+
+rolld connects the way it reaches a database outside roll: it resolves the host itself, refuses a
+private address (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE` allows them for local development), connects to
+the address it checked, and verifies the certificate against the URL's host. A conversation has 15
+seconds, connecting included, and reads at most 1 MiB from the server; searches are base searches
+for one entry.
+
+The bind account needs, at least:
+
+| Flavor | Managed accounts | Dynamic users |
+| --- | --- | --- |
+| `openldap` | `write` on each account's `userPassword` (`olcAccess: to dn.exact="cn=app-blue,…" attrs=userPassword by dn.exact="cn=roll,…" write`), and `read` on the root DSE's `supportedExtension` | `write` on `entry` and `children` of `user_base_dn` (to add and delete users) and on the new users' attributes, and `write` on each group's `member` |
+| `active_directory` | the *Reset Password* extended right on each account (Delegate Control, "Reset user passwords and force password change at next logon") | *Create* and *Delete User objects* on the `user_base_dn` OU, *Reset Password* and write `userAccountControl` and `accountExpires` on its users (inherited, for `User` objects), and write `member` on each group. The attributes a user is made with (`description`, `sAMAccountName`, `userPrincipalName`) need nothing more: creating it covers them |
+
+Checked against OpenLDAP 2.4 (`osixia/openldap:1.5.0`, a certificate from a private CA) over
+LDAPS and StartTLS, bound as an account with only the `openldap` row's rights (`olcAccess` above):
+the bind proof and a missing account refused, a new password that binds while the old one is
+refused (stored `{SSHA}` through Password Modify), a dynamic user that binds and is in its group,
+then deleted and out of the group, a second delete that's fine, and an untrusted certificate
+refused (`a_real_openldap_sets_passwords_and_makes_and_deletes_users` in
+`crates/rolld/src/secrets/directory.rs`, ignored: run by hand with `ROLL_E2E_LDAP_*`).
+
+Checked against Samba's AD DC 4.22 (Debian trixie's `samba-ad-dc`, a domain provisioned with
+`samba-tool domain provision`, its default policies) over LDAPS with a certificate from a private
+CA, bound as an account given only the `active_directory` row's rights (`samba-tool dsacl set`,
+the ACEs `CR` Reset Password on the account; `CCDC` for `User` on the OU plus inherited `CR` Reset
+Password and `WP` on `userAccountControl` and `accountExpires`; `WP` on the group's `member`): the
+bind proof, a missing account and a wrong bind password refused, a certificate from a CA that isn't
+trusted refused (and Samba's own certificate, which has no subjectAltName); a managed account's new
+password binds and its old one is refused at once, under Samba's default hour of old passwords; its
+`sAMAccountName` and implicit UPN read, and the UPN binds; a dynamic user made disabled then
+enabled (`userAccountControl` 512), with its `sAMAccountName`, UPN (which binds) and
+`accountExpires`, in its group, its expiry moved by a renewal; one whose `accountExpires` has passed
+refused; deleting it, and deleting it again
+(`a_real_active_directory_sets_passwords_and_makes_expires_and_deletes_users`, ignored: run by hand
+with `ROLL_E2E_AD_*`). Samba isn't Windows Server: not yet run against one are Windows' password
+policy and fine-grained password policies with roll's passwords, its old-password period after a
+reset, an AD CS certificate, LDAP signing and channel binding requirements, and replication
+between domain controllers (a user made on one and bound on another right after).
+
+A directory a key links to, or with a retired password or a dynamic user still to delete, can't be
+deleted (409).
 ### GCP and Azure
 Short-lived GCP and Azure access tokens for each lease, as Vault's GCP and Azure engines give, with
 no key of the customer's stored anywhere: **roll is an OpenID Connect issuer**, and the customer's
@@ -1172,6 +1281,7 @@ roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
 roll secrets databases ls | add NAME [--role A --role B] [--group G] [--ca FILE] (admin URL on stdin) | rm ID
+roll secrets directories ls | add NAME --url URL --bind-dn DN [--flavor F] [--account DN…] [--user-base-dn DN] [--group DN…] [--ca FILE] (bind password on stdin) | rm ID
 roll secrets aws-users ls | add NAME USER --role ROLE | rm ID
 roll secrets clouds  ls | add-gcp NAME --audience A --service-account SA | add-azure NAME --tenant T --client-id C [--scope S] | rm ID
 roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
@@ -2400,6 +2510,9 @@ isn't in the workspace is 404.
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
+| `GET /directories` | | `Directory[]` (`read` on the project; never the bind password) |
+| `POST /directories` | `{name, url, bind_dn, bind_password, flavor: "openldap" \| "active_directory", user_base_dn?, managed_accounts?: [dn, dn?], groups?: [dn], ca?}` | 201 `Directory` (`admin`; binds once and finds the accounts, groups and base first: 400 with the server's reason) |
+| `DELETE /directories/{id}` | | 204; 409 while a key links to it, or a retired password or a dynamic user waits (`admin`) |
 | `GET /cloud-accounts` | | `CloudAccount[]` (`read` on the project) |
 | `POST /cloud-accounts` | `{name, cloud: "gcp", audience, service_account}` or `{name, cloud: "azure", tenant, client_id, scope?}` | 201 `CloudAccount` (`admin`; 400 when a made-up project's token is taken, or this project's isn't) |
 | `DELETE /cloud-accounts/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -2800,8 +2913,9 @@ rotating a database's admin password and editing registrations in place (#75), s
    on the rotator framework (Infisical, Akeyless).
 7. **AWS roles and users edited in place** (a new role ARN or trust; on #68's branch, where trust
    lives), and Terraform updating registrations in place (#72, after #75).
-8. **More dynamic credentials**: Kubernetes service account tokens, Snowflake, LDAP and Active
-   Directory passwords (Vault, Infisical).
+8. **More dynamic credentials**: Kubernetes service account tokens, Snowflake (Vault, Infisical).
+   LDAP and Active Directory passwords are built (`feature/roll-secrets-ldap`: "Directories (LDAP
+   and Active Directory)", managed accounts taking turns and a user per lease).
 9. **Java and .NET clients, a Pulumi provider, a Lambda extension and an Ansible lookup** (Spring,
    `IConfiguration`; AWS's Parameters and Secrets extension; Vault's and 1Password's Ansible).
 10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project

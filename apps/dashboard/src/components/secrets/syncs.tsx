@@ -7,6 +7,7 @@ import { Cas } from "./cas";
 import { SshCas } from "./ssh-cas";
 import { CloudAccounts } from "./cloud-accounts";
 import { OutsideDatabases } from "./outside-databases";
+import { Directories } from "./directories";
 import { AwsRoles } from "./aws-roles";
 import { Rotators } from "./rotators";
 import { TransitKeys } from "./transit-keys";
@@ -72,6 +73,7 @@ export function SyncsView() {
         )}
       </Section>
       <OutsideDatabases />
+      <Directories />
       <Rotators />
       <TransitKeys />
       <Cas />

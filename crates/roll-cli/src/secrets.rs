@@ -335,6 +335,10 @@ pub enum Secrets {
     /// list, add, remove.
     #[command(subcommand)]
     Databases(DatabasesCmd),
+    /// LDAP and Active Directory servers whose accounts roll rotates or makes per lease: list,
+    /// add (the bind password on stdin), remove.
+    #[command(subcommand)]
+    Directories(DirectoriesCmd),
     /// AWS roles for dynamic AWS credentials: list, add (roll assumes it to check), remove.
     #[command(subcommand, name = "aws-roles")]
     AwsRoles(AwsRolesCmd),
@@ -621,6 +625,38 @@ pub enum DatabasesCmd {
         #[arg(long)]
         group: Option<String>,
         /// The server's CA certificates (PEM file), when the system's don't cover it (Amazon RDS).
+        #[arg(long)]
+        ca: Option<std::path::PathBuf>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum DirectoriesCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register a directory: the bind account's password on stdin; one or two managed accounts
+    /// (two take turns), a base for dynamic users (and the groups they join), or both.
+    Add {
+        name: String,
+        /// ldaps://host[:636], or ldap://host[:389] (StartTLS, always).
+        #[arg(long)]
+        url: String,
+        /// The account roll binds as (it may reset the managed accounts' passwords and make users).
+        #[arg(long)]
+        bind_dn: String,
+        /// openldap or active_directory.
+        #[arg(long, default_value = "openldap")]
+        flavor: String,
+        #[arg(long = "account", num_args = 1)]
+        accounts: Vec<String>,
+        /// Where each dynamic lease's user is made (cn=roll-<lease>,<it>).
+        #[arg(long)]
+        user_base_dn: Option<String>,
+        /// A group each dynamic user joins.
+        #[arg(long = "group", num_args = 1)]
+        groups: Vec<String>,
+        /// The server's CA certificates (PEM file), when the system's don't cover it.
         #[arg(long)]
         ca: Option<std::path::PathBuf>,
     },
@@ -1712,6 +1748,39 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             DatabasesCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/outside-databases/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::Directories(d) => match d {
+            DirectoriesCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/directories", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for d in v.as_array().into_iter().flatten() {
+                    let accounts: Vec<&str> = d["managed_accounts"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    let users = d["user_base_dn"].as_str().map(|b| format!("  dynamic in {b}")).unwrap_or_default();
+                    println!("{}  {:<16} {:<32} {:<16} {}{users}", s(&d["id"]), s(&d["name"]), s(&d["url"]), s(&d["flavor"]), accounts.join(" "));
+                }
+            }
+            DirectoriesCmd::Add { name, url, bind_dn, flavor, accounts, user_base_dn, groups, ca } => {
+                // The bind password: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("Bind password for {bind_dn}, then Enter and Ctrl-D: ");
+                }
+                let mut password = String::new();
+                std::io::stdin().read_to_string(&mut password).context("reading the bind password from stdin")?;
+                let password = password.trim_end_matches(['\r', '\n']);
+                let ca = ca.map(|p| std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))).transpose()?;
+                let body = json!({ "name": name, "url": url, "bind_dn": bind_dn, "bind_password": password, "flavor": flavor, "managed_accounts": accounts, "user_base_dn": user_base_dn, "groups": groups, "ca": ca });
+                let v = c.call(Method::POST, &format!("{}/directories", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link LDAP_BIND_DN and LDAP_PASSWORD to it, managed (its accounts) or dynamic (a user per lease).", s(&v["name"]), s(&v["id"]));
+            }
+            DirectoriesCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/directories/{}", c.base(), enc(&id)), None).await?;
                 println!("Removed {id}");
             }
         },

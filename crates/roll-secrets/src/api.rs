@@ -124,6 +124,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/cloud-accounts/{{id}}"), axum::routing::delete(delete_cloud_account))
         .route(&format!("{P}/outside-databases"), get(outside_databases).post(add_outside_database))
         .route(&format!("{P}/outside-databases/{{id}}"), axum::routing::delete(delete_outside_database))
+        .route(&format!("{P}/directories"), get(directories).post(add_directory))
+        .route(&format!("{P}/directories/{{id}}"), axum::routing::delete(delete_directory))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -1056,6 +1058,20 @@ async fn add_outside_database(State(s): S, Who(c): Who, Path(project): Path<Stri
 
 async fn delete_outside_database(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_outside_database(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn directories(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.directories(&project, &c)).await?))
+}
+
+async fn add_directory(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::directories::NewDirectory = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_directory(&project, n, &c)).await?))
+}
+
+async fn delete_directory(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_directory(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
