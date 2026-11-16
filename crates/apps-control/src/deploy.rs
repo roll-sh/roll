@@ -1865,15 +1865,38 @@ impl Apps {
 
     /// `roll.toml` `[app]` at a pushed revision (in the service's root), if it reads.
     async fn app_config_at(self: &Arc<Self>, svc: &ServiceRow, revision: &str) -> Option<crate::config::AppConfig> {
-        let (Source::Repo { repo, root }, Some(sources)) = (&svc.source, &self.deps.sources) else { return None };
+        let root = match &svc.source {
+            Source::Repo { root, .. } | Source::Git { root, .. } => root,
+            _ => return None,
+        };
         let path = match root {
             Some(r) => format!("{r}/roll.toml"),
             None => "roll.toml".into(),
         };
-        match sources.read_file(repo, revision, &path).await {
+        let read = match (&svc.source, &self.deps.sources) {
+            (Source::Repo { repo, .. }, Some(sources)) => sources.read_file(repo, revision, &path).await,
+            (Source::Git { url, .. }, _) => crate::git_source::read_file(&crate::git_source::client(self.cfg.allow_private), url, revision, &path).await,
+            _ => return None,
+        };
+        match read {
             Ok(Some(bytes)) => crate::config::parse(&String::from_utf8_lossy(&bytes)).ok().flatten(),
             _ => None,
         }
+    }
+
+    /// Why a Git URL service's push at `sha` isn't deployed to `env`, if it isn't: a skip tag in
+    /// its message, or watch paths (roll.toml's at that commit, the environment's block first,
+    /// else the service's) it changes none of. The hook and the five-minute watch both ask.
+    pub(crate) async fn git_push_skip(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, sha: &str, message: &str) -> Option<String> {
+        if let Some(tag) = skip_tag(message) {
+            return Some(format!("its message says {tag}"));
+        }
+        let file = self.app_config_at(svc, sha).await;
+        let watch = file.as_ref().and_then(|f| f.watch_for(&env.name)).or_else(|| svc.build.watch.clone()).filter(|w| !w.is_empty())?;
+        if self.push_touches(svc, env, sha, &watch).await {
+            return None;
+        }
+        Some(format!("it changes nothing this service watches ({})", watch.join(", ")))
     }
 
     /// Whether `revision` changes a watched path since what `env` runs (no active deployment, or
@@ -1886,7 +1909,11 @@ impl Apps {
             let client = crate::git_source::client(self.cfg.allow_private);
             return match crate::git_source::changed_paths(&client, url, &from, revision).await {
                 Ok(Some(paths)) => sources.any_path_matches(patterns, &paths),
-                _ => true,
+                Ok(None) => true,
+                Err(e) => {
+                    self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(format!("{}'s changed paths couldn't be read ({e:#}): deployed as if it touched a watched one", &revision[..revision.len().min(12)]));
+                    true
+                }
             };
         }
         let (Source::Repo { repo, .. }, Some(sources)) = (&svc.source, &self.deps.sources) else { return true };

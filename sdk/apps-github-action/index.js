@@ -43,15 +43,19 @@ function subject(exec, cwd) {
 }
 
 /** The pull request's own comment for this service and environment, made or brought up to date. */
-async function comment(fetchFn, env, ghToken, marker, body) {
-  const event = env.GITHUB_EVENT_PATH ? JSON.parse(fs.readFileSync(env.GITHUB_EVENT_PATH, "utf8")) : {};
+async function comment(fetchFn, env, event, ghToken, marker, body) {
   const number = event.pull_request?.number;
   if (!number) return false;
   const gh = (env.GITHUB_API_URL || "https://api.github.com").replace(/\/+$/, "");
   const base = `/repos/${env.GITHUB_REPOSITORY}/issues/${number}/comments`;
   const headers = { accept: "application/vnd.github+json" };
-  const list = await call(fetchFn, gh, "GET", `${base}?per_page=100`, ghToken, undefined, headers);
-  const mine = (list || []).find((c) => typeof c.body === "string" && c.body.includes(marker));
+  // Every page (a busy pull request has more than one), at most 3,000 comments.
+  let mine;
+  for (let page = 1; !mine && page <= 30; page++) {
+    const list = (await call(fetchFn, gh, "GET", `${base}?per_page=100&page=${page}`, ghToken, undefined, headers)) || [];
+    mine = list.find((c) => typeof c.body === "string" && c.body.includes(marker));
+    if (list.length < 100) break;
+  }
   const text = `${marker}\n${body}`;
   if (mine) await call(fetchFn, gh, "PATCH", `/repos/${env.GITHUB_REPOSITORY}/issues/comments/${mine.id}`, ghToken, { body: text }, headers);
   else await call(fetchFn, gh, "POST", base, ghToken, { body: text }, headers);
@@ -87,7 +91,11 @@ async function run(env, out, fetchFn = fetch, exec = childProcess.execFileSync, 
   const svc = await call(fetchFn, api, "GET", `/v1/apps/services/${seg(service)}`, token);
   const kind = svc?.source?.kind;
   const cwd = input("path") || ".";
-  const sha = input("revision") || env.GITHUB_SHA || "";
+  const event = env.GITHUB_EVENT_PATH ? JSON.parse(fs.readFileSync(env.GITHUB_EVENT_PATH, "utf8")) : {};
+  // On a pull request GITHUB_SHA is GitHub's merge commit, which isn't the branch's: its head.
+  const sha = input("revision") || event.pull_request?.head?.sha || env.GITHUB_SHA || "";
+  const minutes = Number(input("timeout-minutes") || "30");
+  if (!(minutes > 0)) throw new Error("timeout-minutes is a number of minutes");
   const message = (input("message") || subject(exec, cwd) || `${env.GITHUB_WORKFLOW || "GitHub Actions"} #${env.GITHUB_RUN_NUMBER || "?"}`).slice(0, 500);
   // A retried step answers the deployment it started (a re-run attempt is a new deploy).
   const key = `github:${env.GITHUB_REPOSITORY || "?"}:${env.GITHUB_RUN_ID || Date.now()}:${env.GITHUB_RUN_ATTEMPT || "1"}:${environment}`.slice(0, 200);
@@ -108,7 +116,8 @@ async function run(env, out, fetchFn = fetch, exec = childProcess.execFileSync, 
     const prefix = git(["rev-parse", "--show-prefix"], cwd).toString().trim();
     const tgz = git(["archive", "--format=tar.gz", `HEAD:${prefix}`], top);
     const headers = { "content-type": "application/gzip", "idempotency-key": key, "x-roll-message": encodeURIComponent(message) };
-    if (/^[0-9a-f]{40}$/i.test(sha)) headers["x-roll-revision"] = sha.toLowerCase();
+    // What's sent is the checkout's HEAD (on a pull request, GitHub's merge commit): named as it.
+    headers["x-roll-revision"] = git(["rev-parse", "HEAD"], top).toString().trim();
     deployment = await call(fetchFn, api, "POST", `${envPath}/deploys`, token, Buffer.from(tgz), headers);
   } else if (kind === "image") {
     throw new Error("an image service deploys an image: pass image (a tag or digest of its repository)");
@@ -117,7 +126,6 @@ async function run(env, out, fetchFn = fetch, exec = childProcess.execFileSync, 
   }
   out.write(`roll apps: ${deployment.id} queued in ${environment}\n`);
   if (input("wait") !== "false") {
-    const minutes = Number(input("timeout-minutes") || "30");
     const until = Date.now() + minutes * 60_000;
     let last = deployment.status;
     while (!DONE.has(deployment.status)) {
@@ -136,7 +144,7 @@ async function run(env, out, fetchFn = fetch, exec = childProcess.execFileSync, 
   if (env.GITHUB_STEP_SUMMARY) fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `**roll apps** ${environment}: \`${deployment.id}\` ${deployment.status}${url ? ` at ${url}` : ""}\n`);
   if (input("comment") === "true" && input("github-token") && DONE.has(deployment.status)) {
     const said = deployment.status === "active" ? `Deployed to **${environment}**${url ? `: ${url}` : ""}` : `The deploy to **${environment}** is ${deployment.status}`;
-    await comment(fetchFn, env, input("github-token"), `<!-- roll-apps:${service}:${environment} -->`, `${said} (\`${deployment.id}\`, ${sha.slice(0, 12)}).`);
+    await comment(fetchFn, env, event, input("github-token"), `<!-- roll-apps:${service}:${environment} -->`, `${said} (\`${deployment.id}\`, ${sha.slice(0, 12)}).`);
   }
   if (["failed", "canceled"].includes(deployment.status)) {
     // The build's lines are the owner's: printed only when asked (a public repository's job log

@@ -51,16 +51,19 @@ impl crate::Apps {
                     continue;
                 }
                 // Its message, as a push's hook reads it: `[skip ci]` skips it, its subject names it.
-                let message = commit_message(&client, url, &sha).await.unwrap_or_default();
-                if let Some(tag) = crate::deploy::skip_tag(&message) {
-                    sink().line(format!("{} on {branch} not deployed: its message says {tag}", &sha[..12]));
-                    continue;
-                }
-                // Watch paths: a commit that touches none of them isn't deployed.
-                if let Some(patterns) = svc.build.watch.as_ref().filter(|w| !w.is_empty())
-                    && !self.push_touches(&svc, &env, &sha, patterns).await
-                {
-                    sink().line(format!("{} on {branch} changes nothing this service watches ({}): not deployed", &sha[..12], patterns.join(", ")));
+                // One that can't be read isn't deployed blind (its skip tag would be missed): the
+                // next pass tries again.
+                let message = match commit_message(&client, url, &sha).await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        sink().line(format!("{} on {branch}: its message couldn't be read ({e:#}); trying again in five minutes", &sha[..12]));
+                        let (sid, e2) = (svc.id.clone(), env.name.clone());
+                        let _ = self.db(move |s| s.set_tag_seen(&sid, &e2, "")).await;
+                        continue;
+                    }
+                };
+                if let Some(why) = self.git_push_skip(&svc, &env, &sha, &message).await {
+                    sink().line(format!("{} on {branch} not deployed: {why}", &sha[..12]));
                     continue;
                 }
                 let subject = message.lines().next().unwrap_or("").chars().take(500).collect::<String>();
@@ -126,13 +129,22 @@ pub async fn materialize(client: &Client, url: &str, sha: &str, dir: &Path) -> a
     tokio::task::spawn_blocking(move || write_commit(&objects, oid, &dir)).await?
 }
 
+/// A fetch that leaves objects out with a filter, or, from a server that takes no filters (some
+/// self-hosted ones), the same fetch with everything (still at most `Limits::max_pack_bytes`).
+async fn fetch_filtered(client: &Client, url: &str, args: FetchArgs) -> anyhow::Result<code_git::Fetched> {
+    match client.fetch(url, None, &args).await {
+        Err(e) if args.filter.is_some() && e.to_string().contains("does not support filters") => client.fetch(url, None, &FetchArgs { filter: None, ..args }).await,
+        r => r,
+    }
+}
+
 /// The paths that differ between the trees of commits `from` and `to`: one shallow fetch of
 /// both with no blob (trees compared by id, so an unchanged folder is never walked), at most
 /// 10,000 paths (past that, everything counts as changed: `None`).
 pub async fn changed_paths(client: &Client, url: &str, from: &str, to: &str) -> anyhow::Result<Option<Vec<String>>> {
     let (a, b): (ObjectId, ObjectId) = (from.parse().map_err(|_| anyhow::anyhow!("{from} isn't a commit id"))?, to.parse().map_err(|_| anyhow::anyhow!("{to} isn't a commit id"))?);
     let args = FetchArgs { wants: vec![a, b], haves: Vec::new(), depth: Some(1), filter: Some(code_git::Filter::BlobNone) };
-    let objects: HashMap<ObjectId, Object> = client.fetch(url, None, &args).await?.objects.into_iter().map(|o| (o.id, o)).collect();
+    let objects: HashMap<ObjectId, Object> = fetch_filtered(client, url, args).await?.objects.into_iter().map(|o| (o.id, o)).collect();
     let tree_of = |c: ObjectId| -> anyhow::Result<ObjectId> {
         let o = objects.get(&c).filter(|o| o.kind == Kind::Commit).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring commit {c}"))?;
         Ok(parse_commit(&o.data).map_err(|e| anyhow::anyhow!("{e}"))?.tree)
@@ -145,8 +157,12 @@ pub async fn changed_paths(client: &Client, url: &str, from: &str, to: &str) -> 
 /// The paths under `prefix` that differ between two trees (either may be absent); false once
 /// past the cap.
 fn diff_trees(objects: &HashMap<ObjectId, Object>, a: Option<ObjectId>, b: Option<ObjectId>, prefix: &str, out: &mut Vec<String>, depth: usize) -> anyhow::Result<bool> {
-    if a == b || depth >= MAX_DEPTH {
+    if a == b {
         return Ok(true);
+    }
+    // Deeper than a tree is written to disk: everything counts as changed.
+    if depth >= MAX_DEPTH {
+        return Ok(false);
     }
     let entries = |t: Option<ObjectId>| -> anyhow::Result<HashMap<String, (u32, ObjectId)>> {
         let Some(t) = t else { return Ok(HashMap::new()) };
@@ -181,29 +197,43 @@ fn diff_trees(objects: &HashMap<ObjectId, Object>, a: Option<ObjectId>, b: Optio
 pub async fn commit_message(client: &Client, url: &str, sha: &str) -> anyhow::Result<String> {
     let oid: ObjectId = sha.parse().map_err(|_| anyhow::anyhow!("{sha} isn't a commit id"))?;
     let args = FetchArgs { wants: vec![oid], haves: Vec::new(), depth: Some(1), filter: Some(code_git::Filter::TreeNone) };
-    let fetched = client.fetch(url, None, &args).await?;
+    let fetched = fetch_filtered(client, url, args).await?;
     let c = fetched.objects.into_iter().find(|o| o.id == oid && o.kind == Kind::Commit).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring commit {oid}"))?;
     let text = String::from_utf8_lossy(&c.data).into_owned();
     Ok(text.split_once("\n\n").map(|(_, m)| m.to_string()).unwrap_or_default())
 }
 
-/// The file `name` at the root of the tree at `sha` (a "deploy to roll" link's `roll.toml`), at
-/// most 64 KiB: one shallow fetch that leaves out every bigger blob. None: no such file.
-pub async fn read_root_file(client: &Client, url: &str, sha: &str, name: &str) -> anyhow::Result<Option<Vec<u8>>> {
+/// The file at `path` (`roll.toml`, or a root's `web/roll.toml`) in the tree at `sha`, at most
+/// 64 KiB: one shallow fetch that leaves out every bigger blob. None: no such file.
+pub async fn read_file(client: &Client, url: &str, sha: &str, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
     const MAX: u64 = 64 << 10;
     let oid: ObjectId = sha.parse().map_err(|_| anyhow::anyhow!("{sha} isn't a commit id"))?;
     let args = FetchArgs { wants: vec![oid], haves: Vec::new(), depth: Some(1), filter: Some(code_git::Filter::BlobLimit(MAX)) };
-    let objects: HashMap<ObjectId, Object> = client.fetch(url, None, &args).await?.objects.into_iter().map(|o| (o.id, o)).collect();
+    let objects: HashMap<ObjectId, Object> = fetch_filtered(client, url, args).await?.objects.into_iter().map(|o| (o.id, o)).collect();
     let c = objects.get(&oid).filter(|o| o.kind == Kind::Commit).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring commit {oid}"))?;
-    let tree = parse_commit(&c.data).map_err(|e| anyhow::anyhow!("{e}"))?.tree;
-    let t = objects.get(&tree).filter(|o| o.kind == Kind::Tree).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring tree {tree}"))?;
-    for e in tree_entries(&t.data) {
-        let e = e.map_err(|e| anyhow::anyhow!("{e}"))?;
-        if e.name == name.as_bytes() && matches!(e.mode, mode::REGULAR | mode::EXECUTABLE) {
-            return match objects.get(&e.oid).filter(|o| o.kind == Kind::Blob) {
-                Some(b) => Ok(Some(b.data.to_vec())),
-                None => anyhow::bail!("its {name} is over 64 KiB"),
-            };
+    let mut tree = parse_commit(&c.data).map_err(|e| anyhow::anyhow!("{e}"))?.tree;
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let Some((name, folders)) = segments.split_last() else { return Ok(None) };
+    // Down the folders (trees only, never a symlink), then the file in the last one.
+    for (i, want) in segments.iter().enumerate() {
+        let t = objects.get(&tree).filter(|o| o.kind == Kind::Tree).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring tree {tree}"))?;
+        let mut found = None;
+        for e in tree_entries(&t.data) {
+            let e = e.map_err(|e| anyhow::anyhow!("{e}"))?;
+            if e.name == want.as_bytes() {
+                found = Some((e.mode, e.oid));
+                break;
+            }
+        }
+        match found {
+            Some((mode::TREE, oid)) if i < folders.len() => tree = oid,
+            Some((mode::REGULAR | mode::EXECUTABLE, oid)) if i == folders.len() => {
+                return match objects.get(&oid).filter(|o| o.kind == Kind::Blob) {
+                    Some(b) => Ok(Some(b.data.to_vec())),
+                    None => anyhow::bail!("its {name} is over 64 KiB"),
+                };
+            }
+            _ => return Ok(None),
         }
     }
     Ok(None)

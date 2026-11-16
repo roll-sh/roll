@@ -18,7 +18,7 @@ inputs:
     required: false
     default: production
   revision:
-    description: The commit a repo or Git URL service builds (default the workflow's GITHUB_SHA).
+    description: The commit a repo or Git URL service builds (default the workflow's commit; on a pull request, its head, not GitHub's merge commit).
     required: false
   image:
     description: For an image service, the tag or digest of its repository to deploy.

@@ -120,7 +120,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
         )}
         <p className="px-5 pb-2 pt-5 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Deploys</p>
 
-        {repo && (
+        {(repo || service.source.kind === "git") && (
           <form
             className="flex flex-wrap items-end gap-3 px-5 py-4"
             onSubmit={(e) => {

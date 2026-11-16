@@ -184,7 +184,7 @@ async fn import(State(apps): S, b: Bytes) -> R {
             crate::git_source::check_url(url, apps.cfg.allow_private).map_err(Error::BadRequest)?;
             let client = crate::git_source::client(apps.cfg.allow_private);
             let (sha, branch) = crate::git_source::head(&client, url, text("branch")).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
-            let bytes = crate::git_source::read_root_file(&client, url, &sha, "roll.toml").await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
+            let bytes = crate::git_source::read_file(&client, url, &sha, "roll.toml").await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
             let bytes = bytes.ok_or_else(|| Error::BadRequest(format!("{url} has no roll.toml at its root to deploy from")))?;
             Some((url.to_string(), branch, String::from_utf8(bytes).map_err(|_| Error::BadRequest(format!("{url}'s roll.toml isn't UTF-8")))?))
         }

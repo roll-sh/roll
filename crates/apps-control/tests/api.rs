@@ -3868,6 +3868,25 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     // main is production's: deployed by apps as before, never handed on.
     let (st, _) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/main", "after": code }))).await;
     assert!(st.is_success() && pushes.0.lock().len() == 2);
+    // A body naming an older commit (a leaked URL, or a delivery a newer push overtook) deploys
+    // nothing: only where the branch is now does.
+    let (st, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/main", "after": first }))).await;
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("only its head deploys"), "{v}");
+    // roll.toml's watch paths at the pushed commit (over the service's), and a Bitbucket push
+    // that moves two branches: main deploys here, feature goes to previews.
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"build": {"watch": null}}))).await;
+    let toml = ("roll.toml", "[app]\nwatch = [\"api.js\"]\n");
+    let readme = git.commit(&[pkg, ("server.js", "require('http') // v5"), ("README.md", "even more docs"), toml]);
+    let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/main", "after": readme }))).await;
+    assert!(v["ignored"].as_str().unwrap().contains("api.js"), "roll.toml's watch: {v}");
+    let api = git.commit(&[pkg, ("server.js", "require('http') // v5"), ("README.md", "even more docs"), toml, ("api.js", "x")]);
+    let bitbucket = json!({ "push": { "changes": [
+        { "new": { "type": "branch", "name": "main", "target": { "hash": api, "message": "add the api" } } },
+        { "new": { "type": "branch", "name": "feature", "target": { "hash": code, "message": "try it" } } },
+    ] } });
+    let (st, d) = call(&w.api, "POST", &hook, Some(bitbucket)).await;
+    assert_eq!((st, d["revision"].as_str(), d["message"].as_str()), (StatusCode::ACCEPTED, Some(api.as_str()), Some("add the api")), "{d}");
+    assert_eq!(pushes.0.lock().len(), 3, "feature went to previews too");
 }
 
 /// The dashboard's starter templates (apps/dashboard/src/lib/templates) read as the import reads

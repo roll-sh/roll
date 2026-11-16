@@ -50,14 +50,14 @@ function fake(kind, statuses) {
 function job(extra = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "roll-apps-action-"));
   const event = path.join(dir, "event.json");
-  fs.writeFileSync(event, JSON.stringify({ pull_request: { number: 7 } }));
+  fs.writeFileSync(event, JSON.stringify({ pull_request: { number: 7, head: { sha: SHA } } }));
   const env = {
     "INPUT_API-URL": "https://roll.test/",
     INPUT_TOKEN: "rlt_ci",
     INPUT_SERVICE: "svc_web",
     INPUT_COMMENT: "true",
     "INPUT_GITHUB-TOKEN": "gh-token",
-    GITHUB_SHA: SHA,
+    GITHUB_SHA: "f".repeat(40), // a pull request's merge commit: not what deploys
     GITHUB_REPOSITORY: "acme/web",
     GITHUB_RUN_ID: "99",
     GITHUB_RUN_ATTEMPT: "1",
