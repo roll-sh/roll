@@ -119,8 +119,11 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    `Secret` (a `*SecretInfo`, nil when missing), `StoredValue` and
    `secrets.LoginWithIdentity(ctx, api, identity, tokenSource)`, and `values(…, dynamic=False)`,
    `set`, `delete`, `secret` (a `SecretInfo`, None when missing), `stored_value` and
-   `roll_secrets.login_with_identity(api, identity, token_source)`. Both also export the OIDC
-   token source their `FromEnv`/`from_env` uses (`OIDCTokenFromEnv`, `oidc_token_from_env`).
+   `roll_secrets.login_with_identity(api, identity, token_source)`. All three export the OIDC
+   token source their `fromEnv`/`FromEnv`/`from_env` uses (`oidcTokenFromEnv`, `OIDCTokenFromEnv`,
+   `oidc_token_from_env`): `ROLL_OIDC_TOKEN`, the file `ROLL_OIDC_TOKEN_FILE` names, or GitHub
+   Actions' token for `ROLL_OIDC_AUDIENCE` (the API's URL by default). In TypeScript,
+   `await fromEnv()` reads `ROLL_API_URL`, `ROLL_TOKEN` or `ROLL_IDENTITY`, and `ROLL_PROJECT`.
 
    In Go, `sdk/go/secrets` has the same surface, and `FromEnv` logs a workload identity in with
    its own OIDC token as `roll run` does (`ROLL_IDENTITY`). It logs in again before the login's

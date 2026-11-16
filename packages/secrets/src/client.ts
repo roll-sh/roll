@@ -135,6 +135,58 @@ export async function loginWithIdentity(options: LoginOptions): Promise<SecretsC
   return makeClient({ ...rest, token: "", project: options.project ?? login.project() ?? undefined }, login);
 }
 
+/** Reads one setting; the process's environment (trimmed) by default. */
+export type Getenv = (key: string) => string;
+
+const processEnv: Getenv = (key) => ((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[key] ?? "").trim();
+
+/**
+ * The workload's OIDC token as `fromEnv` finds it, as the Go and Python clients do: `ROLL_OIDC_TOKEN`,
+ * the file `ROLL_OIDC_TOKEN_FILE` names (read now: a projected token is replaced on disk), or GitHub
+ * Actions' token for the audience `ROLL_OIDC_AUDIENCE` (by default the API's own URL: a token minted
+ * for one roll server isn't good at another).
+ */
+export async function oidcTokenFromEnv(api: string, getenv: Getenv = processEnv, fetchFn: typeof fetch = fetch): Promise<string> {
+  const direct = getenv("ROLL_OIDC_TOKEN");
+  if (direct) return direct;
+  const file = getenv("ROLL_OIDC_TOKEN_FILE");
+  if (file) {
+    // Node only (a browser has no token file): imported by name, so the package needs no Node types.
+    const fsModule: string = "node:fs/promises";
+    const { readFile } = (await import(fsModule)) as { readFile: (path: string, encoding: "utf8") => Promise<string> };
+    return (await readFile(file, "utf8")).trim();
+  }
+  const requestUrl = getenv("ACTIONS_ID_TOKEN_REQUEST_URL");
+  const bearer = getenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN");
+  if (!requestUrl || !bearer) {
+    throw new Error("ROLL_IDENTITY is set but there's no OIDC token: set ROLL_OIDC_TOKEN or ROLL_OIDC_TOKEN_FILE, or run in GitHub Actions with `permissions: id-token: write`");
+  }
+  const audience = getenv("ROLL_OIDC_AUDIENCE") || api.replace(/\/+$/, "");
+  const res = await fetchFn(`${requestUrl}${requestUrl.includes("?") ? "&" : "?"}audience=${encodeURIComponent(audience)}`, { headers: { authorization: `Bearer ${bearer}` } });
+  if (!res.ok) throw new Error(`GitHub Actions didn't issue an OIDC token (${res.status})`);
+  const body = (await res.json()) as { value?: unknown };
+  if (typeof body.value !== "string" || !body.value) throw new Error("GitHub Actions answered no OIDC token");
+  return body.value;
+}
+
+/**
+ * A client from the process's settings, as the Go and Python clients' `FromEnv`/`from_env`:
+ * `ROLL_API_URL`, then `ROLL_TOKEN`, or `ROLL_IDENTITY` for a workload identity (its OIDC token from
+ * `oidcTokenFromEnv`, asked afresh at each login), and `ROLL_PROJECT` if set.
+ */
+export async function fromEnv(options: { getenv?: Getenv; fetch?: typeof fetch; cacheTtlMs?: number } = {}): Promise<SecretsClient> {
+  const env = options.getenv ?? processEnv;
+  const fetchFn = options.fetch ?? fetch;
+  const api = env("ROLL_API_URL");
+  if (!api) throw new Error("ROLL_API_URL isn't set");
+  const project = env("ROLL_PROJECT") || undefined;
+  const token = env("ROLL_TOKEN");
+  if (token) return createClient({ api, token, project, fetch: options.fetch, cacheTtlMs: options.cacheTtlMs });
+  const identity = env("ROLL_IDENTITY");
+  if (identity) return loginWithIdentity({ api, identity, tokenSource: () => oidcTokenFromEnv(api, env, fetchFn), project, fetch: options.fetch, cacheTtlMs: options.cacheTtlMs });
+  throw new Error("set ROLL_TOKEN, or ROLL_IDENTITY for a workload identity");
+}
+
 /**
  * A client for one project's secrets (docs/secrets.md, "Consumption"): its environments' values,
  * the runtime resolve (sealed to a key only this process holds, if asked), the digest that changes
