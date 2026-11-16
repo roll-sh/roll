@@ -257,6 +257,13 @@ behind the `Apps` trait:
   - Each gets an ephemeral environment `pv-<preview id>`: `PUT …/environments/pv-…`
     `{branch: null, ephemeral: true}`.
   - The branches' URLs and the project's overrides are set as its variables.
+  - Every variable of a link to a branched resource comes from the branch, under roll apps'
+    names (a stream's `KAFKA_BROKERS`/`KAFKA_USERNAME`/`KAFKA_PASSWORD`, a bucket's
+    `AWS_ENDPOINT_URL`, a search cluster's `ELASTICSEARCH_API_KEY` or `OPENSEARCH_URL`/
+    `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD`, from the branch's login), or is set blank when
+    the branch has nothing for it. Never production's: until 2026-11-16 a name that differed
+    from the branch's kept production's value, so a stream's or an OpenSearch cluster's preview
+    reached production's data. `a_links_variables_come_from_the_branch_or_are_blank`.
   - It is deployed at the change's git commit (or its image, for an image service), with an
     `Idempotency-Key` of `pv-<id>@<sha>`, so a retry after a crash returns the same deployment.
     When the environment already runs that commit (a reset's new URLs), it's redeployed: the
