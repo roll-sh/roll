@@ -19,6 +19,8 @@ struct Fake {
     password: Mutex<u32>,
     issued: Mutex<u32>,
     live_keys: Mutex<Vec<String>>,
+    /// The product doesn't answer.
+    down: std::sync::atomic::AtomicBool,
 }
 
 impl LinkProvider for Fake {
@@ -37,6 +39,9 @@ impl LinkProvider for Fake {
         &[("url", Mode::Live), ("access_key_id", Mode::Managed), ("secret_access_key", Mode::Managed)]
     }
     fn read(&self, r#ref: &str, _: &str, _: &Link) -> roll_secrets::Result<Secret> {
+        if self.down.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(roll_secrets::Error::Link("bucket: timed out".into()));
+        }
         Ok(Secret::new(format!("s3://{ref}?pw={}", self.password.lock().unwrap())))
     }
     fn issue(&self, _: &str, _: &str, _: &Link, _: &str, _: Option<u64>) -> roll_secrets::Result<Issued> {
@@ -956,10 +961,24 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     api.set("development", "NEW_FLAG", "on").await;
     let (s, moved) = get("development", "", tag.clone()).await;
     assert!(s == StatusCode::OK && moved.is_some() && moved != tag);
-    // A folder with a live link always reads again: its product may change the credential (a
-    // password reset) without the digest moving.
+    // A live link counts its value as the product answers: unchanged, a 304; changed by the product
+    // itself (a password reset through it), the digest moves once the fingerprint is read again
+    // (within seconds), and at once when the product says so.
     let (_, production) = get("production", "digest=1", None).await;
-    assert_eq!(get("production", "", production).await.0, StatusCode::OK, "it reads a live link");
+    assert_eq!(get("production", "", production.clone()).await.0, StatusCode::NOT_MODIFIED, "the live value is as it was");
+    // A product that doesn't answer for a moment leaves the digest as it was.
+    api.fake.down.store(true, std::sync::atomic::Ordering::Relaxed);
+    api.secrets.forget_live_fingerprints();
+    let held = api.ok(Method::GET, "/environments/production/digest", None).await;
+    api.fake.down.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(held["digest"].as_str(), production.as_deref(), "a passing error moves nothing");
+    *api.fake.password.lock().unwrap() += 1;
+    api.secrets.forget_live_fingerprints();
+    let (s, reset) = get("production", "", production.clone()).await;
+    assert!(s == StatusCode::OK && reset != production, "a password reset in the product moves it");
+    *api.fake.password.lock().unwrap() += 1;
+    api.secrets.source_changed("bucket", "assets").unwrap();
+    assert_eq!(get("production", "", reset).await.0, StatusCode::OK, "a product that says so moves it at once");
     let (_, staging) = get("staging", "dynamic=false&digest=1", None).await;
     assert_eq!(get("staging", "", staging.clone()).await.0, StatusCode::OK, "it holds a dynamic key");
     assert_eq!(get("staging", "dynamic=false", staging.clone()).await.0, StatusCode::NOT_MODIFIED);
@@ -2210,7 +2229,10 @@ async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token()
     let (s, l) = login(issuer.sign(claims("repo:acme/web:ref:refs/heads/main", "refs/heads/main", now + 300))).await;
     assert_eq!(s, StatusCode::OK, "{l}");
     let token = l["token"].as_str().unwrap().to_string();
-    assert!(token.starts_with("rlt_") && l["expires_at"].as_i64().unwrap() <= (now + 601) * 1000);
+    // At most ten minutes from when it was issued (bounded by the answer's time, not `now`: a
+    // loaded machine can take more than a second to log in).
+    let answered = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    assert!(token.starts_with("rlt_") && l["expires_at"].as_i64().unwrap() <= answered + 600_000, "{l}");
     let (s, v) = api.req(Method::GET, "/environments/staging/values", None, Some(&token)).await;
     assert_eq!((s, v["values"]["API_KEY"].as_str()), (StatusCode::OK, Some("staging-key")));
     let (s, _) = api.req(Method::GET, "/environments/production/values", None, Some(&token)).await;
