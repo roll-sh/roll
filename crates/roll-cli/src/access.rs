@@ -319,7 +319,13 @@ async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<(
                 println!("no machine clients yet: roll token client create <name> --preset read-only --public-key key.pub.pem");
             }
             for c in &list {
-                println!("{}  {}", s(&c["client_id"]), if c["signs_with_key"] == true { "signs with a key" } else { "a secret" });
+                let how = match &c["trusts"] {
+                    t if t.is_object() => format!("trusts {}: {}", s(&t["issuer"]).trim_start_matches("https://"), s(&t["subject"])),
+                    _ if c["signs_with_key"] == true => "signs with a key".to_string(),
+                    _ => "signs with a secret".to_string(),
+                };
+                let last = c["last_sign_in"].as_i64().map(|t| format!("last sign-in {}", ago(t / 1000))).unwrap_or_else(|| "never signed in".into());
+                println!("{}  {how}  ({last})", s(&c["client_id"]));
                 print_grant(&c["grant"]);
             }
         }

@@ -73,6 +73,8 @@ pub struct ListedClient {
     pub grant_id: String,
     pub signs_with_key: bool,
     pub trusts: Option<TrustedIdentity>,
+    /// When it last got a token (Unix ms).
+    pub last_sign_in: Option<i64>,
 }
 
 /// A live machine client and its own grant, by `client_id` (`?`) at `now` (`?`, twice): not
@@ -180,13 +182,17 @@ impl Store {
 
     /// The machine clients, newest first.
     pub fn machine_clients(&self) -> Result<Vec<ListedClient>> {
-        let rows: Vec<(String, String, bool, Option<String>)> = self.db.read(|c| {
+        type Row = (String, String, bool, Option<String>, Option<i64>);
+        let rows: Vec<Row> = self.db.read(|c| {
             c.query(
-                "SELECT o.id, g.id, o.jwk IS NOT NULL, o.oidc FROM oauth_clients o JOIN grants g ON g.id = o.grant_id WHERE o.confidential = 1 ORDER BY o.created_at DESC",
+                "SELECT o.id, g.id, o.jwk IS NOT NULL, o.oidc, o.last_used_at FROM oauth_clients o JOIN grants g ON g.id = o.grant_id WHERE o.confidential = 1 ORDER BY o.created_at DESC",
                 (),
-                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0, r.get(3)?, r.get(4)?)),
             )
         })?;
-        Ok(rows.into_iter().map(|(id, grant_id, signs_with_key, oidc)| ListedClient { id, grant_id, signs_with_key, trusts: oidc.and_then(|o| serde_json::from_str(&o).ok()) }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(id, grant_id, signs_with_key, oidc, last_sign_in)| ListedClient { id, grant_id, signs_with_key, trusts: oidc.and_then(|o| serde_json::from_str(&o).ok()), last_sign_in })
+            .collect())
     }
 }

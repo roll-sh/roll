@@ -370,6 +370,8 @@ export interface MachineClient {
   signs_with_key: boolean;
   /** The identity it trusts (CI's own OIDC tokens), when that's its credential. */
   trusts?: TrustedIdentity | null;
+  /** When it last got a token (Unix ms). */
+  last_sign_in?: number | null;
   grant: Grant;
 }
 

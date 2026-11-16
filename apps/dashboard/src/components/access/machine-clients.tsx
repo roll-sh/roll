@@ -19,6 +19,7 @@ import {
 import { btn, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 import { Builder } from "./builder";
 import { GrantRow } from "./overview";
+import { relative } from "./shell";
 
 /**
  * Machine clients (docs/permissions.md, "Machine clients"): automation with no person (CI, a
@@ -67,6 +68,7 @@ export function MachineClients({ clients, refresh }: { clients: MachineClient[];
           <li key={c.client_id}>
             <div className="flex items-center gap-3 px-5 pt-3 text-[12px]">
               <span className="font-mono text-subtle">{c.client_id}</span>
+              <span className="text-subtle">{c.last_sign_in ? `signed in ${relative(c.last_sign_in)}` : "never signed in"}</span>
               {c.trusts ? <span className="text-muted">{trustedLabel(c.trusts)}</span> : <RotateClient client={c} refresh={refresh} />}
             </div>
             <ul>

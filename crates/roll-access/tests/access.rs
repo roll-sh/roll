@@ -1440,6 +1440,10 @@ async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
     assert_eq!((sign_in["args"]["by"].as_str(), sign_in["args"]["credential"].as_str()), (Some(wid.as_str()), Some("secret")), "{sign_in}");
     assert!(!log.to_string().contains(&wsecret), "no secret in the log");
     assert!(log.as_array().unwrap().iter().any(|e| e["decision"] == "create_client"), "{log}");
+    // The list says when it last signed in (never, for one that hasn't).
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/clients", None).await;
+    let seen = |c: &str| list.as_array().unwrap().iter().find(|e| e["client_id"] == c).map(|e| e["last_sign_in"].is_i64());
+    assert_eq!((seen(&wid), seen(&id)), (Some(true), Some(true)), "{list}");
     // Its id is no ordinary OAuth client's: no device or consent flow may hang another grant on
     // it (someone else's, which its sign-ins could then land on).
     let (s, e) = d.form("/v1/access/oauth/device_authorization", &[("client_id", &id)]).await;

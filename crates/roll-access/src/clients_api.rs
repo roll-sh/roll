@@ -159,12 +159,12 @@ pub(crate) async fn list(State(a): S, ext: Extensions) -> crate::Result<Json<Val
     let a2 = a.clone();
     let rows = tokio::task::spawn_blocking(move || -> crate::Result<Vec<Value>> {
         let mut out = Vec::new();
-        for crate::store::ListedClient { id: client_id, grant_id, signs_with_key: key, trusts } in a2.store.machine_clients()? {
+        for crate::store::ListedClient { id: client_id, grant_id, signs_with_key: key, trusts, last_sign_in } in a2.store.machine_clients()? {
             let grant = a2.store.get(&grant_id)?;
             if theirs(&person, &grant) {
                 // Who it trusts is shown; pinned keys only as a count.
                 let trusts = trusts.map(|i| json!({ "issuer": i.issuer, "audience": i.audience, "subject": i.subject, "claims": i.claims, "pinned_keys": i.jwks.as_deref().and_then(|d| roll_oidc::pinned_keys(d).ok()) }));
-                out.push(json!({ "client_id": client_id, "signs_with_key": key, "trusts": trusts, "grant": grant }));
+                out.push(json!({ "client_id": client_id, "signs_with_key": key, "trusts": trusts, "last_sign_in": last_sign_in, "grant": grant }));
             }
         }
         Ok(out)

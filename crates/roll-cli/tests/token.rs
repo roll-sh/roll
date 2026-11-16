@@ -137,6 +137,8 @@ async fn a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its
     assert!(made.status.success() && step.contains("grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer") && step.contains("::add-mask::"), "{step}");
     let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
     assert_eq!(list[0]["trusts"]["subject"], "repo:acme/web:ref:refs/heads/main");
+    let words = String::from_utf8_lossy(&roll(&api, "", &["token", "client", "list"]).stdout).to_string();
+    assert!(words.contains("trusts token.actions.githubusercontent.com: repo:acme/web:ref:refs/heads/main  (never signed in)"), "{words}");
     assert!(!roll(&api, "", &["token", "client", "create", "x", "--preset", "read-only", "--github", "acme"]).status.success(), "owner/repo");
     let lab = roll(&api, "", &["token", "client", "create", "lab", "--preset", "read-only", "--gitlab", "acme/platform/api", "--ref", "main"]);
     assert!(lab.status.success() && String::from_utf8_lossy(&lab.stdout).contains("id_tokens:"), "{lab:?}");
