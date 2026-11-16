@@ -1035,6 +1035,108 @@ between domain controllers (a user made on one and bound on another right after)
 
 A directory a key links to, or with a retired password or a dynamic user still to delete, can't be
 deleted (409).
+### Gateways (private networks)
+
+A database or directory that only has a private address (inside a VPC, behind a firewall) is reached
+through a **gateway**, as Infisical's and Akeyless' gateways reach them: a small process the team
+runs inside the network. It dials out to roll over one WebSocket, and roll's conversations with
+private hosts travel through it. Nothing listens inside the network, and the gateway decides what
+it may reach, not roll.
+
+**Records.** A gateway is a project resource (`gw_…`): `POST /v1/secrets/projects/{id}/gateways`
+(`admin`; `roll secrets gateways add NAME`, or the dashboard's Gateways panel) makes the record and,
+unless `"token": false`, its credential: a roll token (`rlt_…`, roll-access's) with one rule,
+`{"product": "secrets", "resources": [{"id": "gw_…"}], "actions": ["write"]}`, shown once. That
+rule reaches exactly one route, the gateway's own link; nothing else in roll names a gateway by id.
+It's made through roll-access (`Access::create_grant`, as `POST /v1/access/tokens`), so it's
+listed, revoked and audited with every other token, and roll-access looks it up on every connect.
+roll makes it for people and the operator only, never for a token (a project-wide rule doesn't
+cover a gateway's id), like identities. A gateway on Kubernetes, EC2 or in CI can instead log in
+with its own OIDC token: a workload identity made with `"gateway": "gw_…"` mints exactly that rule
+at each login (its environments, folders and actions are refused, they don't apply), for its
+`ttl_minutes`; the gateway logs in again and opens a new link before its token ends. `GET
+…/gateways` lists them with their status, `DELETE …/gateways/{id}` (`admin`; `roll secrets
+gateways rm`) deletes one no database or directory uses (409 otherwise), revokes the token made
+with it and drops its link.
+
+**The binary.** `roll gateway up --url https://roll.example.com --gateway gw_… --allow
+10.0.0.0/8:5432 --allow ldap.corp.internal:636` (or `--allow-file FILE`, one entry a line, `#`
+comments), with the token in `ROLL_GATEWAY_TOKEN` (or `--token-file`), or `--identity id_…` and
+the OIDC token in a file (`--oidc-token-file`, re-read at each login: Kubernetes' projected token,
+`/var/run/secrets/…`). It's a subcommand of `roll` (`crates/roll-cli`), over a small crate,
+`crates/roll-gateway`, that holds the wire, the multiplexer, the allow-list and the agent loop:
+rolld and the CLI share the wire, and the crate is tested on its own (no HTTP client, no product).
+One static binary that's already on the machine is the simplest thing to run in a container
+(`roll gateway up` is its whole entrypoint). It opens one WebSocket to `GET
+/v1/secrets/gateways/{id}/connect` and reconnects with jittered exponential backoff (0.5 s
+doubling to 30 s, ±50%); a 4401 close (credential refused or gateway deleted) stops it, unless it
+logs in through an identity, which logs in again first.
+
+**The allow-list is the gateway's.** Each `--allow` is `HOST:PORT`, `HOST:*`, `*.SUFFIX:PORT`,
+`CIDR:PORT` or `CIDR:*` (IPv6 in brackets). The gateway refuses anything else before resolving
+or dialing: a name must match a name entry, or resolve (on the gateway, with the network's DNS) only
+to addresses inside a CIDR entry for that port; an IP literal must be inside a CIDR entry. Without
+an entry it refuses everything. So a compromised or buggy roll can't use it to scan or reach the
+rest of the network: it reaches what the team listed and nothing more. The gateway reports its list
+in its hello (shown in the Gateways panel), but roll never widens or edits it.
+
+**roll's own check stays.** A database or directory registered with `"gateway": "gw_…"` (a gateway
+of the same project) may name a private address or a name only the network resolves: rolld doesn't
+resolve it, and asks the gateway to open `host:port`. Every other path keeps the public-only rule
+(`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE` for local development only). TLS settings don't change with a
+gateway: TLS still runs end to end from rolld to the server and is verified against the URL's host,
+so the gateway relays ciphertext and never sees a password or a query.
+
+**Wire.** Binary WebSocket messages, each `[type u8][stream u32 BE][payload]`, at most 64 KiB (both
+sides set it as the WebSocket's message limit). The gateway's first message is `hello` (JSON:
+version, its allow-list, its limits) and roll answers `welcome` (the node). Then roll sends `open`
+(JSON `{host, port}`, 1 KiB at most) with a new stream id; the gateway answers `opened` or
+`refused` (a reason: "not in the allow-list", "connection refused"), and both sides send `data`
+(up to 16 KiB), `window` (credit), `fin` (end of that direction) and `reset`. Pings both ways
+every 20 s; 60 s of silence ends the link.
+
+**Bounds.** Every stream has a 256 KiB window each way: a side sends only as many bytes as the other
+granted, and grants more only as its reader takes them, so a slow reader holds at most a window,
+and a peer that sends past it ends the link. Buffers grow with the bytes actually received, never
+from a length the peer sent. A link carries at most 32 streams at once (the gateway refuses more),
+each stream lives at most 20 s (a conversation's 15 s, connecting included, plus a margin) on both
+sides, and `open` waits 10 s for an answer. Only the newest link of a gateway opens streams: a new
+connect replaces the older one, which finishes its streams (20 s at most) and closes with 4409.
+
+**Audit, both sides.** roll writes `gateway.connect` and `gateway.disconnect` rows (node, version,
+the token's id) and a `gateway.stream` row per stream (the target `host:port`, and how it ended: bytes each way, or
+the gateway's refusal).
+The gateway logs one line per stream (`stream 7 open db.internal:5432 -> 10.0.3.4:5432`, `stream 7
+closed: 1.2 KiB up, 3.4 KiB down` or `stream 8 refused 10.9.9.9:22: not in the allow-list`). Never
+the bytes, a password or the token.
+
+**Fleet.** Like an owner's agents (docs/code/cluster.md, "An owner's agents"), a gateway's link
+lives on the holder of the lease `secrets:gateway:<id>`, from rolld's roll-cluster handle: the
+connect is dispatched there (`Cluster::dispatch` forwards the upgrade), the link holds the lease's
+guard, and when the lease moves the old holder closes the link with 1012 and the gateway reconnects
+to the new one. A conversation that needs gateway X runs on X's holder: rolld dispatches the whole
+provider call (`check`, `set_password`, `create_login`, `extend_login`, `drop_login`, and a
+directory's) to the internal route `POST /internal/secrets/gateways/{id}/call`, its body sealed with
+the deployment key every node shares (the admin URL and the new password are in it), so bytes never
+stream between nodes and roll-cluster's 4 MiB forward limit holds. On one node all of this is a
+no-op: the link and the call are local.
+
+**Status.** Each link writes its status to the gateway's row (shared by every node): `connected`,
+the `node`, `version`, the allow-list it reported, `connected_at`, `last_seen_at` (every 30 s while
+up). It's online when connected and seen within 90 s. The link checks its token every 30 s
+(roll-access answers revocation and expiry, never cached) and closes with 4401 once it's gone, or the
+gateway was deleted.
+
+**Where it plugs in.** Databases outside roll (`gateway` on `POST …/outside-databases`: Postgres,
+MySQL, SQL Server, Redis and MongoDB with `mongodb://` hosts; ClickHouse and RabbitMQ speak HTTPS
+through roll's HTTP client and `mongodb+srv://` needs roll's DNS, so those are refused with a
+gateway) and directories (`gateway` on `POST …/directories`). Postgres, SQL Server, Redis and MongoDB
+take the gateway's stream directly; MySQL and LDAP clients take a socket, so rolld hands them a
+loopback socket whose other end it relays to the stream, accepting only the connection its own
+process made (directories pin their checked address the same way). `roll secrets
+outside-databases add … --gateway gw_…`, `roll secrets directories add … --gateway gw_…`, and the
+dashboard's forms offer the project's gateways.
+
 ### GCP and Azure
 Short-lived GCP and Azure access tokens for each lease, as Vault's GCP and Azure engines give, with
 no key of the customer's stored anywhere: **roll is an OpenID Connect issuer**, and the customer's

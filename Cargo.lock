@@ -7078,6 +7078,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-gateway"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "ipnet",
+ "rand 0.8.8",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+]
+
+[[package]]
 name = "roll-mcp"
 version = "0.1.0"
 dependencies = [
