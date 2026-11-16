@@ -290,6 +290,13 @@ ES_TERMS=$(TERMS "$APP_ES")
 curl -sf -XPUT "$APP_ES/products/_doc/2?refresh=true" -H 'content-type: application/json' -d '{"name":"branch","price":9.5}' >/dev/null
 ES_PARENT_SEES=$(curl -s -o /dev/null -w '%{http_code}' "$SEARCH_URL_PARENT/products/_doc/2")
 [ "$ES_PARENT_SEES" = 404 ] || { echo "a write to the search branch reached the parent ($ES_PARENT_SEES)"; exit 1; }
+# The branch's data-only key, as production's link gets: it reads and writes documents, and is
+# refused making keys (the branch's own login in ELASTICSEARCH_URL stays for roll's runtime).
+APP_KEY=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^ELASTICSEARCH_API_KEY=//p')
+ES_PLAIN=$(echo "$APP_ES" | sed -E 's#://[^@/]*@#://#')
+KEY_READ=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: ApiKey $APP_KEY" "$ES_PLAIN/products/_doc/1")
+KEY_MINT=$(curl -s -o /dev/null -w '%{http_code}' -XPOST -H "Authorization: ApiKey $APP_KEY" -H 'content-type: application/json' "$ES_PLAIN/_security/api_key" -d '{"name":"more"}')
+[ -n "$APP_KEY" ] && [ "$KEY_READ" = 200 ] && [ "$KEY_MINT" = 403 ] || { echo "the search branch's ELASTICSEARCH_API_KEY should read (200, got $KEY_READ) and be refused making keys (403, got $KEY_MINT); key set: $([ -n "$APP_KEY" ] && echo yes || echo no)"; exit 1; }
 APP_WAL=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT length(pg_read_binary_file('pg_wal/' || pg_walfile_name(pg_current_wal_lsn())))" 2>&1 | head -1 || true)
 case "$APP_WAL" in *"permission denied"*) ;; *) echo "the branch's role should be refused the WAL: $APP_WAL"; exit 1;; esac
 APP_MASKED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT email FROM users WHERE id = 1" 2>&1 | head -1 || true)
@@ -872,6 +879,7 @@ cat <<EOF
 | The first page's speed, timed with its screenshot | $SPEED |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |
 | Search: products.name in the branch / in the parent / the branch's term dictionary | $ES_READ / $ES_PARENT / $ES_TERMS |
+| Search: the branch's data-only ELASTICSEARCH_API_KEY reads / makes a key | $KEY_READ / $KEY_MINT |
 | Search: an address in an array of objects / under a dotted key / in an index named logs.2024, in the branch | $ES_DEEP / $ES_DOTTED |
 | After landing: parents present / preview Redis branches left | $PARENTS_OK of 4 / $BRANCHES_LEFT |
 EOF
