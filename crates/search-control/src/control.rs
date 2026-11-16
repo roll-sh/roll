@@ -1118,11 +1118,17 @@ impl Control {
     // --- REST through the node -------------------------------------------------------------
 
     /// Sends a request to the cluster as its owner (through authentication and admission, so
-    /// limits apply and it wakes the cluster like any client).
+    /// limits apply and it wakes the cluster like any client). On a fleet it runs on the node that
+    /// owns the cluster: here, or sent there (an in-process caller on any node, as apps' links).
     async fn call(&self, c: &SearchCluster, mut req: EsRequest) -> EsResponse {
         req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("host"));
         let token = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", c.name, c.password));
         req.headers.push(("Authorization".into(), format!("Basic {token}")));
+        if self.node.get_loaded(&c.name).is_none()
+            && let Some(resp) = crate::cluster::to_owner(self, &c.name, &req).await
+        {
+            return resp;
+        }
         self.node.handle(req).await
     }
 

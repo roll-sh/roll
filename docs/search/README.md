@@ -447,14 +447,20 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
 11. **Integration with the other threads**: on main since #29: previews branch search clusters
    (`scripts/preview-cost.sh`: the branch reads the parent's document, its writes stay in it, the
    service gets its `ELASTICSEARCH_URL`, landing deletes it; previews mask search fields), and
-   roll secrets' search link asks for `access: "data"` keys and refuses anything else (#97). Open:
-   apps services link search clusters through roll secrets' provider (#100: a data-only key per
-   link, sealed, revoked on unlink; checked live), and search's in-process control-plane calls go
-   to a cluster's owner on a fleet (in #100). Next: an inference endpoint's key from a roll secret
-   (possible since #20), and checking search's routes through MCP's search mode (#80) end to end.
-   A flavor switch doesn't carry keys across (an API key isn't an OpenSearch user): links made
-   before one are reissued. The fleet test with every product on passed (2026-11-13: search 8,077
-   writes acknowledged and verified, no errors, longest stall 1.2 s in the rolling restart).
+   roll secrets' search link asks for `access: "data"` keys and refuses anything else (#97). On
+   main since #100: apps services link search clusters through roll secrets' search provider like
+   buckets and streams (rolld's `secrets::link_provider("search")`, search's keys route with
+   `access: "data"`): an API key with a data-only role, `ELASTICSEARCH_URL` +
+   `ELASTICSEARCH_API_KEY`, or on an OpenSearch-flavor cluster an internal user with a data-only
+   role of its own, `OPENSEARCH_URL`, `OPENSEARCH_USERNAME` and `OPENSEARCH_PASSWORD`; never the
+   cluster's password (checked live 2026-11-16: relinking keeps the credential, unlinking revokes
+   it, a prefix applies); on a fleet `Control::call` sends search's own in-process requests to the
+   cluster's owner (`cluster::to_owner`). Next: an inference endpoint's key from a roll secret (in
+   progress), roll.toml declaring a search link (apps' side), and checking search's routes through
+   MCP's search mode (#80) end to end. A flavor switch doesn't carry keys across (an API key isn't
+   an OpenSearch user): links made before one are reissued. The fleet test with every product on
+   passed (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall
+   1.2 s in the rolling restart).
 12. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
