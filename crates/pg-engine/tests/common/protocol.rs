@@ -340,10 +340,14 @@ fn session_as(addr: &str, proto: i32, params: &[(&str, &str)], setup: &[&str], s
     if s.last().map(String::as_str) != Some("ZI") {
         return format!("startup {}", s.join(" "));
     }
+    // (A setup query's replies end with its ReadyForQuery: waited for however long a loaded
+    // machine takes, an ANALYZE say, so none is left for the first step.)
+    c.quiet = Duration::from_secs(30);
     for q in setup {
         c.send(&query(q));
         c.rest();
     }
+    c.quiet = QUIET;
     let mut out = Vec::new();
     for st in steps {
         if !c.send(st) {
