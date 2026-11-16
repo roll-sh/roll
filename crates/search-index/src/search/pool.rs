@@ -63,6 +63,37 @@ pub fn cores() -> usize {
     *N.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
 }
 
+/// The physical cores among the CPUs this process may run on (hyperthread siblings count
+/// once), at most [`cores`]; [`cores`] where the topology can't be read. Work that is
+/// memory-bound and split for latency (a k-NN's segments) takes no more threads than this:
+/// two siblings share a core's caches and units, so a second thread there adds little speed
+/// and as much CPU time.
+pub fn physical_cores() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| read_physical_cores().map_or(cores(), |n| n.clamp(1, cores())))
+}
+
+/// Distinct `(package, core)` pairs of the CPUs in this process's affinity mask (Linux).
+fn read_physical_cores() -> Option<usize> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let list = status.lines().find_map(|l| l.strip_prefix("Cpus_allowed_list:"))?.trim();
+    let mut seen = std::collections::HashSet::new();
+    for part in list.split(',').filter(|p| !p.is_empty()) {
+        let (lo, hi) = match part.split_once('-') {
+            Some((a, b)) => (a.trim().parse::<usize>().ok()?, b.trim().parse::<usize>().ok()?),
+            None => {
+                let c = part.trim().parse::<usize>().ok()?;
+                (c, c)
+            }
+        };
+        for cpu in lo..=hi.min(lo + 4096) {
+            let topo = |f: &str| std::fs::read_to_string(format!("/sys/devices/system/cpu/cpu{cpu}/topology/{f}")).ok().map(|s| s.trim().to_string());
+            seen.insert((topo("physical_package_id")?, topo("core_id")?));
+        }
+    }
+    (!seen.is_empty()).then_some(seen.len())
+}
+
 thread_local! {
     static IN_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }

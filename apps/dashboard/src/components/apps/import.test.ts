@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Link, ProjectImport, Service } from "@/lib/apps-api";
-import { planImport, stepLine, variablesFor } from "./import";
+import { planImport, sealedFor, stepLine, variablesFor } from "./import";
 
 const svc = (name: string, source: Service["source"], run: Partial<Service["run"]> = {}): Service =>
   ({ id: `svc_${name}`, project: "prj_a", name, source, build: { builder: "auto" }, run: { type: "web", min_instances: 0, max_instances: 3, concurrency: 50, cpu: 0.5, memory_mb: 512, ...run }, registry: null, created_at: 1, environments: [] }) as unknown as Service;
@@ -40,5 +40,7 @@ describe("importing a project's file", () => {
   it("fills a new service's variables: the file's values, a secret made, a question's answer or its default", () => {
     const app = { source: { kind: "image" as const, image: "x" }, branch: null, run: {}, links: [], variables: { NODE_ENV: "production" }, generate: ["SESSION_SECRET"], ask: [{ name: "STRIPE_KEY", ask: "Your Stripe key", default: null }, { name: "REGION", ask: "Where", default: "eu" }] };
     expect(variablesFor(app, { STRIPE_KEY: "sk_test_1" }, () => "made")).toEqual({ NODE_ENV: "production", SESSION_SECRET: "made", STRIPE_KEY: "sk_test_1", REGION: "eu" });
+    // What's made for it, and what reads as a secret, is sealed from the start; a reference isn't.
+    expect(sealedFor(app, { ...variablesFor(app, { STRIPE_KEY: "sk_test_1" }, () => "made"), API_TOKEN: "${{ api.TOKEN }}" })).toEqual(["SESSION_SECRET", "STRIPE_KEY"]);
   });
 });

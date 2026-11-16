@@ -1,0 +1,44 @@
+{
+  "plugins_security.securityconfig": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/security/access-control/api/",
+      "description": "The Security plugin's authentication and authorization configuration."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_security/api/securityconfig",
+          "methods": [
+            "GET",
+            "PATCH"
+          ]
+        },
+        {
+          "path": "/_plugins/_security/api/securityconfig/config",
+          "methods": [
+            "PUT"
+          ]
+        },
+        {
+          "path": "/_opendistro/_security/api/securityconfig",
+          "methods": [
+            "GET",
+            "PATCH"
+          ]
+        },
+        {
+          "path": "/_opendistro/_security/api/securityconfig/config",
+          "methods": [
+            "PUT"
+          ]
+        }
+      ]
+    },
+    "params": {},
+    "body": {
+      "description": "The configuration, or a JSON patch",
+      "required": false
+    }
+  }
+}

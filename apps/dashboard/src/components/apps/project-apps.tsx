@@ -17,7 +17,8 @@ export function ProjectApps({ project, projectName }: { project: string; project
   const download = () =>
     runner.run("export", async () => {
       const names: Record<string, string> = {};
-      for (const [key, v] of ws.inventory) if (v.kind === "postgres" || v.kind === "redis") names[key] = v.name;
+      // What a file can declare goes by its name (the rest by its ref).
+      for (const [key, v] of ws.inventory) if (["postgres", "redis", "bucket", "stream", "nosql"].includes(v.kind)) names[key] = v.name;
       const { roll_toml } = await appsApi.exportProject(project, names);
       const a = document.createElement("a");
       a.href = URL.createObjectURL(new Blob([roll_toml], { type: "text/plain" }));

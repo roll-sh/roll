@@ -55,7 +55,28 @@ resource "roll_secrets_sync" "vercel" {
 data "roll_secrets_values" "production" {
   environment = "production"
 }
+
+# roll apps: a service, a variable, a custom domain (docs/apps/http-api.md).
+resource "roll_app_service" "web" {
+  name          = "web"
+  git_url       = "https://github.com/acme/web"   # or image, or repo (roll code); none: roll up
+  max_instances = 3
+}
+
+resource "roll_app_variable" "level" {
+  service = roll_app_service.web.id
+  name    = "LOG_LEVEL"
+  value   = "info"
+}
+
+resource "roll_app_domain" "www" {
+  service  = roll_app_service.web.id
+  hostname = "www.example.com"   # point its CNAME at .target
+}
 ```
+
+- An app's variable isn't read back (a sealed one never shows again): a change made outside
+  Terraform is put back only when the value in the file changes. Its value lands in the state.
 
 - Identities, syncs and tokens don't change in place: every attribute replaces them.
 
