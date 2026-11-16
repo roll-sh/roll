@@ -272,6 +272,55 @@ hook_push 0000000000000000000000000000000000000000 "" >/dev/null
 for _ in $(seq 1 240); do [ "$(git_preview)" = "[]" ] && break; sleep 0.5; done
 [ "$(git_preview)" = "[]" ] || { echo "deleting the branch should delete its preview: $(git_preview)"; exit 1; }
 GIT_SAID="made and serving in $((T8 - T7)) ms; moved by the next push (the same preview); deleted with the branch"
+
+say "a pull request of the Git URL service: a same-repo one names its branch's preview; a fork's runs only once a writer approves its head; a close deletes it"
+pr_event() { # pr_event <action> <number> <head branch> <sha> <head repo id>: GitHub's pull_request event
+  curl -sS -X POST "http://$API$HOOK" -H 'content-type: application/json' -H 'x-github-event: pull_request' \
+    -d "$(python3 -c 'import json,sys; a,n,b,s,r=sys.argv[1:]; print(json.dumps({"action": a, "number": int(n), "pull_request": {"number": int(n), "title": "Cart badge (#" + n + ")", "head": {"ref": b, "sha": s, "repo": {"id": int(r)}}, "base": {"repo": {"id": 1}}}}))' "$1" "$2" "$3" "$4" "$5")"
+}
+pull_preview() { api GET "/v1/previews?project=$PRJ" | jq_ "([p for p in d if p['branch'] == '$1'] + [None])[0]"; }
+gitc checkout -q -B cart origin/main 2>/dev/null || gitc checkout -q -B cart main
+echo "site cart" > "$WT/index.html"
+gitc commit -qam "cart"
+gitc push -q origin HEAD:refs/heads/cart
+CART=$(gitc rev-parse HEAD)
+SAID=$(pr_event opened 5 cart "$CART" 1)
+case "$SAID" in *"handed to roll previews"*) ;; *) echo "a same-repo pull request should be handed to roll previews: $SAID"; exit 1;; esac
+PR_SAME=""
+for _ in $(seq 1 600); do
+  PR_SAME=$(pull_preview cart | python3 -c "import sys,ast; p=ast.literal_eval(sys.stdin.read()); print('' if not p else '%s|%s|%s' % (p['title'], (p.get('pull') or {}).get('number'), p['trusted']))")
+  case "$PR_SAME" in "Cart badge (#5)|5|True") break;; esac
+  sleep 1
+done
+[ "$PR_SAME" = "Cart badge (#5)|5|True" ] || { echo "the same-repo pull request should name its branch's preview, trusted: $PR_SAME"; exit 1; }
+# A fork's: its head is the base repository's refs/pull/7/head (GitHub keeps it there). roll
+# code's git takes the ref, so the hook's check finds it.
+PR_FORK="skipped (the repository took no refs/pull/7/head)"
+if gitc push -q origin HEAD:refs/pull/7/head 2>/dev/null; then
+  SAID=$(pr_event opened 7 cart "$CART" 2)
+  case "$SAID" in *"handed to roll previews"*) ;; *) echo "a fork's pull request should be handed to roll previews: $SAID"; exit 1;; esac
+  FORK=""
+  for _ in $(seq 1 120); do
+    FORK=$(pull_preview pull/7 | python3 -c "import sys,ast; p=ast.literal_eval(sys.stdin.read()); print('' if not p else '%s|%s|%s' % (p['id'], p['state'], p['trusted']))")
+    case "$FORK" in *"|awaiting_approval|False") break;; esac
+    sleep 1
+  done
+  case "$FORK" in *"|awaiting_approval|False") ;; *) echo "a fork's pull request should wait for an approval, untrusted: $FORK"; exit 1;; esac
+  FORK_ID=${FORK%%|*}
+  STALE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$FORK_ID/approve" -H 'content-type: application/json' -d '{"head":"0000000000000000000000000000000000000000"}')
+  [ "$STALE" = 409 ] || { echo "approving another head should be refused: $STALE"; exit 1; }
+  api POST "/v1/previews/$FORK_ID/approve" "{\"head\":\"$CART\"}" >/dev/null
+  for _ in $(seq 1 600); do
+    [ "$(api GET "/v1/previews/$FORK_ID" | jq_ "d['state']")" = ready ] && break
+    sleep 1
+  done
+  [ "$(api GET "/v1/previews/$FORK_ID" | jq_ "d['state']")" = ready ] || { echo "the approved head should run: $(api GET "/v1/previews/$FORK_ID" | jq_ "{k: d.get(k) for k in ('state', 'error')}")"; exit 1; }
+  pr_event closed 7 cart "$CART" 2 >/dev/null
+  PR_FORK="waited for an approval (another head refused, 409), ran once approved, deleted when closed"
+fi
+pr_event closed 5 cart "$CART" 1 >/dev/null
+for _ in $(seq 1 120); do [ "$(pull_preview cart)" = None ] && break; sleep 0.5; done
+[ "$(pull_preview cart)" = None ] || { echo "closing the pull request should delete its preview"; exit 1; }
 cat <<EOF
 | What | Measured |
 | --- | --- |
@@ -287,4 +336,5 @@ cat <<EOF
 | Promoted to production (the preview's image, no build): production serves / took / expecting another deployment | $PROD_AFTER / $((T6 - T5)) ms / HTTP $STALE |
 | After landing: previews left / the environment | $N / HTTP $GONE |
 | A Git URL service's branch (a git push and its webhook): its preview | $GIT_SAID |
+| A Git URL service's pull requests: same repo / a fork's | named and trusted, deleted when closed / $PR_FORK |
 EOF
