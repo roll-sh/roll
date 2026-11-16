@@ -135,8 +135,17 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
   project's secrets, made through `POST /v1/access/tokens` as the dashboard's New token. Its
   secret is in the state (sensitive). Any change replaces it, and destroying it revokes it.
 - **`data.roll_secrets_values`** is an environment's resolved values, for another provider.
+- **Without values in the state** (Terraform 1.10 and 1.11+), as Vault's and AWS' providers allow:
+  - **`ephemeral "roll_secrets_values"`** reads an environment for one run, never into the plan or
+    the state; it feeds another provider's configuration or a write-only argument. Strict: a key
+    that doesn't resolve fails the run. With `dynamic = true` a dynamic link issues a credential for
+    the run, and closing the run revokes its lease.
+  - **`value_wo`** on `roll_secret` writes a value write-only: it's sent and never kept, and
+    `value_wo_version` is bumped to write a new one (Terraform can't see a write-only value
+    change). Such a value isn't read back, so a change made outside Terraform isn't seen.
 
-Values land in Terraform's state, as with every provider: keep the state as private as the values.
+`value` and the data source still land in Terraform's state, as with every provider: keep that
+state as private as the values, or use the two above.
 ## GitHub Actions
 `sdk/github-action` puts an environment into a job, as Doppler's and Infisical's actions do:
 ```yaml
@@ -680,6 +689,14 @@ trait in `crates/roll-secrets/src/links.rs`, implemented in `crates/rolld/src/se
 the product's own HTTP API in process. `roll-secrets` has no list of kinds: a product makes its
 resources linkable by registering a provider. That is how roll search, roll apps and future
 products join without changes here.
+
+A live link's value changes however its credential does: roll rotating it, a password reset or
+restore through the product, `ALTER ROLE` over SQL. Watches, syncs, roll apps' redeploys and
+conditional reads follow the folder's digest, so the digest counts each live value's keyed
+fingerprint as the product answers, read at most every 10 seconds (only the fingerprint is kept,
+never the value). It moves at once, on every node, when roll rotates the credential and when a
+product's own password, reset or restore route succeeds (rolld tells roll secrets:
+`Secrets::source_changed`).
 
 ```rust
 pub trait LinkProvider: Send + Sync {
@@ -2323,10 +2340,10 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
-| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`); with `digest=1` or `If-None-Match` an `ETag` (the digest), and `If-None-Match` with the digest still current is a 304 that decrypts and issues nothing, and writes one `secrets.revalidate` row a day per caller and folder (so health and insights still see the folder read) (never for a folder holding a dynamic credential unless `dynamic=false`: a lease ends without moving the digest; never for one that reads a live link: its product can change the credential without roll knowing) |
+| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`); with `digest=1` or `If-None-Match` an `ETag` (the digest), and `If-None-Match` with the digest still current is a 304 that decrypts and issues nothing, and writes one `secrets.revalidate` row a day per caller and folder (so health and insights still see the folder read) (never for a folder holding a dynamic credential unless `dynamic=false`: a lease ends without moving the digest) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, projects it's shared with, folders that import it, readers in 30 days |
-| `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
+| `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would; a live link counts its value's keyed fingerprint as the product answers, read at most every 10 s, and at once when roll rotates it or the product's own password, reset or restore route changes it) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` (`dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`) |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
@@ -2345,8 +2362,8 @@ isn't in the workspace is 404.
 | `POST /environments/{env}/requests/{id}/close` | | `Request` |
 | `GET /links` | | `LinkTarget[]` |
 | `GET /leases` | | `Lease[]` |
-| `DELETE /leases/{id}` | | 204 |
-| `POST /leases/{id}/renew` | `{ttl_minutes?}` | `Lease` (`reveal` on its environment) |
+| `DELETE /leases/{id}` | | 204 (whoever may delete there, or the caller it was issued to while it may still reveal there; 403 for another's) |
+| `POST /leases/{id}/renew` | `{ttl_minutes?}` | `Lease` (as ending one: `delete` there, or the caller it was issued to with `reveal`) |
 | `GET /identities` | | `Identity[]` (admin) |
 | `POST /identities` | `NewIdentity` | 201 `Identity` |
 | `DELETE /identities/{id}` | | 204 (its tokens revoked) |
