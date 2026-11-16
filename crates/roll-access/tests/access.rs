@@ -1416,6 +1416,22 @@ async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
     assert_eq!(search(token.clone()).await, StatusCode::OK);
     assert_eq!(d.call(&token, Method::GET, "/v1/secrets/projects/prj_a/transit", None).await.0, StatusCode::FORBIDDEN, "only what its rules allow");
     assert_eq!(d.call(&token, Method::GET, "/v1/access/clients", None).await.0, StatusCode::FORBIDDEN, "a client never manages clients");
+    // A token can be asked for narrower: scope=read-only keeps only its rules' reads.
+    let wide = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "write": "allow" } }]);
+    let (_, w) = d.call(OPERATOR, Method::POST, "/v1/access/clients", Some(json!({ "name": "wide", "rules": wide }))).await;
+    let (wid, wsecret) = (w["client_id"].as_str().unwrap().to_string(), w["client_secret"].as_str().unwrap().to_string());
+    let trade = |scope: &'static str| {
+        let (d, wid, wsecret) = (&d, wid.clone(), wsecret.clone());
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", "client_credentials"), ("client_id", &wid), ("client_secret", &wsecret), ("scope", scope)]).await }
+    };
+    let (_, ro) = trade("read-only").await;
+    assert_eq!(ro["scope"], "read-only", "{ro}");
+    let ro = ro["access_token"].as_str().unwrap().to_string();
+    assert_eq!(d.call(&ro, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK);
+    assert_eq!(d.call(&ro, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "nope" }))).await.0, StatusCode::FORBIDDEN, "read-only can't write");
+    let full = trade("granted").await.1["access_token"].as_str().unwrap().to_string();
+    assert_eq!(d.call(&full, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "yes" }))).await.0, StatusCode::CREATED, "its rules otherwise");
+    assert_eq!(trade("full").await.1["error"], "invalid_scope", "never wider");
     // Its id is no ordinary OAuth client's: no device or consent flow may hang another grant on
     // it (someone else's, which its sign-ins could then land on).
     let (s, e) = d.form("/v1/access/oauth/device_authorization", &[("client_id", &id)]).await;

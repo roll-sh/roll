@@ -55,6 +55,7 @@ fn same(a: &str, b: &str) -> bool {
 pub async fn token(a: Arc<Access>, headers: &HeaderMap, f: &HashMap<String, String>) -> Result<(crate::store::Grant, String), Error> {
     let get = |k: &str| f.get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     let api = check_resource(&a, f)?;
+    let read_only = read_only_scope(f)?;
     let (client_id, assertion) = if let Some((id, secret)) = basic(headers).or_else(|| Some((get("client_id")?, get("client_secret")?))) {
         (id, Err(secret))
     } else if let (Some(kind), Some(jwt)) = (get("client_assertion_type"), get("client_assertion")) {
@@ -100,7 +101,7 @@ pub async fn token(a: Arc<Access>, headers: &HeaderMap, f: &HashMap<String, Stri
         }
     }
     let (grant_id, generation) = (client.grant_id.clone(), client.generation);
-    tokio::task::spawn_blocking(move || a.store.issue_client_access(&grant_id, &client_id, generation)).await.map_err(|e| Error::Internal(e.to_string()))?
+    tokio::task::spawn_blocking(move || a.store.issue_client_access(&grant_id, &client_id, generation, read_only)).await.map_err(|e| Error::Internal(e.to_string()))?
 }
 
 /// The `sub` of a JWT, before it's verified: only to find whose key verifies it.
@@ -139,6 +140,17 @@ fn verify(jwt: &str, jwk: &str, client_id: &str, api: &str) -> Result<(String, i
     Ok((jti.to_string(), exp))
 }
 
+/// What `scope` asks of a machine client's token: nothing narrower (none, or "granted"), or
+/// `read-only` (its rules' reads alone). A token never gets more than its client's rules.
+pub fn read_only_scope(f: &HashMap<String, String>) -> Result<bool, Error> {
+    let words: Vec<&str> = f.get("scope").map(|s| s.split_whitespace().collect()).unwrap_or_default();
+    match words.as_slice() {
+        [] | ["granted"] => Ok(false),
+        ["read-only"] => Ok(true),
+        _ => Err(Error::OAuth("invalid_scope", "a machine client's token is its rules (no scope) or their reads (scope=read-only)".into())),
+    }
+}
+
 /// `resource`, if given, is roll's API or its MCP server: roll's API URL.
 fn check_resource(a: &Access, f: &HashMap<String, String>) -> Result<String, Error> {
     let api = a.config.api_url.trim_end_matches('/').to_string();
@@ -155,6 +167,7 @@ fn check_resource(a: &Access, f: &HashMap<String, String>) -> Result<String, Err
 /// against the identity it trusts (or, after a rotation that kept it, the one before).
 pub async fn federated(a: Arc<Access>, f: &HashMap<String, String>) -> Result<(crate::store::Grant, String), Error> {
     check_resource(&a, f)?;
+    let read_only = read_only_scope(f)?;
     let get = |k: &str| f.get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     let client_id = get("client_id").ok_or_else(|| Error::OAuth("invalid_request", "client_id names the machine client this token signs in as".into()))?;
     let assertion = get("assertion").ok_or_else(|| Error::OAuth("invalid_request", "assertion is the CI's OIDC token".into()))?;
@@ -196,7 +209,7 @@ pub async fn federated(a: Arc<Access>, f: &HashMap<String, String>) -> Result<(c
             if !a.oidc_logins.allow(&client_id, SIGN_INS_PER_MINUTE) {
                 return Err(Error::TooMany(format!("at most {SIGN_INS_PER_MINUTE} sign-ins a minute for one machine client")));
             }
-            return a.store.issue_client_access(&client.grant_id, &client_id, client.generation);
+            return a.store.issue_client_access(&client.grant_id, &client_id, client.generation, read_only);
         }
         Err(refused(why))
     })

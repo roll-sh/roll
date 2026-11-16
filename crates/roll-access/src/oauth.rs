@@ -402,6 +402,7 @@ async fn token(State(a): S, headers: HeaderMap, Form(f): Form<HashMap<String, St
     // A machine client, with no person (its id may be in a header or its assertion).
     let grant = get("grant_type");
     if matches!(grant.as_deref(), Some(crate::client_credentials::GRANT | crate::client_credentials::JWT_GRANT)) {
+        let scope = if crate::client_credentials::read_only_scope(&f).unwrap_or(false) { "read-only" } else { "granted" };
         let made = if grant.as_deref() == Some(crate::client_credentials::JWT_GRANT) {
             crate::client_credentials::federated(a, &f).await
         } else {
@@ -411,7 +412,7 @@ async fn token(State(a): S, headers: HeaderMap, Form(f): Form<HashMap<String, St
             // No refresh token: the client trades its credential again for the next one.
             Ok((_, access)) => (
                 [(header::CACHE_CONTROL, "no-store"), (header::PRAGMA, "no-cache")],
-                Json(json!({ "access_token": access, "token_type": "Bearer", "expires_in": ACCESS_TTL_MS / 1000, "scope": "granted" })),
+                Json(json!({ "access_token": access, "token_type": "Bearer", "expires_in": ACCESS_TTL_MS / 1000, "scope": scope })),
             )
                 .into_response(),
             Err(e) => e.into_response(),

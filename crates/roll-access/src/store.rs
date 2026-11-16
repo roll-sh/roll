@@ -281,6 +281,17 @@ impl Grant {
         self.revoked_at.is_none() && self.expires_at.is_none_or(|e| e > now)
     }
 
+    /// Narrowed to reading: every rule (and every rule an approval allowed for a while) keeps only
+    /// `read`, and nothing asks. A read-only access token's grant, as the evaluator sees it.
+    pub fn read_only(&mut self) {
+        let narrow = |r: &mut roll_auth::scope::Rule| r.actions.retain(|a, e| *a == roll_auth::scope::Action::Read && *e == roll_auth::scope::Effect::Allow);
+        self.rules.0.iter_mut().for_each(narrow);
+        self.rules.0.retain(|r| !r.actions.is_empty());
+        self.temporary.iter_mut().for_each(|t| narrow(&mut t.rule));
+        self.temporary.retain(|t| !t.rule.actions.is_empty());
+        self.ask_otherwise = false;
+    }
+
     /// Honoured now: live, and past its `not_before`.
     pub fn usable(&self, now: i64) -> bool {
         self.live(now) && !self.pending && self.not_before.is_none_or(|b| b <= now)
@@ -795,6 +806,9 @@ impl Store {
         // how many times its credential was rotated (a token is issued only if it still matches).
         db.add_column("oauth_clients", "grant_id", "TEXT")?;
         db.add_column("oauth_clients", "generation", "INTEGER NOT NULL DEFAULT 0")?;
+        // An access token a machine client asked to be read-only (`scope=read-only`): its grant's
+        // rules narrowed to reading wherever the secret is looked up.
+        db.add_column("grant_secrets", "read_only", "INTEGER NOT NULL DEFAULT 0")?;
         // Where an approval's chat card is (`{install, channel, ts}`), once posted.
         if !db.has_column("approvals", "chat")? {
             db.add_column("approvals", "chat", "TEXT")?;
@@ -1072,10 +1086,15 @@ impl Store {
         let now = code_sql::now_ms();
         let h = hash(secret);
         let row = self.db.read(|c| {
-            c.query_row(
-                &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
+            c.query_row(                &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at, s.read_only FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
                 [&h],
-                |r| Ok((grant_row(r)?, r.get::<_, String>(after_grant(0))?, r.get::<_, Option<i64>>(after_grant(1))?)),
+                |r| {
+                    let mut g = grant_row(r)?;
+                    if r.get::<_, i64>(after_grant(2))? != 0 {
+                        g.read_only();
+                    }
+                    Ok((g, r.get::<_, String>(after_grant(0))?, r.get::<_, Option<i64>>(after_grant(1))?))
+                },
             )
             .optional()
         })?;

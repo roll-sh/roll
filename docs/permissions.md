@@ -172,7 +172,9 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
       | --environment production]` prints the `.gitlab-ci.yml` lines (`id_tokens` for roll's
       audience). The panel's "GitHub Actions" choice does the same for GitHub.
 - **The request:** `grant_type=client_credentials`; its `resource`, if any, must be roll's API or
-  MCP server. The answer has no refresh token: the client trades its credential again for the
+  MCP server. `scope=read-only` narrows that token to its rules' reads (no asks either), checked
+  wherever the token is looked up; no scope (or `granted`) is the client's rules, and any other
+  scope is `invalid_scope`: never wider. The answer has no refresh token: the client trades its credential again for the
   next one. Every failure to authenticate is the same `invalid_client`, so an unknown client and a
   wrong credential look alike.
 - **The metadata** lists `client_secret_basic`, `client_secret_post` and `private_key_jwt`, the

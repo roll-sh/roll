@@ -151,7 +151,7 @@ impl Store {
     /// An hour's access token on a machine client's grant, if the client is still live and its
     /// credential still the one checked (`generation`): checked and issued in one write, so a
     /// rotation or a revocation while a sign-in was being checked leaves it with nothing.
-    pub fn issue_client_access(&self, grant_id: &str, client_id: &str, generation: i64) -> Result<(Grant, String)> {
+    pub fn issue_client_access(&self, grant_id: &str, client_id: &str, generation: i64, read_only: bool) -> Result<(Grant, String)> {
         let access = new_secret(ACCESS_PREFIX);
         let now = code_sql::now_ms();
         self.db.write(|c| {
@@ -160,7 +160,7 @@ impl Store {
                 return Err(Error::OAuth("invalid_client", "the client's credentials didn't check out".into()));
             }
             c.execute("DELETE FROM grant_secrets WHERE grant_id = ? AND kind = 'access' AND expires_at < ?", params![grant_id, now])?;
-            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'access', ?, ?)", params![hash(&access), grant_id, now + ACCESS_TTL_MS, now])?;
+            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at, read_only) VALUES (?, ?, 'access', ?, ?, ?)", params![hash(&access), grant_id, now + ACCESS_TTL_MS, now, read_only])?;
             c.execute("UPDATE oauth_clients SET last_used_at = ? WHERE id = ?", params![now, client_id])?;
             Ok::<_, Error>(())
         })?;
