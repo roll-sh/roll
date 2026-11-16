@@ -389,6 +389,10 @@ impl roll_secrets::directories::Directory for FakeDirectory {
         self.entries.lock().unwrap().remove(dn);
         Ok(())
     }
+    fn account_names(&self, b: &roll_secrets::directories::Bind<'_>, dns: &[String]) -> Result<Vec<roll_secrets::directories::AccountNames>, String> {
+        self.bound(b)?;
+        Ok(dns.iter().map(|dn| roll_secrets::directories::AccountNames { account_name: dn[3..dn.find(',').unwrap()].into(), upn: format!("{}@corp.example", &dn[3..dn.find(',').unwrap()]) }).collect())
+    }
 }
 
 /// An ES256 key of the fake issuer, its JWKS, and tokens it signs.
@@ -1805,6 +1809,26 @@ async fn a_directory_hands_out_accounts_in_turn_and_a_user_per_lease() {
     let check = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "check:fork#1", "untrusted": true }))).await;
     assert!(check["values"].get("TMP_PASSWORD").is_none() && check["leases"] == json!([]), "{check}");
     assert!(!api.directory.entries.lock().unwrap().keys().any(|dn| dn.starts_with("cn=roll-")));
+
+    // Active Directory's logins also have an account name and a UPN (OpenLDAP's don't).
+    let (s, e) = api.call(Method::PUT, "/environments/production/secrets/LDAP_UPN", Some(json!({ "link": link("upn") }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("only Active Directory"), "{e}");
+    let svc = "cn=svc-reports,ou=svc,dc=example,dc=com";
+    api.directory.entries.lock().unwrap().insert(svc.into(), ("set-by-hand".into(), vec![], String::new()));
+    let ad = api.ok(Method::POST, "/directories", Some(json!({ "name": "ad", "url": "ldaps://ldap.example:636", "bind_dn": "cn=roll,dc=example,dc=com", "bind_password": "fake-bind-pw", "flavor": "active_directory", "user_base_dn": base, "managed_accounts": [svc] }))).await;
+    let ad_link = |field: &str, mode: &str| json!({ "kind": "directory", "ref": ad["id"], "field": field, "mode": mode, "options": if mode == "dynamic" { json!({ "ttl_minutes": 15 }) } else { json!({}) } });
+    let ops = |mode: &str| {
+        let ops: Vec<Value> = ["username", "password", "upn", "account_name"].iter().map(|f| json!({ "op": "set", "key": format!("AD_{}_{}", mode.to_uppercase(), f.to_uppercase()), "link": ad_link(f, mode) })).collect();
+        json!({ "ops": ops })
+    };
+    api.ok(Method::POST, "/environments/production/changes", Some(ops("managed"))).await;
+    let v = api.values("production", "/").await["values"].clone();
+    assert_eq!((v["AD_MANAGED_USERNAME"].as_str(), v["AD_MANAGED_ACCOUNT_NAME"].as_str(), v["AD_MANAGED_UPN"].as_str()), (Some(svc), Some("svc-reports"), Some("svc-reports@corp.example")));
+    api.ok(Method::POST, "/environments/staging/changes", Some(ops("dynamic"))).await;
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:sync" }))).await;
+    let lease = r["leases"].as_array().unwrap().iter().map(|l| l.as_str().unwrap()).find(|l| r["values"]["AD_DYNAMIC_USERNAME"].as_str().unwrap().contains(l)).unwrap();
+    let sam = format!("roll-{}", &lease[4..19]);
+    assert_eq!((r["values"]["AD_DYNAMIC_ACCOUNT_NAME"].as_str(), r["values"]["AD_DYNAMIC_UPN"].as_str()), (Some(sam.as_str()), Some(format!("{sam}@example.com").as_str())));
 
     // The bind password is in no answer and no audit row.
     let listed = api.ok(Method::GET, "/directories", None).await;

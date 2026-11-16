@@ -7,7 +7,7 @@
 
 use ldap3::exop::PasswordModify;
 use ldap3::{Ldap, LdapConnAsync, LdapConnSettings, LdapError, Mod, Scope, SearchEntry, SearchOptions, StdStream};
-use roll_secrets::directories::{Bind, Flavor};
+use roll_secrets::directories::{AccountNames, Bind, Flavor};
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -40,7 +40,15 @@ impl roll_secrets::directories::Directory for Guarded {
 
     fn set_password(&self, bind: &Bind<'_>, dn: &str, password: &str) -> Result<(), String> {
         let flavor = bind.flavor;
-        self.run(bind, async move |l| set_password(l, flavor, dn, password).await)
+        self.run(bind, async move |l| {
+            // Active Directory keeps taking an account's previous password for an hour after a
+            // reset (NTLM's old password allowed period, which Samba applies to simple binds as
+            // well): a throwaway password first makes the previous one a password nobody knows.
+            if flavor == Flavor::ActiveDirectory {
+                set_password(l, flavor, dn, &throwaway()).await?;
+            }
+            set_password(l, flavor, dn, password).await
+        })
     }
 
     fn create_user(&self, bind: &Bind<'_>, dn: &str, password: &str, groups: &[String], description: &str, until: i64) -> Result<(), String> {
@@ -54,14 +62,14 @@ impl roll_secrets::directories::Directory for Guarded {
                     set_password(l, flavor, dn, password).await?;
                 }
                 Flavor::ActiveDirectory => {
-                    // sAMAccountName is 20 characters at most: roll- and the lease id's random part.
-                    let sam: String = format!("roll-{}", cn.rsplit('_').next().unwrap_or(&cn).chars().take(15).collect::<String>());
+                    let names = AccountNames::dynamic(dn);
                     // Made disabled, then given its password, then enabled (AD refuses an enabled
                     // account without a password that meets its policy).
                     let attrs = vec![
                         attr("objectClass", &["top", "person", "organizationalPerson", "user"]),
                         attr("cn", &[&cn]),
-                        attr("sAMAccountName", &[&sam]),
+                        attr("sAMAccountName", &[&names.account_name]),
+                        attr("userPrincipalName", &[&names.upn]),
                         attr("description", &[description]),
                         attr("userAccountControl", &["514"]),
                         attr("accountExpires", &[&filetime(until)]),
@@ -102,6 +110,21 @@ impl roll_secrets::directories::Directory for Guarded {
                 r if r.rc == 0 || r.rc == 32 => Ok(()),
                 r => Err(ldap_error(LdapError::from(r))),
             }
+        })
+    }
+
+    fn account_names(&self, bind: &Bind<'_>, dns: &[String]) -> Result<Vec<AccountNames>, String> {
+        self.run(bind, async move |l| {
+            let mut out = Vec::with_capacity(dns.len());
+            for dn in dns {
+                let (entries, _) = l.with_search_options(SearchOptions::new().sizelimit(1).timelimit(10)).search(dn, Scope::Base, "(objectClass=*)", vec!["sAMAccountName", "userPrincipalName"]).await.and_then(|r| r.success()).map_err(ldap_error)?;
+                let e = entries.into_iter().next().map(SearchEntry::construct).ok_or_else(|| format!("there's no {dn}"))?;
+                let one = |a: &str| e.attrs.get(a).and_then(|v| v.first()).cloned();
+                let account_name = one("sAMAccountName").ok_or_else(|| format!("{dn} has no sAMAccountName"))?;
+                let upn = one("userPrincipalName").unwrap_or_else(|| format!("{account_name}@{}", roll_secrets::directories::domain(dn)));
+                out.push(AccountNames { account_name, upn });
+            }
+            Ok(out)
         })
     }
 }
@@ -211,6 +234,13 @@ async fn passmod(l: &mut Ldap) -> Result<bool, String> {
     Ok(entries.into_iter().next().map(SearchEntry::construct).is_some_and(|e| e.attrs.get("supportedExtension").is_some_and(|v| v.iter().any(|o| o == PASSMOD))))
 }
 
+/// A password nobody keeps, with each kind of character Active Directory's complexity rules ask for.
+fn throwaway() -> String {
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).expect("system randomness");
+    b.iter().map(|x| format!("{x:02x}")).collect::<String>() + "Aa1!"
+}
+
 fn attr(name: &str, values: &[&str]) -> (Vec<u8>, HashSet<Vec<u8>>) {
     (name.as_bytes().to_vec(), values.iter().map(|v| v.as_bytes().to_vec()).collect())
 }
@@ -293,6 +323,79 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// Against a real Active Directory, run by hand (docs/secrets.md, "Directories"; checked with
+    /// Samba's AD DC): `ROLL_E2E_AD_URL=ldaps://dc1.samdom.localhost:PORT ROLL_E2E_AD_CA=ca.pem
+    /// ROLL_E2E_AD_BIND=CN=roll-bind,CN=Users,… ROLL_E2E_AD_PASSWORD=… ROLL_E2E_AD_BASE=DC=samdom,DC=localhost
+    /// cargo test -p rolld real_active_directory -- --ignored`, with `OU=svc` holding `CN=app-blue`,
+    /// `OU=roll` and `OU=groups` holding `CN=readers`, the bind account holding only the
+    /// `active_directory` row's rights.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn a_real_active_directory_sets_passwords_and_makes_expires_and_deletes_users() {
+        use roll_secrets::directories::Directory;
+        let env = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k}"));
+        let (url, ca, bind_dn, pw, base) = (env("ROLL_E2E_AD_URL"), std::fs::read_to_string(env("ROLL_E2E_AD_CA")).unwrap(), env("ROLL_E2E_AD_BIND"), env("ROLL_E2E_AD_PASSWORD"), env("ROLL_E2E_AD_BASE"));
+        tokio::task::spawn_blocking(move || {
+            let g = Guarded { allow_private: true };
+            let at = |dn: &'static str| format!("{dn},{base}");
+            let (blue, users, group) = (at("CN=app-blue,OU=svc"), at("OU=roll"), at("CN=readers,OU=groups"));
+            let admin = Bind { url: &url, flavor: Flavor::ActiveDirectory, bind_dn: &bind_dn, bind_password: &pw, ca: Some(&ca) };
+            let as_user = |dn: &str, password: &str| g.check(&Bind { url: &url, flavor: Flavor::ActiveDirectory, bind_dn: dn, bind_password: password, ca: Some(&ca) }, &[], &[], None);
+            // The bind proof, a refusal for what isn't there, and a certificate from a CA nobody trusts.
+            g.check(&admin, std::slice::from_ref(&blue), std::slice::from_ref(&group), Some(&users)).unwrap();
+            assert!(g.check(&admin, &[at("CN=nobody,OU=svc")], &[], None).unwrap_err().contains("there's no"));
+            assert!(g.check(&Bind { bind_password: "fake-wrong", ..admin }, &[], &[], None).unwrap_err().contains("49"));
+            let untrusted = g.check(&Bind { ca: None, ..admin }, &[], &[], None).unwrap_err();
+            assert!(untrusted.to_lowercase().contains("certificate"), "{untrusted}");
+            // A managed account's new password works and its old one doesn't.
+            let first = roll_secrets_password();
+            g.set_password(&admin, &blue, &first).unwrap();
+            as_user(&blue, &first).unwrap();
+            let second = roll_secrets_password();
+            g.set_password(&admin, &blue, &second).unwrap();
+            as_user(&blue, &second).unwrap();
+            assert!(as_user(&blue, &first).is_err(), "the old password is refused");
+            // Its other names (no userPrincipalName set: the implicit one) log in too.
+            let names = g.account_names(&admin, std::slice::from_ref(&blue)).unwrap();
+            assert_eq!(names[0].account_name, "app-blue");
+            as_user(&names[0].upn, &second).unwrap();
+            // A dynamic user: made enabled, in the group, expiring, binds; renewing moves its
+            // expiry; then it's gone (twice: gone counts as deleted).
+            let user = format!("cn=roll-lse_fakefakefakefake,{users}");
+            let upw = roll_secrets_password();
+            let until = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64) + 3_600_000;
+            g.create_user(&admin, &user, &upw, std::slice::from_ref(&group), "roll secrets lease lse_fakefakefakefake (test)", until).unwrap();
+            as_user(&user, &upw).unwrap();
+            let names = AccountNames::dynamic(&user);
+            assert_eq!(g.account_names(&admin, std::slice::from_ref(&user)).unwrap(), vec![names.clone()]);
+            as_user(&names.upn, &upw).unwrap();
+            assert!(member_of(&g, &admin, &group, &user), "it joined the group");
+            assert_eq!(attribute(&g, &admin, &user, "userAccountControl").as_deref(), Some("512"), "enabled");
+            assert_eq!(attribute(&g, &admin, &user, "sAMAccountName").as_deref(), Some("roll-fakefakefakefak"));
+            assert_eq!(attribute(&g, &admin, &user, "accountExpires"), Some(filetime(until)));
+            g.extend_user(&admin, &user, until + 3_600_000).unwrap();
+            assert_eq!(attribute(&g, &admin, &user, "accountExpires"), Some(filetime(until + 3_600_000)), "renewing moves the expiry");
+            g.delete_user(&admin, &user, std::slice::from_ref(&group)).unwrap();
+            assert!(as_user(&user, &upw).is_err() && !member_of(&g, &admin, &group, &user), "deleted and out of the group");
+            g.delete_user(&admin, &user, std::slice::from_ref(&group)).unwrap();
+            // An account that expired is refused.
+            g.create_user(&admin, &user, &upw, &[], "roll secrets lease lse_fakefakefakefake (test)", 1_000).unwrap();
+            assert!(as_user(&user, &upw).is_err(), "an expired account can't bind");
+            g.delete_user(&admin, &user, &[]).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    fn attribute(g: &Guarded, admin: &Bind<'_>, dn: &str, name: &str) -> Option<String> {
+        let (dn, name) = (dn.to_string(), name.to_string());
+        g.run(admin, async move |l| {
+            let (entries, _) = l.search(&dn, Scope::Base, "(objectClass=*)", vec![name.as_str()]).await.and_then(|r| r.success()).map_err(ldap_error)?;
+            Ok(entries.into_iter().map(SearchEntry::construct).find_map(|e| e.attrs.get(&name).and_then(|v| v.first().cloned())))
+        })
+        .unwrap()
     }
 
     fn roll_secrets_password() -> String {

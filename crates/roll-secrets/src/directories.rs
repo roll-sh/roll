@@ -92,6 +92,32 @@ pub trait Directory: Send + Sync {
     fn extend_user(&self, bind: &Bind<'_>, dn: &str, until: i64) -> std::result::Result<(), String>;
     /// Take `dn` out of `groups` and delete it. A user that's gone already is fine.
     fn delete_user(&self, bind: &Bind<'_>, dn: &str, groups: &[String]) -> std::result::Result<(), String>;
+    /// Active Directory accounts' other names, in the order of `dns`.
+    fn account_names(&self, bind: &Bind<'_>, dns: &[String]) -> std::result::Result<Vec<AccountNames>, String>;
+}
+
+/// The names an Active Directory account logs in with besides its DN.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccountNames {
+    /// `sAMAccountName` (`DOMAIN\name` logins).
+    pub account_name: String,
+    /// `userPrincipalName`, else the implicit `account_name@domain` every account has.
+    pub upn: String,
+}
+
+impl AccountNames {
+    /// A dynamic user's names (`cn=roll-<lease>,…`): `roll-` and 15 characters of the lease id
+    /// (sAMAccountName is 20 characters at most), at the DN's domain.
+    pub fn dynamic(dn: &str) -> AccountNames {
+        let cn = dn.split(',').next().unwrap_or_default().split_once('=').map_or("", |(_, v)| v);
+        let account_name = format!("roll-{}", cn.rsplit('_').next().unwrap_or(cn).chars().take(15).collect::<String>());
+        AccountNames { upn: format!("{account_name}@{}", domain(dn)), account_name }
+    }
+}
+
+/// The DNS domain a DN is in: its `DC=` parts, joined with dots.
+pub fn domain(dn: &str) -> String {
+    dn.split(',').filter_map(|rdn| rdn.trim().split_once('=')).filter(|(k, _)| k.trim().eq_ignore_ascii_case("dc")).map(|(_, v)| v.trim()).collect::<Vec<_>>().join(".")
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -148,6 +174,16 @@ impl Opened {
     }
 }
 
+/// A login's parts: its DN and password, and on Active Directory its other names.
+fn parts(dn: String, password: Value, names: Option<AccountNames>) -> BTreeMap<String, Value> {
+    let mut parts = BTreeMap::from([("username".to_string(), Value::new(dn)), ("password".to_string(), password)]);
+    if let Some(n) = names {
+        parts.insert("upn".into(), Value::new(n.upn));
+        parts.insert("account_name".into(), Value::new(n.account_name));
+    }
+    parts
+}
+
 /// Its managed accounts take turns (turns.rs), named `dn` in a credential's handle.
 const TURNS: crate::turns::Turns = crate::turns::Turns { table: "directories", kind: KIND, key: "dn" };
 
@@ -197,7 +233,12 @@ pub(crate) fn password(flavor: Flavor) -> String {
 const FIELDS: &[Field] = &[
     Field { field: "username", label: "Username (DN)", modes: &[Mode::Managed, Mode::Dynamic], secret: false, suggest: "LDAP_BIND_DN", credential: Some("login") },
     Field { field: "password", label: "Password", modes: &[Mode::Managed, Mode::Dynamic], secret: true, suggest: "LDAP_PASSWORD", credential: Some("login") },
+    Field { field: "upn", label: "User principal name (Active Directory)", modes: &[Mode::Managed, Mode::Dynamic], secret: false, suggest: "LDAP_UPN", credential: Some("login") },
+    Field { field: "account_name", label: "Account name (sAMAccountName, Active Directory)", modes: &[Mode::Managed, Mode::Dynamic], secret: false, suggest: "LDAP_USERNAME", credential: Some("login") },
 ];
+
+/// What only Active Directory issues.
+const AD_ONLY: &[&str] = &["upn", "account_name"];
 
 /// How long past its lease a dynamic Active Directory user's account lasts (the lease's end deletes it).
 const SLACK_MS: i64 = 5 * 60_000;
@@ -210,6 +251,10 @@ pub(crate) struct Provider {
 }
 
 impl Provider {
+    fn flavor(&self, id: &str) -> Option<Flavor> {
+        self.db.read(|c| c.query_row("SELECT flavor FROM directories WHERE id = ?", [id], |r| r.get::<_, String>(0)).optional()).ok().flatten().map(|f| Flavor::parse(&f))
+    }
+
     fn open(&self, id: &str) -> Result<Opened> {
         type Row = (String, String, String, String, Vec<u8>, Option<String>, String, String, Option<String>, String);
         let row: Option<Row> = self.db.read(|c| {
@@ -250,8 +295,8 @@ impl Provider {
             let _ = self.directory.delete_user(&o.bind(), &dn, &o.groups);
             return Err(Error::Link(format!("creating {dn}: {why}")));
         }
-        let parts = BTreeMap::from([("username".to_string(), Value::new(dn.clone())), ("password".to_string(), pw)]);
-        Ok(Issued { parts, handle: json!({ "user": dn }) })
+        let names = (o.flavor == Flavor::ActiveDirectory).then(|| AccountNames::dynamic(&dn));
+        Ok(Issued { parts: parts(dn.clone(), pw, names), handle: json!({ "user": dn }) })
     }
 }
 
@@ -266,6 +311,18 @@ impl LinkProvider for Provider {
 
     fn suggested(&self) -> &[(&'static str, Mode)] {
         &[("username", Mode::Managed), ("password", Mode::Managed)]
+    }
+
+    fn fields_for(&self, r#ref: &str) -> Vec<Field> {
+        let ad = self.flavor(r#ref) == Some(Flavor::ActiveDirectory);
+        FIELDS.iter().filter(|f| ad || !AD_ONLY.contains(&f.field)).cloned().collect()
+    }
+
+    fn check(&self, link: &Link) -> Result<()> {
+        if AD_ONLY.contains(&link.field.as_str()) && self.flavor(&link.r#ref).is_some_and(|f| f != Flavor::ActiveDirectory) {
+            return Err(Error::BadRequest(format!("only Active Directory has {}: link username (the DN) to this directory", link.field)));
+        }
+        Ok(())
     }
 
     fn name(&self, r#ref: &str) -> Option<String> {
@@ -287,9 +344,14 @@ impl LinkProvider for Provider {
         if o.accounts.is_empty() {
             return Err(Error::Link(format!("directory {ref} has no managed accounts: register it with one or two", ref = r#ref)));
         }
+        // Active Directory's names are read first: a failure changes no password.
+        let names = match o.flavor {
+            Flavor::ActiveDirectory => self.directory.account_names(&o.bind(), &o.accounts).map_err(|why| Error::Link(format!("reading {}: {why}", o.accounts.join(", "))))?,
+            Flavor::Openldap => vec![],
+        };
         let (dn, pw, handle) = TURNS.issue(&self.db, r#ref, &o.accounts, || password(o.flavor), |dn, pw| self.directory.set_password(&o.bind(), dn, pw))?;
-        let parts = BTreeMap::from([("username".to_string(), Value::new(dn)), ("password".to_string(), pw)]);
-        Ok(Issued { parts, handle })
+        let names = o.accounts.iter().position(|a| *a == dn).and_then(|i| names.get(i).cloned());
+        Ok(Issued { parts: parts(dn, pw, names), handle })
     }
 
     fn issue_lease(&self, r#ref: &str, credential: &str, link: &Link, label: &str, ttl_minutes: u64, lease: &str) -> Result<Issued> {
