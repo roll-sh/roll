@@ -23,9 +23,9 @@ impl crate::Apps {
     pub async fn watch_git(self: &std::sync::Arc<Self>) -> Vec<String> {
         let mut started = Vec::new();
         let Ok(services) = self.db(|s| s.services(None)).await else { return started };
-        let client = client(self.cfg.allow_private);
         for svc in services.into_iter().filter(|s| self.owns(&s.id) && !self.capped(&s.id)) {
             let crate::model::Source::Git { url, .. } = &svc.source else { continue };
+            let remote = self.git_remote(&svc.id, url).await;
             let sid = svc.id.clone();
             let Ok((envs, pending)) = self.db(move |s| Ok((s.environments(&sid)?, s.pending_deployments(&sid)?))).await else { continue };
             for env in envs.into_iter().filter(|e| !e.ephemeral && !e.paused && e.held_by.is_none()) {
@@ -35,7 +35,7 @@ impl crate::Apps {
                     continue;
                 }
                 let sink = || self.logs.sink(format!("env:{}/{}", svc.id, env.name), crate::logs::Stream::System);
-                let sha = match head(&client, url, Some(&branch)).await {
+                let sha = match head(&remote, Some(&branch)).await {
                     Ok((sha, _)) => sha,
                     Err(e) => {
                         sink().line(format!("watching {url} ({branch}): {e:#}"));
@@ -53,7 +53,7 @@ impl crate::Apps {
                 // Its message, as a push's hook reads it: `[skip ci]` skips it, its subject names it.
                 // One that can't be read isn't deployed blind (its skip tag would be missed): the
                 // next pass tries again.
-                let message = match commit_message(&client, url, &sha).await {
+                let message = match commit_message(&remote, &sha).await {
                     Ok(m) => m,
                     Err(e) => {
                         sink().line(format!("{} on {branch}: its message couldn't be read ({e:#}); trying again in five minutes", &sha[..12]));
@@ -105,13 +105,42 @@ pub fn check_url(url: &str, allow_private: bool) -> Result<(), String> {
 }
 
 /// The client a deploy fetches with.
-pub fn client(allow_private: bool) -> Client {
+fn client(allow_private: bool) -> Client {
     Client::with_http(crate::net::client(allow_private, std::time::Duration::from_secs(120)), Limits::default())
 }
 
+/// A repository to fetch from: the client, its URL, and a private repository's login (sent as
+/// Basic auth, only ever to this URL: the client follows no redirect). No `Debug`: it holds the
+/// password.
+pub struct Remote<'a> {
+    client: Client,
+    pub url: &'a str,
+    auth: Option<code_git::Credentials>,
+}
+
+impl<'a> Remote<'a> {
+    pub fn new(allow_private: bool, url: &'a str, login: Option<(String, String)>) -> Self {
+        Remote { client: client(allow_private), url, auth: login.map(|(username, password)| code_git::Credentials { username, password, vouched: false }) }
+    }
+
+    /// A public repository's (a plan, an import, a template): no login.
+    pub fn public(allow_private: bool, url: &'a str) -> Self {
+        Self::new(allow_private, url, None)
+    }
+
+    pub async fn ls_refs(&self) -> anyhow::Result<code_git::RefList> {
+        self.client.ls_refs(self.url, self.auth.as_ref()).await
+    }
+
+    async fn fetch(&self, args: &FetchArgs) -> anyhow::Result<code_git::Fetched> {
+        self.client.fetch(self.url, self.auth.as_ref(), args).await
+    }
+}
+
 /// A branch's head: its commit and its name (the repository's default when none is named).
-pub async fn head(client: &Client, url: &str, branch: Option<&str>) -> anyhow::Result<(String, String)> {
-    let refs = client.ls_refs(url, None).await?;
+pub async fn head(r: &Remote<'_>, branch: Option<&str>) -> anyhow::Result<(String, String)> {
+    let url = r.url;
+    let refs = r.ls_refs().await?;
     let name = match branch {
         Some(b) => format!("refs/heads/{b}"),
         None => refs.head.clone().ok_or_else(|| anyhow::anyhow!("{url} has no default branch"))?,
@@ -121,9 +150,9 @@ pub async fn head(client: &Client, url: &str, branch: Option<&str>) -> anyhow::R
 }
 
 /// The tree at `sha`, fetched shallowly and written into `dir` (empty). How many files.
-pub async fn materialize(client: &Client, url: &str, sha: &str, dir: &Path) -> anyhow::Result<usize> {
+pub async fn materialize(r: &Remote<'_>, sha: &str, dir: &Path) -> anyhow::Result<usize> {
     let oid: ObjectId = sha.parse().map_err(|_| anyhow::anyhow!("{sha} isn't a commit id"))?;
-    let fetched = client.fetch(url, None, &FetchArgs { wants: vec![oid], haves: Vec::new(), depth: Some(1), filter: None }).await?;
+    let fetched = r.fetch(&FetchArgs { wants: vec![oid], haves: Vec::new(), depth: Some(1), filter: None }).await?;
     let objects: HashMap<ObjectId, Object> = fetched.objects.into_iter().map(|o| (o.id, o)).collect();
     let dir = dir.to_path_buf();
     tokio::task::spawn_blocking(move || write_commit(&objects, oid, &dir)).await?
@@ -131,9 +160,9 @@ pub async fn materialize(client: &Client, url: &str, sha: &str, dir: &Path) -> a
 
 /// A fetch that leaves objects out with a filter, or, from a server that takes no filters (some
 /// self-hosted ones), the same fetch with everything (still at most `Limits::max_pack_bytes`).
-async fn fetch_filtered(client: &Client, url: &str, args: FetchArgs) -> anyhow::Result<code_git::Fetched> {
-    match client.fetch(url, None, &args).await {
-        Err(e) if args.filter.is_some() && e.to_string().contains("does not support filters") => client.fetch(url, None, &FetchArgs { filter: None, ..args }).await,
+async fn fetch_filtered(r: &Remote<'_>, args: FetchArgs) -> anyhow::Result<code_git::Fetched> {
+    match r.fetch(&args).await {
+        Err(e) if args.filter.is_some() && e.to_string().contains("does not support filters") => r.fetch(&FetchArgs { filter: None, ..args }).await,
         r => r,
     }
 }
@@ -141,10 +170,10 @@ async fn fetch_filtered(client: &Client, url: &str, args: FetchArgs) -> anyhow::
 /// The paths that differ between the trees of commits `from` and `to`: one shallow fetch of
 /// both with no blob (trees compared by id, so an unchanged folder is never walked), at most
 /// 10,000 paths (past that, everything counts as changed: `None`).
-pub async fn changed_paths(client: &Client, url: &str, from: &str, to: &str) -> anyhow::Result<Option<Vec<String>>> {
+pub async fn changed_paths(r: &Remote<'_>, from: &str, to: &str) -> anyhow::Result<Option<Vec<String>>> {
     let (a, b): (ObjectId, ObjectId) = (from.parse().map_err(|_| anyhow::anyhow!("{from} isn't a commit id"))?, to.parse().map_err(|_| anyhow::anyhow!("{to} isn't a commit id"))?);
     let args = FetchArgs { wants: vec![a, b], haves: Vec::new(), depth: Some(1), filter: Some(code_git::Filter::BlobNone) };
-    let objects: HashMap<ObjectId, Object> = fetch_filtered(client, url, args).await?.objects.into_iter().map(|o| (o.id, o)).collect();
+    let objects: HashMap<ObjectId, Object> = fetch_filtered(r, args).await?.objects.into_iter().map(|o| (o.id, o)).collect();
     let tree_of = |c: ObjectId| -> anyhow::Result<ObjectId> {
         let o = objects.get(&c).filter(|o| o.kind == Kind::Commit).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring commit {c}"))?;
         Ok(parse_commit(&o.data).map_err(|e| anyhow::anyhow!("{e}"))?.tree)
@@ -194,10 +223,10 @@ fn diff_trees(objects: &HashMap<ObjectId, Object>, a: Option<ObjectId>, b: Optio
 }
 
 /// A commit's message: one shallow fetch of the commit alone (no tree, no blob).
-pub async fn commit_message(client: &Client, url: &str, sha: &str) -> anyhow::Result<String> {
+pub async fn commit_message(r: &Remote<'_>, sha: &str) -> anyhow::Result<String> {
     let oid: ObjectId = sha.parse().map_err(|_| anyhow::anyhow!("{sha} isn't a commit id"))?;
     let args = FetchArgs { wants: vec![oid], haves: Vec::new(), depth: Some(1), filter: Some(code_git::Filter::TreeNone) };
-    let fetched = fetch_filtered(client, url, args).await?;
+    let fetched = fetch_filtered(r, args).await?;
     let c = fetched.objects.into_iter().find(|o| o.id == oid && o.kind == Kind::Commit).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring commit {oid}"))?;
     let text = String::from_utf8_lossy(&c.data).into_owned();
     Ok(text.split_once("\n\n").map(|(_, m)| m.to_string()).unwrap_or_default())
@@ -205,11 +234,11 @@ pub async fn commit_message(client: &Client, url: &str, sha: &str) -> anyhow::Re
 
 /// The file at `path` (`roll.toml`, or a root's `web/roll.toml`) in the tree at `sha`, at most
 /// 64 KiB: one shallow fetch that leaves out every bigger blob. None: no such file.
-pub async fn read_file(client: &Client, url: &str, sha: &str, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
+pub async fn read_file(r: &Remote<'_>, sha: &str, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
     const MAX: u64 = 64 << 10;
     let oid: ObjectId = sha.parse().map_err(|_| anyhow::anyhow!("{sha} isn't a commit id"))?;
     let args = FetchArgs { wants: vec![oid], haves: Vec::new(), depth: Some(1), filter: Some(code_git::Filter::BlobLimit(MAX)) };
-    let objects: HashMap<ObjectId, Object> = fetch_filtered(client, url, args).await?.objects.into_iter().map(|o| (o.id, o)).collect();
+    let objects: HashMap<ObjectId, Object> = fetch_filtered(r, args).await?.objects.into_iter().map(|o| (o.id, o)).collect();
     let c = objects.get(&oid).filter(|o| o.kind == Kind::Commit).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring commit {oid}"))?;
     let mut tree = parse_commit(&c.data).map_err(|e| anyhow::anyhow!("{e}"))?.tree;
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();

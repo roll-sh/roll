@@ -97,6 +97,14 @@ export function ConnectPanel({ token }: { token?: string }) {
   }, []);
   const cost = toolsetCost(costs.products, picked, readonly, search ? costs.search : undefined);
   const limit = CLIENT_TOOL_LIMIT[client];
+  // A client that can't take the whole list (VS Code, Cursor) gets search mode to start with,
+  // whenever the client is picked or the counts arrive; the checkbox still turns it off.
+  const whole = toolsetCost(costs.products, picked, readonly).tools;
+  useEffect(() => {
+    if (costs.search) setSearch(Boolean(limit && whole > limit.tools));
+    // Only on a new client or new counts: a person's own choice of products stays theirs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, costs]);
   const over = limit && cost.tools > limit.tools;
   const url = withToolsets(mcpUrl(), picked, { readonly, search, lockdown });
   const cfg = mcpConfig(client, url, token);
