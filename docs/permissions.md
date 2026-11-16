@@ -388,9 +388,11 @@ It covers the routes of one key (`/v1/secrets/projects/{project}/transit/{name}/
 decrypt, sign, verify, HMAC, the public key; rotating, its minimum version and deleting it at
 admin), at their own actions, so a service that signs with one key needs write on that key only,
 not on the project. Roll secrets checks the key again itself (`Caller::need_key`). The list
-(`GET …/transit`) shows such a rule only the keys it names: the row filters itself, roll-auth lets
-a rule limited to some indices match a list that does, and roll secrets asks the grant about each
-key (`Grants::reaches_key`); with none reachable it's a 403. Creating a key stays the project's
+(`GET …/transit`) shows such a rule only the keys it names: the row filters by index
+(`filters_index`), roll-auth lets a rule limited to some indices match such a list and no other
+request that names none (secrets' health and leaks filter only by environment and folder, so a
+key-limited token gets a 403 there), and roll secrets asks the grant about each key
+(`Grants::reaches_key`); with none reachable it's a 403. Creating a key stays the project's
 (`roll_auth::scope::sub_resources` lists the products that have such names; secrets' rows name
 `{name}` with `.index("name")`).
 

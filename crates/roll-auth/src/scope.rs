@@ -147,10 +147,10 @@ impl Selector {
                             "secrets" => key_name(asked) && keys_cover(mine, asked),
                             _ => index_covers(mine, asked),
                         },
-                        // A list that answers only what the grant reaches, item by item (it asks
+                        // A list that answers only what the grant reaches, index by index (it asks
                         // `Grant::allows` with each one's index): a rule limited to some indices
-                        // matches it too.
-                        (Some(_), None) => r.filters_itself,
+                        // matches it too. No other request that names no index does.
+                        (Some(_), None) => r.filters_index,
                     }
             }
             Selector::Project { project } => r.project.as_deref() == Some(project) || r.also_in.contains(project),
@@ -297,6 +297,10 @@ pub struct Resource {
     /// asks [`crate::Grant::allows`] per finding): a rule limited to some environments or paths
     /// matches it too, and the answer leaves out the rest.
     pub filters_itself: bool,
+    /// The product answers only the indices the caller's grant reaches (it asks
+    /// [`crate::Grant::allows`] with each one's index): a rule limited to some indices matches it
+    /// though the request names none. Secrets' encryption key list.
+    pub filters_index: bool,
 }
 
 impl Resource {
@@ -556,11 +560,12 @@ mod tests {
         let r = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_a" }], "environments": ["staging"], "paths": ["/api"], "actions": { "read": "allow" } }));
         let at = |id: &str, filters_itself: bool| Target::One(Resource { filters_itself, ..Resource::new("secrets", id) });
         assert!(!r.matches(&at("prj_a", false)) && r.matches(&at("prj_a", true)) && !r.matches(&at("prj_b", true)));
-        // A rule limited to one key matches the list too (it shows that key alone), never another
-        // key's request.
+        // A rule limited to one key matches a list that filters by key (it shows that key alone),
+        // never another key's request, nor a list that only filters by environment and folder.
         let one_key = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_a", "index": "payments" }], "actions": { "read": "allow" } }));
         let key = |name: &str| Target::One(Resource { index: Some(name.into()), ..Resource::new("secrets", "prj_a") });
-        assert!(one_key.matches(&at("prj_a", true)) && !one_key.matches(&at("prj_a", false)) && one_key.matches(&key("payments")) && !one_key.matches(&key("billing")));
+        let by_key = Target::One(Resource { filters_index: true, ..Resource::new("secrets", "prj_a") });
+        assert!(one_key.matches(&by_key) && !one_key.matches(&at("prj_a", true)) && !one_key.matches(&at("prj_a", false)) && one_key.matches(&key("payments")) && !one_key.matches(&key("billing")));
     }
 
     /// Resources, environments and paths narrow a rule; the most permissive matching rule wins;
