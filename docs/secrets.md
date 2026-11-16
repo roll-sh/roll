@@ -2800,19 +2800,19 @@ extension that logs in with the function's role) and #117 (an Ansible collection
    backup schedules, rotation windows): the resources once their routes are on main, the tools
    with roll MCP.
 5. **Snowflake credentials and a Pulumi provider** (bridged from the Terraform provider).
-7. **Access requests**: a time-boxed `reveal` on a protected environment that an approver grants
+6. **Access requests**: a time-boxed `reveal` on a protected environment that an approver grants
    (Infisical's and 1Password's), once projects have members.
-8. **A gateway into private networks** (Infisical's and Akeyless'); **ACME on project CAs**.
-9. *To check against the real services:* #113's STS login (`GetWebIdentityToken`) in an AWS account,
+7. **A gateway into private networks** (Infisical's and Akeyless'); **ACME on project CAs**.
+8. *To check against the real services:* #113's STS login (`GetWebIdentityToken`) in an AWS account,
    and Entra's answer for removing a secret that's already gone (#92). Both need accounts: the
    user's call.
-10. *Waits on roll MCP:* #114 (`roll-oidc`, approved here) and the GitHub Action's `client-id`
+9. *Waits on roll MCP:* #114 (`roll-oidc`, approved here) and the GitHub Action's `client-id`
    mode (their diff, reviewed here).
-11. *Waits on roll apps:* their redeploys holding `wait_digest` once #79 lands.
-12. *Waits on other threads:* a live check of OpenSearch links, roll redis and nosql keeping a
+10. *Waits on roll apps:* their redeploys holding `wait_digest` once #79 lands.
+11. *Waits on other threads:* a live check of OpenSearch links, roll redis and nosql keeping a
    rotated password a while, splitting the CLI's `secrets.rs` once the queue has landed.
-13. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
-14. *Waits on products serving signed-in people:* a person's project linking their own databases,
+12. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
+13. *Waits on products serving signed-in people:* a person's project linking their own databases,
    buckets and streams.
 
 ### Landing
