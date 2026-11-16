@@ -44,7 +44,7 @@ impl Apps {
     /// as `payload`): a push to the environment's branch deploys that commit at once, keyed by
     /// it as the five-minute watch's deploy is (a redelivery, or the watch, makes no second one);
     /// another branch, a deleted branch, a `[skip ci]` commit or a ping is `Ignored`.
-    pub async fn run_hook(self: &Arc<Self>, service: &str, env: &str, token: &str, image: Option<String>, payload: Option<Value>) -> Result<HookOutcome> {
+    pub async fn run_hook(self: &Arc<Self>, service: &str, env: &str, token: &str, image: Option<String>, payload: Option<Webhook>) -> Result<HookOutcome> {
         let none = || Error::NotFound("no such hook".into());
         let (sid, e) = (service.to_string(), env.to_string());
         let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await.map_err(|_| none())?;
@@ -54,12 +54,16 @@ impl Apps {
         }
         let mut body = json!({ "message": "deploy hook" });
         let mut key = None;
-        if let (Source::Git { .. }, Some(p)) = (&svc.source, payload.as_ref()) {
-            match push_of(p) {
+        if let (Source::Git { .. }, Some(w)) = (&svc.source, payload.as_ref()) {
+            match push_of(w) {
                 Push::Ping => return Ok(HookOutcome::Ignored("pong".into())),
-                Push::Other => {}
+                Push::Plain => {}
+                Push::Ignored(why) => return Ok(HookOutcome::Ignored(why)),
                 Push::Branch { branch, sha, message } => {
-                    let follows = row.branch.as_deref().unwrap_or(branch.as_str());
+                    // Only the environment's own branch: one that follows none deploys by hand.
+                    let Some(follows) = row.branch.as_deref() else {
+                        return Ok(HookOutcome::Ignored(format!("{env} follows no branch: set its branch to deploy on push")));
+                    };
                     if branch != follows {
                         return Ok(HookOutcome::Ignored(format!("a push to {branch}; {env} follows {follows}")));
                     }
@@ -98,22 +102,51 @@ pub enum HookOutcome {
     Ignored(String),
 }
 
-/// A webhook's body as a push: GitHub's (`ref`, `after`, `head_commit.message`; `zen` on its
-/// ping) or GitLab's (`ref`, `checkout_sha`, the last of `commits`).
+/// A repository's webhook call: its body, and the event its platform named in a header
+/// (`X-GitHub-Event`, `X-Gitlab-Event`, Bitbucket's `X-Event-Key`).
+pub struct Webhook {
+    pub body: Value,
+    pub event: Option<String>,
+}
+
+/// A webhook's call as a push: GitHub's (`ref`, `after`, `head_commit.message`; `zen` on its
+/// ping), GitLab's (`ref`, `checkout_sha`, the last of `commits`) or Bitbucket's
+/// (`push.changes[].new`: a branch, its target's hash and message).
 enum Push {
     Ping,
     /// A branch moved to `sha` (none: it was deleted).
     Branch { branch: String, sha: Option<String>, message: String },
-    /// Not a push (a registry's webhook, CI's empty POST): a plain deploy.
-    Other,
+    /// An empty body (CI's POST): a plain deploy.
+    Plain,
+    /// Another event, a tag, or a body that isn't a push: nothing deploys.
+    Ignored(String),
 }
 
-fn push_of(p: &Value) -> Push {
-    if p.get("zen").is_some() && p.get("hook_id").is_some() {
+fn push_of(w: &Webhook) -> Push {
+    let p = &w.body;
+    if w.event.as_deref() == Some("ping") || (p.get("zen").is_some() && p.get("hook_id").is_some()) {
         return Push::Ping;
     }
-    let Some(branch) = p["ref"].as_str().and_then(|r| r.strip_prefix("refs/heads/")) else { return Push::Other };
-    let sha = p["after"].as_str().or(p["checkout_sha"].as_str()).filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()) && s.bytes().any(|b| b != b'0'));
+    if let Some(e) = w.event.as_deref().filter(|e| !matches!(*e, "push" | "Push Hook" | "repo:push")) {
+        return Push::Ignored(format!("a {e} event isn't a push"));
+    }
+    let hex = |s: &str| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()) && s.bytes().any(|b| b != b'0');
+    // Bitbucket's: the last change of the push.
+    if let Some(c) = p["push"]["changes"].as_array().and_then(|c| c.last()) {
+        let (new, old) = (&c["new"], &c["old"]);
+        let kind = new["type"].as_str().or(old["type"].as_str()).unwrap_or("");
+        if kind != "branch" {
+            return Push::Ignored(format!("a push of a {kind}, not a branch"));
+        }
+        let branch = new["name"].as_str().or(old["name"].as_str()).unwrap_or("").to_string();
+        let sha = new["target"]["hash"].as_str().filter(|s| hex(s)).map(str::to_ascii_lowercase);
+        return Push::Branch { branch, sha, message: new["target"]["message"].as_str().unwrap_or("").to_string() };
+    }
+    let Some(r) = p["ref"].as_str() else {
+        return if p.as_object().is_some_and(|o| o.is_empty()) { Push::Plain } else { Push::Ignored("not a push".into()) };
+    };
+    let Some(branch) = r.strip_prefix("refs/heads/") else { return Push::Ignored(format!("a push of {r}, not a branch")) };
+    let sha = p["after"].as_str().or(p["checkout_sha"].as_str()).filter(|s| hex(s));
     let message = p["head_commit"]["message"].as_str().or_else(|| p["commits"].as_array().and_then(|c| c.last()).and_then(|c| c["message"].as_str())).unwrap_or("");
     Push::Branch { branch: branch.to_string(), sha: sha.map(str::to_ascii_lowercase), message: message.to_string() }
 }

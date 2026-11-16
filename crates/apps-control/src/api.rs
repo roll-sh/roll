@@ -930,9 +930,21 @@ async fn hook_on_owner(State(apps): S, req: Request, next: Next) -> Response {
     cluster.dispatch(&lease_key(&id), req, |req, _guard| next.run(req)).await
 }
 
-async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, String)>, Query(q): Query<HookQuery>, ext: Extensions, b: Bytes) -> R {
-    // A JSON body is a repository's push webhook (anything else: a plain deploy).
-    let payload = serde_json::from_slice::<Value>(&b).ok().filter(Value::is_object);
+async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, String)>, Query(q): Query<HookQuery>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
+    // A repository's webhook: JSON, or GitHub's default form encoding (`payload=<JSON>`), and
+    // the event its platform names. Anything else is a plain deploy.
+    let event = ["x-github-event", "x-gitlab-event", "x-event-key"].iter().find_map(|h| headers.get(*h)).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let form = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("application/x-www-form-urlencoded"));
+    let json = if form {
+        url::form_urlencoded::parse(&b).find(|(k, _)| k == "payload").and_then(|(_, v)| serde_json::from_str::<Value>(&v).ok())
+    } else {
+        serde_json::from_slice::<Value>(&b).ok()
+    };
+    let payload = match (json.filter(Value::is_object), event) {
+        (Some(body), event) => Some(crate::hooks::Webhook { body, event }),
+        (None, Some(event)) => Some(crate::hooks::Webhook { body: json!({ "event": event }), event: Some(event) }),
+        (None, None) => None,
+    };
     let d = match apps.run_hook(&id, &env, &token, q.image, payload).await? {
         crate::hooks::HookOutcome::Deployed(d) => *d,
         crate::hooks::HookOutcome::Ignored(why) => return ok(json!({ "ignored": why })),

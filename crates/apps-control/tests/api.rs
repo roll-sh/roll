@@ -3694,6 +3694,11 @@ struct GitHost {
 impl GitHost {
     /// A commit of these files (one directory) on main, after the last one.
     fn commit(&self, files: &[(&str, &str)]) -> String {
+        self.commit_saying(files, "change")
+    }
+
+    /// A commit with this message.
+    fn commit_saying(&self, files: &[(&str, &str)], message: &str) -> String {
         use code_git::{Kind, Object, mode};
         let mut objects = self.objects.lock();
         let mut tree = Vec::new();
@@ -3710,7 +3715,7 @@ impl GitHost {
         if let Some(p) = *self.main.lock() {
             c.push_str(&format!("parent {p}\n"));
         }
-        c.push_str("author a <a@example.com> 1700000000 +0000\ncommitter a <a@example.com> 1700000000 +0000\n\nchange\n");
+        c.push_str(&format!("author a <a@example.com> 1700000000 +0000\ncommitter a <a@example.com> 1700000000 +0000\n\n{message}\n"));
         let commit = Object::new(Kind::Commit, c.into_bytes());
         let id = commit.id;
         objects.insert(tree.id, tree);
@@ -3785,6 +3790,37 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("follows main"), "{v}");
     assert_eq!(call(&w.api, "POST", &hook, Some(json!({ "zen": "Keep it logically awesome.", "hook_id": 1 }))).await.1["ignored"], "pong");
     assert_eq!(settled(&w, &id, "production", d3["id"].as_str().unwrap()).await["status"], "active");
+    // What a repository sends that isn't a branch push deploys nothing: a tag, another event,
+    // a body that isn't a push. GitHub's default form encoding is read as its JSON is.
+    let raw = |ct: &'static str, event: Option<&'static str>, body: String| {
+        let mut r = Request::builder().method("POST").uri(hook.clone()).header("content-type", ct);
+        if let Some(e) = event {
+            r = r.header("x-github-event", e);
+        }
+        r.body(Body::from(body)).unwrap()
+    };
+    let answer = |r: Request<Body>| {
+        let api = w.api.clone();
+        async move {
+            let resp = api.oneshot(r).await.unwrap();
+            let st = resp.status();
+            (st, serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+        }
+    };
+    let (st, v) = answer(raw("application/json", Some("push"), json!({ "ref": "refs/tags/v1", "after": third }).to_string())).await;
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("not a branch"), "{v}");
+    let (st, v) = answer(raw("application/json", Some("pull_request"), json!({ "action": "opened" }).to_string())).await;
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("isn't a push"), "{v}");
+    let (st, v) = answer(raw("application/json", None, json!({ "star": true }).to_string())).await;
+    assert!(st == StatusCode::OK && v["ignored"] == "not a push", "{v}");
+    let fourth = git.commit(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v4")]);
+    let form = format!("payload={}", url::form_urlencoded::byte_serialize(json!({ "ref": "refs/heads/main", "after": fourth, "head_commit": { "message": "form encoded" } }).to_string().as_bytes()).collect::<String>());
+    let (st, d4) = answer(raw("application/x-www-form-urlencoded", Some("push"), form)).await;
+    assert_eq!((st, d4["revision"].as_str()), (StatusCode::ACCEPTED, Some(fourth.as_str())), "{d4}");
+    settled(&w, &id, "production", d4["id"].as_str().unwrap()).await;
+    // The watch reads a commit's message as the hook does: `[skip ci]` isn't deployed.
+    git.commit_saying(&[("README.md", "docs")], "docs only [skip ci]");
+    assert!(w.apps.watch_git().await.is_empty(), "its message says [skip ci]");
 }
 
 /// The dashboard's starter templates (apps/dashboard/src/lib/templates) read as the import reads
