@@ -10,6 +10,7 @@
 //! Within a leaf the keys are taken as spread evenly over its range, so a split's key is
 //! interpolated, and an insert's key is the first 16 bytes of its sort key (`key_prefix`).
 //! The model proper (`btsim`) holds every entry; this costs a few dozen bytes a leaf.
+use super::estkeep::{Dec, Enc};
 use crate::catalog::relsize::{self, BT_USABLE, LevelFill};
 
 const ITEM_ID: f64 = 4.0;
@@ -61,6 +62,11 @@ pub struct BtEst {
     hint: usize,
     /// The file's blocks (it never shrinks).
     blocks: u32,
+    /// What changed since the summary was last made durable (`estkeep`): the leaves by slot
+    /// (`dirty_bits` marks those listed), or all of it (`all_dirty`).
+    dirty: Vec<u32>,
+    dirty_bits: Vec<u64>,
+    all_dirty: bool,
 }
 
 /// What a build hands the summary for each leaf it lays out.
@@ -131,6 +137,9 @@ impl EstBuilder {
             stuck: 0,
             hint: 0,
             blocks: 0,
+            dirty: Vec::new(),
+            dirty_bits: Vec::new(),
+            all_dirty: true,
         };
         e.inner_base = e.inner_for(n);
         let pages = if n == 0 { 1 } else { 1 + n + inner } as u32;
@@ -172,6 +181,9 @@ impl BtEst {
             stuck: 0,
             hint: 0,
             blocks,
+            dirty: Vec::new(),
+            dirty_bits: Vec::new(),
+            all_dirty: true,
         };
         e.inner_base = e.inner_for(n);
         // (Its inner and deleted pages as the model has them: the blocks past the leaves.)
@@ -266,6 +278,7 @@ impl BtEst {
         let room = self.room(rightmost);
         let dedup = self.dedup;
         let slot = self.slots[i] as usize;
+        self.touch(slot);
         let l = &self.store[slot];
         // (A row's key in a leaf of distinct keys is a new one; in a leaf whose keys have
         // two TIDs or more each, one of its keys again: such an index's values repeat.)
@@ -368,6 +381,7 @@ impl BtEst {
         self.store[slot] = l;
         self.lows.insert(i + 1, right_at);
         self.slots.insert(i + 1, self.store.len() as u32);
+        self.touch(self.store.len());
         self.store.push(right);
         // (A deleted page is reused before the file grows.)
         self.free = self.free.saturating_sub(1);
@@ -404,9 +418,164 @@ impl BtEst {
             self.lows.truncate(at);
             self.slots.truncate(at);
             self.free += gone;
+            self.all_dirty = true;
             self.note_blocks();
         }
         self.blocks
+    }
+}
+
+/// The summary as `estkeep` keeps it: in full, or the leaves changed since it was last
+/// made durable.
+const FULL: u8 = 1;
+const CHANGED: u8 = 2;
+
+impl BtEst {
+    /// Leaf slot `slot` changed (`estkeep`).
+    fn touch(&mut self, slot: usize) {
+        if self.all_dirty {
+            return;
+        }
+        let (w, b) = (slot / 64, 1u64 << (slot % 64));
+        if w >= self.dirty_bits.len() {
+            self.dirty_bits.resize(w + 1, 0);
+        }
+        if self.dirty_bits[w] & b == 0 {
+            self.dirty_bits[w] |= b;
+            self.dirty.push(slot as u32);
+        }
+    }
+
+    /// Something changed since the summary was last made durable.
+    pub(super) fn changed(&self) -> bool {
+        self.all_dirty || !self.dirty.is_empty()
+    }
+
+    /// The summary, in full (`full`, or when all of it changed) or its changed leaves, for
+    /// `estkeep`; nothing is marked changed after it.
+    pub(super) fn encode(&mut self, e: &mut Enc, full: bool) {
+        let full = full || self.all_dirty;
+        e.u8(if full { FULL } else { CHANGED });
+        e.u8(self.dedup as u8);
+        e.f64(self.base);
+        e.f64(self.pivot);
+        for n in [self.inner_built, self.inner_base, self.free, self.stuck, self.hint] {
+            e.u64(n as u64);
+        }
+        e.u32(self.blocks);
+        let leaf = |e: &mut Enc, l: &Leaf| {
+            e.u128(l.max);
+            for x in [l.used, l.tuples, l.tids, l.keys] {
+                e.f64(x);
+            }
+        };
+        if full {
+            e.u32(self.lows.len() as u32);
+            for (lo, slot) in self.lows.iter().zip(&self.slots) {
+                e.u128(lo.0);
+                e.u64(lo.1);
+                e.u32(*slot);
+            }
+            e.u32(self.store.len() as u32);
+            for l in &self.store {
+                leaf(e, l);
+            }
+        } else {
+            // (Each changed leaf with its low key: a new one, split off, goes in its place.)
+            let mut at = vec![u32::MAX; self.store.len()];
+            for (i, s) in self.slots.iter().enumerate() {
+                at[*s as usize] = i as u32;
+            }
+            self.dirty.sort_unstable();
+            let live: Vec<(u32, u32)> = self.dirty.iter().filter_map(|&s| Some((s, *at.get(s as usize)?)).filter(|x| x.1 != u32::MAX)).collect();
+            e.u32(live.len() as u32);
+            for (slot, i) in live {
+                let lo = self.lows[i as usize];
+                e.u32(slot);
+                e.u128(lo.0);
+                e.u64(lo.1);
+                leaf(e, &self.store[slot as usize]);
+            }
+        }
+        self.dirty.clear();
+        self.dirty_bits.clear();
+        self.all_dirty = false;
+    }
+
+    /// A summary `encode` wrote: in full, or the leaves that changed applied to `base` (None:
+    /// a malformed record, or changes without a summary to apply them to).
+    pub(super) fn decode(d: &mut Dec, base: Option<BtEst>) -> Option<BtEst> {
+        let tag = d.u8()?;
+        let dedup = d.u8()? != 0;
+        let (base_size, pivot) = (d.f64()?, d.f64()?);
+        let mut n = [0usize; 5];
+        for x in &mut n {
+            *x = d.u64()? as usize;
+        }
+        let blocks = d.u32()?;
+        let leaf = |d: &mut Dec| -> Option<Leaf> {
+            Some(Leaf { max: d.u128()?, used: d.f64()?, tuples: d.f64()?, tids: d.f64()?, keys: d.f64()? })
+        };
+        let mut e = match tag {
+            FULL => {
+                let k = d.u32()? as usize;
+                let (mut lows, mut slots) = (Vec::with_capacity(k.min(1 << 20)), Vec::with_capacity(k.min(1 << 20)));
+                for _ in 0..k {
+                    lows.push((d.u128()?, d.u64()?));
+                    slots.push(d.u32()?);
+                }
+                let m = d.u32()? as usize;
+                let mut store = Vec::with_capacity(m.min(1 << 20));
+                for _ in 0..m {
+                    store.push(leaf(d)?);
+                }
+                if slots.iter().any(|s| *s as usize >= m) {
+                    return None;
+                }
+                BtEst {
+                    lows,
+                    slots,
+                    store,
+                    dedup,
+                    base: 0.0,
+                    pivot: 0.0,
+                    inner_built: 0,
+                    inner_base: 0,
+                    free: 0,
+                    stuck: 0,
+                    hint: 0,
+                    blocks: 0,
+                    dirty: Vec::new(),
+                    dirty_bits: Vec::new(),
+                    all_dirty: false,
+                }
+            }
+            CHANGED => {
+                let mut e = base?;
+                for _ in 0..d.u32()? {
+                    let slot = d.u32()? as usize;
+                    let lo = (d.u128()?, d.u64()?);
+                    let l = leaf(d)?;
+                    if slot < e.store.len() {
+                        e.store[slot] = l;
+                    } else if slot == e.store.len() {
+                        let i = e.lows.partition_point(|x| *x < lo);
+                        e.lows.insert(i, lo);
+                        e.slots.insert(i, slot as u32);
+                        e.store.push(l);
+                    } else {
+                        return None;
+                    }
+                }
+                e
+            }
+            _ => return None,
+        };
+        e.dedup = dedup;
+        (e.base, e.pivot) = (base_size, pivot);
+        [e.inner_built, e.inner_base, e.free, e.stuck, e.hint] = n;
+        e.blocks = blocks;
+        Some(e)
     }
 }
 

@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub mod btest;
+pub mod estkeep;
 pub mod gistlog;
 pub mod kept;
 
@@ -60,6 +61,11 @@ thread_local! {
 pub fn with_max_versions<R>(n: usize, f: impl FnOnce() -> R) -> R {
     let _g = crate::scoped::set(&MAX_VERSIONS_HERE, n, "sizing::MAX_VERSIONS_HERE");
     f()
+}
+
+/// `max_versions`, as a table's estimate keeps it (`EstHeap::limit`).
+fn max_limit() -> u32 {
+    max_versions().min(u32::MAX as usize) as u32
 }
 
 fn max_versions() -> usize {
@@ -104,6 +110,8 @@ pub struct Models {
     /// untracked: `is_estimated` answers most tables without a shard lock, so a scan of a
     /// table doesn't wait behind writers of its shard to learn it is modelled.
     untracked_maybe: [std::sync::atomic::AtomicU64; 16],
+    /// An estimate changed since the last commit took them (`estkeep`).
+    est_dirty: std::sync::atomic::AtomicBool,
 }
 
 /// (A power of two: hot tables' oids are usually close together, and land in shards of
@@ -117,6 +125,7 @@ impl Default for Models {
             tids_checked: Default::default(),
             built: Default::default(),
             untracked_maybe: Default::default(),
+            est_dirty: Default::default(),
         }
     }
 }
@@ -185,6 +194,9 @@ pub struct RelFiles {
     estimated: HashMap<u32, EstHeap>,
     /// Their btree indexes' leaves, summarized (`btest`), by index.
     est_btrees: FastMap<u32, btest::BtEst>,
+    /// What the store holds of their estimates (`estkeep`), and tables whose records go.
+    est_saved: HashMap<u32, estkeep::Saved>,
+    est_gone: Vec<u32>,
     /// Bulk loads (COPY) in progress, by (table, transaction).
     bulk: FastMap<(u32, u64), Bulk>,
     /// Hash indexes: the heap's estimated tuples when each was built (its initial
@@ -268,6 +280,12 @@ struct EstHeap {
     /// The TIDs of versions put out of key order (an update's new version), by a hash of
     /// their rows' keys (`key_hash`), at most `moved_max`.
     moved: HashedMap<Tid>,
+    /// Changed since the last commit took it (`estkeep`), and what changed.
+    dirty: bool,
+    log: estkeep::Log,
+    /// The model's limit the table was too big for (`max_versions` then): a build with a
+    /// higher one models it instead of using its kept estimate.
+    limit: u32,
 }
 
 /// A map keyed by hashes already mixed (`key_hash`): used as they are.
@@ -290,10 +308,28 @@ impl std::hash::Hasher for Hashed {
     }
 }
 
-/// A row key's hash for `EstHeap::moved` (64 bits: a clash puts one row out of place).
+/// A row key's hash for `EstHeap::moved` (64 bits: a clash puts one row out of place). The
+/// estimate's records keep these (`estkeep`), so it is the same in every process and build,
+/// not seeded per process as `fasthash`'s is: a change to it needs a new record tag.
 fn key_hash(key: &[u8]) -> u64 {
-    use std::hash::BuildHasher;
-    crate::exec::fasthash::FastState::default().hash_one(key)
+    const K: u64 = 0x517c_c1b7_2722_0a95;
+    let mut h = 0x243f_6a88_85a3_08d3u64 ^ key.len() as u64;
+    let mut add = |w: u64| {
+        let m = u128::from(h ^ w) * u128::from(K);
+        h = m as u64 ^ (m >> 64) as u64;
+    };
+    let (words, rest) = key.as_chunks::<8>();
+    for w in words {
+        add(u64::from_le_bytes(*w));
+    }
+    if !rest.is_empty() {
+        let mut w = [0u8; 8];
+        w[..rest.len()].copy_from_slice(rest);
+        add(u64::from_le_bytes(w));
+    }
+    h ^= h >> 32;
+    h = h.wrapping_mul(K);
+    h ^ (h >> 29)
 }
 
 /// The versions out of key order an estimate keeps the TIDs of (about 20 bytes each, 40 MB
@@ -367,6 +403,9 @@ impl EstHeap {
             tail: None,
             runs: Vec::new(),
             moved: HashedMap::default(),
+            dirty: false,
+            log: estkeep::Log::default(),
+            limit: 0,
         }
     }
 
@@ -475,7 +514,9 @@ impl EstHeap {
             self.unplace();
             return false;
         }
-        self.moved.insert(key_hash(key), tid);
+        let h = key_hash(key);
+        self.moved.insert(h, tid);
+        self.log.moved.push((h, tid));
         false
     }
 
@@ -484,6 +525,7 @@ impl EstHeap {
         self.order = EstOrder::Unplaced;
         self.runs = Vec::new();
         self.moved = HashedMap::default();
+        self.log = estkeep::Log { reset: true, ..Default::default() };
     }
 
     /// The heap-order rank (`heaporder::tid_rank`) of the row under `key` without a stored
@@ -534,6 +576,7 @@ pub fn measured_live(t: u32, live: u32, db: &Database) -> Option<u32> {
     let e = rf.estimated.get_mut(&t)?;
     e.pages = e.pages.max(live);
     e.reusable = (e.pages - live) as usize * (heapsim::BLCKSZ - heapsim::PAGE_HEADER);
+    estkeep::touched(db, e);
     Some(e.pages)
 }
 
@@ -1843,6 +1886,18 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     // too big to model: its size is the pages they counted, without reading it again (the
     // planner reads only pg_class and pg_statistic, as Postgres's does).
     let cold = heap_missing && !db.relfiles.of(t.oid).read().dropped.contains(&t.oid);
+    // One whose estimate its records keep (`estkeep`): as it was before the restart or the
+    // crash, its versions' places and its btrees' leaves too.
+    if cold && let Some((est, btrees, saved)) = estkeep::restore(t, ctx) {
+        let mut rf = db.relfiles.of(t.oid).write();
+        db.relfiles.note_untracked(t.oid);
+        rf.untracked.insert(t.oid);
+        forget(&mut rf, t);
+        rf.est_btrees.extend(btrees);
+        rf.estimated.insert(t.oid, est);
+        rf.est_saved.insert(t.oid, saved);
+        return Ok(false);
+    }
     let known_big = if cold {
         ctx.catalog()
             .relstats
@@ -1856,8 +1911,8 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
         set_estimated(db, t, Some(EstHeap { pages, ..Default::default() }));
         return Ok(false);
     }
-    // One never measured that was too big to model when its database last had it open: the
-    // estimate kept then (`store_estimate`).
+    // One never measured that was too big to model when its database last had it open, under
+    // a build that kept its heap pages alone (`stored_estimate`).
     if cold
         && ctx.catalog().relstats.get(&t.oid).is_none_or(|s| s.tuples < 0.0)
         && let Some(pages) = stored_estimate(t, ctx)
@@ -2093,8 +2148,7 @@ fn forget(rf: &mut RelFiles, t: &Table) {
 /// heap model's, or `est`). The estimate is kept for the database's next open
 /// (`stored_estimate`).
 fn untrack(db: &Database, t: &Table, est: Option<EstHeap>) {
-    let pages = set_estimated(db, t, est);
-    store_estimate(db, t.oid, pages);
+    set_estimated(db, t, est);
 }
 
 /// Returns the estimate's pages.
@@ -2114,15 +2168,22 @@ fn set_estimated(db: &Database, t: &Table, est: Option<EstHeap>) -> u32 {
     }
     forget(&mut rf, t);
     let pages = est.pages;
-    rf.estimated.insert(t.oid, est);
+    rf.estimated.insert(t.oid, EstHeap { limit: max_limit(), ..est });
+    full_next(db, &mut rf, t.oid);
     pages
 }
 
-/// Where a table too big to model has its estimated heap pages kept for the next open of
-/// its database, with the relfilenode they are of: its first use then needn't read it
-/// whole to know it is big (`ensure`). Written as it becomes big and when the database
-/// closes (`persist_estimates`), outside transactions: the estimate isn't transactional
-/// (a rolled-back load leaves its pages, as Postgres's file keeps them).
+/// Table `oid`'s estimate was made afresh: its next record is a full one (`estkeep`).
+fn full_next(db: &Database, rf: &mut RelFiles, oid: u32) {
+    rf.est_saved.entry(oid).or_default().full_next(true);
+    if let Some(e) = rf.estimated.get_mut(&oid) {
+        estkeep::touched(db, e);
+    }
+}
+
+/// Where a table too big to model has its estimate kept for the next open of its database,
+/// with the relfilenode it is of (`estkeep`): its first use then needn't read it whole to
+/// know it is big (`ensure`). (Before, its heap pages alone: `stored_estimate`.)
 const EST_PREFIX: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0x22];
 
 fn est_key(oid: u32) -> Vec<u8> {
@@ -2131,21 +2192,7 @@ fn est_key(oid: u32) -> Vec<u8> {
     k
 }
 
-fn store_estimate(db: &Database, oid: u32, pages: u32) {
-    // (A table not committed yet has no relfilenode to tie it to: its next open reads it.)
-    let Some(node) = db.catalog().relfilenode(oid).filter(|n| *n != 0) else {
-        return;
-    };
-    let mut v = pages.to_le_bytes().to_vec();
-    v.extend_from_slice(&node.to_le_bytes());
-    // (The limit it was too big for: a build with a higher one models the table instead.)
-    v.extend_from_slice(&(max_versions().min(u32::MAX as usize) as u32).to_le_bytes());
-    if let Err(e) = db.store.commit(vec![(est_key(oid), Some(bytes::Bytes::from(v)))], |_| Ok(())) {
-        tracing::warn!(error = %e, "keeping a table's size estimate failed");
-    }
-}
-
-/// The estimated heap pages kept for table `t` (`store_estimate`), when they are of its
+/// The estimated heap pages a build before `estkeep` kept for table `t`, when they are of its
 /// current relfilenode and it is still too big to model. One kept under a higher limit than
 /// today's stays estimated; one kept under a lower limit is modelled now. Legacy records
 /// without a limit were written with the old 400,000-row limit.
@@ -2163,13 +2210,9 @@ fn stored_estimate(t: &Table, ctx: &ExecCtx) -> Option<u32> {
 }
 
 /// Keep the estimates of the database's tables too big to model for its next open (it is
-/// closing).
+/// closing): their records folded into full ones (`estkeep`).
 pub fn persist_estimates(db: &Database) {
-    let est: Vec<(u32, u32)> =
-        db.relfiles.all().flat_map(|s| s.read().estimated.iter().map(|(o, e)| (*o, e.pages)).collect::<Vec<_>>()).collect();
-    for (oid, pages) in est {
-        store_estimate(db, oid, pages);
-    }
+    estkeep::persist(db);
 }
 
 /// The pruning horizon for `table` (GlobalVisTestFor): a temporary table's (or its TOAST
@@ -2270,16 +2313,20 @@ pub fn inserted_stored(t: &Table, len: usize, ctx: &ExecCtx) -> Option<bool> {
         return Some(false);
     };
     let tid = e.add_in(len, heap_fillfactor(t), Some((bulk, (t.oid, txn))), Put::Row(None));
-    Some(e.placed(None, tid, t.has_rowid()))
+    let r = e.placed(None, tid, t.has_rowid());
+    estkeep::touched(&ctx.sess.db, e);
+    Some(r)
 }
 
 /// The row `inserted_stored` took, which began a run of the heap order's places, went in
 /// under `key`.
 pub fn stored_run_key(t: &Table, key: &[u8], db: &Database) {
-    if let Some(r) = db.relfiles.of(t.oid).write().estimated.get_mut(&t.oid).and_then(|e| e.runs.last_mut())
+    if let Some(e) = db.relfiles.of(t.oid).write().estimated.get_mut(&t.oid)
+        && let Some(r) = e.runs.last_mut()
         && r.0.is_empty()
     {
         r.0 = key.to_vec();
+        estkeep::touched(db, e);
     }
 }
 
@@ -2320,6 +2367,7 @@ fn untracked_write(
         reused = tid.is_none() || e.in_place;
         // (A new row of a table keyed by row ids has a key past every other's.)
         e.placed(Some(key), tid, old.is_none() && t.has_rowid());
+        estkeep::touched(&ctx.sess.db, e);
     }
     let hot = reused && old.is_some() && entries.iter().all(|e| e.3);
     if !hot {
@@ -2417,6 +2465,9 @@ pub fn btree_estimated(table: u32, index: u32, est: btest::BtEst, db: &Database)
     let mut rf = db.relfiles.of(table).write();
     if rf.untracked.contains(&table) {
         rf.est_btrees.insert(index, est);
+        if let Some(e) = rf.estimated.get_mut(&table) {
+            estkeep::touched(db, e);
+        }
     }
 }
 
@@ -2453,6 +2504,11 @@ pub fn est_btrees_vacuumed(t: &Table, partial: &[u32], live: f64, db: &Database)
             let blocks = b.vacuum(left);
             out.push((i, blocks, b.entries().round()));
         }
+    }
+    if !out.is_empty()
+        && let Some(e) = rf.estimated.get_mut(&t.oid)
+    {
+        estkeep::touched(db, e);
     }
     out
 }
@@ -3594,7 +3650,9 @@ pub fn modelled_blocks(table: u32, ctx: &ExecCtx) -> Option<u32> {
 pub fn truncated(t: &Table, db: &Database) {
     let mut rf = db.relfiles.of(t.oid).write();
     rf.untracked.remove(&t.oid);
-    rf.estimated.remove(&t.oid);
+    if rf.estimated.remove(&t.oid).is_some() {
+        estkeep::gone(db, &mut rf, t.oid);
+    }
     for i in t.indexes.iter().chain(&t.pkey_index) {
         rf.est_btrees.remove(i);
     }
@@ -4392,6 +4450,9 @@ pub fn dropped(oids: &[u32], db: &Database) {
         for o in oids {
             forget_dropped(&mut rf, o);
         }
+        if !rf.est_gone.is_empty() {
+            estkeep::note(db);
+        }
     }
     for o in oids {
         // (A dropped table's search structures: `exec::search`.)
@@ -4404,7 +4465,9 @@ fn forget_dropped(rf: &mut RelFiles, o: &u32) {
     rf.heaps.remove(o);
     rf.btrees.remove(o);
     rf.untracked.remove(o);
-    rf.estimated.remove(o);
+    if rf.estimated.remove(o).is_some() {
+        rf.est_gone.push(*o);
+    }
     rf.est_btrees.remove(o);
     rf.toast.remove(o);
     rf.hash_est.remove(o);
@@ -4450,7 +4513,9 @@ pub fn loaded(
     let xids = ctx.sess.db.xids();
     let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
     rf.untracked.remove(&t.oid);
-    rf.estimated.remove(&t.oid);
+    if rf.estimated.remove(&t.oid).is_some() {
+        estkeep::gone(&ctx.sess.db, &mut rf, t.oid);
+    }
     forget(&mut rf, t);
     let RelFiles {
         heaps,
@@ -4614,7 +4679,10 @@ pub fn rewritten(t: &Table, order: Option<&[Vec<u8>]>, ctx: &ExecCtx) -> Result<
         }
         // (The rows keep the TIDs they had: not their places now.)
         est.order = EstOrder::Unplaced;
-        ctx.sess.db.relfiles.of(t.oid).write().estimated.insert(t.oid, est);
+        est.limit = max_limit();
+        let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
+        rf.estimated.insert(t.oid, est);
+        full_next(&ctx.sess.db, &mut rf, t.oid);
         return Ok(());
     }
     let db = &ctx.sess.db;
@@ -5493,6 +5561,7 @@ pub fn estimated_order_found(t: &Table, order: EstOrder, writes: u64, db: &Datab
         && e.writes == writes
     {
         e.order = order;
+        estkeep::touched(db, e);
     }
 }
 
@@ -5877,6 +5946,9 @@ fn est_inserted(db: &Database, t: u32, entries: Vec<(u32, u128, usize)>) {
         if let Some(b) = rf.est_btrees.get_mut(&ix) {
             b.insert(key, size, false);
         }
+    }
+    if let Some(e) = rf.estimated.get_mut(&t) {
+        estkeep::touched(db, e);
     }
 }
 
