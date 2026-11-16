@@ -87,7 +87,8 @@ jobs:
           filter: dashboard...
       - run: pnpm --filter dashboard exec vitest run --shard=${{ matrix.shard }}/3
 
-  # roll secrets' Go and Python clients (sdk/): the same surface as @roll/secrets.
+  # roll secrets' Go and Python clients (sdk/): the same surface as @roll/secrets; the Ansible
+  # collection on the Python one.
   sdk:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -130,6 +131,13 @@ jobs:
         run: |
           pip install -q cryptography
           PYTHONPATH=src python -m unittest discover -s tests
+      # The roll.secrets collection on the Python client: the plugins in process, then a playbook
+      # through ansible-galaxy and ansible-playbook against a fake rolld.
+      - name: Ansible
+        working-directory: sdk/ansible
+        run: |
+          pip install -q ansible-core==2.21.6 ../python/roll_secrets
+          python -m unittest discover -s tests
 
   # The roll Terraform provider (sdk/terraform-provider-roll): Terraform drives it against a fake
   # rolld in memory.

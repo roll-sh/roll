@@ -6,7 +6,7 @@ __metaclass__ = type
 
 DOCUMENTATION = r"""
 name: secret
-author: roll
+author: roll (@roll-sh)
 short_description: Read values from roll secrets
 description:
   - Returns the values of keys in one folder of a roll secrets environment, references resolved,
@@ -160,7 +160,9 @@ class LookupModule(LookupBase):
         if not HAS_ROLL_SECRETS:
             raise AnsibleLookupError("roll.secrets.secret needs the roll_secrets Python client (pip install roll-secrets): %s" % ROLL_SECRETS_IMPORT_ERROR)
         self.set_options(var_options=variables, direct=kwargs)
-        o = {k: self.get_option(k) for k in ("environment", "path", "project", "api_url", "token", "identity", "oidc_token", "oidc_token_file", "as_dict", "dynamic", "cache_ttl", "timeout")}
+        names = ("environment", "path", "project", "api_url", "token", "identity", "oidc_token", "oidc_token_file")
+        names += ("as_dict", "dynamic", "cache_ttl", "timeout")
+        o = {k: self.get_option(k) for k in names}
         if not o["environment"]:
             raise AnsibleLookupError("roll.secrets.secret: set environment")
         keys = [to_native(t) for t in terms or []]
@@ -184,7 +186,10 @@ class LookupModule(LookupBase):
                 raise AnsibleLookupError("roll secrets: %s in %s doesn't resolve: %s" % (k, where, problems[k]))
             if k not in v.values:
                 if k in v.dynamic and not o["dynamic"]:
-                    raise AnsibleLookupError("roll secrets: %s in %s holds a dynamic credential; set dynamic=true to issue one (its lease isn't renewed during the play)" % (k, where))
+                    raise AnsibleLookupError(
+                        "roll secrets: %s in %s holds a dynamic credential; set dynamic=true to issue one"
+                        " (its lease isn't renewed during the play)" % (k, where)
+                    )
                 raise AnsibleLookupError("roll secrets: no key %s in %s" % (k, where))
             found.append(v.values[k])
         if o["as_dict"]:

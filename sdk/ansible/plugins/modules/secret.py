@@ -7,7 +7,7 @@ __metaclass__ = type
 
 DOCUMENTATION = r"""
 module: secret
-author: roll
+author: roll (@roll-sh)
 short_description: Set or delete one key in roll secrets
 description:
   - Sets one key's value in a folder of a roll secrets environment (O(state=present)), or deletes the
@@ -46,7 +46,7 @@ options:
   comment:
     description: The key's comment. Left as it is when not given.
     type: str
-  message:
+  change_message:
     description: The change's message in the history.
     type: str
   project:
@@ -156,7 +156,7 @@ def main():
             environment=dict(type="str", required=True),
             path=dict(type="str", default="/"),
             comment=dict(type="str"),
-            message=dict(type="str"),
+            change_message=dict(type="str"),
             project=dict(type="str", fallback=(env_fallback, ["ROLL_PROJECT"])),
             api_url=dict(type="str", fallback=(env_fallback, ["ROLL_API_URL"])),
             token=dict(type="str", no_log=True, fallback=(env_fallback, ["ROLL_TOKEN"])),
@@ -175,7 +175,7 @@ def main():
     try:
         client = connect(p["api_url"], p["token"], p["project"], p["identity"], p["oidc_token"], p["oidc_token_file"], timeout=p["timeout"])
         if p["state"] == "present":
-            result = set_key(client, p["environment"], p["key"], p["value"], p["path"], p["comment"], p["message"], module.check_mode)
+            result = set_key(client, p["environment"], p["key"], p["value"], p["path"], p["comment"], p["change_message"], module.check_mode)
         else:
             result = delete_key(client, p["environment"], p["key"], p["path"], module.check_mode)
     except Exception as e:

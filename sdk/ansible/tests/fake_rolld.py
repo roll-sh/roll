@@ -16,8 +16,11 @@ IDENTITY, OIDC = "idn_ci", "fake-oidc-token-for-tests"
 PROJECT = "shop"
 
 
+def own(value):
+    return {"value": value, "comment": "", "version": 1, "link": None}
+
+
 def initial():
-    own = lambda v, version=1: {"value": v, "comment": "", "version": version, "link": None}  # noqa: E731
     return {
         # (environment, folder) -> key -> record
         "folders": {
@@ -116,10 +119,10 @@ class Rolld(BaseHTTPRequestHandler):
                 return self.answer(404, {"error": "no such route"})
             if method == "GET":
                 if key in folder:
-                    r = folder[key]
-                    return self.answer(200, {"key": key, "path": path, "version": r["version"], "comment": r["comment"], "link": r["link"], "source": {"kind": "own"}})
+                    return self.answer(200, self.secret(key, path, folder[key]))
                 if key in s["inherited"].get(where, {}):
-                    return self.answer(200, {"key": key, "path": path, "version": 1, "comment": "", "link": None, "source": {"kind": "base", "environment": "development"}})
+                    inherited = dict(self.secret(key, path, own("")), source={"kind": "base", "environment": "development"})
+                    return self.answer(200, inherited)
                 return self.answer(404, {"error": f"no secret {key} in {env}:{path}"})
             if env in s["protected"]:
                 return self.answer(409, {"error": f"{env} is protected: open a change request", "code": "approval_required"})
@@ -150,7 +153,7 @@ class Rolld(BaseHTTPRequestHandler):
 
     def values(self, s, where, q):
         own = s["folders"].get(where, {})
-        values = {k: v for k, v in s["inherited"].get(where, {}).items()}
+        values = dict(s["inherited"].get(where, {}))
         values.update({k: r["value"] for k, r in own.items()})
         problems = [{"key": k, "problem": "references a key that isn't set"} for k, v in values.items() if "${MISSING}" in v]
         for k in problems:

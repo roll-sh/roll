@@ -27,6 +27,7 @@ def setUpModule():
 
 def tearDownModule():
     SERVER.shutdown()
+    SERVER.server_close()
     shutil.rmtree(TMP, ignore_errors=True)
 
 
@@ -53,7 +54,8 @@ class Base(unittest.TestCase):
 class TheLookup(Base):
     def test_reads_keys_and_folders_without_issuing_dynamic_credentials(self):
         self.assertEqual(lookup("DB_URL", environment="production", path="/api", project="shop"), ["fake-db-url-not-a-secret"])
-        self.assertEqual(lookup("DB_URL", "API_KEY", environment="production", path="/api", as_dict=True), [{"DB_URL": "fake-db-url-not-a-secret", "API_KEY": "fake-api-key-0000"}])
+        both = lookup("DB_URL", "API_KEY", environment="production", path="/api", as_dict=True)
+        self.assertEqual(both, [{"DB_URL": "fake-db-url-not-a-secret", "API_KEY": "fake-api-key-0000"}])
         # The whole folder, an inherited key with it; the dynamic one left out and never issued.
         (folder,) = lookup(environment="production", path="/api", as_dict=True)
         self.assertEqual(sorted(folder), ["API_KEY", "DB_URL", "FROM_BASE"])
@@ -113,7 +115,7 @@ class TheModule(Base):
         self.client = roll.connect(API, fake_rolld.TOKEN, "shop")
 
     def writes(self):
-        return [m for m, _ in Rolld.state["requests"] if m in ("PUT", "DELETE")]
+        return [m for m, path in Rolld.state["requests"] if m in ("PUT", "DELETE")]
 
     def test_sets_idempotently_and_check_mode_writes_nothing(self):
         r = self.roll

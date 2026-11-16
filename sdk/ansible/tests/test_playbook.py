@@ -15,14 +15,18 @@ from fake_rolld import Rolld
 NEW = "fake-new-value-from-ansible"
 
 
+def run(*args, **kw):
+    return subprocess.run(args, capture_output=True, text=True, timeout=120, check=False, **kw)
+
+
 class APlaybook(unittest.TestCase):
     def test_reads_sets_idempotently_and_deletes_printing_no_value(self):
         api, server = fake_rolld.serve()
+        self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         tmp = tempfile.mkdtemp(prefix="roll-ansible-")
         self.addCleanup(shutil.rmtree, tmp, True)
         bindir = os.path.dirname(sys.executable)
-        run = lambda *args, **kw: subprocess.run(args, capture_output=True, text=True, timeout=120, **kw)  # noqa: E731
 
         built = run(os.path.join(bindir, "ansible-galaxy"), "collection", "build", str(collection.ROOT), "--output-path", tmp)
         self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
