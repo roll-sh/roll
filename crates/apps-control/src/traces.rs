@@ -19,7 +19,7 @@ const MAX_BODY: u64 = 8 << 20;
 /// Span lines one read looks at (newest first).
 const MAX_LINES: usize = 100_000;
 
-fn key(service: &str, env: &str) -> String {
+pub(crate) fn key(service: &str, env: &str) -> String {
     format!("trace:{service}/{env}")
 }
 

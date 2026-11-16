@@ -1678,11 +1678,13 @@ impl Apps {
             Some(Value::Bool(true)) => {
                 let (sid, e) = (service.to_string(), env.to_string());
                 self.db(move |s| s.ensure_trace_token(&sid, &e)).await?;
+                self.live(service, env).forget_gate();
                 self.changed(service);
             }
             Some(Value::Bool(false)) => {
                 let (sid, e) = (service.to_string(), env.to_string());
                 self.db(move |s| s.delete_trace_token(&sid, &e)).await?;
+                self.live(service, env).forget_gate();
                 self.changed(service);
             }
             _ => {}
@@ -2651,9 +2653,9 @@ impl Apps {
         }
         let seen = live.gate_gen();
         let (sid, e) = (live.service.clone(), live.env.clone());
-        let row = self.db(move |s| s.environment(&sid, &e)).await?;
+        let (row, traces) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.traces_on(&sid, &e)?))).await?;
         let allow = row.allow_ips.iter().filter_map(|r| r.cidr.parse::<ipnet::IpNet>().ok()).collect();
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, traces });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }

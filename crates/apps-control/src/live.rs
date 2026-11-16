@@ -230,6 +230,8 @@ pub struct Gate {
     pub preview: bool,
     /// Headers its answers carry.
     pub headers: Vec<crate::model::HeaderRule>,
+    /// Traces are on: the proxy adds its own span to each request's trace.
+    pub traces: bool,
 }
 
 /// Clients a rate limit remembers at most (a full bucket is the same as none, so those go first).

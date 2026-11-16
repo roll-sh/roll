@@ -1853,6 +1853,11 @@ impl Store {
         Ok(())
     }
 
+    /// Whether traces are on (no token opened).
+    pub fn traces_on(&self, service: &str, env: &str) -> Result<bool> {
+        Ok(self.db.query_row("SELECT 1 FROM trace_ingest WHERE service = ? AND env = ?", params![service, env], |_| Ok(())).optional()?.is_some())
+    }
+
     /// The environment's trace token, opened (none: traces are off).
     pub fn trace_token(&self, service: &str, env: &str) -> Result<Option<String>> {
         let sealed: Option<String> = self.db.query_row("SELECT sealed FROM trace_ingest WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?;

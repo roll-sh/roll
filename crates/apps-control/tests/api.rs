@@ -356,6 +356,20 @@ async fn traces_sent_by_instances_read_back() {
     assert_eq!(list["traces"][0], json!({ "trace": t, "name": "GET /items", "service": "api", "start_ms": 1_700_000_000_000u64, "ms": 120, "spans": 2, "error": true }), "{list}");
     let (_, one) = call(&w.api, "GET", &format!("{env}/traces/{t}"), None).await;
     assert_eq!((one["spans"][0]["name"].as_str(), one["spans"][1]["parent"].as_str()), (Some("GET /items"), Some(root.as_str())), "{one}");
+    // The proxy's own span: under the client's traceparent, the app's parent, its wake a child.
+    let h = host(&svc["environments"][0]["url"]);
+    let client_trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+    w.apps.live(&id, "production").sleep().await;
+    let req = Request::builder().uri("/items/42").header("host", h.clone()).header("traceparent", format!("00-{client_trace}-00f067aa0ba902b7-01")).body(Body::empty()).unwrap();
+    let r = w.public.clone().oneshot(req).await.unwrap();
+    let app: Value = serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let seen = app["traceparent"].as_str().unwrap_or("").to_string();
+    assert!(seen.starts_with(&format!("00-{client_trace}-")) && !seen.contains("00f067aa0ba902b7"), "the app's parent is the proxy's span: {app}");
+    let (_, one) = call(&w.api, "GET", &format!("{env}/traces/{client_trace}"), None).await;
+    let spans = one["spans"].as_array().cloned().unwrap_or_default();
+    let proxy = spans.iter().find(|s| s["service"] == "roll" && s["name"] == "GET /items/:id").unwrap_or_else(|| panic!("{one}"));
+    assert_eq!((proxy["parent"].as_str(), proxy["span"].as_str()), (Some("00f067aa0ba902b7"), seen.split('-').nth(2)), "{one}");
+    assert!(spans.iter().any(|s| s["name"] == "roll wake" && s["parent"] == proxy["span"]), "a cold start's wait: {one}");
     call(&w.api, "PUT", &env, Some(json!({"traces": false}))).await;
     let (_, vars) = call(&w.api, "GET", &format!("{env}/variables/values"), None).await;
     assert!(vars.get("OTEL_SERVICE_NAME").is_none(), "{vars}");
