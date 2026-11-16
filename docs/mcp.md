@@ -718,16 +718,16 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **The merge queue, in turn:** previews' security fixes #123 and #137 go first (agreed), then #108 (skills, waits, missing ids asked for, install links), #114 (trusted
-   machine clients: the secrets thread reruns roll-secrets' tests on its head first).
-2. **Two-person approvals (in progress, `feature/roll-mcp-approval-quorum` on #114):** a policy
-   rule names what needs more than one approver and who they are (`{product, actions,
-   environments, required, approvers}`), as Teleport's access requests, Vault's control groups,
-   Infisical's approval policies and GitHub's required reviewers do. The token's own person never
-   counts, each approver counts once, any eligible approver denies, and such a request is approved
-   once (never remembered). roll secrets now uses roll-access's approvals for reveals rather than
-   its own access requests, so this is where production reveals get a second pair of eyes. The
-   approvals page and chat cards show "1 of 2".
+1. **The merge queue, in turn:** #108 holds the lock (main with previews #123/#137 and secrets #67
+   merged as adf32d147, full gate running); then search's #125/#129/#119 and secrets' #68 (agreed);
+   then #114 (the secrets thread reruns roll-secrets' tests on its head first).
+2. **Two-person approvals: built** on `feature/roll-mcp-approval-quorum` (on #114; a PR on main once
+   #114 merges). The policy's `approval_rules` (`{product, actions, environments, approvals,
+   approvers}`, named as roll secrets' protected environments) are gates: each approver counts once,
+   never the token's own person, pending until every gate is met, never remembered; the approvals
+   page, chat cards and `Approved.by` say who approved. Tests: `two_people_approve_what_the_policy_names`,
+   vitest, the CLI's parser; screenshots 40–41. Next on it: a person's own `usr_` id on the
+   approvals page (an admin's view reads as the operator's today), so the card knows who's looking.
 3. **`roll_machine_client` in the Terraform provider:** built on `feature/roll-mcp-terraform-clients`
    (6bc1979b9, on #114; with the secrets thread for review). `TF_ACC=1 go test` is green against the fake
    rolld, and so is a run against a real rolld (`live/tf-machine-client.sh`: create with GitHub's
