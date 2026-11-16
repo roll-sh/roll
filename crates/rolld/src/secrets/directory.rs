@@ -1,0 +1,255 @@
+//! LDAP and Active Directory servers outside roll (roll-secrets' directories.rs). The address is
+//! the tenant's, so it's handled as outside databases are (outside.rs): rolld resolves the host,
+//! refuses a private address unless private ones are allowed, and connects to the address it
+//! checked. Always over TLS: `ldaps://`, or `ldap://` with StartTLS (a password, and Active
+//! Directory's `unicodePwd`, never go in plain text). The connection goes through a small relay
+//! that stops after 1 MiB from the server, and the whole conversation has 15 seconds.
+
+use ldap3::exop::PasswordModify;
+use ldap3::{Ldap, LdapConnAsync, LdapConnSettings, LdapError, Mod, Scope, SearchEntry, SearchOptions, StdStream};
+use roll_secrets::directories::{Bind, Flavor};
+use std::collections::HashSet;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// One conversation, connecting included.
+const TIMEOUT: Duration = Duration::from_secs(15);
+/// The most a conversation reads from the server: its answers are a handful of small results.
+const MAX_READ: u64 = 1 << 20;
+/// The Password Modify extended operation (RFC 3062).
+const PASSMOD: &str = "1.3.6.1.4.1.4203.1.11.1";
+
+pub(crate) struct Guarded {
+    pub allow_private: bool,
+}
+
+impl roll_secrets::directories::Directory for Guarded {
+    fn check(&self, bind: &Bind<'_>, accounts: &[String], groups: &[String], user_base_dn: Option<&str>) -> Result<(), String> {
+        let dns: Vec<String> = accounts.iter().chain(groups).cloned().chain(user_base_dn.map(str::to_string)).collect();
+        self.run(bind, async move |l| {
+            for dn in &dns {
+                if !exists(l, dn).await? {
+                    return Err(format!("there's no {dn}"));
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn set_password(&self, bind: &Bind<'_>, dn: &str, password: &str) -> Result<(), String> {
+        let flavor = bind.flavor;
+        self.run(bind, async move |l| set_password(l, flavor, dn, password).await)
+    }
+
+    fn create_user(&self, bind: &Bind<'_>, dn: &str, password: &str, groups: &[String], description: &str, until: i64) -> Result<(), String> {
+        let flavor = bind.flavor;
+        let cn = dn.strip_prefix("cn=").and_then(|r| r.split(',').next()).filter(|c| !c.is_empty()).ok_or("a user's DN starts cn=")?.to_string();
+        self.run(bind, async move |l| {
+            match flavor {
+                Flavor::Openldap => {
+                    let attrs = vec![attr("objectClass", &["top", "person", "organizationalPerson", "inetOrgPerson"]), attr("cn", &[&cn]), attr("sn", &["roll"]), attr("description", &[description])];
+                    l.add(dn, attrs).await.and_then(|r| r.success()).map_err(ldap_error)?;
+                    set_password(l, flavor, dn, password).await?;
+                }
+                Flavor::ActiveDirectory => {
+                    // sAMAccountName is 20 characters at most: roll- and the lease id's random part.
+                    let sam: String = format!("roll-{}", cn.rsplit('_').next().unwrap_or(&cn).chars().take(15).collect::<String>());
+                    // Made disabled, then given its password, then enabled (AD refuses an enabled
+                    // account without a password that meets its policy).
+                    let attrs = vec![
+                        attr("objectClass", &["top", "person", "organizationalPerson", "user"]),
+                        attr("cn", &[&cn]),
+                        attr("sAMAccountName", &[&sam]),
+                        attr("description", &[description]),
+                        attr("userAccountControl", &["514"]),
+                        attr("accountExpires", &[&filetime(until)]),
+                    ];
+                    l.add(dn, attrs).await.and_then(|r| r.success()).map_err(ldap_error)?;
+                    set_password(l, flavor, dn, password).await?;
+                    l.modify(dn, vec![Mod::Replace(b"userAccountControl".to_vec(), set(b"512"))]).await.and_then(|r| r.success()).map_err(ldap_error)?;
+                }
+            }
+            for g in groups {
+                l.modify(g, vec![Mod::Add(b"member".to_vec(), set(dn.as_bytes()))]).await.and_then(|r| r.success()).map_err(|e| format!("adding it to {g}: {}", ldap_error(e)))?;
+            }
+            Ok(())
+        })
+    }
+
+    fn extend_user(&self, bind: &Bind<'_>, dn: &str, until: i64) -> Result<(), String> {
+        // Only Active Directory has an expiry for an account; elsewhere the lease is the expiry.
+        if bind.flavor != Flavor::ActiveDirectory {
+            return Ok(());
+        }
+        let at = filetime(until);
+        self.run(bind, async move |l| l.modify(dn, vec![Mod::Replace(b"accountExpires".to_vec(), set(at.as_bytes()))]).await.and_then(|r| r.success()).map(|_| ()).map_err(ldap_error))
+    }
+
+    fn delete_user(&self, bind: &Bind<'_>, dn: &str, groups: &[String]) -> Result<(), String> {
+        let flavor = bind.flavor;
+        self.run(bind, async move |l| {
+            // OpenLDAP keeps a deleted member's DN in its groups (without the refint overlay):
+            // take it out first, as far as the server lets (a group's last member can't go).
+            // Active Directory does this itself.
+            if flavor == Flavor::Openldap {
+                for g in groups {
+                    let _ = l.modify(g, vec![Mod::Delete(b"member".to_vec(), set(dn.as_bytes()))]).await;
+                }
+            }
+            match l.delete(dn).await.map_err(ldap_error)? {
+                r if r.rc == 0 || r.rc == 32 => Ok(()),
+                r => Err(ldap_error(LdapError::from(r))),
+            }
+        })
+    }
+}
+
+impl Guarded {
+    /// Bind as the directory's bind account, then `work`, all within [`TIMEOUT`].
+    fn run<T: Send>(&self, bind: &Bind<'_>, work: impl AsyncFnOnce(&mut Ldap) -> Result<T, String>) -> Result<T, String> {
+        let (url, host, port, starttls) = parse(bind.url)?;
+        let tls = Arc::new(super::outside::tls_config(bind.ca)?);
+        let allow_private = self.allow_private;
+        let go = async move {
+            let addr = super::outside::resolve(&host, port, allow_private).await?;
+            let stream = pinned(addr).await.map_err(|e| format!("{host}: {e}"))?;
+            let settings = LdapConnSettings::new().set_conn_timeout(TIMEOUT).set_config(tls).set_starttls(starttls).set_std_stream(StdStream::Tcp(stream));
+            let (conn, mut l) = LdapConnAsync::with_settings(settings, &url).await.map_err(|e| format!("{host}: {}", ldap_error(e)))?;
+            tokio::spawn(tokio::time::timeout(TIMEOUT, conn.drive()));
+            l.simple_bind(bind.bind_dn, bind.bind_password).await.and_then(|r| r.success()).map_err(|e| format!("binding as {}: {}", bind.bind_dn, ldap_error(e)))?;
+            let out = work(&mut l).await;
+            let _ = l.unbind().await;
+            out
+        };
+        tokio::runtime::Handle::current().block_on(async move { tokio::time::timeout(TIMEOUT, go).await.map_err(|_| "timed out".to_string())? })
+    }
+}
+
+/// `ldaps://host[:port]` or `ldap://host[:port]` (roll-secrets checked the shape): the URL as
+/// ldap3 takes it, the host, the port, and whether StartTLS comes first.
+fn parse(url: &str) -> Result<(String, String, u16, bool), String> {
+    let (rest, starttls, default) = match url.strip_prefix("ldaps://") {
+        Some(r) => (r, false, 636),
+        None => (url.strip_prefix("ldap://").ok_or("the URL is ldaps://host or ldap://host")?, true, 389),
+    };
+    let rest = rest.trim_end_matches('/');
+    let (host, port) = match rest.strip_prefix('[') {
+        Some(v6) => {
+            let (h, after) = v6.split_once(']').ok_or("a bad IPv6 address")?;
+            (h, after.strip_prefix(':'))
+        }
+        None => match rest.rsplit_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (rest, None),
+        },
+    };
+    let port = port.map(|p| p.parse::<u16>().map_err(|_| "a bad port".to_string())).transpose()?.unwrap_or(default);
+    if host.is_empty() || rest.contains(['/', '?', '@']) {
+        return Err("the URL is ldaps://host or ldap://host".into());
+    }
+    Ok((url.trim_end_matches('/').to_string(), host.to_string(), port, starttls))
+}
+
+/// A stream to `addr` (the address that was checked) through a relay that reads at most
+/// [`MAX_READ`] from the server: ldap3 takes a standard library stream, so the relay listens on
+/// loopback for the one connection it opens itself.
+async fn pinned(addr: SocketAddr) -> Result<std::net::TcpStream, String> {
+    let remote = tokio::time::timeout(TIMEOUT, tokio::net::TcpStream::connect(addr)).await.map_err(|_| "timed out connecting".to_string())?.map_err(|e| e.to_string())?;
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.map_err(|e| e.to_string())?;
+    let at = listener.local_addr().map_err(|e| e.to_string())?;
+    let (local, accepted) = tokio::join!(tokio::net::TcpStream::connect(at), listener.accept());
+    let local = local.map_err(|e| e.to_string())?;
+    let (inner, peer) = accepted.map_err(|e| e.to_string())?;
+    if Some(peer) != local.local_addr().ok() {
+        return Err("another process took the relay's connection".into());
+    }
+    tokio::spawn(tokio::time::timeout(TIMEOUT, async move {
+        let (mut from_server, mut to_server) = remote.into_split();
+        let (mut from_client, mut to_client) = inner.into_split();
+        let up = async {
+            let _ = tokio::io::copy(&mut from_client, &mut to_server).await;
+            let _ = to_server.shutdown().await;
+        };
+        let down = async {
+            let _ = tokio::io::copy(&mut (&mut from_server).take(MAX_READ), &mut to_client).await;
+            let _ = to_client.shutdown().await;
+        };
+        tokio::join!(up, down);
+    }));
+    local.into_std().map_err(|e| e.to_string())
+}
+
+/// Whether `dn` exists (a base search for no attributes).
+async fn exists(l: &mut Ldap, dn: &str) -> Result<bool, String> {
+    let r = l.with_search_options(SearchOptions::new().sizelimit(1).timelimit(10)).search(dn, Scope::Base, "(objectClass=*)", vec!["1.1"]).await.map_err(ldap_error)?;
+    match r.1.rc {
+        0 => Ok(!r.0.is_empty()),
+        32 => Ok(false),
+        _ => Err(ldap_error(LdapError::from(r.1))),
+    }
+}
+
+/// Replace `dn`'s password as an administrator. Active Directory: `unicodePwd`, the password in
+/// double quotes as UTF-16LE (the connection is TLS). OpenLDAP: the Password Modify extended
+/// operation where the server has it (it hashes as configured), else `userPassword`.
+async fn set_password(l: &mut Ldap, flavor: Flavor, dn: &str, password: &str) -> Result<(), String> {
+    match flavor {
+        Flavor::ActiveDirectory => {
+            let quoted: Vec<u8> = format!("\"{password}\"").encode_utf16().flat_map(u16::to_le_bytes).collect();
+            l.modify(dn, vec![Mod::Replace(b"unicodePwd".to_vec(), HashSet::from([quoted]))]).await.and_then(|r| r.success()).map(|_| ()).map_err(ldap_error)
+        }
+        Flavor::Openldap if passmod(l).await? => l.extended(PasswordModify { user_id: Some(dn), old_pass: None, new_pass: Some(password) }).await.and_then(|r| r.success()).map(|_| ()).map_err(ldap_error),
+        Flavor::Openldap => l.modify(dn, vec![Mod::Replace(b"userPassword".to_vec(), set(password.as_bytes()))]).await.and_then(|r| r.success()).map(|_| ()).map_err(ldap_error),
+    }
+}
+
+/// Whether the root DSE lists the Password Modify extended operation.
+async fn passmod(l: &mut Ldap) -> Result<bool, String> {
+    let (entries, _) = l.with_search_options(SearchOptions::new().sizelimit(1).timelimit(10)).search("", Scope::Base, "(objectClass=*)", vec!["supportedExtension"]).await.and_then(|r| r.success()).map_err(ldap_error)?;
+    Ok(entries.into_iter().next().map(SearchEntry::construct).is_some_and(|e| e.attrs.get("supportedExtension").is_some_and(|v| v.iter().any(|o| o == PASSMOD))))
+}
+
+fn attr(name: &str, values: &[&str]) -> (Vec<u8>, HashSet<Vec<u8>>) {
+    (name.as_bytes().to_vec(), values.iter().map(|v| v.as_bytes().to_vec()).collect())
+}
+
+fn set(v: &[u8]) -> HashSet<Vec<u8>> {
+    HashSet::from([v.to_vec()])
+}
+
+/// Unix ms as a Windows FILETIME (100 ns since 1601), Active Directory's `accountExpires`.
+fn filetime(ms: i64) -> String {
+    (ms.max(0) * 10_000 + 116_444_736_000_000_000).to_string()
+}
+
+/// The server's answer, or what went wrong on the way (never a password: ldap3's errors hold
+/// result codes, the server's text and I/O errors).
+fn ldap_error(e: LdapError) -> String {
+    match e {
+        LdapError::LdapResult { result } if result.text.is_empty() => format!("result {}", result.rc),
+        LdapError::LdapResult { result } => format!("{} (result {})", result.text.trim(), result.rc),
+        e => e.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_tenants_directory_is_reached_over_tls_at_a_public_address_only() {
+        assert_eq!(parse("ldaps://dc1.example.com").unwrap(), ("ldaps://dc1.example.com".into(), "dc1.example.com".into(), 636, false));
+        assert_eq!(parse("ldap://ldap.example.com:1389/").unwrap(), ("ldap://ldap.example.com:1389".into(), "ldap.example.com".into(), 1389, true), "ldap:// always starts with StartTLS");
+        assert_eq!(parse("ldaps://[2001:db8::1]:636").unwrap().1, "2001:db8::1");
+        assert!(parse("ldapi:///run/slapd.sock").is_err());
+        let g = Guarded { allow_private: false };
+        let bind = Bind { url: "ldaps://127.0.0.1:636", flavor: Flavor::Openldap, bind_dn: "cn=admin,dc=example,dc=com", bind_password: "fake-pw", ca: None };
+        let refused = tokio::task::spawn_blocking(move || roll_secrets::directories::Directory::check(&g, &bind, &[], &[], None)).await.unwrap();
+        assert!(refused.unwrap_err().contains("private"));
+        // unicodePwd is the quoted password as UTF-16LE.
+        assert_eq!("\"Ab1!\"".encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>(), b"\"\0A\0b\x001\0!\0\"\0");
+        assert_eq!(filetime(0), "116444736000000000");
+    }
+}

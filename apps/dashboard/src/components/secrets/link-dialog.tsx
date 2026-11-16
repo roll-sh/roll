@@ -1,4 +1,4 @@
-import { Cloud, Database, KeyRound, Link2, RotateCw, ShieldCheck, Terminal, type LucideIcon } from "lucide-react";
+import { Cloud, Database, KeyRound, Link2, RotateCw, ShieldCheck, Terminal, Users, type LucideIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { SECRET_KEY, type Batch, type Environment, type LinkField, type LinkMode, type LinkTarget, type Op } from "@/lib/secrets-api";
 import type { ResourceKind } from "@/lib/workspace-api";
@@ -14,6 +14,7 @@ const OWN_KINDS: Record<string, { icon: LucideIcon; label: string }> = {
   aws: { icon: Cloud, label: "AWS role" },
   aws_iam_user: { icon: KeyRound, label: "IAM user" },
   outside_database: { icon: Database, label: "Database outside roll" },
+  directory: { icon: Users, label: "Directory (LDAP)" },
   pki: { icon: ShieldCheck, label: "Certificate authority" },
   ssh: { icon: Terminal, label: "SSH CA" },
   gcp: { icon: Cloud, label: "GCP account" },
