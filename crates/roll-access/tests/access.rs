@@ -1571,6 +1571,22 @@ async fn a_ci_job_signs_in_with_its_own_oidc_token() {
     }
 }
 
+/// A refusal says where a person can allow it: the token's own page with the refused rule
+/// proposed (product, action, the resource), which they decide on; nothing widens by itself.
+#[tokio::test]
+async fn a_refusal_links_to_where_a_person_can_allow_it() {
+    let d = Daemon::new(50);
+    let (token, id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let (s, e) = d.call(&token, Method::DELETE, "/v1/projects/prj_a", None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let widen = url::Url::parse(e["widen"].as_str().unwrap_or_else(|| panic!("{e}"))).unwrap();
+    let q: std::collections::HashMap<String, String> = widen.query_pairs().into_owned().collect();
+    assert!(widen.path().ends_with(&format!("/dashboard/access/tokens/{id}")), "{widen}");
+    assert_eq!((q.get("add").map(String::as_str), q.get("id").map(String::as_str)), (Some("postgres:delete"), Some("prj_a")), "{widen}");
+    // Its token stays as it was: the link only proposes.
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/prj_a", None).await.0, StatusCode::FORBIDDEN);
+}
+
 /// A person's own machine client acts as them, as their tokens do: within their account's reach,
 /// theirs alone to see and revoke, past the policy only once an admin approves, and it stops when
 /// they can't sign in.

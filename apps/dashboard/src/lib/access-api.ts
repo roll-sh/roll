@@ -36,6 +36,21 @@ export interface Rule {
   actions: Partial<Record<Action, Effect>>;
 }
 
+/**
+ * The rule a refusal proposed (`?add=product:action&id=…&index=…`: the `widen` link roll answers a
+ * refused request with), as `effect` (allow, or ask each time): one action, on that resource (or
+ * the product's every resource when none was named). `null` for anything that isn't one.
+ */
+export function proposedRule(search: string, effect: Effect): Rule | null {
+  const q = new URLSearchParams(search);
+  const [product, action] = (q.get("add") ?? "").split(":");
+  if (!product || !/^[a-z][a-z0-9_-]{0,31}$/.test(product) || !(ACTIONS as readonly string[]).includes(action)) return null;
+  const id = q.get("id");
+  const index = q.get("index");
+  const resources: Rule["resources"] = id ? [index ? { id, index } : { id }] : "*";
+  return { product, resources, actions: { [action as Action]: effect } };
+}
+
 export interface OAuthClient {
   id: string;
   name: string;

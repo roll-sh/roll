@@ -216,6 +216,16 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
   (the right repository and branch sign in, within the rules; another repository, branch, audience,
   key or an expired token is `invalid_grant`; a shared issuer's wildcard tenant is refused); `roll-cli/tests/token.rs::a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules`.
 
+### When a token is refused
+
+A refused request's answer says what it needed (`needs: {product, action, resource}`) and where a
+person can allow it: `widen`, the token's own page with that one rule proposed
+(`/dashboard/access/tokens/{id}?add=postgres:delete&id=prj_a`). MCP's refusal text carries the
+link, so the agent can hand it to the person. The page shows the rule and asks: "Allow", "Ask me
+each time" or "Not now". Nothing widens until they choose, the edit is theirs (the same route as
+any change to the token, audited as one), and a link never proposes a wildcard product. A workload's
+token, which is fixed, gets no link.
+
 ## The grant
 
 ```ts

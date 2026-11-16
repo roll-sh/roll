@@ -546,11 +546,29 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         Outcome::Deny => {
             ctx.audit(Some(row), Some(action), resource.clone(), "deny", None, StatusCode::FORBIDDEN);
             let what = resource.as_deref().map_or_else(|| about.to_string(), |r| format!("{about} {r}"));
+            // Where a person can allow it: the token's page with this rule proposed (they decide;
+            // nothing widens by itself). Not for a workload's token, which is fixed.
+            let widen = (ctx.grant.kind != "workload").then(|| {
+                let (id, index) = match (&lent, &target) {
+                    (Some((_, id)), _) => (Some(id.clone()), None),
+                    (None, Target::One(r)) => (r.id.clone(), r.index.clone()),
+                    _ => (None, None),
+                };
+                let mut q = url::form_urlencoded::Serializer::new(String::new());
+                q.append_pair("add", &format!("{about}:{}", action.as_str()));
+                if let Some(id) = &id {
+                    q.append_pair("id", id);
+                }
+                if let Some(ix) = &index {
+                    q.append_pair("index", ix);
+                }
+                format!("{}/dashboard/access/tokens/{}?{}", access.web_url(), ctx.grant.id, q.finish())
+            });
             return deny(
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 format!("this token can't {action} {what}"),
-                json!({ "needs": { "product": about, "action": action, "resource": resource } }),
+                json!({ "needs": { "product": about, "action": action, "resource": resource }, "widen": widen }),
             );
         }
         Outcome::Ask if decided_before => {}

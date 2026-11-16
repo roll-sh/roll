@@ -801,7 +801,7 @@ impl Access {
         Ok((g, secret))
     }
 
-    fn web_url(&self) -> &str {
+    pub(crate) fn web_url(&self) -> &str {
         self.config.web_url.trim_end_matches('/')
     }
 

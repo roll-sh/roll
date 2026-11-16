@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
+import { proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -163,5 +163,16 @@ describe("machine clients", () => {
       "-----BEGIN PUBLIC KEY-----\r\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0CXl01/W8B09OrWXFui602a0TapW\r\nrUnzlc/PDXFBLWXU0czXjt63cFk2Zkq8vPXit79F07TIc2OQ08izssxVEg==\r\n-----END PUBLIC KEY-----";
     expect(publicJwk(ec)).toEqual({ jwk: { kty: "EC", crv: "P-256", x: "0CXl01_W8B09OrWXFui602a0TapWrUnzlc_PDXFBLWU", y: "1NHM147et3BZNmZKvLz14re_RdO0yHNjkNPIs7LMVRI" } });
     expect(publicJwk("-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEI…\n-----END PRIVATE KEY-----")).toHaveProperty("problem");
+  });
+});
+
+describe("a refusal's proposal", () => {
+  it("reads roll's widen link as one rule, and nothing else", () => {
+    expect(proposedRule("?add=postgres:delete&id=prj_a", "allow")).toEqual({ product: "postgres", resources: [{ id: "prj_a" }], actions: { delete: "allow" } });
+    expect(proposedRule("?add=search:read&id=cl_1&index=logs", "ask")).toEqual({ product: "search", resources: [{ id: "cl_1", index: "logs" }], actions: { read: "ask" } });
+    expect(proposedRule("?add=apps:deploy", "allow")).toEqual({ product: "apps", resources: "*", actions: { deploy: "allow" } });
+    expect(proposedRule("?add=postgres:everything&id=x", "allow")).toBeNull();
+    expect(proposedRule("?add=*:admin", "allow")).toBeNull();
+    expect(proposedRule("", "allow")).toBeNull();
   });
 });
