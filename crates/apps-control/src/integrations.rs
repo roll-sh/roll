@@ -210,6 +210,11 @@ pub trait GitHubApp: Send + Sync {
     /// A username and short-lived token for fetching `owner/repo` (never stored).
     async fn git_login(&self, installation: u64, owner: &str, repo: &str) -> anyhow::Result<(String, String)>;
     async fn status(&self, installation: u64, owner: &str, repo: &str, sha: &str, status: &CommitStatus) -> anyhow::Result<()>;
+    /// A GitHub Deployment of `sha` to `environment` (`production` or not). Its id.
+    async fn deployment(&self, installation: u64, owner: &str, repo: &str, sha: &str, environment: &str, production: bool) -> anyhow::Result<u64>;
+    /// That deployment's state (`in_progress`, `success`, `failure`), with where it answers.
+    #[allow(clippy::too_many_arguments)]
+    async fn deployment_status(&self, installation: u64, owner: &str, repo: &str, deployment: u64, state: &str, url: Option<&str>, description: &str) -> anyhow::Result<()>;
 }
 
 /// Email to a person through their account (rolld fills it with roll-accounts' mailer). Unset or

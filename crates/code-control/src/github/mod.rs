@@ -198,6 +198,22 @@ impl Code {
         Ok(c.id)
     }
 
+    /// A GitHub Deployment of `sha` to `environment` through `installation` (production or not,
+    /// never transient: a roll apps environment stays). Its id.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn github_deployment(&self, installation: u64, owner: &str, repo: &str, sha: &str, environment: &str, description: &str, production: bool) -> Result<u64> {
+        let hub = self.github_hub().ok_or_else(|| Error::Invalid("roll's GitHub App isn't configured".into()))?;
+        hub.client.create_deployment_in(installation, owner, repo, sha, environment, description, false, production).await.map_err(|e| Error::Internal(e.into()))
+    }
+
+    /// A GitHub Deployment's state (`in_progress`, `success`, `failure`), with where it answers.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn github_deployment_status(&self, installation: u64, owner: &str, repo: &str, deployment: u64, state: &str, environment_url: Option<&str>, description: &str) -> Result<()> {
+        let hub = self.github_hub().ok_or_else(|| Error::Invalid("roll's GitHub App isn't configured".into()))?;
+        hub.client.create_deployment_status(installation, owner, repo, deployment, state, environment_url, None, description).await.map_err(|e| Error::Internal(e.into()))?;
+        Ok(())
+    }
+
     /// A commit status on `owner/repo` at `sha` through `installation`.
     #[allow(clippy::too_many_arguments)]
     pub async fn github_commit_status(&self, installation: u64, owner: &str, repo: &str, sha: &str, state: &str, context: &str, description: &str, target_url: Option<&str>) -> Result<()> {

@@ -62,7 +62,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `DELETE /v1/apps/services/{id}/registry` | | `Service` | write |
 | `PUT /v1/apps/services/{id}/git-login` | `{ username, password }` (a deploy token, app password or access token as `password`; one line each) | `Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another repository; sealed, never returned) | write |
 | `DELETE /v1/apps/services/{id}/git-login` | | `Service` | write |
-| `PUT /v1/apps/services/{id}/github` | | `Service` (a Git URL service on roll's GitHub App's host connected to the installation that sees its repository: fetches use the installation's short-lived tokens, deploys post commit statuses; 409 without the App or when no installation sees the repository; dropped when the source moves to another repository) | operator only (installations span tenants) |
+| `PUT /v1/apps/services/{id}/github` | | `Service` (a Git URL service on roll's GitHub App's host connected to the installation that sees its repository: fetches use the installation's short-lived tokens, deploys post commit statuses and GitHub Deployments; 409 without the App or when no installation sees the repository; dropped when the source moves to another repository) | operator only (installations span tenants) |
 | `DELETE /v1/apps/services/{id}/github` | | `Service` | operator only |
 | `GET /v1/apps/services/{id}/environments` | | `Environment[]` | read |
 | `PUT /v1/apps/services/{id}/environments/{env}` | `EnvironmentPut` | `Environment` | deploy*; with `variables_from` also reveal in that environment (it copies its values) |
