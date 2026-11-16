@@ -1565,8 +1565,12 @@ Ranked by what a person notices first. Done so far:
    one live check in `scripts/preview-apps.sh` with a fork's event.
 2. **A Git URL service's preview reported to its repository** (Vercel's deployment status and
    comment on the pull request): a roll code repo's previews reach GitHub through roll code; a
-   Git URL service's reach only roll. Through roll apps' repository login (scoped to statuses),
-   never a credential previews holds.
+   Git URL service's reach only roll. Agreed with the apps thread: a Git URL service on github.com
+   connects through roll's GitHub App (`github: { installation }`, admin, only an installation
+   already connected to the same owner, its repo in it: rolld's `GitHubInstallations` port decides,
+   never apps or previews). Previews' `GitReport` port then posts `roll/preview` and the preview
+   comment with a short-lived token for that one repo (`GitHubInstallations::token`); the
+   service's `git_login` is never used to write. Waits on apps' port.
 3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
