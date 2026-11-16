@@ -157,61 +157,6 @@
         "x-roll-action": "read"
       }
     },
-    "/v1/apps/otlp/{id}/{env}/{token}/v1/traces": {
-      "post": {
-        "description": "Answers 200, an empty export response.",
-        "operationId": "postOtlpIdEnvTokenV1Traces",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "env",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "token",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object"
-              }
-            }
-          },
-          "description": "OTLP/HTTP `ExportTraceServiceRequest`: protobuf (`application/x-protobuf`) or JSON (`application/json`), gzip or not, at most 8 MiB"
-        },
-        "responses": {
-          "200": {
-            "description": "200, an empty export response"
-          },
-          "4XX": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Create trace",
-        "tags": [
-          "otlp"
-        ],
-        "x-roll-action": "anonymous: the token in the path (`traces: true` sets `OTEL_EXPORTER_OTLP_ENDPOINT` to it); any other token 404"
-      }
-    },
     "/v1/apps/plan": {
       "post": {
         "description": "Answers `Plan`; with `roots: true` (a repo or a Git URL, no `root`): `{ roots: { root, provider, framework? }[] }`, the folders up to three levels down that build on their own (a start command, a framework or a Dockerfile: no library package, docs or dependencies), at most 20.",
