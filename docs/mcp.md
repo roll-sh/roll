@@ -707,7 +707,7 @@ waits on a sibling PR reaching main is last.
    repository, a ref or an environment) with the step to paste; GitLab CI's shape in the CLI
    (`--gitlab group/project`); a step in `sdk/github-action` (the secrets thread's: ask first) so a
    workflow uses one action rather than two `curl`s. The grant, `roll-oidc` and `--github` are in
-   #112 (stacked on #101).
+   #114 (stacked on #101).
 2. **The merge queue, in turn:** #98 (MCP Apps), #101 (machine clients), #104 (server card), #108
    (skills and `apps_wait_deploy`): each takes the lock, merges main, runs the full gate. #98's
    pre-gate runs while another thread holds the lock.
