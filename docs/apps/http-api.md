@@ -430,12 +430,12 @@ type ProjectImport = {
     source: { kind: "repo"; repo: string; root: string | null } | { kind: "git"; url: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
     branch: string | null;    // a repo's production branch
     run: Patch<Run>;          // the run settings the entry names
-    links: { kind: "postgres" | "redis"; name: string }[]; // databases below, by name
+    links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "service"; name: string }[]; // databases below by name, or another app of the file (`service`)
     variables: { [name: string]: string }; // set when the service is made, never over what it has
     generate: string[];       // `{ generate = "secret" }`: 32 random bytes in hex, made by whoever makes the service, once
     ask: { name: string; ask: string; default: string | null }[]; // `{ ask = "…" }`: asked of whoever makes it
   } };
-  databases: { [name: string]: { kind: "postgres" | "redis" } };
+  databases: { [name: string]: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" } };
 };
 
 type PlanRequest = { repo: string; revision?: string; root?: string } | { files: Record<string, string> };

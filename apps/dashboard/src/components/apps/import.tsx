@@ -5,12 +5,14 @@ import { looksSecret } from "@/lib/secret-names";
 import type { Template } from "@/lib/templates";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { redisApi } from "@/lib/redis-api";
-import { api } from "@/lib/roll-api";
+import { nosqlApi } from "@/lib/nosql-api";
+import { api, streams } from "@/lib/roll-api";
+import { storageApi } from "@/lib/storage-api";
 import { freeSpot, service as serviceView } from "@/lib/workspace-resources";
 import { PlaceError, refreshInventory, workspace } from "@/lib/workspace-store";
 import { Label } from "../workspace/inspector";
 
-type Db = "postgres" | "redis";
+type Db = ProjectImport["databases"][string]["kind"];
 
 /** One line of what an import does, as `roll up --all` prints it: `+` made, `=` there, `~`
  *  changed, `↑` deployed, `!` stops it. */
@@ -32,6 +34,8 @@ export interface ImportHave {
 }
 
 const dbKey = (kind: string, name: string) => `${kind}:${name}`;
+/** `postgres database db`, `bucket uploads`, `stream events`. */
+const dbLabel = (kind: string) => (kind === "bucket" || kind === "stream" ? kind : `${kind} database`);
 const an = (kind: string) => `${kind === "image" || kind === "upload" ? "an" : "a"} ${kind}`;
 
 /** Equal as JSON values, whatever their keys' order. */
@@ -65,6 +69,7 @@ export function planImport(imp: ProjectImport, have: ImportHave): ImportStep[] {
       for (const l of a.links) out.push({ op: "link", service: name, db: l.name });
       continue;
     }
+    // A link's target: a database by its name, or another app of the project.
     if (there.service.source.kind !== a.source.kind) {
       out.push({ op: "conflict", service: name, text: `${name} has ${an(there.service.source.kind)} source; the file makes it ${an(a.source.kind)} one: rename one of them` });
       continue;
@@ -74,7 +79,7 @@ export function planImport(imp: ProjectImport, have: ImportHave): ImportStep[] {
     if (a.source.kind === "repo" && there.service.source.kind === "repo" && (a.source.repo !== there.service.source.repo || (a.source.root ?? "") !== (there.service.source.root ?? "")))
       out.push({ op: "note", service: name, text: `the file says ${from}; its source stays (Settings changes it)` });
     for (const l of a.links) {
-      const ref = have.dbs.get(dbKey(l.kind, l.name));
+      const ref = l.kind === "service" ? have.services.get(l.name)?.service.id : have.dbs.get(dbKey(l.kind, l.name));
       if (!ref || !there.links.some((x) => x.kind === l.kind && x.ref === ref)) out.push({ op: "link", service: name, db: l.name });
     }
     const run = there.service.run as unknown as Record<string, unknown>;
@@ -88,9 +93,9 @@ export function planImport(imp: ProjectImport, have: ImportHave): ImportStep[] {
 export function stepLine(s: ImportStep): { mark: string; text: string } {
   switch (s.op) {
     case "make-db":
-      return { mark: "+", text: `${s.kind} database ${s.name}` };
+      return { mark: "+", text: `${dbLabel(s.kind)} ${s.name}` };
     case "have-db":
-      return { mark: "=", text: `${s.kind} database ${s.name}` };
+      return { mark: "=", text: `${dbLabel(s.kind)} ${s.name}` };
     case "make-service":
       return { mark: "+", text: `service ${s.name} (${s.from})${s.upload ? ": `roll up --all` uploads its code" : ""}` };
     case "have-service":
@@ -180,6 +185,9 @@ export function ImportPane({ project, spot, onDone, repo, git, template }: { pro
       const names = new Map<string, string>();
       if (kinds.has("postgres")) for (const p of await api.projects()) names.set(`postgres:${p.id}`, p.name);
       if (kinds.has("redis")) for (const d of await redisApi.list()) names.set(`redis:${d.id}`, d.name);
+      if (kinds.has("bucket")) for (const b of await storageApi.buckets()) names.set(`bucket:${b.name}`, b.name);
+      if (kinds.has("stream")) for (const s of await streams.list()) names.set(`stream:${s.id}`, s.name);
+      if (kinds.has("nosql")) for (const d of await nosqlApi.list()) names.set(`nosql:${d.id}`, d.name);
       const dbs = new Map<string, string>();
       for (const r of project.resources) {
         const n = names.get(`${r.kind}:${r.ref}`);
@@ -208,7 +216,7 @@ export function ImportPane({ project, spot, onDone, repo, git, template }: { pro
       const dbs = new Map(have.dbs);
       for (const [name, d] of Object.entries(imp.databases)) {
         if (dbs.has(dbKey(d.kind, name))) continue;
-        setStep(`Making the ${d.kind} database ${name}…`);
+        setStep(`Making the ${dbLabel(d.kind)} ${name}…`);
         const at = freeSpot(taken);
         taken.push(at);
         const ref = await workspace.make(project.id, d.kind, name, at).catch((e: unknown) => {
@@ -217,9 +225,13 @@ export function ImportPane({ project, spot, onDone, repo, git, template }: { pro
         });
         dbs.set(dbKey(d.kind, name), ref);
       }
+      // Links to other apps wait until every app is made (one may name an app made after it).
+      const ids = new Map([...have.services].map(([n, s]) => [n, s.service.id]));
+      const later: { id: string; target: string; there?: Link[] }[] = [];
       for (const [name, a] of Object.entries(imp.apps)) {
-        const links = a.links.map((l) => ({ kind: l.kind, ref: dbs.get(dbKey(l.kind, l.name))! }));
+        const links = a.links.filter((l) => l.kind !== "service").map((l) => ({ kind: l.kind, ref: dbs.get(dbKey(l.kind, l.name))! }));
         const there = have.services.get(name);
+        const toApps = a.links.filter((l) => l.kind === "service").map((l) => l.name);
         if (!there) {
           setStep(`Making ${name}…`);
           const at = taken.length === project.resources.length + 1 ? spot : freeSpot(taken);
@@ -238,8 +250,11 @@ export function ImportPane({ project, spot, onDone, repo, git, template }: { pro
           const s = await appsApi.create({ project: project.id, name, source, ...(Object.keys(a.run).length ? { run: a.run } : {}), ...(Object.keys(variables).length ? { variables } : {}), ...(sealed.length ? { sealed } : {}), ...(links.length ? { links } : {}), ...(a.branch ? { branch: a.branch } : {}), ...at });
           workspace.added(project.id, serviceView(s), at.x, at.y);
           made.push(s);
+          ids.set(name, s.id);
+          for (const t of toApps) later.push({ id: s.id, target: t });
           continue;
         }
+        for (const t of toApps) later.push({ id: there.service.id, target: t, there: there.links });
         const id = there.service.id;
         const run = there.service.run as unknown as Record<string, unknown>;
         const differs = Object.fromEntries(Object.entries(a.run).filter(([k, v]) => !same(run[k], v)));
@@ -255,6 +270,12 @@ export function ImportPane({ project, spot, onDone, repo, git, template }: { pro
           await appsApi.deploy(id, "production", { image: a.source.image });
           await appsApi.update(id, { source: { kind: "image", image: a.source.image } });
         }
+      }
+      for (const l of later) {
+        const ref = ids.get(l.target);
+        if (!ref || l.there?.some((x) => x.kind === "service" && x.ref === ref)) continue;
+        setStep(`Linking to ${l.target}…`);
+        await appsApi.link(l.id, "service", ref);
       }
       void refreshInventory();
       onDone(made);

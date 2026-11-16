@@ -219,7 +219,7 @@ async fn import(State(apps): S, b: Bytes) -> R {
             };
             // A folder of a Git URL follows the branch the file was read from.
             let branch = a.branch.clone().or_else(|| (entry_kind(a) == "upload").then(|| git_branch.clone()).flatten());
-            let links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "name": l })).collect();
+            let links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": apps_build::project::link_kind(&f, l), "name": l })).collect();
             // What to set as it is, what to make (a secret, once), and what to ask whoever makes it.
             let mut fixed = serde_json::Map::new();
             let (mut generate, mut ask) = (Vec::new(), Vec::new());

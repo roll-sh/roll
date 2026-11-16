@@ -150,7 +150,8 @@ export interface ProjectImport {
       source: { kind: "repo"; repo: string; root: string | null } | { kind: "git"; url: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
       branch: string | null;
       run: Partial<Run>;
-      links: { kind: "postgres" | "redis"; name: string }[];
+      /** A database's kind, or `service`: another app of the file, by its name. */
+      links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "service"; name: string }[];
       /** What it's set to as it is. */
       variables: Record<string, string>;
       /** Made once, when the service is (`{ generate = "secret" }`): 32 random bytes in hex. */
@@ -159,7 +160,7 @@ export interface ProjectImport {
       ask: { name: string; ask: string; default: string | null }[];
     }
   >;
-  databases: Record<string, { kind: "postgres" | "redis" }>;
+  databases: Record<string, { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" }>;
 }
 
 export interface NewService {

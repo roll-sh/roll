@@ -1662,8 +1662,12 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
         let have = services.get(n);
         out.push(format!("{} service {n} ({from})", if have.is_some() { "=" } else { "+" }));
         for l in &a.links {
-            let kind = &f.databases[l].kind;
-            let linked = dbs.get(&(kind.clone(), l.clone())).is_some_and(|r| links.get(n).is_some_and(|ls| ls.contains(r)));
+            // A database by its name, or another app of the project (its service's id).
+            let target = match apps_build::project::link_kind(f, l) {
+                "service" => services.get(l).map(|s| s["id"].as_str().unwrap_or("").to_string()),
+                kind => dbs.get(&(kind.to_string(), l.clone())).cloned(),
+            };
+            let linked = target.is_some_and(|r| links.get(n).is_some_and(|ls| ls.contains(&r)));
             if !linked {
                 out.push(format!("~ link {n} to {l}"));
             }
@@ -1796,6 +1800,14 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
             dbs.insert(("redis".to_string(), s(&d["name"])), s(&d["id"]));
         }
     }
+    // Buckets go by their name; streams and NoSQL databases by their id.
+    for (kind, path, id) in [("bucket", "/v1/storage/buckets", "name"), ("stream", "/v1/streams", "id"), ("nosql", "/v1/nosql/databases", "id")] {
+        if wants(kind) {
+            for d in api.get(path).await?.as_array().into_iter().flatten().filter(|d| placed.contains(&(kind.to_string(), s(&d[id])))) {
+                dbs.insert((kind.to_string(), s(&d["name"])), s(&d[id]));
+            }
+        }
+    }
     // A service the file names with another source is a mistake to stop at, not to convert.
     for (n, a) in &f.apps {
         if let Some(svc) = services.get(n) {
@@ -1830,21 +1842,27 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
         }
         let made = match d.kind.as_str() {
             "postgres" => api.post("/v1/projects", json!({ "name": n })).await?,
-            _ => api.post("/v1/redis/databases", json!({ "name": n })).await?,
+            "redis" => api.post("/v1/redis/databases", json!({ "name": n })).await?,
+            "bucket" => api.post("/v1/storage/buckets", json!({ "name": n })).await?,
+            "stream" => api.post("/v1/streams", json!({ "name": n })).await?,
+            _ => api.post("/v1/nosql/databases", json!({ "name": n })).await?,
         };
-        let r = s(&made["id"]);
+        let r = if d.kind == "bucket" { s(&made["name"]) } else { s(&made["id"]) };
         let _ = api.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/resources/{}/{}", enc(&project), d.kind, enc(&r)), Some(json!({ "x": 48 + 320 * i as i64, "y": 340 }))).await;
-        eprintln!("made {} database {n}", d.kind);
+        eprintln!("made {} {n}", if d.kind == "bucket" || d.kind == "stream" { d.kind.clone() } else { format!("{} database", d.kind) });
         dbs.insert((d.kind.clone(), n.clone()), r);
     }
     let mut out = Vec::new();
+    // Every app's service id, for links between them (made once all are made).
+    let mut ids: std::collections::BTreeMap<String, String> = services.iter().map(|(n, svc)| (n.clone(), s(&svc["id"]))).collect();
+    let db_links = |a: &apps_build::project::AppEntry| a.links.iter().filter(|l| f.databases.contains_key(*l)).cloned().collect::<Vec<_>>();
     for (n, a) in &f.apps {
         let fresh = !services.contains_key(n);
         let svc = match services.get(n) {
             Some(svc) => svc.clone(),
             None => {
                 let source = entry_source(a);
-                let made_links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "ref": dbs[&(f.databases[l].kind.clone(), l.clone())] })).collect();
+                let made_links: Vec<Value> = db_links(a).iter().map(|l| json!({ "kind": f.databases[l].kind, "ref": dbs[&(f.databases[l].kind.clone(), l.clone())] })).collect();
                 let mut body = json!({ "project": project, "name": n, "source": source, "links": made_links });
                 // Production follows it from the first deploy (not the default branch's head first).
                 if let Some(b) = &a.branch {
@@ -1882,7 +1900,7 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                 api.call(reqwest::Method::PATCH, &format!("/v1/apps/services/{}", enc(&id)), Some(json!({ "run": differs }))).await?;
                 eprintln!("set {n}'s settings");
             }
-            for l in &a.links {
+            for l in &db_links(a) {
                 let kind = &f.databases[l].kind;
                 let r = &dbs[&(kind.clone(), l.clone())];
                 if !links.get(n).is_some_and(|ls| ls.contains(r)) {
@@ -1922,6 +1940,17 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                 println!("↑ {n}: {}", s(&d["id"]));
             }
             out.push(json!({ "service": n, "deployment": d["id"] }));
+        }
+        ids.insert(n.clone(), s(&svc["id"]));
+    }
+    // Links to other apps of the file: their URLs (each made by now).
+    for (n, a) in &f.apps {
+        for l in a.links.iter().filter(|l| !f.databases.contains_key(*l)) {
+            let (Some(id), Some(target)) = (ids.get(n), ids.get(l)) else { continue };
+            if !links.get(n).is_some_and(|ls| ls.contains(target)) {
+                api.call(reqwest::Method::PUT, &format!("/v1/apps/services/{}/links/service/{}", enc(id), enc(target)), Some(json!({}))).await?;
+                eprintln!("linked {n} to {l}");
+            }
         }
     }
     if json_out {

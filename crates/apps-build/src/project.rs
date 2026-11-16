@@ -112,9 +112,12 @@ impl VarSpec {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DbEntry {
-    /// `postgres` or `redis`.
+    /// One of [`DB_KINDS`].
     pub kind: String,
 }
+
+/// What `[databases]` can declare: roll's products a service links by name.
+pub const DB_KINDS: [&str; 5] = ["postgres", "redis", "bucket", "stream", "nosql"];
 
 pub fn valid_name(n: &str) -> bool {
     !n.is_empty() && n.len() <= 32 && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') && !n.starts_with('-') && !n.ends_with('-')
@@ -133,7 +136,8 @@ pub fn parse_project(text: &str) -> Result<ProjectFile, ProjectError> {
     ensure(!f.apps.is_empty(), || "roll.toml declares no [apps.<name>]".to_string())?;
     for (n, d) in &f.databases {
         ensure(valid_name(n), || format!("database {n:?}: a name is a-z, 0-9 and -, at most 32"))?;
-        ensure(matches!(d.kind.as_str(), "postgres" | "redis"), || format!("database {n}: kind is postgres or redis"))?;
+        ensure(DB_KINDS.contains(&d.kind.as_str()), || format!("database {n}: kind is {}", DB_KINDS.join(", ")))?;
+        ensure(!f.apps.contains_key(n), || format!("{n} is both a database and an app: a link would name either"))?;
     }
     for (n, a) in &f.apps {
         ensure(valid_name(n), || format!("app {n:?}: a name is a-z, 0-9 and -, at most 32"))?;
@@ -146,8 +150,10 @@ pub fn parse_project(text: &str) -> Result<ProjectFile, ProjectError> {
         }
         ensure(a.branch.is_none() || a.repo.is_some() || a.git.is_some(), || format!("app {n}: branch is for a repo or git"))?;
         ensure(a.kind.as_deref().is_none_or(|k| ["web", "worker", "cron"].contains(&k)), || format!("app {n}: type is web, worker or cron"))?;
+        // A database, or another app (Render's `fromService`: its private and public URLs).
         for l in &a.links {
-            ensure(f.databases.contains_key(l), || format!("app {n} links {l}, which isn't in [databases]"))?;
+            ensure(l != n, || format!("app {n} links itself"))?;
+            ensure(f.databases.contains_key(l) || f.apps.contains_key(l), || format!("app {n} links {l}, which isn't in [databases] or [apps]"))?;
         }
         for (k, v) in &a.variables {
             match v {
@@ -207,6 +213,11 @@ pub fn entry_source(a: &AppEntry) -> Value {
         s["root"] = Value::from(root.as_str());
     }
     s
+}
+
+/// What a link names in `f`: a database's kind, or `service` for another app.
+pub fn link_kind<'a>(f: &'a ProjectFile, link: &str) -> &'a str {
+    f.databases.get(link).map_or("service", |d| d.kind.as_str())
 }
 
 /// The kind of source an entry makes.
@@ -417,6 +428,18 @@ pub fn compose_to_toml(text: &str) -> Result<(String, Vec<String>), ProjectError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file declares buckets, streams and NoSQL databases, and an app links another by name
+    /// (its URLs); a self-link or a name that's both an app and a database is refused.
+    #[test]
+    fn a_file_links_buckets_streams_and_other_apps() {
+        let f = parse_project("[apps.web]\nimage = \"a:1\"\nlinks = [\"api\", \"uploads\"]\n[apps.api]\nimage = \"b:1\"\nlinks = [\"events\", \"db\"]\n[databases.uploads]\nkind = \"bucket\"\n[databases.events]\nkind = \"stream\"\n[databases.db]\nkind = \"nosql\"\n").unwrap();
+        assert_eq!(f.apps["web"].links.iter().map(|l| link_kind(&f, l)).collect::<Vec<_>>(), ["service", "bucket"]);
+        assert_eq!(f.apps["api"].links.iter().map(|l| link_kind(&f, l)).collect::<Vec<_>>(), ["stream", "nosql"]);
+        assert!(parse_project("[apps.web]\nimage = \"a:1\"\nlinks = [\"web\"]\n").is_err(), "a self-link");
+        assert!(parse_project("[apps.db]\nimage = \"a:1\"\n[databases.db]\nkind = \"redis\"\n").is_err(), "one name, two things");
+        assert!(parse_project("[apps.web]\nimage = \"a:1\"\n[databases.q]\nkind = \"mysql\"\n").is_err(), "a kind roll doesn't have");
+    }
 
     #[test]
     fn a_compose_file_becomes_a_projects_roll_toml() {

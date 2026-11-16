@@ -73,11 +73,17 @@ impl Apps {
                 }
             }
             a.run = (!table.is_empty()).then_some(table);
-            // Databases it links (postgres and redis: what a file can declare); the rest said.
+            // What it links that a file declares (databases, buckets, streams, NoSQL, another
+            // service of the project by its name); the rest said.
             let mut other = Vec::new();
             for l in self.links(&svc.id).await? {
                 let kind = l.kind.as_str();
-                if kind == "postgres" || kind == "redis" {
+                if kind == "service" {
+                    match services.iter().find(|s| s.id == l.r#ref) {
+                        Some(t) => a.links.push(t.name.clone()),
+                        None => other.push(format!("service {}", l.r#ref)),
+                    }
+                } else if apps_build::project::DB_KINDS.contains(&kind) {
                     let named = names.get(&format!("{kind}:{}", l.r#ref)).cloned().unwrap_or_else(|| l.r#ref.clone());
                     let name = name_of(&named);
                     file.databases.insert(name.clone(), DbEntry { kind: kind.to_string() });
