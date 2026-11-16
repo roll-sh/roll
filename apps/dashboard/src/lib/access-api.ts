@@ -105,11 +105,15 @@ export interface NewGrant {
 export interface Checkup {
   grant: { id: string; name: string; kind: Grant["kind"]; last_used_at: number | null; expires_at: number | null; created_at: number };
   /** Most serious first. */
-  findings: { kind: "pending" | "unapproved" | "everything" | "never_expires" | "unused" | "narrower" | "roams"; why: string; fix: "approve" | "tighten" | "expire" | "revoke" | "limit_addresses" }[];
+  findings: {
+    kind: "pending" | "unapproved" | "everything" | "never_expires" | "secret_client" | "unused" | "narrower" | "roams";
+    why: string;
+    fix: "approve" | "tighten" | "expire" | "revoke" | "limit_addresses" | "rotate_client";
+  }[];
 }
 
 /** Checkup findings, most serious first. */
-const FINDING_ORDER: Checkup["findings"][number]["kind"][] = ["pending", "unapproved", "everything", "never_expires", "unused", "roams", "narrower"];
+const FINDING_ORDER: Checkup["findings"][number]["kind"][] = ["pending", "unapproved", "everything", "never_expires", "secret_client", "unused", "roams", "narrower"];
 
 /** The checkup's tokens, the most serious first (by each one's worst finding, then how many). */
 export function byConcern(list: Checkup[]): Checkup[] {
@@ -124,6 +128,7 @@ export const FIX_LABEL: Record<Checkup["findings"][number]["fix"], string> = {
   expire: "Give it an expiry",
   revoke: "Revoke",
   limit_addresses: "Limit addresses",
+  rotate_client: "Rotate to a key",
 };
 
 /** A token's rules narrowed to what it used (`GET /v1/access/tokens/{id}/tighten`). */

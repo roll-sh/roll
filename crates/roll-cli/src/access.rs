@@ -866,6 +866,7 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
                         "tighten" => format!("roll token tighten {} --apply", s(&c["grant"]["id"])),
                         "expire" => format!("roll token edit {} --expires 30d", s(&c["grant"]["id"])),
                         "limit_addresses" => format!("roll token edit {} --ip <cidr>", s(&c["grant"]["id"])),
+                        "rotate_client" => "roll token client list, then roll token client rotate <mcl_…> --public-key key.pub.pem".to_string(),
                         other => other.to_string(),
                     };
                     println!("  {}: {fix}", s(&f["why"]));

@@ -1470,6 +1470,10 @@ async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
     assert_eq!(s, StatusCode::OK, "{signed}");
     assert_eq!(search(signed["access_token"].as_str().unwrap().to_string()).await, StatusCode::OK);
     assert_eq!(assert_with(jwt).await.0, StatusCode::UNAUTHORIZED, "a replayed assertion");
+    // The checkup nudges a client on a secret toward a key (or CI's own identity), not one on a key.
+    let (_, check) = d.call(OPERATOR, Method::GET, "/v1/access/checkup", None).await;
+    let kinds = |grant: &Value| check.as_array().unwrap().iter().find(|c| c["grant"]["id"] == *grant).map(|c| c["findings"].as_array().unwrap().iter().map(|f| f["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>()).unwrap_or_default();
+    assert!(kinds(&made["grant"]["id"]).contains(&"secret_client".to_string()) && !kinds(&keyed["grant"]["id"]).contains(&"secret_client".to_string()), "{check}");
 
     // Rotated, it keeps its id: kept a minute, the old secret works beside the new one; rotated
     // again keeping nothing, the old ones stop at once, and so do the tokens they got.

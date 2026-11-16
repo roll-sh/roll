@@ -188,6 +188,9 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
   holds the client, the kind of credential (`secret`, `key`, or `oidc` with the CI token's issuer
   and subject, such as `repo:acme/web:ref:refs/heads/main`), whether it was read-only, and the
   address it came from. It never holds a secret or a token.
+- **In the checkup:** a client that signs in with a secret is `secret_client`, with the fix to
+  rotate to a key or to CI's own identity, as GitHub nudges secrets toward OIDC. Its sign-ins count
+  as use, so one that only holds its token for later steps isn't `unused`.
 - **Rotating one:** `POST /v1/access/clients/{id}/rotate {public_jwk?, keep_old_for_s?}` (or
   `roll token client rotate <id> [--public-key f] [--keep-old 1h]`) gives it a new key, or a new
   secret shown once, keeping its id and rules. The old credential stops at once, and so do the
