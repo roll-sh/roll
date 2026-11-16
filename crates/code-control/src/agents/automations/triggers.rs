@@ -100,7 +100,7 @@ fn code_event(kind: &str) -> EventInfo {
             &["change", "preview.state", "preview.url", "preview.environment.state", "preview.environment.visual_review.state"],
             json!({ "change": change_id, "preview": { "state": "running", "url": "https://chg-12.preview.roll.sh", "error": null, "created_at": 1_762_000_000_000_i64,
                 "environment": { "id": "pv_0123456789ab", "slug": "pr12-shop", "state": "ready", "dashboard_url": "https://roll.sh/dashboard/projects/prj_0123456789ab/previews?preview=pv_0123456789ab",
-                    "visual_review": { "state": "changed", "branch": "main", "percent": 8.0, "by": null, "required": false } } } }),
+                    "visual_review": { "state": "changed", "branch": "main", "percent": 8.0, "by": null, "required": false }, "issues": ["ENG-123"] } } }),
         ),
         "budget" => (
             &["budget.project", "budget.percent"],

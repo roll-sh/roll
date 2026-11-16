@@ -962,6 +962,14 @@ type Settings = {
   sleeping_usd_month, active_usd_hour, dashboard_url, github}` (docs/code/http-api.md). A change whose repo is in
   a project with previews on gets its preview from here instead of code-preview's single
   container.
+- **Linear issue** (Vercel's Linear integration): `PreviewEnvironment.issues` holds the Linear
+  issues the change names, `ENG-123` in its title (roll's Linear agent titles its changes so) or
+  at the start of its branch's last part (`ada/eng-123-fix-cart`, Linear's own branch names). The
+  gallery's Linear template "A change's preview on its Linear issue" (`linear-preview-on-issue`:
+  the `preview` trigger, ready and naming an issue, then `linear.attach`) links the preview there
+  with how its pages compare with main's; attaching the same link again updates it. A name that
+  isn't an issue of the workspace fails that run's step and nothing else.
+  `a_changes_linear_issues_from_its_title_and_branch`, `linear-templates.test.ts`.
 - **GitHub PR**, through roll code's GitHub outbox (durable, retried, sent on the repo's owner):
   - one comment, edited in place, with a table of services, URLs, status, data branches and cost;
   - a commit status `roll/preview` on the head. A preview removed before it was ready (the change
@@ -1479,6 +1487,7 @@ Ranked by what a person notices first. Done so far:
 - metrics: converges, screenshots and their failures as EMF lines (`PreviewConvergeFailures`,
   `PreviewScreenshotFailures`; docs/cloud/README.md);
 - visual reviews in automations (the `preview` trigger's field, a built-in template);
+- the preview on the change's Linear issue (`issues`, the Linear template);
 - an acceptance carried over a push that changes nothing visible;
 - speed against main ("300 ms slower than main") accessibility problems and errors new against it;
 - a look at the sheet and the change page from screenshots of a live preview (the screenshot's
@@ -1527,12 +1536,7 @@ Ranked by what a person notices first. Done so far:
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-3. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
-   to a work item from Linear gets its preview's link and visual review posted there, as an
-   automation template on the `preview` trigger.
-   It needs roll to remember which issue a change was made for (Linear's side only attaches it
-   today): the agents thread's `linear.attach` could record the link.
-4. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node
+3. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node
    they're done (`Reach` = roll apps' `Apps::reachable`; `scripts/preview-apps.sh`: the apps
    service screenshotted in its instance's network, main's baseline on roll apps, the feedback
    button on its environment). On a fleet an instance runs on its service's holder, and Fargate
@@ -1542,12 +1546,12 @@ Ranked by what a person notices first. Done so far:
    access link, in the browser container. Ranked lower: the cloud fleet runs instances on
    Fargate, where neither `reachable` nor rolld's Docker screenshot works (a browser task of its
    own, with the cloud thread).
-5. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+4. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-6. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+5. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.
