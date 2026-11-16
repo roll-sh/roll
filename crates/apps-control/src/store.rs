@@ -66,6 +66,12 @@ CREATE TABLE IF NOT EXISTS registry_auth (
     username TEXT NOT NULL,
     sealed TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS git_auth (
+    service TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    username TEXT NOT NULL,
+    sealed TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS env_access (
     service TEXT NOT NULL,
     env TEXT NOT NULL,
@@ -758,7 +764,7 @@ impl Store {
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1758,6 +1764,33 @@ impl Store {
     pub fn registry_login(&self, service: &str) -> Result<Option<(Registry, String)>> {
         let row: Option<(String, String, String)> = self.db.query_row("SELECT server, username, sealed FROM registry_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
         row.map(|(server, username, sealed)| Ok((Registry { server, username }, self.sealer.open(&format!("registry:{service}"), &sealed)?))).transpose()
+    }
+
+    // ── private Git repositories ──
+
+    pub fn set_git_login(&self, service: &str, host: &str, username: &str, password: &str) -> Result<()> {
+        let sealed = self.sealer.seal(&format!("git:{service}"), password);
+        self.db.execute(
+            "INSERT INTO git_auth (service, host, username, sealed) VALUES (?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET host = excluded.host, username = excluded.username, sealed = excluded.sealed",
+            params![service, host, username, sealed],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_git_login(&self, service: &str) -> Result<()> {
+        self.db.execute("DELETE FROM git_auth WHERE service = ?", [service])?;
+        Ok(())
+    }
+
+    /// The login, without the password.
+    pub fn git_login(&self, service: &str) -> Result<Option<GitLogin>> {
+        Ok(self.db.query_row("SELECT host, username FROM git_auth WHERE service = ?", [service], |r| Ok(GitLogin { host: r.get(0)?, username: r.get(1)? })).optional()?)
+    }
+
+    /// The login with its password opened, for a fetch.
+    pub fn git_login_secret(&self, service: &str) -> Result<Option<(GitLogin, String)>> {
+        let row: Option<(String, String, String)> = self.db.query_row("SELECT host, username, sealed FROM git_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+        row.map(|(host, username, sealed)| Ok((GitLogin { host, username }, self.sealer.open(&format!("git:{service}"), &sealed)?))).transpose()
     }
 
     // ── private environments ──
