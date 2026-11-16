@@ -800,7 +800,8 @@ land on the change.
   picture, and a selector roll refuses (`selector_ok`) is never sent. At most 10 notes a run,
   each picture at most 512 KiB, 50 kept a preview; a note already cropped isn't asked again, and
   one whose element isn't on the page has none. `GET …/notes/{note}/crop` serves it, the notes
-  list says `crop`, and the sheet shows it with the note.
+  list says `crop`, and the sheet shows it with the note, as does the change page's review
+  timeline in roll (beside the note's review).
   `a_notes_element_is_cropped_by_the_next_screenshot`.
 - The open notes reach the pull request (Vercel's comments): the preview's own comment, updated
   in place, lists them (newest first, at most 10), each with its page, who and what as plain
@@ -1385,6 +1386,7 @@ Ranked by what a person notices first. Done so far:
   no route out (roll's products and roll's proxy still reach them);
 - allowed outside hosts (`egress_hosts`) through a per-preview egress proxy, what it refused said
   in the activity;
+- a note's picture beside it on the change page in roll too (its review in the timeline);
 - only the pages a push can change are taken again (Chromatic's TurboSnap): another service that
   runs what it ran at the push before (its revision, what it's deployed with, the same data)
   keeps its pages, checks and all, without a browser run;
