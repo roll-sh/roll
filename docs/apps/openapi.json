@@ -157,6 +157,61 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/otlp/{id}/{env}/{token}/v1/traces": {
+      "post": {
+        "description": "Answers 200, an empty export response.",
+        "operationId": "postOtlpIdEnvTokenV1Traces",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "OTLP/HTTP `ExportTraceServiceRequest`: protobuf (`application/x-protobuf`) or JSON (`application/json`), gzip or not, at most 8 MiB"
+        },
+        "responses": {
+          "200": {
+            "description": "200, an empty export response"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create trace",
+        "tags": [
+          "otlp"
+        ],
+        "x-roll-action": "anonymous: the token in the path (`traces: true` sets `OTEL_EXPORTER_OTLP_ENDPOINT` to it); any other token 404"
+      }
+    },
     "/v1/apps/plan": {
       "post": {
         "description": "Answers `Plan`; with `roots: true` (a repo or a Git URL, no `root`): `{ roots: { root, provider, framework? }[] }`, the folders up to three levels down that build on their own (a start command, a framework or a Dockerfile: no library package, docs or dependencies), at most 20.",
@@ -3011,6 +3066,88 @@
           "services"
         ],
         "x-roll-action": "deploy*"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/traces": {
+      "get": {
+        "description": "Answers `{ minutes, traces: TraceSummary[], cut }`: recent traces (5–10,080 minutes, default 60), newest first, at most 100; `min_ms` keeps the slower ones.",
+        "operationId": "getServicesIdEnvironmentsEnvTraces",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ minutes, traces: TraceSummary[], cut }`: recent traces (5–10,080 minutes, default 60), newest first, at most 100; `min_ms` keeps the slower ones"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List traces",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/traces/{trace}": {
+      "get": {
+        "description": "Answers `{ trace, spans: Span[] }` in start order (the last week's); 404 when none.",
+        "operationId": "getServicesIdEnvironmentsEnvTracesTrace",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "trace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ trace, spans: Span[] }` in start order (the last week's); 404 when none"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get trace",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/tunnel": {

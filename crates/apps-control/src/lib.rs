@@ -40,12 +40,14 @@ pub mod metrics;
 pub mod model;
 pub mod net;
 pub mod notify;
+pub mod otlp;
 pub mod public;
 pub mod resp_cache;
 pub mod runtime;
 pub mod shell;
 pub mod spend;
 pub mod store;
+pub mod traces;
 pub mod traffic;
 
 use integrations::{DomainTls, Resolver, Resources, SecretSource, Sources};
@@ -132,6 +134,10 @@ pub struct AppsConfig {
     pub upload_max: usize,
     /// The dashboard (roll code's `web_url`): a private preview's 401 page links into it.
     pub web_url: Option<String>,
+    /// Where an instance sends its traces (OTLP/HTTP): this API's base as rolld reaches it
+    /// (`http://127.0.0.1:7070`, made reachable from instances by the runtime), or a public one on
+    /// a fleet. None: traces can't be turned on.
+    pub otlp_base: Option<String>,
     /// URLs a tenant chooses may be private addresses and plain HTTP: notification targets, and
     /// registries whose names resolve to one (local development and tests only:
     /// `ROLL_APPS_ALLOW_PRIVATE`).
@@ -165,6 +171,7 @@ impl AppsConfig {
             prices: Prices::default(),
             upload_max: 512 << 20,
             web_url: None,
+            otlp_base: None,
             allow_private: false,
             spend_every: Duration::from_secs(30),
             cron_retry_after: Duration::from_secs(30),
@@ -1225,6 +1232,10 @@ impl Apps {
             hook: r.hook_hash.is_some(),
             follow_tag: r.follow_tag,
             redeploy_on_secrets: r.redeploy_on_secrets,
+            traces: {
+                let (sid, e) = (r.service.clone(), r.name.clone());
+                self.db(move |s| s.trace_token(&sid, &e)).await.ok().flatten().is_some()
+            },
             feedback: r.feedback,
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             paused: r.paused,
@@ -1264,7 +1275,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused", "held", "hostname"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused", "held", "hostname", "traces"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1440,10 +1451,13 @@ impl Apps {
                 svc.for_env(&row).map_err(|e| Error::BadRequest(e.to_string().replace("no longer fit", "don't fit")))?;
             }
         }
-        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets"] {
+        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces"] {
             if !matches!(o.get(k), None | Some(Value::Null | Value::Bool(_))) {
                 return Err(Error::BadRequest(format!("{k} is a boolean")));
             }
+        }
+        if o.get("traces") == Some(&Value::Bool(true)) && self.cfg.otlp_base.is_none() {
+            return Err(Error::Conflict("traces aren't set up on this node (no OTLP address)".into()));
         }
         if o.get("feedback") == Some(&Value::Bool(true)) && !ephemeral.unwrap_or(existing.as_ref().is_some_and(|r| r.ephemeral)) {
             return Err(Error::BadRequest("feedback is for a preview environment (ephemeral)".into()));
@@ -1570,6 +1584,21 @@ impl Apps {
         if let Some(Value::Bool(on)) = o.get("redeploy_on_secrets") {
             let (sid, e, on) = (service.to_string(), env.to_string(), *on);
             self.db(move |s| s.set_redeploy_on_secrets(&sid, &e, on)).await?;
+        }
+        // Traces: a token of the environment's own (kept sealed: it goes into every deploy's
+        // variables), or none. Its variables reach instances at the next deploy.
+        match o.get("traces") {
+            Some(Value::Bool(true)) => {
+                let (sid, e) = (service.to_string(), env.to_string());
+                self.db(move |s| s.ensure_trace_token(&sid, &e)).await?;
+                self.changed(service);
+            }
+            Some(Value::Bool(false)) => {
+                let (sid, e) = (service.to_string(), env.to_string());
+                self.db(move |s| s.delete_trace_token(&sid, &e)).await?;
+                self.changed(service);
+            }
+            _ => {}
         }
         match o.get("follow_tag") {
             None | Some(Value::Null) => {}
@@ -1792,6 +1821,17 @@ impl Apps {
                 vars.insert("ROLL_GIT_BRANCH".into(), (b.clone(), "roll"));
             }
             vars.insert("ROLL_GIT_URL".into(), (url.clone(), "roll"));
+        }
+        // Traces turned on: the OpenTelemetry SDK's own variables, to this environment's address.
+        if let Some(base) = &self.cfg.otlp_base {
+            let (sid, e) = (svc.id.clone(), env.name.clone());
+            if let Some(token) = self.db(move |s| s.trace_token(&sid, &e)).await? {
+                let url = format!("{}/v1/apps/otlp/{}/{}/{token}", base.trim_end_matches('/'), svc.id, env.name);
+                vars.insert("OTEL_EXPORTER_OTLP_ENDPOINT".into(), (self.deps.runtime.reach(&url), "roll"));
+                vars.insert("OTEL_EXPORTER_OTLP_PROTOCOL".into(), ("http/protobuf".into(), "roll"));
+                vars.insert("OTEL_TRACES_EXPORTER".into(), ("otlp".into(), "roll"));
+                vars.insert("OTEL_SERVICE_NAME".into(), (svc.name.clone(), "roll"));
+            }
         }
         let sid = svc.id.clone();
         let links = self.db(move |s| s.links_minted(&sid)).await?;

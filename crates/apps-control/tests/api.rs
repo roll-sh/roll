@@ -221,6 +221,7 @@ async fn world_full(setup: impl FnOnce(&mut AppsConfig), objects: bool, deps_set
     cfg.live.probe_every = Duration::from_millis(2);
     cfg.live.drain = Duration::from_millis(50);
     cfg.supersede_every = Duration::from_millis(50);
+    cfg.otlp_base = Some("http://127.0.0.1:7070".into());
     cfg.allow_private = true;
     setup(&mut cfg);
     let mut deps = Deps {
@@ -307,6 +308,41 @@ async fn image_service(w: &World, name: &str, run: Value) -> (Value, Value) {
     let latest = svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string();
     let d = settled(w, id, "production", &latest).await;
     (svc, d)
+}
+
+/// Traces: turned on, an environment's instances get the OpenTelemetry SDK's variables pointing
+/// at roll; what they send (OTLP JSON here) reads back as recent traces and as one trace's
+/// spans; another token is a 404; turned off, the variables go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn traces_sent_by_instances_read_back() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"traces": true}))).await;
+    assert_eq!((st, &e["traces"]), (StatusCode::OK, &json!(true)), "{e}");
+    let (_, vars) = call(&w.api, "GET", &format!("{env}/variables/values"), None).await;
+    let endpoint = vars["OTEL_EXPORTER_OTLP_ENDPOINT"].as_str().unwrap().to_string();
+    assert!(endpoint.starts_with(&format!("http://127.0.0.1:7070/v1/apps/otlp/{id}/production/rlx_")), "{vars}");
+    assert_eq!((vars["OTEL_SERVICE_NAME"].as_str(), vars["OTEL_EXPORTER_OTLP_PROTOCOL"].as_str()), (Some("api"), Some("http/protobuf")));
+    let path = format!("{}/v1/traces", endpoint.trim_start_matches("http://127.0.0.1:7070"));
+    let (t, root, child) = ("a1".repeat(16), "b2".repeat(8), "c3".repeat(8));
+    let ms = 1_000_000u64;
+    let body = json!({ "resourceSpans": [{ "resource": { "attributes": [{ "key": "service.name", "value": { "stringValue": "api" } }] }, "scopeSpans": [{ "spans": [
+        { "traceId": t, "spanId": root, "name": "GET /items", "startTimeUnixNano": (1_700_000_000_000 * ms).to_string(), "endTimeUnixNano": (1_700_000_000_120 * ms).to_string() },
+        { "traceId": t, "spanId": child, "parentSpanId": root, "name": "SELECT items", "startTimeUnixNano": (1_700_000_000_010 * ms).to_string(), "endTimeUnixNano": (1_700_000_000_090 * ms).to_string(), "status": { "code": 2 } },
+    ] }] }] });
+    let (st, v) = call(&w.api, "POST", &path, Some(body.clone())).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, _) = call(&w.api, "POST", &format!("/v1/apps/otlp/{id}/production/rlx_nope/v1/traces"), Some(body)).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (_, list) = call(&w.api, "GET", &format!("{env}/traces?minutes=60"), None).await;
+    assert_eq!(list["traces"][0], json!({ "trace": t, "name": "GET /items", "service": "api", "start_ms": 1_700_000_000_000u64, "ms": 120, "spans": 2, "error": true }), "{list}");
+    let (_, one) = call(&w.api, "GET", &format!("{env}/traces/{t}"), None).await;
+    assert_eq!((one["spans"][0]["name"].as_str(), one["spans"][1]["parent"].as_str()), (Some("GET /items"), Some(root.as_str())), "{one}");
+    call(&w.api, "PUT", &env, Some(json!({"traces": false}))).await;
+    let (_, vars) = call(&w.api, "GET", &format!("{env}/variables/values"), None).await;
+    assert!(vars.get("OTEL_EXPORTER_OTLP_ENDPOINT").is_none(), "{vars}");
 }
 
 /// Visitors and page views from the access log: page loads only (not an API's calls), a visitor

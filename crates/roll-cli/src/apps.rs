@@ -705,6 +705,18 @@ pub enum AppsCmd {
         #[arg(long, default_value_t = 1440)]
         minutes: i64,
     },
+    /// Recent traces the app's OpenTelemetry SDK sent once its environment's Traces switch is on
+    /// (newest first; `--min-ms` keeps the slow ones); `--trace ID` prints one's spans.
+    Traces {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, default_value_t = 60)]
+        minutes: i64,
+        #[arg(long)]
+        min_ms: Option<u64>,
+        #[arg(long)]
+        trace: Option<String>,
+    },
     /// Replace the instances with fresh ones (the same deployment).
     Restart {
         #[command(flatten)]
@@ -3160,6 +3172,30 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             a
+        }
+        AppsCmd::Traces { target, minutes, min_ms, trace } => {
+            let svc = service(api, &target).await?;
+            let base = env_path(&svc, &target.env);
+            let v = match &trace {
+                Some(t) => api.get(&format!("{base}/traces/{}", enc(t))).await?,
+                None => api.get(&format!("{base}/traces?minutes={minutes}&min_ms={}", min_ms.unwrap_or(0))).await?,
+            };
+            if !json_out {
+                if trace.is_some() {
+                    let spans = v["spans"].as_array().cloned().unwrap_or_default();
+                    let start = spans.iter().filter_map(|s| s["start"].as_u64()).min().unwrap_or(0);
+                    for sp in &spans {
+                        let (a, b) = (sp["start"].as_u64().unwrap_or(0), sp["end"].as_u64().unwrap_or(0));
+                        println!("{:>8.1} ms  +{:>8.1} ms  {}{}", (b.saturating_sub(a)) as f64 / 1e6, (a.saturating_sub(start)) as f64 / 1e6, s(&sp["name"]), if sp["error"] == true { "  (error)" } else { "" });
+                    }
+                } else {
+                    for t in v["traces"].as_array().into_iter().flatten() {
+                        println!("{:>8} ms  {:>3} spans  {}  {}{}", t["ms"], t["spans"], s(&t["trace"]), s(&t["name"]), if t["error"] == true { "  (error)" } else { "" });
+                    }
+                }
+                return Ok(());
+            }
+            v
         }
         AppsCmd::Purge { target, paths } => {
             let svc = service(api, &target).await?;

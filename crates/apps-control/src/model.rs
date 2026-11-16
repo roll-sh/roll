@@ -1003,6 +1003,8 @@ pub struct Environment {
     pub follow_tag: bool,
     /// Redeploys (the same image, the new values) when the project's secrets change.
     pub redeploy_on_secrets: bool,
+    /// Its instances send OpenTelemetry traces to roll (`OTEL_*` set at each deploy).
+    pub traces: bool,
     /// A preview's pages carry roll previews' feedback button for visitors who came in through
     /// its access link.
     pub feedback: bool,

@@ -375,6 +375,8 @@ export interface EnvironmentPut {
   follow_tag?: boolean;
   /** Redeploy (same image, new values) when the project's secrets change. */
   redeploy_on_secrets?: boolean;
+  /** Its instances send OpenTelemetry traces to roll (`OTEL_*` from the next deploy). */
+  traces?: boolean;
   /** Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until false. */
   paused?: boolean;
   /** `false` resumes deploys held after a rollback. */
@@ -457,6 +459,8 @@ export interface Environment extends EnvironmentSummary {
   follow_tag?: boolean;
   /** Redeploys (same image, new values) when the project's secrets change, checked each minute. */
   redeploy_on_secrets?: boolean;
+  /** Its instances send OpenTelemetry traces to roll. */
+  traces?: boolean;
   /** A push deploys only once its commit's checks pass. */
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
@@ -609,6 +613,30 @@ export interface RouteStats {
   cut: boolean;
   /** The busiest, the most 5xx and the slowest (5 requests or more), each at most 50. */
   routes: RouteStat[];
+}
+
+/** A trace's root span, its duration and its spans' count. */
+export interface TraceSummary {
+  trace: string;
+  name: string;
+  service: string;
+  start_ms: number;
+  ms: number;
+  spans: number;
+  error: boolean;
+}
+
+/** A span: ids in hex, times in Unix nanoseconds. */
+export interface Span {
+  trace: string;
+  span: string;
+  parent?: string;
+  name: string;
+  service?: string;
+  start: number;
+  end: number;
+  error?: boolean;
+  attrs?: [string, string][];
 }
 
 /** Visitors and page views from the access log (no script, no cookie). */
@@ -931,6 +959,8 @@ export const appsApi = {
   /** Errors and latency by route over the last `minutes` (5–60). */
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),
+  traces: (id: string, e: string, minutes = 60) => call<{ minutes: number; traces: TraceSummary[]; cut: boolean }>("GET", `${env(id, e)}/traces${qs({ minutes })}`),
+  trace: (id: string, e: string, trace: string) => call<{ trace: string; spans: Span[] }>("GET", `${env(id, e)}/traces/${enc(trace)}`),
   usage: (id: string, e: string, days = 30) => call<Usage>("GET", `${env(id, e)}/usage${qs({ days })}`),
 
   runs: (id: string, e: string) => call<CronRun[]>("GET", `${env(id, e)}/runs`),
