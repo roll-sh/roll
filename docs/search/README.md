@@ -497,8 +497,11 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `PUT _cluster/settings` and the template, pipeline and stored script APIs do (templates among
    the snapshot's own). Left, low: a cluster whose `max_body_mb` is over the node's 100mb can
    write documents its restore from a bucket refuses.
-   Since: background jobs (transforms, ILM, SLM, watches, rollups) stop running as a revoked or
-   expired key or a deleted or disabled user, each failing as its job type fails (#106, open; a
-   difference from Elasticsearch, which keeps them running: compatibility.md), and the dashboard's
-   file import keeps exact numbers and ids and reads files with bounded memory (#103, open). The
-   next review follows item 1: per-user access changes who may reach what.
+   The second review's low finding on background jobs is fixed. Transforms, rollup jobs, watches,
+   ILM and SLM ran as the user or API key that set them up, and nothing checked that principal
+   again, so a revoked key's ILM delete policy outlived the key. Each run now checks the user or
+   key first (`internal::principal_problem`). A gone, invalidated or expired key, or a gone or
+   disabled user, fails the run without running anything. Elasticsearch keeps running these jobs
+   (checked on 9.5.5); compatibility.md has the difference and what each job type does. The
+   dashboard's file import keeps exact numbers and ids and reads files with bounded memory (#103).
+   The next review follows per-user access (#127): it changes who may reach what.
