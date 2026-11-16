@@ -604,7 +604,7 @@ impl Apps {
             let known = self.db(move |s| s.github_deployment(&did)).await.ok().flatten();
             let github = match known {
                 Some(g) => Some(g),
-                None if state == "pending" => match app.deployment(installation, &owner, &repo, &rev, &d.environment, d.environment == crate::model::PRODUCTION).await {
+                None if state == "pending" => match app.deployment(installation, &owner, &repo, &rev, &d.environment, d.environment == crate::model::PRODUCTION, env.ephemeral).await {
                     Ok(g) => {
                         let did = d.id.clone();
                         let _ = self.db(move |s| s.set_github_deployment(&did, g)).await;
@@ -1765,7 +1765,8 @@ impl Apps {
                         || self.db(move |s| s.environments(&sid)).await.is_ok_and(|envs| envs.iter().any(|e| e.run.get("min_instances").and_then(Value::as_u64).is_some_and(|n| n > 0)));
                     let always = svc.run.kind != RunType::Web || floor;
                     let sid = svc.id.clone();
-                    let pending = self.db(move |s| s.pending_deployments(&sid)).await.map(|p| !p.is_empty()).unwrap_or(false);
+                    // Pending deploys, or the GitHub App's events waiting to run there.
+                    let pending = self.db(move |s| Ok(!s.pending_deployments(&sid)?.is_empty() || s.has_github_events(&sid)?)).await.unwrap_or(false);
                     if !(always || pending) {
                         continue;
                     }

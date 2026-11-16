@@ -757,10 +757,12 @@ impl Apps {
     /// them on, signature checked): queued for each Git URL service connected to its repository
     /// through its installation, run on the service's owner as the service's own hook's would be
     /// (so a connected service needs no hook). Only what deciding reads is kept.
-    pub async fn github_event(self: &Arc<Self>, event: &str, body: &[u8]) {
+    pub fn github_event(&self, event: &str, body: &[u8]) {
+        // In the webhook's own call, before GitHub hears back: a crash after the answer loses
+        // nothing (the store is the queue).
         let Ok(p) = serde_json::from_slice::<Value>(body) else { return };
-        let (Some(repo), Some(installation)) = (p["repository"]["full_name"].as_str().map(str::to_string), p["installation"]["id"].as_u64()) else { return };
-        let Ok(services) = self.db(move |s| s.connected_to(installation, &repo)).await else { return };
+        let (Some(repo), Some(installation)) = (p["repository"]["full_name"].as_str(), p["installation"]["id"].as_u64()) else { return };
+        let Ok(services) = self.store.connected_to(installation, repo) else { return };
         if services.is_empty() {
             return;
         }
@@ -773,11 +775,10 @@ impl Apps {
                 "base": { "repo": { "id": pr["base"]["repo"]["id"] } },
             } }),
             _ => return,
-        };
-        let (event, kept) = (event.to_string(), kept.to_string());
+        }
+        .to_string();
         for svc in services {
-            let (e, k) = (event.clone(), kept.clone());
-            if let Err(err) = self.db(move |s| s.queue_github_event(&svc, &e, &k)).await {
+            if let Err(err) = self.store.queue_github_event(&svc, event, &kept) {
                 tracing::warn!(error = %err, "apps: a GitHub App event couldn't be queued");
             }
         }
@@ -785,8 +786,18 @@ impl Apps {
 
     /// Run the queued App events of the services this node owns (each claimed before it runs).
     pub(crate) async fn run_github_events(self: &Arc<Self>) {
-        let Ok(queued) = self.db(|s| s.github_events()).await else { return };
-        for (id, service, event, body) in queued.into_iter().filter(|(_, s, ..)| self.owns(s)) {
+        // An hour unrun (a service that's gone, an owner that never came): dropped.
+        let _ = self.db(|s| s.expire_github_events(code_sql::now_ms() - 3_600_000)).await;
+        // Each service this node owns, its own oldest first: one nobody owns yet (asleep; the
+        // keeper gives it an owner) never holds up the rest.
+        let Ok(waiting) = self.db(|s| s.github_event_services()).await else { return };
+        let mut queued = Vec::new();
+        for service in waiting.into_iter().filter(|s| self.owns(s)) {
+            if let Ok(rows) = self.db(move |s| s.github_events_of(&service)).await {
+                queued.extend(rows);
+            }
+        }
+        for (id, service, event, body) in queued {
             let claimed = id.clone();
             if !self.db(move |s| s.take_github_event(&claimed)).await.unwrap_or(false) {
                 continue;

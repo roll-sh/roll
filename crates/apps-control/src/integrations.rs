@@ -210,8 +210,10 @@ pub trait GitHubApp: Send + Sync {
     /// A username and short-lived token for fetching `owner/repo` (never stored).
     async fn git_login(&self, installation: u64, owner: &str, repo: &str) -> anyhow::Result<(String, String)>;
     async fn status(&self, installation: u64, owner: &str, repo: &str, sha: &str, status: &CommitStatus) -> anyhow::Result<()>;
-    /// A GitHub Deployment of `sha` to `environment` (`production` or not). Its id.
-    async fn deployment(&self, installation: u64, owner: &str, repo: &str, sha: &str, environment: &str, production: bool) -> anyhow::Result<u64>;
+    /// A GitHub Deployment of `sha` to `environment` (`production` or not; `transient`: a
+    /// preview's, which GitHub lets go). Its id.
+    #[allow(clippy::too_many_arguments)]
+    async fn deployment(&self, installation: u64, owner: &str, repo: &str, sha: &str, environment: &str, production: bool, transient: bool) -> anyhow::Result<u64>;
     /// That deployment's state (`in_progress`, `success`, `failure`), with where it answers.
     #[allow(clippy::too_many_arguments)]
     async fn deployment_status(&self, installation: u64, owner: &str, repo: &str, deployment: u64, state: &str, url: Option<&str>, description: &str) -> anyhow::Result<()>;

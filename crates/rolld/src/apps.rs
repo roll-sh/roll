@@ -152,8 +152,8 @@ impl apps_control::integrations::GitHubApp for CodeGitHub {
     async fn status(&self, installation: u64, owner: &str, repo: &str, sha: &str, s: &apps_control::integrations::CommitStatus) -> anyhow::Result<()> {
         Ok(self.0.github_commit_status(installation, owner, repo, sha, s.state, &s.context, &s.description, s.target_url.as_deref()).await?)
     }
-    async fn deployment(&self, installation: u64, owner: &str, repo: &str, sha: &str, environment: &str, production: bool) -> anyhow::Result<u64> {
-        Ok(self.0.github_deployment(installation, owner, repo, sha, environment, "roll apps", production).await?)
+    async fn deployment(&self, installation: u64, owner: &str, repo: &str, sha: &str, environment: &str, production: bool, transient: bool) -> anyhow::Result<u64> {
+        Ok(self.0.github_deployment(installation, owner, repo, sha, environment, "roll apps", production, transient).await?)
     }
     async fn deployment_status(&self, installation: u64, owner: &str, repo: &str, deployment: u64, state: &str, url: Option<&str>, description: &str) -> anyhow::Result<()> {
         Ok(self.0.github_deployment_status(installation, owner, repo, deployment, state, url, description).await?)
@@ -650,10 +650,7 @@ pub async fn start(
         // The App's verified pushes and pull requests reach the services connected to them
         // (queued here, run on each service's owner).
         let a = apps.clone();
-        c.on_github_event(Arc::new(move |event: &str, body: &[u8]| {
-            let (a, event, body) = (a.clone(), event.to_string(), body.to_vec());
-            tokio::spawn(async move { a.github_event(&event, &body).await });
-        }));
+        c.on_github_event(Arc::new(move |event: &str, body: &[u8]| a.github_event(event, body)));
     }
     apps.start();
     if on_docker && !apps_control::runtime::docker::available().await {

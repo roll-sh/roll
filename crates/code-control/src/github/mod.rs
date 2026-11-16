@@ -205,12 +205,12 @@ impl Code {
         Ok(c.id)
     }
 
-    /// A GitHub Deployment of `sha` to `environment` through `installation` (production or not,
-    /// never transient: a roll apps environment stays). Its id.
+    /// A GitHub Deployment of `sha` to `environment` through `installation` (production or not;
+    /// transient for a preview's, which GitHub lets go). Its id.
     #[allow(clippy::too_many_arguments)]
-    pub async fn github_deployment(&self, installation: u64, owner: &str, repo: &str, sha: &str, environment: &str, description: &str, production: bool) -> Result<u64> {
+    pub async fn github_deployment(&self, installation: u64, owner: &str, repo: &str, sha: &str, environment: &str, description: &str, production: bool, transient: bool) -> Result<u64> {
         let hub = self.github_hub().ok_or_else(|| Error::Invalid("roll's GitHub App isn't configured".into()))?;
-        hub.client.create_deployment_in(installation, owner, repo, sha, environment, description, false, production).await.map_err(|e| Error::Internal(e.into()))
+        hub.client.create_deployment_in(installation, owner, repo, sha, environment, description, transient, production).await.map_err(|e| Error::Internal(e.into()))
     }
 
     /// A GitHub Deployment's state (`in_progress`, `success`, `failure`), with where it answers.

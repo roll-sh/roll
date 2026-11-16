@@ -4027,7 +4027,7 @@ impl apps_control::integrations::GitHubApp for FakeGitHub {
         self.statuses.lock().push((installation, format!("{owner}/{repo}"), s.context.clone(), s.state.to_string()));
         Ok(())
     }
-    async fn deployment(&self, _installation: u64, _owner: &str, _repo: &str, _sha: &str, environment: &str, production: bool) -> anyhow::Result<u64> {
+    async fn deployment(&self, _installation: u64, _owner: &str, _repo: &str, _sha: &str, environment: &str, production: bool, _transient: bool) -> anyhow::Result<u64> {
         let mut d = self.deployments.lock();
         let id = d.len() as u64 + 1;
         d.push((id, environment.to_string(), production));
@@ -4096,9 +4096,9 @@ async fn a_git_url_service_connects_to_rolls_github_app() {
     // pushed head; another installation's, or another repository's, doesn't.
     let second = git.commit_saying(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v2")], "via the App");
     let push = |installation: u64, repo: &str| json!({ "ref": "refs/heads/main", "after": second, "head_commit": { "message": "via the App" }, "repository": { "full_name": repo }, "installation": { "id": installation } }).to_string();
-    w.apps.github_event("push", push(7, "acme/site").as_bytes()).await;
-    w.apps.github_event("push", push(42, "acme/elsewhere").as_bytes()).await;
-    w.apps.github_event("push", push(42, "ACME/site").as_bytes()).await;
+    w.apps.github_event("push", push(7, "acme/site").as_bytes());
+    w.apps.github_event("push", push(42, "acme/elsewhere").as_bytes());
+    w.apps.github_event("push", push(42, "ACME/site").as_bytes());
     let mut via = Value::Null;
     for _ in 0..200 {
         let (_, list) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys"), None).await;

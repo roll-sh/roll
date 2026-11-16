@@ -1846,9 +1846,24 @@ impl Store {
         Ok(())
     }
 
-    /// The queued App events, oldest first (at most 100).
-    pub fn github_events(&self) -> Result<Vec<(String, String, String, String)>> {
-        Ok(self.db.query("SELECT id, service, event, body FROM github_events ORDER BY created_at, id LIMIT 100", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?)
+    /// The services with App events queued.
+    pub fn github_event_services(&self) -> Result<Vec<String>> {
+        Ok(self.db.query("SELECT DISTINCT service FROM github_events LIMIT 1000", (), |r| r.get(0))?)
+    }
+
+    /// A service's queued App events, oldest first (at most 100).
+    pub fn github_events_of(&self, service: &str) -> Result<Vec<(String, String, String, String)>> {
+        Ok(self.db.query("SELECT id, service, event, body FROM github_events WHERE service = ? ORDER BY created_at, id LIMIT 100", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?)
+    }
+
+    /// Whether a service has App events waiting (the keeper gives it an owner to run them).
+    pub fn has_github_events(&self, service: &str) -> Result<bool> {
+        Ok(self.db.query_row("SELECT 1 FROM github_events WHERE service = ? LIMIT 1", [service], |_| Ok(())).optional()?.is_some())
+    }
+
+    pub fn expire_github_events(&self, before: i64) -> Result<()> {
+        self.db.execute("DELETE FROM github_events WHERE created_at < ?", [before])?;
+        Ok(())
     }
 
     /// Claim a queued App event: whether this call took it (the row goes in the same statement).
