@@ -1067,15 +1067,11 @@ impl Apps {
             Some(_) => return Err(Error::BadRequest("hostname is the environment's name on the roll domain".into())),
         };
         // Resume deploys held after a rollback (`false`); a hold is only ever a rollback's.
-        match o.get("held") {
-            None => {}
-            Some(Value::Bool(false)) => {
-                let (sid, e) = (service.to_string(), env.to_string());
-                self.db(move |s| s.set_hold(&sid, &e, None)).await?;
-                self.changed(service);
-            }
+        let resume = match o.get("held") {
+            None => false,
+            Some(Value::Bool(false)) => true,
             Some(_) => return Err(Error::BadRequest("held is false (deploys resume); a rollback holds them".into())),
-        }
+        };
         let paused = match o.get("paused") {
             None => None,
             Some(Value::Bool(b)) => Some(*b),
@@ -1244,13 +1240,25 @@ impl Apps {
         if o.get("follow_tag") == Some(&Value::Bool(true)) && !matches!(&svc.source, Source::Image { image } if !image.contains('@')) {
             return Err(Error::BadRequest("follow_tag is for an image service whose image has a tag (not a digest)".into()));
         }
-        self.ensure_environment(&svc, env, branch.as_ref().map(|b| b.as_deref()), ephemeral, &pname).await?;
-        if let Some(h) = hostname {
-            self.set_hostname(service, env, &h).await?;
+        // A name another environment has is refused before anything is made or changed.
+        if let Some(h) = hostname.clone() {
+            let (sid, e) = (service.to_string(), env.to_string());
+            if self.db(move |s| s.environment_by_slug(&h)).await?.is_some_and(|r| r.service != sid || r.name != e) {
+                return Err(Error::Conflict(format!("{} is taken", hostname.as_deref().unwrap_or(""))));
+            }
         }
+        self.ensure_environment(&svc, env, branch.as_ref().map(|b| b.as_deref()), ephemeral, &pname).await?;
         if let Some(vars) = copied.filter(|v| !v.is_empty()) {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.change_variables(&sid, &e, &vars, &[], &BTreeSet::new())).await?;
+        }
+        if resume {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_hold(&sid, &e, None)).await?;
+            self.changed(service);
+        }
+        if let Some(h) = hostname {
+            self.set_hostname(service, env, &h).await?;
         }
         // Its own size and scale: each field replaces the service's, null goes back to it.
         if let Some(patch) = o.get("run") {
@@ -1573,11 +1581,7 @@ impl Apps {
         let sid = svc.id.clone();
         let links = self.db(move |s| s.links_minted(&sid)).await?;
         for (kind, r, prefix, minted) in links {
-            // A link's own credentials as made, else the resource's variables now.
-            let read = match minted {
-                Some(m) => Ok(m.vars),
-                None => self.link_vars(svc, kind, &r, &env.name).await,
-            };
+            let read = self.link_values(svc, kind, &r, &env.name, minted).await;
             match read {
                 Ok(vs) => {
                     for (k, v) in vs {
@@ -1832,10 +1836,7 @@ impl Apps {
         let rows = self.db(move |s| s.links_minted(&sid)).await?;
         let mut out = Vec::new();
         for (kind, r, prefix, minted) in rows {
-            let names = match minted {
-                Some(m) => Ok(m.vars),
-                None => self.link_vars(&svc, kind, &r, "production").await,
-            };
+            let names = self.link_values(&svc, kind, &r, "production", minted).await;
             let vars = names.map(|v| v.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect()).unwrap_or_default();
             out.push(Link { kind, r#ref: r, prefix, vars });
         }
@@ -1880,10 +1881,7 @@ impl Apps {
             Some(m) => Some(m),
             None => self.deps.resources.link(kind, r#ref, service).await.map_err(|e| Error::BadRequest(e.to_string()))?,
         };
-        let vars = match &minted {
-            Some(m) => m.vars.clone(),
-            None => self.link_vars(&svc, kind, r#ref, "production").await.map_err(|e| Error::BadRequest(e.to_string()))?,
-        };
+        let vars = self.link_values(&svc, kind, r#ref, "production", minted.clone()).await.map_err(|e| Error::BadRequest(e.to_string()))?;
         let (sid, r, p, m) = (service.to_string(), r#ref.to_string(), prefix.clone(), minted.clone());
         let vars = match self.db(move |s| s.put_link(&sid, kind, &r, &p, m.as_ref())).await {
             Ok(true) => vars,
@@ -1909,6 +1907,21 @@ impl Apps {
 
     /// A link's variables now, as `service` gets them in `env`: another service's URLs (apps'
     /// own), else the resource's through [`crate::integrations::Resources`].
+    /// What a link sets now: the resource's variables read again (an endpoint, a login that was
+    /// rotated), with the credentials the link made for itself over them. A minted link whose
+    /// resource can't be read now keeps what it made.
+    async fn link_values(self: &Arc<Self>, service: &ServiceRow, kind: LinkKind, r#ref: &str, env: &str, minted: Option<integrations::Minted>) -> anyhow::Result<Vec<(String, String)>> {
+        let Some(m) = minted else { return self.link_vars(service, kind, r#ref, env).await };
+        let mut out = self.link_vars(service, kind, r#ref, env).await.unwrap_or_default();
+        for (k, v) in m.vars {
+            match out.iter_mut().find(|(have, _)| *have == k) {
+                Some(slot) => slot.1 = v,
+                None => out.push((k, v)),
+            }
+        }
+        Ok(out)
+    }
+
     async fn link_vars(self: &Arc<Self>, service: &ServiceRow, kind: LinkKind, r#ref: &str, env: &str) -> anyhow::Result<Vec<(String, String)>> {
         if kind != LinkKind::Service {
             return self.deps.resources.link_vars(kind, r#ref).await;

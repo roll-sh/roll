@@ -332,14 +332,16 @@ struct RollResources {
 impl RollResources {
     /// What a link to `kind` sets through roll secrets' provider for it: each live field read
     /// now, and (`label`: the credential's name in the product) each credential issued once,
-    /// its handles kept to revoke. None: a kind that has no provider.
-    async fn provided(&self, kind: LinkKind, r#ref: &str, label: Option<String>) -> anyhow::Result<Option<(Vec<(String, String)>, serde_json::Value)>> {
+    /// its handles kept to revoke, and which variables those are. None: a kind that has no
+    /// provider.
+    async fn provided(&self, kind: LinkKind, r#ref: &str, label: Option<String>) -> anyhow::Result<Option<Provided>> {
         use roll_secrets::links::{Link, Mode};
         let Some(p) = crate::secrets::link_provider(&self.products, kind.as_str()) else { return Ok(None) };
         let r = r#ref.to_string();
         blocking(move || {
             let fields = p.fields_for(&r);
             let mut vars = Vec::new();
+            let mut issued_vars = Vec::new();
             let mut issued: Vec<(String, roll_secrets::links::Issued)> = Vec::new();
             let mut made = || -> anyhow::Result<()> {
                 for (field, mode) in p.suggested_for(&r) {
@@ -355,6 +357,7 @@ impl RollResources {
                                 issued.push((cred.to_string(), p.issue(&r, cred, &link, label, None)?));
                             }
                             let parts = &issued.iter().find(|(c, _)| c == cred).expect("issued").1.parts;
+                            issued_vars.push(f.suggest.to_string());
                             parts.get(field).cloned().ok_or_else(|| anyhow::anyhow!("{} issued no {field}", kind.as_str()))?
                         }
                     };
@@ -371,10 +374,18 @@ impl RollResources {
                 }
                 return Err(e);
             }
-            Ok(Some((vars, handles)))
+            Ok(Some(Provided { vars, handles, issued: issued_vars }))
         })
         .await
     }
+}
+
+/// What a provider gave a link: every variable, the handles to revoke what it issued, and
+/// which variables those issued credentials are.
+struct Provided {
+    vars: Vec<(String, String)>,
+    handles: serde_json::Value,
+    issued: Vec<String>,
 }
 
 #[async_trait]
@@ -425,32 +436,41 @@ impl Resources for RollResources {
                 .await
             }
             LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql => match self.provided(kind, r#ref, None).await? {
-                Some((vars, _)) => Ok(vars),
+                Some(p) => Ok(p.vars),
                 None => anyhow::bail!("links to {} aren't wired on this node yet", kind.as_str()),
             },
             other => anyhow::bail!("links to {} aren't wired on this node yet", other.as_str()),
         }
     }
 
-    /// A bucket's, a stream's or a NoSQL database's link gets credentials of its own (a key
-    /// named for the service), made once, revoked when the link goes; a database's URL is read
-    /// fresh instead.
+    /// A bucket's or a stream's link gets credentials of its own (a key named for the
+    /// service), made once, revoked when the link goes; only those are kept with the link, and
+    /// what's read (an endpoint, NoSQL's login, a database's URL) is read again at each deploy.
     async fn link(&self, kind: LinkKind, r#ref: &str, service: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
         if !matches!(kind, LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql) {
             return Ok(None);
         }
-        Ok(self.provided(kind, r#ref, Some(format!("roll apps {service}"))).await?.map(|(vars, handles)| apps_control::integrations::Minted { vars, kept: handles.to_string() }))
+        let Some(p) = self.provided(kind, r#ref, Some(format!("roll apps {service}"))).await? else { return Ok(None) };
+        if p.issued.is_empty() {
+            return Ok(None);
+        }
+        let vars = p.vars.into_iter().filter(|(k, _)| p.issued.contains(k)).collect();
+        Ok(Some(apps_control::integrations::Minted { vars, kept: p.handles.to_string() }))
     }
 
     async fn unlink(&self, kind: LinkKind, r#ref: &str, kept: &str) -> anyhow::Result<()> {
         let Some(p) = crate::secrets::link_provider(&self.products, kind.as_str()) else { return Ok(()) };
         let handles: Vec<serde_json::Value> = serde_json::from_str(kept).unwrap_or_default();
         let r = r#ref.to_string();
+        // Each is tried: one that fails doesn't leave the rest alive.
         blocking(move || {
+            let mut first = None;
             for h in &handles {
-                p.revoke(&r, h)?;
+                if let Err(e) = p.revoke(&r, h) {
+                    first.get_or_insert(e);
+                }
             }
-            Ok(())
+            first.map_or(Ok(()), |e| Err(e.into()))
         })
         .await
     }
@@ -714,7 +734,10 @@ mod tests {
         products.set(router);
         let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products };
         let m = r.link(LinkKind::Bucket, "photos", "svc_a").await.unwrap().expect("credentials of its own");
-        let vars: std::collections::BTreeMap<String, String> = m.vars.iter().cloned().collect();
+        // Only what it issued is kept with the link: the rest is read at each deploy.
+        assert_eq!(m.vars.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]);
+        let mut vars: std::collections::BTreeMap<String, String> = r.link_vars(LinkKind::Bucket, "photos").await.unwrap().into_iter().collect();
+        vars.extend(m.vars.iter().cloned());
         assert_eq!(vars.get("S3_BUCKET").map(String::as_str), Some("photos"));
         assert_eq!(vars.get("AWS_ENDPOINT_URL").map(String::as_str), Some("http://s3.roll.test"));
         assert_eq!(vars.get("AWS_REGION").map(String::as_str), Some("eu-central-1"));

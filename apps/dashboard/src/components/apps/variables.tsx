@@ -18,9 +18,11 @@ const SOURCE_TONE: Record<VariableSource, string> = {
   reference: "border-line-2 text-muted",
 };
 
-/** Workspace kinds a service can link to, by their link kind. */
-/** What a service can link to today: rolld wires Postgres and Redis (buckets, streams and NoSQL come as roll secrets links, docs/apps/README.md "Next"). */
-export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", service: "service" };
+/**
+ * Workspace kinds a service can link to, by their link kind: databases give their URLs, a bucket
+ * and a stream credentials of their own, a NoSQL database its login, another service its URLs.
+ */
+export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", bucket: "bucket", stream: "stream", nosql: "nosql", service: "service" };
 
 /** `sealSet`: the seal was chosen by hand (a secret-looking name no longer decides it). */
 type Edit = { name: string; value: string; seal?: boolean; sealSet?: boolean };
