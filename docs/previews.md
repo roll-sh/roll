@@ -353,7 +353,9 @@ none of the service's environments follows, after checking the branch really is 
   that head (`POST …/approve {head}`, the sheet's "Approve and run"); the next push waits again,
   its services asleep meanwhile. One waiting holds a place under `max_previews` (anyone can open
   them). A close deletes the preview. A later push never makes a row trusted again.
-  `a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head`.
+  `a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head`; live in
+  `scripts/preview-apps.sh` with GitHub's `pull_request` events through roll apps' hook (#115:
+  `GitPushes::takes_pulls`).
 - roll code's discovery leaves them alone (they follow pushes, not roll code's branches), and
   keeps them while the service is on the canvas.
 
@@ -1576,11 +1578,7 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Pull-request previews of Git URL services, roll apps' side** (#115): previews' side is
-   built (`GitPull`, `POST …/approve`); rolld hands on `pull: None` until roll apps' hook reads
-   GitHub's `pull_request` and GitLab's merge request events into it (`GitPushes::takes_pulls`).
-   Then one live check in `scripts/preview-apps.sh` with a fork's event.
-2. **A Git URL service's preview reported to its repository** (Vercel's deployment status and
+1. **A Git URL service's preview reported to its repository** (Vercel's deployment status and
    comment on the pull request): a roll code repo's previews reach GitHub through roll code; a
    Git URL service's reach only roll. Agreed with the apps thread: a Git URL service on github.com
    connects through roll's GitHub App (`Service.github: { installation, repo }`, operator-only, an
@@ -1588,16 +1586,26 @@ Ranked by what a person notices first. Done so far:
    `roll/preview` with `Code::github_commit_status` and the pull request's comment with
    `Code::github_comment` (an upsert by id), the installation read from the service, never the
    event; the service's `git_login` is never used to write. Waits on apps' #120.
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+2. **Egress rules for previews hosted on roll apps** (agreed with the apps thread, #2 in its
+   `## Next`): `"roll"` and `egress_hosts` cover only services roll's runtime runs (#135 says so
+   in the Rules dialog). roll apps runs a `pv-` environment's instance on an `--internal` network
+   of its own with `hosts` through `egress.js` (#137's private-address check), and a per-task
+   security group with no outbound rule on Fargate; previews then sends
+   `PUT …/environments/pv-… {egress: {mode, hosts}}` and checks it live in
+   `scripts/preview-apps.sh` (1.1.1.1 unreachable, a listed host through the proxy).
+3. **A preview's search branch with a data-only key, as production's link has**
+   (`feature/roll-previews-search-keys`, stacked on #123; gated after #123 lands): code that
+   needs more than production's link fails in its preview too.
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-5. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node
+6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node
    they're done (`Reach` = roll apps' `Apps::reachable`; `scripts/preview-apps.sh`: the apps
    service screenshotted in its instance's network, main's baseline on roll apps, the feedback
    button on its environment). On a fleet an instance runs on its service's holder, and Fargate
@@ -1607,12 +1615,12 @@ Ranked by what a person notices first. Done so far:
    access link, in the browser container. Ranked lower: the cloud fleet runs instances on
    Fargate, where neither `reachable` nor rolld's Docker screenshot works (a browser task of its
    own, with the cloud thread).
-6. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+7. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

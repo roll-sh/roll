@@ -20,11 +20,14 @@ jq_() { python3 -c "import json,sys; d=json.load(sys.stdin); print(eval(sys.argv
 now_ms() { date +%s%3N; }
 SVC=""
 SVC2=""
+SVC3=""
+GITD=""
 PRJ=""
 cleanup() {
   [ -n "${PID:-}" ] && { kill "$PID" 2>/dev/null || true; for _ in $(seq 1 20); do kill -0 "$PID" 2>/dev/null || break; sleep 0.5; done; kill -9 "$PID" 2>/dev/null || true; }
   for c in $(docker ps -aq --filter "label=sh.roll.code.home=$H"); do docker rm -f "$c" >/dev/null; done
-  for one in $SVC $SVC2; do
+  [ -n "$GITD" ] && kill "$GITD" 2>/dev/null
+  for one in $SVC $SVC2 $SVC3; do
     s=${one#svc_}
     for c in $(docker ps -aq --filter "name=^roll-apps-$s-"); do docker rm -f "$c" >/dev/null; done
     for i in $(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^roll-apps-$s:" || true); do docker rmi -f "$i" >/dev/null || true; done
@@ -274,8 +277,8 @@ for _ in $(seq 1 240); do [ "$(git_preview)" = "[]" ] && break; sleep 0.5; done
 GIT_SAID="made and serving in $((T8 - T7)) ms; moved by the next push (the same preview); deleted with the branch"
 
 say "a pull request of the Git URL service: a same-repo one names its branch's preview; a fork's runs only once a writer approves its head; a close deletes it"
-pr_event() { # pr_event <action> <number> <head branch> <sha> <head repo id>: GitHub's pull_request event
-  curl -sS -X POST "http://$API$HOOK" -H 'content-type: application/json' -H 'x-github-event: pull_request' \
+pr_event() { # pr_event <action> <number> <head branch> <sha> <head repo id> [hook]: GitHub's pull_request event
+  curl -sS -X POST "http://$API${6:-$HOOK}" -H 'content-type: application/json' -H 'x-github-event: pull_request' \
     -d "$(python3 -c 'import json,sys; a,n,b,s,r=sys.argv[1:]; print(json.dumps({"action": a, "number": int(n), "pull_request": {"number": int(n), "title": "Cart badge (#" + n + ")", "head": {"ref": b, "sha": s, "repo": {"id": int(r)}}, "base": {"repo": {"id": 1}}}}))' "$1" "$2" "$3" "$4" "$5")"
 }
 pull_preview() { api GET "/v1/previews?project=$PRJ" | jq_ "([p for p in d if p['branch'] == '$1'] + [None])[0]"; }
@@ -294,30 +297,70 @@ for _ in $(seq 1 600); do
 done
 [ "$PR_SAME" = "Cart badge (#5)|5|True" ] || { echo "the same-repo pull request should name its branch's preview, trusted: $PR_SAME"; exit 1; }
 # A fork's: its head is the base repository's refs/pull/7/head (GitHub keeps it there). roll
-# code's git takes the ref, so the hook's check finds it.
-PR_FORK="skipped (the repository took no refs/pull/7/head)"
-if gitc push -q origin HEAD:refs/pull/7/head 2>/dev/null; then
-  SAID=$(pr_event opened 7 cart "$CART" 2)
-  case "$SAID" in *"handed to roll previews"*) ;; *) echo "a fork's pull request should be handed to roll previews: $SAID"; exit 1;; esac
-  FORK=""
-  for _ in $(seq 1 120); do
-    FORK=$(pull_preview pull/7 | python3 -c "import sys,ast; p=ast.literal_eval(sys.stdin.read()); print('' if not p else '%s|%s|%s' % (p['id'], p['state'], p['trusted']))")
-    case "$FORK" in *"|awaiting_approval|False") break;; esac
-    sleep 1
-  done
-  case "$FORK" in *"|awaiting_approval|False") ;; *) echo "a fork's pull request should wait for an approval, untrusted: $FORK"; exit 1;; esac
-  FORK_ID=${FORK%%|*}
-  STALE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$FORK_ID/approve" -H 'content-type: application/json' -d '{"head":"0000000000000000000000000000000000000000"}')
-  [ "$STALE" = 409 ] || { echo "approving another head should be refused: $STALE"; exit 1; }
-  api POST "/v1/previews/$FORK_ID/approve" "{\"head\":\"$CART\"}" >/dev/null
-  for _ in $(seq 1 600); do
-    [ "$(api GET "/v1/previews/$FORK_ID" | jq_ "d['state']")" = ready ] && break
-    sleep 1
-  done
-  [ "$(api GET "/v1/previews/$FORK_ID" | jq_ "d['state']")" = ready ] || { echo "the approved head should run: $(api GET "/v1/previews/$FORK_ID" | jq_ "{k: d.get(k) for k in ('state', 'error')}")"; exit 1; }
-  pr_event closed 7 cart "$CART" 2 >/dev/null
-  PR_FORK="waited for an approval (another head refused, 409), ran once approved, deleted when closed"
-fi
+# code's git takes no such ref, so the fork's repository is served by git's own smart HTTP
+# (git http-backend behind a few lines of Python), refs/pull/7/head written by a file push.
+GIT_ROOT="$H/gitroot"
+mkdir -p "$GIT_ROOT" && git init -q --bare "$GIT_ROOT/shop.git"
+gitc push -q "file://$GIT_ROOT/shop.git" HEAD:refs/heads/main HEAD:refs/pull/7/head
+GIT_PORT=${PORTS}417
+python3 - "$GIT_ROOT" "$GIT_PORT" >"$H/githttp.log" 2>&1 <<'PY' &
+import http.server, os, subprocess, sys
+root, port = sys.argv[1], int(sys.argv[2])
+class H(http.server.BaseHTTPRequestHandler):
+    def run(self):
+        path, _, qs = self.path.partition("?")
+        n = int(self.headers.get("content-length") or 0)
+        body = self.rfile.read(n) if n else b""
+        env = dict(os.environ, GIT_PROJECT_ROOT=root, GIT_HTTP_EXPORT_ALL="1", PATH_INFO=path, QUERY_STRING=qs, REQUEST_METHOD=self.command,
+                   CONTENT_TYPE=self.headers.get("content-type", ""), CONTENT_LENGTH=str(len(body)), GIT_PROTOCOL=self.headers.get("git-protocol", ""),
+                   HTTP_CONTENT_ENCODING=self.headers.get("content-encoding", ""))
+        out = subprocess.run(["git", "http-backend"], input=body, env=env, capture_output=True).stdout
+        head, _, rest = out.partition(b"\r\n\r\n")
+        status, hdrs = 200, []
+        for line in head.decode().split("\r\n"):
+            k, _, v = line.partition(":")
+            if k.lower() == "status":
+                status = int(v.split()[0])
+            elif k:
+                hdrs.append((k, v.strip()))
+        self.send_response(status)
+        for k, v in hdrs:
+            self.send_header(k, v)
+        self.send_header("content-length", str(len(rest)))
+        self.end_headers()
+        self.wfile.write(rest)
+    do_GET = do_POST = run
+    def log_message(self, *a):
+        pass
+http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+PY
+GITD=$!
+for _ in $(seq 1 40); do curl -sf -o /dev/null "http://127.0.0.1:$GIT_PORT/shop.git/info/refs?service=git-upload-pack" && break; sleep 0.25; done
+SVC3=$(api POST "/v1/apps/projects/$PRJ/services" "{\"name\":\"shopfront\",\"source\":{\"kind\":\"git\",\"url\":\"http://127.0.0.1:$GIT_PORT/shop.git\"},\"run\":{\"type\":\"web\",\"port\":8000}}" | jq_ "d['id']")
+HOOK3=$(api POST "/v1/apps/services/$SVC3/environments/production/hook" | jq_ "d['path']")
+SAID=$(pr_event opened 7 cart "$CART" 2 "$HOOK3")
+case "$SAID" in *"handed to roll previews"*) ;; *) echo "a fork's pull request should be handed to roll previews: $SAID"; exit 1;; esac
+FORK=""
+for _ in $(seq 1 120); do
+  FORK=$(api GET "/v1/previews?project=$PRJ" | jq_ "([p['id'] + '|' + p['state'] + '|' + str(p['trusted']) for p in d if p['branch'] == 'pull/7' and p['repo'] == 'git:$SVC3'] + [''])[0]")
+  case "$FORK" in *"|awaiting_approval|False") break;; esac
+  sleep 1
+done
+case "$FORK" in *"|awaiting_approval|False") ;; *) echo "a fork's pull request should wait for an approval, untrusted: $FORK"; exit 1;; esac
+FORK_ID=${FORK%%|*}
+[ "$(api GET "/v1/previews/$FORK_ID" | jq_ "any(s.get('deployed') for s in d['services'])")" = False ] || { echo "nothing of a fork's should be deployed before an approval: $(api GET "/v1/previews/$FORK_ID" | jq_ "[(s['name'], s.get('deployed')) for s in d['services']]")"; exit 1; }
+STALE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$FORK_ID/approve" -H 'content-type: application/json' -d '{"head":"0000000000000000000000000000000000000000"}')
+[ "$STALE" = 409 ] || { echo "approving another head should be refused: $STALE"; exit 1; }
+api POST "/v1/previews/$FORK_ID/approve" "{\"head\":\"$CART\"}" >/dev/null
+for _ in $(seq 1 600); do
+  [ "$(api GET "/v1/previews/$FORK_ID" | jq_ "d['state']")" = ready ] && break
+  sleep 1
+done
+[ "$(api GET "/v1/previews/$FORK_ID" | jq_ "d['state']")" = ready ] || { echo "the approved head should run: $(api GET "/v1/previews/$FORK_ID" | jq_ "{k: d.get(k) for k in ('state', 'error')}")"; exit 1; }
+pr_event closed 7 cart "$CART" 2 "$HOOK3" >/dev/null
+for _ in $(seq 1 120); do [ -z "$(api GET "/v1/previews?project=$PRJ" | jq_ "''.join(p['id'] for p in d if p['branch'] == 'pull/7')")" ] && break; sleep 0.5; done
+[ -z "$(api GET "/v1/previews?project=$PRJ" | jq_ "''.join(p['id'] for p in d if p['branch'] == 'pull/7')")" ] || { echo "closing the fork's pull request should delete its preview"; exit 1; }
+PR_FORK="waited for an approval with nothing deployed (another head refused, 409), ran once approved, deleted when closed"
 pr_event closed 5 cart "$CART" 1 >/dev/null
 for _ in $(seq 1 120); do [ "$(pull_preview cart)" = None ] && break; sleep 0.5; done
 [ "$(pull_preview cart)" = None ] || { echo "closing the pull request should delete its preview"; exit 1; }
