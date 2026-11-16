@@ -102,6 +102,8 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/metrics"), get(metrics))
         .route(&format!("{env}/routes"), get(routes))
         .route(&format!("{env}/analytics"), get(analytics))
+        .route(&format!("{env}/traces"), get(traces))
+        .route(&format!("{env}/traces/{{trace}}"), get(trace))
         .route(&format!("{env}/usage"), get(usage))
         .route(&format!("{env}/runs"), get(runs).post(run_now))
         .route(&format!("{env}/runs/{{run}}"), get(get_run))
@@ -954,6 +956,7 @@ struct HookQuery {
 fn hooks_router(apps: Arc<Apps>) -> Router {
     Router::new()
         .route("/v1/apps/hooks/{id}/{env}/{token}", post(run_hook))
+        .route("/v1/apps/otlp/{id}/{env}/{token}/v1/traces", post(otlp_traces).layer(axum::extract::DefaultBodyLimit::max(8 << 20)))
         .route_layer(axum::middleware::from_fn_with_state(apps.clone(), hook_on_owner))
         .with_state(apps)
 }
@@ -961,7 +964,7 @@ fn hooks_router(apps: Arc<Apps>) -> Router {
 /// The caller is anonymous: only an id shaped like a service's, of a service that exists, is
 /// routed to its owner (a made-up one would otherwise have this node take a lease for it).
 async fn hook_on_owner(State(apps): S, req: Request, next: Next) -> Response {
-    let raw = req.uri().path().strip_prefix("/v1/apps/hooks/").and_then(|r| r.split('/').next()).unwrap_or("");
+    let raw = req.uri().path().strip_prefix("/v1/apps/hooks/").or_else(|| req.uri().path().strip_prefix("/v1/apps/otlp/")).and_then(|r| r.split('/').next()).unwrap_or("");
     let id = percent_encoding::percent_decode_str(raw).decode_utf8_lossy().into_owned();
     let shaped = id.strip_prefix("svc_").is_some_and(|r| r.len() == 12 && r.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)));
     let sid = id.clone();
@@ -1094,6 +1097,29 @@ async fn metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(
 }
 
 /// `GET …/routes?minutes=`: errors and latency by route, from the access log (`crate::traffic`).
+#[derive(serde::Deserialize)]
+struct TraceQuery {
+    minutes: Option<i64>,
+    min_ms: Option<u64>,
+}
+
+async fn traces(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<TraceQuery>) -> R {
+    ok(apps.traces(&id, &env, q.minutes.unwrap_or(60), q.min_ms.unwrap_or(0)).await?)
+}
+
+async fn trace(State(apps): S, Path((id, env, trace)): Path<(String, String, String)>) -> R {
+    ok(apps.trace(&id, &env, &trace).await?)
+}
+
+/// OTLP/HTTP from an environment's instances (`traces: true`): the token in the path is the
+/// credential. Answered as OTLP expects: an empty export response.
+async fn otlp_traces(State(apps): S, Path((id, env, token)): Path<(String, String, String)>, headers: HeaderMap, b: Bytes) -> R {
+    let json = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("application/json"));
+    let gzip = headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).is_some_and(|c| c.eq_ignore_ascii_case("gzip"));
+    apps.ingest_traces(&id, &env, &token, json, gzip, &b).await?;
+    Ok(if json { (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], "{}").into_response() } else { (StatusCode::OK, [(header::CONTENT_TYPE, "application/x-protobuf")], Bytes::new()).into_response() })
+}
+
 async fn analytics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
     ok(apps.analytics(&id, &env, w.minutes.unwrap_or(1_440)).await?)
 }

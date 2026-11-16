@@ -66,6 +66,12 @@ CREATE TABLE IF NOT EXISTS registry_auth (
     username TEXT NOT NULL,
     sealed TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS trace_ingest (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    sealed TEXT NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS github_events (
     id TEXT PRIMARY KEY,
     service TEXT NOT NULL,
@@ -780,7 +786,7 @@ impl Store {
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -895,7 +901,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "domains", "runs", "jobs", "metrics", "deploy_keys", "env_access"] {
+            for t in ["variables", "domains", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             c.execute(
@@ -1807,6 +1813,26 @@ impl Store {
     pub fn git_login_secret(&self, service: &str) -> Result<Option<(GitLogin, String)>> {
         let row: Option<(String, String, String)> = self.db.query_row("SELECT host, username, sealed FROM git_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
         row.map(|(host, username, sealed)| Ok((GitLogin { host, username }, self.sealer.open(&format!("git:{service}"), &sealed)?))).transpose()
+    }
+
+    // ── traces ──
+
+    /// The environment's trace token, made once (`traces: true`).
+    pub fn ensure_trace_token(&self, service: &str, env: &str) -> Result<()> {
+        let sealed = self.sealer.seal(&format!("trace:{service}:{env}"), &format!("rlx_{}", random(32)));
+        self.db.execute("INSERT INTO trace_ingest (service, env, sealed) VALUES (?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed])?;
+        Ok(())
+    }
+
+    pub fn delete_trace_token(&self, service: &str, env: &str) -> Result<()> {
+        self.db.execute("DELETE FROM trace_ingest WHERE service = ? AND env = ?", params![service, env])?;
+        Ok(())
+    }
+
+    /// The environment's trace token, opened (none: traces are off).
+    pub fn trace_token(&self, service: &str, env: &str) -> Result<Option<String>> {
+        let sealed: Option<String> = self.db.query_row("SELECT sealed FROM trace_ingest WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?;
+        sealed.map(|s| self.sealer.open(&format!("trace:{service}:{env}"), &s)).transpose()
     }
 
     // ── roll's GitHub App on a Git URL service ──
