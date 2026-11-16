@@ -33,6 +33,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/connect", get(connect))
         .route("/v1/previews/{id}/notes", get(notes))
         .route("/v1/previews/{id}/notes/{note}/resolve", post(resolve_note))
+        .route("/v1/previews/{id}/notes/{note}/crop", get(note_crop))
         .route("/v1/previews/{id}/mail", get(mails))
         .route("/v1/previews/{id}/mail/{mail}", get(mail_raw))
         .route("/v1/previews/{id}/screenshot.png", get(screenshot_link))
@@ -302,6 +303,14 @@ async fn notes(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serd
     Ok(Json(serde_json::json!({ "notes": notes })))
 }
 
+/// A picture of a note's element, as a screenshot run cropped it from the page (404 until one has).
+async fn note_crop(AxState(e): S, Path((id, note)): Path<(String, String)>) -> crate::Result<Response> {
+    check_id(&id)?;
+    e.store.row(&id)?;
+    let png = e.store.note_crop(&id, &note)?.ok_or_else(|| Error::NotFound("no picture of that note's element yet".into()))?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, max-age=3600")], png).into_response())
+}
+
 /// Resolve a note left on the preview's page (its review's id): the page stops listing it.
 async fn resolve_note(AxState(e): S, Path((id, note)): Path<(String, String)>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<Json<serde_json::Value>> {
     check_id(&id)?;
@@ -440,15 +449,21 @@ async fn screenshot_link(AxState(e): S, Path(id): Path<String>, Query(q): Query<
     let (Some(exp), Some(sig)) = (q.get("exp").and_then(|x| x.parse::<i64>().ok()), q.get("sig").cloned()) else {
         return Ok((StatusCode::FORBIDDEN, "a signed link only").into_response());
     };
-    // `diff=base`: where it differs from the baseline's, under its own signature.
-    let variant = match q.get("diff").map(String::as_str) {
-        None => None,
-        Some("base") => Some("diff=base"),
-        Some(_) => return Ok((StatusCode::FORBIDDEN, "not a valid link").into_response()),
+    // `diff=base`: where it differs from the baseline's; `note=<id>`: a note's crop. Each under
+    // its own signature.
+    let note = q.get("note").cloned();
+    let variant: Option<String> = match (q.get("diff").map(String::as_str), note.as_deref()) {
+        (None, None) => None,
+        (Some("base"), None) => Some("diff=base".into()),
+        (None, Some(n)) if crate::store::note_id_ok(n) => Some(format!("note={n}")),
+        _ => return Ok((StatusCode::FORBIDDEN, "not a valid link").into_response()),
     };
     let shot = blocking(e, move |e| {
-        if !e.store.screenshot_link_ok(&id, exp, &sig, variant)? {
+        if !e.store.screenshot_link_ok(&id, exp, &sig, variant.as_deref())? {
             return Ok(None);
+        }
+        if let Some(n) = &note {
+            return e.store.note_crop(&id, n);
         }
         if variant.is_none() {
             return Ok(e.store.screenshot(&id)?.map(|(_, png)| png));

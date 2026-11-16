@@ -200,6 +200,20 @@ impl CodeSource {
                     .then(|| p.diff_link.clone())
                     .flatten()
                     .map(|(exp, sig)| format!("{}/v1/previews/{}/screenshot.png?diff=base&exp={exp}&sig={sig}", self.code.config.api_url.trim_end_matches('/'), p.id)),
+                notes: p
+                    .notes
+                    .iter()
+                    .map(|(n, link)| code_control::model::PreviewNoteLink {
+                        path: n.path.clone(),
+                        note: n.note.clone(),
+                        by: n.by.clone(),
+                        // A public preview's only, as the screenshot's.
+                        crop_url: (s.access == crate::settings::Access::Public)
+                            .then(|| link.clone())
+                            .flatten()
+                            .map(|(exp, sig)| format!("{}/v1/previews/{}/screenshot.png?note={}&exp={exp}&sig={sig}", self.code.config.api_url.trim_end_matches('/'), p.id, n.id)),
+                    })
+                    .collect(),
             }),
         }
     }

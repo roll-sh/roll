@@ -3,7 +3,8 @@ import { useEffect, useState } from "react";
 import { appsApi } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
-import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
+import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
+import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, replyBody, replyOf, type PreviewFeedback } from "./preview-feedback";
@@ -140,6 +141,8 @@ export function PreviewSheet({
                 A pull request from a fork: a writer approves its head (<span className="font-mono text-fg">approve-run</span>) before its services run.
               </p>
             )}
+            <VerdictStrip p={p} />
+            <span data-section="services" />
             <Label>Services</Label>
             {p.services.length ? (
               <div className="rounded-lg border border-line-2 bg-raised inset-shadow-highlight">
@@ -258,6 +261,7 @@ export function PreviewSheet({
             )}
             {p.schema_changes && p.schema_changes.length > 0 && (
               <>
+                <span data-section="schema" />
                 <Label>Schema changes</Label>
                 {p.schema_risks && p.schema_risks.length > 0 && (
                   <ul className="mb-1.5 space-y-0.5 rounded-lg border border-danger/40 bg-danger/10 px-2.5 py-1.5 text-[11.5px] text-danger">
@@ -278,6 +282,7 @@ export function PreviewSheet({
               </>
             )}
 
+            <span data-section="visual" />
             {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} change={p.visual_change} phone={p.phone_screenshot} base={p.base_change} pages={p.pages} /> : null}
             {p.visual_review && p.visual_review.state !== "unchanged" && (
               <div className="mt-1.5 flex items-center gap-2 text-[11.5px]">
@@ -334,10 +339,13 @@ export function PreviewSheet({
             )}
             {/* What else differs from main, after the picture and its review: words, API, endpoints. */}
             {p.base_change?.text && <TextAgainst diff={p.base_change.text} branch={p.base_change.branch} />}
+            <span data-section="api" />
             {p.base_change?.api && <TextAgainst diff={p.base_change.api} branch={p.base_change.branch} what="api" />}
             {p.base_change?.api_breaking && <ApiBreaking items={p.base_change.api_breaking} />}
             {p.base_change?.api_unread && <p className="mt-1.5 text-[11.5px] text-danger">Its OpenAPI document couldn't be read (gone, broken, or too big or slow): its API isn't compared with {p.base_change.branch}'s.</p>}
+            <span data-section="endpoints" />
             {p.base_change?.endpoints && <Endpoints items={p.base_change.endpoints} branch={p.base_change.branch} />}
+            <span data-section="checks" />
             {(p.page_health || p.page_links || p.page_a11y || p.page_speed) && <ChecksHeading p={p} />}
             {p.page_health && (p.page_health.errors > 0 || p.page_health.failed > 0) && (
               <div className="mt-1.5 space-y-0.5 text-[11.5px] text-danger">
@@ -925,6 +933,30 @@ export function Endpoints({ items, branch }: { items: EndpointTime[]; branch: st
   );
 }
 
+/** What the sheet leads with: what changed against main and what waits on someone, most serious
+ * first, each jumping to its section below (Vercel's deployment summary). Says nothing new when
+ * there's nothing, once the preview has been compared. */
+function VerdictStrip({ p }: { p: Preview }) {
+  const items = verdict(p);
+  const jump = (target: VerdictTarget) => {
+    const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    document.querySelector(`[data-section="${target}"]`)?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+  };
+  if (!items.length) {
+    return p.base_change ? <p className="mb-3 text-[11.5px] text-subtle">Nothing new against {p.base_change.branch}: its pages, API and checks are as they were.</p> : null;
+  }
+  const tone = { danger: "border-danger/40 text-danger", attention: "border-accent/40 text-accent", note: "border-line-2 text-muted" } as const;
+  return (
+    <div className="mb-3 flex flex-wrap gap-1.5" role="list" aria-label="What changed">
+      {items.map((v, i) => (
+        <button key={i} role="listitem" type="button" onClick={() => jump(v.target)} className={`h-6 rounded-md border px-2 text-[11.5px] hover:bg-white/[0.05] ${tone[v.tone]}`}>
+          {v.text}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** A roll apps service's build promoted to production (Vercel's promote): the preview
  * environment's live image deployed to production as is (no rebuild), with production's
  * variables (roll apps' `…/environments/production/promote`). It's the person's own call to roll
@@ -1026,6 +1058,24 @@ function NoteThread({ previewId, change, review, onDone }: { previewId: string; 
   const [reply, setReply] = useState("");
   const [state, setState] = useState<"idle" | "busy" | "done">("idle");
   const [error, setError] = useState<string | null>(null);
+  // What the note is about, as the next screenshot run cropped it from the page.
+  const [crop, setCrop] = useState<string | null>(null);
+  useEffect(() => {
+    let url: string | null = null;
+    let live = true;
+    noteCropUrl(previewId, review).then(
+      (u) => {
+        url = u;
+        if (live) setCrop(u);
+        else if (u) URL.revokeObjectURL(u);
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [previewId, review]);
   const load = () =>
     codeApi.reviews(change).then(
       (all) => {
@@ -1052,6 +1102,7 @@ function NoteThread({ previewId, change, review, onDone }: { previewId: string; 
     <div className="rounded-lg border border-line-2 bg-raised px-2.5 py-2 text-[11.5px] inset-shadow-highlight">
       <p className="text-muted">A note on the preview's page</p>
       {note && <p className="mt-1 break-words text-fg">{note}</p>}
+      {crop && <img src={crop} alt="The part of the page the note is about" className="mt-1.5 max-h-48 max-w-full rounded-md border border-line-2" />}
       {replies.map((r) => (
         <div key={r.id} className="mt-1.5 border-l border-line-2 pl-2">
           <p className="text-subtle">{r.by}</p>
