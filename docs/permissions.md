@@ -176,7 +176,9 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
   wherever the token is looked up; no scope (or `granted`) is the client's rules, and any other
   scope is `invalid_scope`: never wider. The answer has no refresh token: the client trades its credential again for the
   next one. Every failure to authenticate is the same `invalid_client`, so an unknown client and a
-  wrong credential look alike.
+  wrong credential look alike. A client gets at most 120 tokens a minute per node, counted once its
+  credential checks out, so junk naming it can't lock it out and a leaked credential can't mint
+  without end.
 - **The metadata** lists `client_secret_basic`, `client_secret_post` and `private_key_jwt`, the
   signature algorithms (`EdDSA`, `ES256`, `RS256`) and the grant type.
 - **In the audit log** (source `access`, on the client's grant): `create_client`, `rotate_client`,

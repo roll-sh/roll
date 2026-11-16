@@ -22,8 +22,8 @@ use std::sync::Arc;
 pub const GRANT: &str = "client_credentials";
 /// RFC 7523 §2.1: a JWT (here, CI's OIDC token) as an authorization grant.
 pub const JWT_GRANT: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
-/// A trusted client's sign-ins a minute, per node, counted once a token checks out (key fetches
-/// are roll-oidc's own: at most one per issuer each 30 s).
+/// A machine client's sign-ins a minute, per node, counted once its credential checks out (key
+/// fetches are roll-oidc's own: at most one per issuer each 30 s).
 const SIGN_INS_PER_MINUTE: u32 = 120;
 pub const JWT_BEARER: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 /// The signature algorithms a machine client's key may use.
@@ -104,6 +104,11 @@ pub async fn token(a: Arc<Access>, headers: &HeaderMap, f: &HashMap<String, Stri
     }
     let (grant_id, generation) = (client.grant_id.clone(), client.generation);
     tokio::task::spawn_blocking(move || {
+        // As a trusted client's: counted once the credential checks out, so a holder of a leaked
+        // secret can't mint tokens without end.
+        if !a.sign_ins.allow(&client_id, SIGN_INS_PER_MINUTE) {
+            return Err(Error::TooMany(format!("at most {SIGN_INS_PER_MINUTE} sign-ins a minute for one machine client")));
+        }
         let made = a.store.issue_client_access(&grant_id, &client_id, generation, read_only)?;
         audit_sign_in(&a, &made.0, &client_id, json!({ "by": client_id, "credential": credential, "read_only": read_only }), ip);
         Ok(made)
@@ -242,7 +247,7 @@ pub async fn federated(a: Arc<Access>, f: &HashMap<String, String>, ip: Option<s
             }
             // Counted only once a token checks out: anyone can send junk naming a client, and
             // that mustn't lock its CI out. This caps what a valid identity mints.
-            if !a.oidc_logins.allow(&client_id, SIGN_INS_PER_MINUTE) {
+            if !a.sign_ins.allow(&client_id, SIGN_INS_PER_MINUTE) {
                 return Err(Error::TooMany(format!("at most {SIGN_INS_PER_MINUTE} sign-ins a minute for one machine client")));
             }
             let made = a.store.issue_client_access(&client.grant_id, &client_id, client.generation, read_only)?;
