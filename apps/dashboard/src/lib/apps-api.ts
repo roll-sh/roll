@@ -27,7 +27,9 @@ export interface Overview {
 export type Source =
   | { kind: "repo"; repo: string; root?: string }
   | { kind: "image"; image: string }
-  | { kind: "upload" };
+  | { kind: "upload" }
+  /** A public Git repository by URL: each deploy fetches its branch's head. */
+  | { kind: "git"; url: string; root?: string };
 
 export interface Build {
   builder: "auto" | "dockerfile";
@@ -75,7 +77,7 @@ export interface Run {
   volume?: { mount: string; size_gb: number };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
-  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; log_match?: string; log_count?: number };
+  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number };
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
   rollout?: { steps: number[]; step_s: number; error_pct: number };
@@ -145,19 +147,22 @@ export interface ProjectImport {
   apps: Record<
     string,
     {
-      source: { kind: "repo"; repo: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
+      source: { kind: "repo"; repo: string; root: string | null } | { kind: "git"; url: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
       branch: string | null;
       run: Partial<Run>;
-      links: { kind: "postgres" | "redis"; name: string }[];
+      /** A database's kind, or `service`: another app of the file, by its name. */
+      links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "service"; name: string }[];
       /** What it's set to as it is. */
       variables: Record<string, string>;
       /** Made once, when the service is (`{ generate = "secret" }`): 32 random bytes in hex. */
       generate: string[];
       /** Asked of whoever makes it (`{ ask = "…" }`), its default offered. */
       ask: { name: string; ask: string; default: string | null }[];
+      /** Its other environments (`[apps.<name>.environments.<env>]`). */
+      environments?: Record<string, { branch: string | null; run: Partial<Record<EnvRunField, number>>; variables: Record<string, string> }>;
     }
   >;
-  databases: Record<string, { kind: "postgres" | "redis" }>;
+  databases: Record<string, { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" }>;
 }
 
 export interface NewService {
@@ -168,6 +173,8 @@ export interface NewService {
   run?: Partial<Run>;
   /** Production's variables, set before its first deploy. */
   variables?: Record<string, string>;
+  /** Which of those are sealed from the start: never shown again. */
+  sealed?: string[];
   /** An image source's private registry login, before its first pull. */
   registry?: { username: string; password: string; server?: string };
   /** Resources to link before the first deploy (their variables are in it). */
@@ -350,6 +357,8 @@ export function parseAllowList(text: string): IpRule[] {
 
 export interface EnvironmentPut {
   branch?: string | null;
+  /** Its name on the roll domain (`<hostname>.<domain>`): the old one stops answering. */
+  hostname?: string;
   ephemeral?: boolean;
   /** Private: visitors need `?roll_access=<token>` once; null makes it public again. */
   access?: { token: string; bypass_sha256?: string } | null;
@@ -426,6 +435,8 @@ export interface Environment extends EnvironmentSummary {
   next_run_at: number | null;
   /** How full its volume was when last measured (hourly), when it has one. */
   volume_used?: { bytes: number; at: number };
+  /** Its schedules as they stand: when each is next due, and the job it last started. */
+  schedules?: { name: string; next_run_at: number | null; last: { job: string; status: Job["status"]; started_at: number } | null }[];
   /** Its instances keep crashing: three or more in the last ten minutes. */
   crash_loop: { crashes: number; last_at: number; last_error: string } | null;
   /** A gradual rollout under way: the new deployment and the percent of requests it takes. */
@@ -498,7 +509,13 @@ export interface Plan {
   uses?: ("postgres" | "redis")[];
 }
 
-export type PlanRequest = { repo: string; revision?: string; root?: string } | { files: Record<string, string> };
+export interface RootCandidate {
+  root: string;
+  provider: string;
+  framework?: string;
+}
+
+export type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string; branch?: string; root?: string } | { files: Record<string, string> };
 
 export interface Deployment {
   id: string;
@@ -520,6 +537,8 @@ export interface Deployment {
   ready_ms: number | null;
   /** What the app or the build printed when it failed (the step, its last line): only shown here, never sent in a commit status or a notification. */
   error_detail?: string;
+  /** How to fix a failure roll knows (a private image's login, more memory, a lockfile): the setting and its command. */
+  fix?: string;
   /** Pruned (older than its environment keeps): history only, its image gone, so it can't be rolled back to. */
   pruned_at?: number;
   /** When each step began (`build`, `pre_deploy`, `rollout`, then `live` or `failed`): on a single deployment's GET. */
@@ -587,6 +606,8 @@ export interface RouteStats {
 }
 
 export interface Metrics {
+  /** Minutes a point stands for: 1, or 60 past a week. */
+  step?: number;
   minutes: number[];
   requests: number[];
   errors: number[];
@@ -600,6 +621,8 @@ export interface Metrics {
   cold_start_ms: number[];
   /** Bytes answered a minute (what egress is billed by). */
   egress_bytes: number[];
+  /** Requests a minute that found every instance busy at `max_instances` (saturation). */
+  over_capacity: number[];
 }
 
 export interface Usage {
@@ -637,6 +660,7 @@ export type NotifyEvent =
   | "alert.memory"
   | "alert.errors"
   | "alert.latency"
+  | "alert.capacity"
   | "alert.log"
   | "cron.failed"
   | "job.failed"
@@ -764,10 +788,12 @@ export interface LogQuery {
 export const appsApi = {
   overview: () => call<Overview>("GET", "/v1/apps"),
   plan: (req: PlanRequest) => call<Plan>("POST", "/v1/apps/plan", req),
+  /** The folders of a repo's or a Git URL's tree that build on their own (a monorepo's apps). */
+  roots: (req: { repo: string } | { git: string; branch?: string }) => call<{ roots: RootCandidate[] }>("POST", "/v1/apps/plan", { ...req, roots: true }),
   /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
   exportProject: (project: string, databases: Record<string, string>) => call<{ roll_toml: string; notes: string[] }>("POST", `/v1/apps/projects/${enc(project)}/export`, { databases }),
   /** A roll.toml or Compose file read as a project (nothing made). */
-  importProject: (file: { roll_toml: string } | { compose: string } | { repo: string; revision?: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
+  importProject: (file: { roll_toml: string } | { compose: string } | { repo: string; revision?: string } | { git: string; branch?: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
 
   services: (project?: string) => call<Service[]>("GET", `/v1/apps/services${qs({ project })}`),
   /** Makes the service and places its card; a repo or an image source deploys to production at once. */
@@ -1122,6 +1148,8 @@ export function sourceLabel(s: Source) {
       return s.image;
     case "upload":
       return "roll up";
+    case "git":
+      return s.root ? `${s.url} · ${s.root}` : s.url;
   }
 }
 

@@ -173,6 +173,25 @@ async fn import(State(apps): S, b: Bytes) -> R {
             Some(String::from_utf8(bytes).map_err(|_| Error::BadRequest(format!("{repo}'s roll.toml isn't UTF-8")))?)
         }
     };
+    // A public Git repository's (a "deploy to roll" link for GitHub, GitLab…): its branch's head,
+    // or the default one's; the file's folders become services built from the repository.
+    let from_git = match text("git") {
+        None => None,
+        Some(url) => {
+            if from_repo.is_some() {
+                return Err(Error::BadRequest("give one of repo or git".into()));
+            }
+            crate::git_source::check_url(url, apps.cfg.allow_private).map_err(Error::BadRequest)?;
+            let client = crate::git_source::client(apps.cfg.allow_private);
+            let (sha, branch) = crate::git_source::head(&client, url, text("branch")).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
+            let bytes = crate::git_source::read_root_file(&client, url, &sha, "roll.toml").await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
+            let bytes = bytes.ok_or_else(|| Error::BadRequest(format!("{url} has no roll.toml at its root to deploy from")))?;
+            Some((url.to_string(), branch, String::from_utf8(bytes).map_err(|_| Error::BadRequest(format!("{url}'s roll.toml isn't UTF-8")))?))
+        }
+    };
+    let (git_url, git_branch) = from_git.as_ref().map(|(u, b, _)| (Some(u.clone()), Some(b.clone()))).unwrap_or_default();
+    let repo = text("repo").map(str::to_string);
+    let from_repo = from_repo.or(from_git.map(|(_, _, t)| t));
     let (toml_text, notes) = match (from_repo, text("roll_toml"), text("compose")) {
         (Some(t), None, None) => (t, Vec::new()),
         (None, Some(t), None) => (t.to_string(), Vec::new()),
@@ -181,7 +200,7 @@ async fn import(State(apps): S, b: Bytes) -> R {
             let c = c.to_string();
             tokio::task::spawn_blocking(move || compose_to_toml(&c)).await.map_err(|e| Error::Internal(e.to_string()))?.map_err(|e| Error::BadRequest(e.to_string()))?
         }
-        _ => return Err(Error::BadRequest("give one of roll_toml, compose or repo".into())),
+        _ => return Err(Error::BadRequest("give one of roll_toml, compose, repo or git".into())),
     };
     let f = parse_project(&toml_text).map_err(|e| Error::BadRequest(e.to_string()))?;
     let apps: serde_json::Map<String, Value> = f
@@ -190,10 +209,17 @@ async fn import(State(apps): S, b: Bytes) -> R {
         .map(|(n, a)| {
             let source = match entry_kind(a) {
                 "repo" => json!({ "kind": "repo", "repo": a.repo, "root": a.root }),
+                "git" => json!({ "kind": "git", "url": a.git, "root": a.root }),
                 "image" => json!({ "kind": "image", "image": a.image }),
+                // A folder of the repository the file came from: built from it, at that folder
+                // (an upload would need `roll up`, and a link has no checkout to run it in).
+                _ if repo.is_some() => json!({ "kind": "repo", "repo": repo, "root": a.root.as_deref().filter(|r| *r != ".") }),
+                _ if git_url.is_some() => json!({ "kind": "git", "url": git_url, "root": a.root.as_deref().filter(|r| *r != ".") }),
                 _ => json!({ "kind": "upload", "root": a.root.as_deref().unwrap_or(".") }),
             };
-            let links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "name": l })).collect();
+            // A folder of a Git URL follows the branch the file was read from.
+            let branch = a.branch.clone().or_else(|| (entry_kind(a) == "upload").then(|| git_branch.clone()).flatten());
+            let links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": apps_build::project::link_kind(&f, l), "name": l })).collect();
             // What to set as it is, what to make (a secret, once), and what to ask whoever makes it.
             let mut fixed = serde_json::Map::new();
             let (mut generate, mut ask) = (Vec::new(), Vec::new());
@@ -206,7 +232,13 @@ async fn import(State(apps): S, b: Bytes) -> R {
                     VarSpec::Ask(q) => ask.push(json!({ "name": k, "ask": q.ask, "default": q.default })),
                 }
             }
-            (n.clone(), json!({ "source": source, "branch": a.branch, "run": entry_run(a), "links": links, "variables": fixed, "generate": generate, "ask": ask }))
+            // Its other environments: a branch, its own run settings, variables as they are.
+            let environments: serde_json::Map<String, Value> = a
+                .environments
+                .iter()
+                .map(|(e, env)| (e.clone(), json!({ "branch": env.branch, "run": env.run.as_ref().map(|t| serde_json::to_value(t).unwrap_or_default()).unwrap_or_else(|| json!({})), "variables": env.variables })))
+                .collect();
+            (n.clone(), json!({ "environments": environments, "source": source, "branch": branch, "run": entry_run(a), "links": links, "variables": fixed, "generate": generate, "ask": ask }))
         })
         .collect();
     ok(json!({ "roll_toml": toml_text, "notes": notes, "apps": apps, "databases": f.databases }))
@@ -226,17 +258,45 @@ async fn plan(State(apps): S, b: Bytes) -> R {
         let p = apps_build::plan(&apps_build::MapTree(map), &o).map_err(|e| Error::BadRequest(e.to_string()))?;
         return ok(p);
     }
-    let repo = v.get("repo").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("repo or files is required".into()))?.to_string();
-    let sources = apps.deps.sources.clone().ok_or_else(|| Error::BadRequest("roll code isn't on this node".into()))?;
-    let rev = match v.get("revision").and_then(Value::as_str) {
-        Some(r) => sources.revision(&repo, r).await,
-        None => sources.resolve(&repo, None).await,
+    // A roll code repo at a revision, or a public Git URL at its branch's head (fetched as its
+    // deploy would fetch it), before anything is made.
+    enum From {
+        Repo(Arc<dyn crate::integrations::Sources>, String, String),
+        Git(code_git::Client, String, String),
     }
-    .map_err(|e| Error::BadRequest(format!("{repo}: {e}")))?;
+    let from = match (v.get("repo").and_then(Value::as_str), v.get("git").and_then(Value::as_str)) {
+        (Some(repo), None) => {
+            let sources = apps.deps.sources.clone().ok_or_else(|| Error::BadRequest("roll code isn't on this node".into()))?;
+            let rev = match v.get("revision").and_then(Value::as_str) {
+                Some(r) => sources.revision(repo, r).await,
+                None => sources.resolve(repo, None).await,
+            }
+            .map_err(|e| Error::BadRequest(format!("{repo}: {e}")))?;
+            From::Repo(sources, repo.to_string(), rev.sha)
+        }
+        (None, Some(url)) => {
+            crate::git_source::check_url(url, apps.cfg.allow_private).map_err(Error::BadRequest)?;
+            let client = crate::git_source::client(apps.cfg.allow_private);
+            let (sha, _) = crate::git_source::head(&client, url, v.get("branch").and_then(Value::as_str)).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
+            From::Git(client, url.to_string(), sha)
+        }
+        _ => return Err(Error::BadRequest("one of repo, git or files is required".into())),
+    };
     let dir = apps.cfg.home.join("apps").join("plans").join(crate::model::random(12));
     tokio::fs::create_dir_all(&dir).await.map_err(anyhow::Error::from)?;
     let result = async {
-        sources.materialize(&repo, &rev.sha, &dir).await?;
+        match &from {
+            From::Repo(sources, repo, sha) => sources.materialize(repo, sha, &dir).await?,
+            From::Git(client, url, sha) => {
+                crate::git_source::materialize(client, url, sha, &dir).await?;
+            }
+        }
+        // `roots`: the tree's folders that build on their own, to choose one from (a monorepo).
+        if v.get("roots") == Some(&Value::Bool(true)) {
+            let d = dir.clone();
+            let roots = tokio::task::spawn_blocking(move || apps_build::candidates(&apps_build::DirTree::new(d))).await.map_err(|e| Error::Internal(e.to_string()))?;
+            return Ok(json!({ "roots": roots }));
+        }
         let root = match v.get("root").and_then(Value::as_str) {
             Some(r) => crate::model::in_tree(&dir, "root", r, true)?,
             None => dir.clone(),
@@ -269,17 +329,13 @@ async fn plan(State(apps): S, b: Bytes) -> R {
         let p = tokio::task::spawn_blocking(move || apps_build::plan(&apps_build::DirTree::new(context), &o)).await.map_err(|e| Error::Internal(e.to_string()))?;
         p.map(|mut p| {
             p.notes.splice(0..0, said);
-            p
+            serde_json::to_value(p).expect("JSON")
         })
         .map_err(|e| Error::BadRequest(e.to_string()))
     }
     .await;
     let _ = tokio::fs::remove_dir_all(&dir).await;
-    let p: apps_build::Plan = match result {
-        Ok(p) => p,
-        Err(e) => return Err(e),
-    };
-    ok(p)
+    ok(result?)
 }
 
 #[derive(Deserialize)]
@@ -550,6 +606,10 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
         let revision = headers.get("x-roll-revision").and_then(|v| v.to_str().ok()).filter(|r| (7..=64).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_hexdigit()));
         let no_cache = headers.get("x-roll-no-cache").is_some_and(|v| v == "1");
         apps.deploy(&id, &env, json!({ "message": message, "revision": revision, "no_cache": no_cache }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
+    } else if ct.starts_with("application/x-docker-image") {
+        // An image built elsewhere (`docker save`'s archive, `roll apps deploy --image-file`).
+        let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();
+        apps.deploy(&id, &env, json!({ "message": message, "image_upload": true }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
     } else {
         apps.deploy(&id, &env, body(&b)?, By { trigger: Trigger::Manual, actor }, None, key).await?
     };
@@ -870,8 +930,13 @@ async fn hook_on_owner(State(apps): S, req: Request, next: Next) -> Response {
     cluster.dispatch(&lease_key(&id), req, |req, _guard| next.run(req)).await
 }
 
-async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, String)>, Query(q): Query<HookQuery>, ext: Extensions) -> R {
-    let d = apps.run_hook(&id, &env, &token, q.image).await?;
+async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, String)>, Query(q): Query<HookQuery>, ext: Extensions, b: Bytes) -> R {
+    // A JSON body is a repository's push webhook (anything else: a plain deploy).
+    let payload = serde_json::from_slice::<Value>(&b).ok().filter(Value::is_object);
+    let d = match apps.run_hook(&id, &env, &token, q.image, payload).await? {
+        crate::hooks::HookOutcome::Deployed(d) => *d,
+        crate::hooks::HookOutcome::Ignored(why) => return ok(json!({ "ignored": why })),
+    };
     // The gate never saw it: who called is in the service's activity.
     let address = ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_string());
     apps.audit("hook.deployed", &id, &env, Some("deploy hook".into()), json!({ "deployment": d.id, "address": address })).await;
