@@ -2774,46 +2774,48 @@ Doppler, Infisical, Vault and 1Password (clients, IaC, CI, Kubernetes, BYOK). Th
 is Vault's signature: dynamic credentials for clouds and databases roll doesn't run. CI stays
 under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
-Ranked (twenty-first review, 2026-11-16 afternoon, against Doppler, Infisical, Vault, AWS Secrets
+Ranked (twenty-second review, 2026-11-16 evening, against Doppler, Infisical, Vault, AWS Secrets
 Manager, 1Password and Akeyless, and the other threads' branches): first what can be built now,
 then what waits on a merge or another thread.
 
-On main: #20, #62 (one squash of #31–#61), #63 (the CSI provider), #65 (conditional reads and
-client caches) and #85 (roll-access's tokens; #64 rebuilt). In pull requests to main, each green:
-read quotas counted across the fleet (#81), metrics (#82), scheduled sealed backups (#83), watches
-that long-poll the digest with one counter reader per node and project, and `wait_digest` for roll
-apps (#79), the operator pushed within seconds (#95, on #79), rotation windows (#86), encryption
-keys by name inside roll secrets (#87), password policies per key (#88), SaaS rotators: SendGrid,
-Twilio, Okta, Entra, Auth0 (#92), search keys that must say `access: data` (#97), dynamic
-Kubernetes service-account tokens (#102), a Java client (#105); and the stack's follow-ups (#66–#77,
-#74).
+On main: #20, #62, #63 (the CSI provider), #65 (conditional reads and client caches), #85
+(roll-access's tokens), #74 (live links' digests) and #66 (Terraform without values in state).
+In pull requests to main, each green: #67 (transit in the Go and Python clients, next to land),
+#68 (AWS through roll's issuer; roles and users edited in place), #69–#73, #75–#77, #79 with #95,
+#81 (read quotas across the fleet), #82 (metrics), #83 (scheduled backups), #86 (rotation
+windows), #87 (encryption keys by name), #88 (password policies), #92 (SaaS rotators, the
+credential checked at registration), #97 (search keys say `access: data`), #102 (Kubernetes
+service-account tokens), #105 (Java), #110 (.NET with `IConfiguration`), #113 (an AWS Lambda
+extension that logs in with the function's role) and #117 (an Ansible collection).
 
-1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing").
-2. **AWS roles and users edited in place** (a new role ARN or trust; on #68's branch, where trust
-   lives), and Terraform updating registrations in place (#72, after #75).
+1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
+   four threads share it, so each gate runs before the lock is taken and only main's newest change
+   is merged under it.
+2. **Finish what's in review:** screenshots for #102's registration form and Link dialog; a test of
+   #102's own-CA client against a real TLS server (a throwaway container); the client methods the
+   Ansible collection borrows (`_call`, `_cached`) made public in all three clients.
 3. **Kubernetes generated roles** (`role_rules`: a service account, Role and RoleBinding per lease,
    deleted on revoke, as Vault's), on #102.
 4. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
-   backup schedules); the MCP tools with roll MCP once their routes are on main.
-5. **A .NET client, the Java client's Spring `PropertySource`, a Pulumi provider, a Lambda extension
-   and an Ansible lookup** (`IConfiguration`; AWS's Parameters and Secrets extension; Vault's and
-   1Password's Ansible).
+   backup schedules, rotation windows): the resources once their routes are on main, the tools
+   with roll MCP.
+5. **The Java client's Spring `PropertySource` and a Pulumi provider** (bridged from the Terraform
+   provider).
 6. **More dynamic credentials**: Snowflake, LDAP and Active Directory passwords (Vault, Infisical).
-7. **Checking a SaaS rotator's credential against the vendor when it's registered** (Infisical
-   does), and Entra's answer for removing a secret that's already gone (#92).
-8. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
-   CAs**.
-9. *Not possible as push:* the CSI provider (the Secrets Store CSI driver decides when it asks;
-   its rotation interval is the cluster's).
-10. *Waits on roll apps:* their redeploys holding `wait_digest` (#79, then their `tags.rs`), and
-   Terraform resources for apps (theirs, beside the provider's).
-11. *Waits on other threads:* a live check of OpenSearch links, roll redis and nosql keeping a
+7. **Access requests**: a time-boxed `reveal` on a protected environment that an approver grants
+   (Infisical's and 1Password's), once projects have members.
+8. **A gateway into private networks** (Infisical's and Akeyless'); **ACME on project CAs**.
+9. *To check against the real services:* #113's STS login (`GetWebIdentityToken`) in an AWS account,
+   and Entra's answer for removing a secret that's already gone (#92). Both need accounts: the
+   user's call.
+10. *Waits on roll MCP:* #114 (`roll-oidc`, approved here) and the GitHub Action's `client-id`
+   mode (their diff, reviewed here).
+11. *Waits on roll apps:* their redeploys holding `wait_digest` once #79 lands.
+12. *Waits on other threads:* a live check of OpenSearch links, roll redis and nosql keeping a
    rotated password a while, splitting the CLI's `secrets.rs` once the queue has landed.
-12. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
-13. *Waits on products serving signed-in people:* a person's project linking their own databases,
+13. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
+14. *Waits on products serving signed-in people:* a person's project linking their own databases,
    buckets and streams.
-14. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
-   environment).
 
 ### Landing
 
