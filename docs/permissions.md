@@ -168,7 +168,9 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
       `invalid_grant`, and its text never holds the token.
     - **From the CLI:** `roll token client create ci --product apps --allow read,deploy --github
       acme/web [--ref refs/heads/main | --environment production]` prints the workflow step that
-      trades the job's token and exports a masked `ROLL_TOKEN`.
+      trades the job's token and exports a masked `ROLL_TOKEN`; `--gitlab group/project [--ref main
+      | --environment production]` prints the `.gitlab-ci.yml` lines (`id_tokens` for roll's
+      audience). The panel's "GitHub Actions" choice does the same for GitHub.
 - **The request:** `grant_type=client_credentials`; its `resource`, if any, must be roll's API or
   MCP server. The answer has no refresh token: the client trades its credential again for the
   next one. Every failure to authenticate is the same `invalid_client`, so an unknown client and a

@@ -138,6 +138,10 @@ async fn a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its
     let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
     assert_eq!(list[0]["trusts"]["subject"], "repo:acme/web:ref:refs/heads/main");
     assert!(!roll(&api, "", &["token", "client", "create", "x", "--preset", "read-only", "--github", "acme"]).status.success(), "owner/repo");
+    let lab = roll(&api, "", &["token", "client", "create", "lab", "--preset", "read-only", "--gitlab", "acme/platform/api", "--ref", "main"]);
+    assert!(lab.status.success() && String::from_utf8_lossy(&lab.stdout).contains("id_tokens:"), "{lab:?}");
+    let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
+    assert_eq!(list[0]["trusts"]["subject"], "project_path:acme/platform/api:ref_type:branch:ref:main");
 }
 
 /// `roll login` signs a person's CLI in through the browser: it registers itself, the consent

@@ -706,8 +706,7 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **CI signs in with its own OIDC token, the rest:** GitLab CI's shape in the CLI
-   (`--gitlab group/project`); a step in `sdk/github-action` (the secrets thread's: ask first) so a
+1. **CI signs in with its own OIDC token, the rest:** a step in `sdk/github-action` (the secrets thread's: ask first) so a
    workflow uses one action rather than two `curl`s. The grant, `roll-oidc` and `--github` are in
    #114 (stacked on #101).
 2. **The merge queue, in turn:** #98 (MCP Apps), #101 (machine clients), #104 (server card), #108
