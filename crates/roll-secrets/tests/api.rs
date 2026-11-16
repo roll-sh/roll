@@ -214,8 +214,15 @@ impl roll_secrets::Deliver for Sent {
         Ok(doc.to_string().into_bytes())
     }
     /// Snowflake's SQL API: one statement a request, as rolld's guarded client would send it.
-    fn request(&self, method: &str, url: &str, headers: &[(&str, &str)], body: Option<&Value>, _: usize) -> roll_secrets::Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+    fn request(&self, method: &str, url: &str, headers: &[(&str, &roll_secrets::Value)], body: Option<(&str, &roll_secrets::Value)>, _: usize) -> roll_secrets::Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
         let sf = &self.3;
+        let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.expose())).collect();
+        let headers = &headers[..];
+        let body: Option<Value> = body.map(|(t, b)| {
+            assert_eq!(t, "application/json");
+            serde_json::from_str(b.expose()).unwrap()
+        });
+        let body = body.as_ref();
         let answer = |status: u16, v: Value| Ok((status, v.to_string().into_bytes().into()));
         let Some(path) = url.strip_prefix("https://myorg-acct.snowflakecomputing.com") else { return Err(roll_secrets::Error::Link(format!("{url}: connection refused"))) };
         if !sf.signed_in(headers) {

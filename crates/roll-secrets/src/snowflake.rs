@@ -271,14 +271,14 @@ impl Client<'_> {
     /// says only Snowflake's code, never its message (which may quote the statement).
     fn exec(&self, statement: &str, secret: bool) -> Result<Rows> {
         let jwt = self.jwt()?;
-        let auth = Zeroizing::new(format!("Bearer {}", jwt.as_str()));
-        let headers = [("authorization", auth.as_str()), ("x-snowflake-authorization-token-type", "KEYPAIR_JWT"), ("accept", "application/json")];
+        let (auth, kind, accept) = (Value::new(format!("Bearer {}", jwt.as_str())), Value::new("KEYPAIR_JWT"), Value::new("application/json"));
+        let headers = [("authorization", &auth), ("x-snowflake-authorization-token-type", &kind), ("accept", &accept)];
         let mut body = json!({ "statement": statement, "timeout": 30 });
         if let Some(role) = &self.role {
             body["role"] = json!(role);
         }
         let url = format!("https://{}/api/v2/statements", self.host);
-        let (mut status, mut answer) = self.deliver.request("POST", &url, &headers, Some(&body), ANSWER_MAX)?;
+        let (mut status, mut answer) = self.deliver.request("POST", &url, &headers, Some(("application/json", &Value::new(body.to_string()))), ANSWER_MAX)?;
         // A statement still running (202) is asked after, a second apart, for up to 30 seconds.
         let mut polls = 0;
         while status == 202 && polls < 30 {
