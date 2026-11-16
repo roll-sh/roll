@@ -308,6 +308,9 @@ pub struct Target {
     /// The feedback button on its pages (the project's `feedback`, a change's preview, link
     /// access): a backend that serves the pages itself (roll apps) adds it as the runtime does.
     pub feedback: bool,
+    /// What the service's code may reach (the project's `egress`): with `roll`, the runtime runs
+    /// it on the preview's own network with no route out.
+    pub egress: crate::settings::EgressRule,
 }
 
 /// A deploy the backend accepted that hasn't finished (a build, a rollout): the converge leaves

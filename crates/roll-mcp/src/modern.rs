@@ -15,7 +15,7 @@ pub const HEADER_MISMATCH: i64 = -32020;
 /// A protocol version this server doesn't speak.
 pub const UNSUPPORTED_VERSION: i64 = -32022;
 const VERSION: &str = "io.modelcontextprotocol/protocolVersion";
-const CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+pub(crate) const CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 const CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
 const SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 /// How long a client may keep a list (`ttlMs`): tools follow the token's rules, which can change,
@@ -80,6 +80,8 @@ pub fn check(h: &HeaderMap, msg: &Value, legacy: &[&str]) -> Result<(), (StatusC
     let named = match method {
         "tools/call" | "prompts/get" => msg["params"]["name"].as_str(),
         "resources/read" => msg["params"]["uri"].as_str(),
+        // The tasks extension's methods name their task (SEP-2663, over Streamable HTTP).
+        "tasks/get" | "tasks/update" | "tasks/cancel" => msg["params"]["taskId"].as_str(),
         _ => None,
     };
     if let Some(name) = named {
