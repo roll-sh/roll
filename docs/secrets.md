@@ -74,7 +74,7 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    and `watch` follows the digest and renews dynamic credentials' leases, as `roll run --watch` does:
 
    ```ts
-   import { createClient, generateKeyPair } from "@roll/secrets";
+   import { createClient, generateKeyPair, loginWithIdentity } from "@roll/secrets";
 
    const secrets = createClient({ api: process.env.ROLL_API_URL!, token: process.env.ROLL_TOKEN! });
    const { values } = await secrets.values("staging");
@@ -97,14 +97,30 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    await secrets.set("staging", "FEATURE_FLAGS", "beta", { path: "/api", comment: "rollout" });
    const { deleted } = await secrets.delete("staging", "OLD_KEY", { path: "/api" });
 
+   // One key's reads, for a tool that writes only what differs (a playbook's check mode). `secret`
+   // is the key's record without its value (`GET …/secrets/{key}`: `version`, `comment`, the
+   // link's `link_kind` only, and `source`: own, base or import), null when the folder has no such
+   // key. `storedValue` is the value as stored, references unresolved (`…/value?resolve=false`):
+   // a reveal, audited and never cached, and no error holds it.
+   const record = await secrets.secret("staging", "FEATURE_FLAGS", { path: "/api" });
+   const stored = await secrets.storedValue("staging", "FEATURE_FLAGS", { path: "/api" });
+
+   // A workload identity's login with the workload's own OIDC token: `tokenSource` is called for a
+   // fresh one at each login (the first, then before the roll token ends and when it's refused).
+   const ci = await loginWithIdentity({ api: process.env.ROLL_API_URL!, identity: "idn_…", tokenSource: () => readFile(tokenFile, "utf8") });
+
    // An encryption key (below, "Encryption keys"): the key stays in roll.
    const cards = secrets.transit("cards");
    const ct = await cards.encrypt(cardNumber, `order:${id}`);
    const index = await cards.hmac(email); // a lookup column over encrypted emails
    ```
 
-   The Go and Python clients name these `Values(…, secrets.WithoutDynamic())`, `Set` and
-   `Delete`, and `values(…, dynamic=False)`, `set` and `delete`.
+   The Go and Python clients name these `Values(…, secrets.WithoutDynamic())`, `Set`, `Delete`,
+   `Secret` (a `*SecretInfo`, nil when missing), `StoredValue` and
+   `secrets.LoginWithIdentity(ctx, api, identity, tokenSource)`, and `values(…, dynamic=False)`,
+   `set`, `delete`, `secret` (a `SecretInfo`, None when missing), `stored_value` and
+   `roll_secrets.login_with_identity(api, identity, token_source)`. Both also export the OIDC
+   token source their `FromEnv`/`from_env` uses (`OIDCTokenFromEnv`, `oidc_token_from_env`).
 
    In Go, `sdk/go/secrets` has the same surface, and `FromEnv` logs a workload identity in with
    its own OIDC token as `roll run` does (`ROLL_IDENTITY`). It logs in again before the login's

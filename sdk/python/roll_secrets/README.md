@@ -3,8 +3,9 @@
 A client for roll secrets (docs/secrets.md, "Consumption") with the same surface as
 `@roll/secrets` and `sdk/go/secrets`: an environment's values, the runtime resolve (sealed to a
 key only this process holds, if asked), the digest that moves when the values would, a watch that
-follows it and renews dynamic leases, and one key's writes. The standard library, but for sealed
-resolves, which need `cryptography` (`pip install "roll-secrets[seal]"`).
+follows it and renews dynamic leases, one key's record and stored value, and one key's writes.
+The standard library, but for sealed resolves, which need `cryptography`
+(`pip install "roll-secrets[seal]"`).
 
 ```python
 import roll_secrets
@@ -32,6 +33,17 @@ v = c.values("production", dynamic=False)
 # hold the value, and both drop the cached reads.
 w = c.set("staging", "FEATURE_FLAGS", "beta", path="/api", comment="rollout")   # w["secret"]["version"]
 d = c.delete("staging", "OLD_KEY", path="/api")                                 # d["deleted"]
+
+# One key's reads, for a tool that writes only what differs (a playbook's check mode). secret is
+# the key's record without its value (version, comment, link_kind, source.kind "own", "base" or
+# "import"), None when the folder has no such key. stored_value is the value as stored, references
+# unresolved: a reveal, audited and never kept by cache_ttl, and no error holds it.
+s = c.secret("staging", "FEATURE_FLAGS", path="/api")
+stored = c.stored_value("staging", "FEATURE_FLAGS", path="/api")
+
+# A workload identity's login with a token source called for a fresh OIDC token at each login
+# (from_env uses roll_secrets.oidc_token_from_env).
+c = roll_secrets.login_with_identity(api, "idn_…", lambda: open(token_file).read())
 ```
 
 Tests: `PYTHONPATH=src python -m unittest discover -s tests` (CI's `sdk` job).
