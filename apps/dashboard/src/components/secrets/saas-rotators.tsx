@@ -117,16 +117,19 @@ export function SaasRotators() {
             <span className="mb-1 block text-[11px] font-medium text-subtle">Name</span>
             <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="sendgrid" spellCheck={false} className={`${field} font-mono text-[12px]`} />
           </label>
-          <Select
-            label="Vendor"
-            value={vendor}
-            onChange={(v) => {
-              setVendor(v as SaasVendor);
-              setTarget({});
-            }}
-            options={(Object.keys(VENDORS) as SaasVendor[]).map((v) => ({ value: v, label: VENDORS[v].label }))}
-            className="w-44"
-          />
+          <div>
+            <span className="mb-1 block text-[11px] font-medium text-subtle">Vendor</span>
+            <Select
+              label="Vendor"
+              value={vendor}
+              onChange={(v) => {
+                setVendor(v as SaasVendor);
+                setTarget({});
+              }}
+              options={(Object.keys(VENDORS) as SaasVendor[]).map((v) => ({ value: v, label: VENDORS[v].label }))}
+              className="w-44"
+            />
+          </div>
           {spec.fields.map((f) => (
             <label key={f.name} className="w-56">
               <span className="mb-1 block text-[11px] font-medium text-subtle">{f.label}</span>
