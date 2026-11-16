@@ -648,7 +648,8 @@ pub async fn wait_digest(s: Arc<Secrets>, project: String, env: String, path: St
 /// One reader per node and project of a project's change counter, for every poll held on it: it
 /// reads the counter each second while anyone's subscribed and wakes them when it moves, then
 /// ends (4096 held polls cost a query a second per project, not 4096).
-static MARKERS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<(i64, i64)>>>> = std::sync::LazyLock::new(Default::default);
+type Markers = std::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<(i64, i64)>>>;
+static MARKERS: std::sync::LazyLock<Markers> = std::sync::LazyLock::new(Default::default);
 
 fn subscribe(s: &Arc<Secrets>, project: &str, first: (i64, i64)) -> tokio::sync::watch::Receiver<(i64, i64)> {
     // Keyed by the store too: tests run several in one process.
