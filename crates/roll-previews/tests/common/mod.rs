@@ -220,6 +220,8 @@ pub struct FakeApps {
     pub fail_remove: AtomicUsize,
     /// Runs inside a deploy (an API call landing while the reconciler works).
     pub on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// Which service each screenshot run was of.
+    pub shot_services: Mutex<Vec<String>>,
     /// The notes each screenshot was asked to crop (a `#missing` selector finds nothing).
     pub crops_asked: Mutex<Vec<String>>,
     /// Services the runtime says run on this node, and those put to sleep.
@@ -295,8 +297,9 @@ impl Apps for FakeApps {
         self.runs.lock().push((job.seed.run.clone(), job.revision.clone(), at_rev));
         Ok((self.seed_exit.load(Ordering::SeqCst), "seed output".into()))
     }
-    async fn screenshot(&self, preview: &str, _service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
+    async fn screenshot(&self, preview: &str, service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
         let Some(png) = self.shot.lock().clone() else { return Ok(None) };
+        self.shot_services.lock().push(service.to_string());
         // The API the preview serves: by any revision it runs (whichever service is first).
         let revs: Vec<String> = self.deployed.lock().iter().filter(|((p, _), _)| p == preview).map(|(_, r)| r.clone()).collect();
         let api = opts.openapi.as_ref().and_then(|_| revs.iter().find_map(|r| self.api.lock().get(r).cloned()));
