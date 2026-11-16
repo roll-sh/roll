@@ -142,10 +142,11 @@ impl apps_control::integrations::DomainTls for FakeTls {
 }
 
 /// Two Postgres projects a service can link, `main` and `orders`, whose variables are read
-/// fresh; and a Redis database, `cache`, that makes each link a key of its own.
+/// fresh; and a search cluster, `logs`, that makes each link an API key of its own (in rolld:
+/// roll secrets' search provider, through search's keys route).
 struct FakeResources;
 
-/// What the fake made and revoked for `cache` links, in order.
+/// What the fake made and revoked for `logs` links, in order.
 static MINTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 #[async_trait]
@@ -158,7 +159,7 @@ impl apps_control::integrations::Resources for FakeResources {
     }
 
     async fn link(&self, kind: apps_control::model::LinkKind, r#ref: &str, service: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
-        if (kind.as_str(), r#ref) != ("redis", "cache") {
+        if (kind.as_str(), r#ref) != ("search", "logs") {
             return Ok(None);
         }
         // A provider takes a moment: two requests at once both get here.
@@ -166,11 +167,12 @@ impl apps_control::integrations::Resources for FakeResources {
         let mut m = MINTED.lock();
         let key = format!("key{}", m.len());
         m.push(format!("link {service} {key}"));
-        Ok(Some(apps_control::integrations::Minted { vars: vec![("REDIS_URL".into(), format!("redis://{key}@cache.roll.test:6379"))], kept: key }))
+        let vars = vec![("ELASTICSEARCH_URL".into(), "https://logs.search.roll.test".into()), ("ELASTICSEARCH_API_KEY".into(), format!("{key}-secret"))];
+        Ok(Some(apps_control::integrations::Minted { vars, kept: format!("key:{key}") }))
     }
 
     async fn unlink(&self, _kind: apps_control::model::LinkKind, _ref: &str, kept: &str) -> anyhow::Result<()> {
-        MINTED.lock().push(format!("unlink {kept}"));
+        MINTED.lock().push(format!("unlink {}", kept.trim_start_matches("key:")));
         Ok(())
     }
 
@@ -915,21 +917,34 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let (_, l) = call(&w.api, "PUT", &format!("{links}/postgres/orders"), Some(json!({"prefix": "ORDERS"}))).await;
     assert_eq!(l["vars"], json!(["ORDERS_DATABASE_URL"]), "{l}");
     assert_eq!(call(&w.api, "PUT", &format!("{links}/postgres/nope"), Some(json!({}))).await.0, StatusCode::BAD_REQUEST);
+    // A preview (an ephemeral environment) gets no resource's production variables: roll
+    // previews sets the branched ones itself.
+    let pv = format!("/v1/apps/services/{id}/environments/pv-1");
+    call(&w.api, "PUT", &pv, Some(json!({"ephemeral": true}))).await;
+    let (_, v) = call(&w.api, "GET", &format!("{pv}/variables/values"), None).await;
+    assert!(v.get("DATABASE_URL").is_none() && v.get("ORDERS_DATABASE_URL").is_none(), "{v}");
+    let (_, v) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/variables/values"), None).await;
+    assert!(v["DATABASE_URL"].is_string(), "{v}");
+    call(&w.api, "DELETE", &pv, None).await;
     // A link that makes credentials of its own makes them once: setting it again keeps them.
-    let (st, l) = call(&w.api, "PUT", &format!("{links}/redis/cache"), Some(json!({}))).await;
-    assert_eq!((st, &l["vars"]), (StatusCode::OK, &json!(["REDIS_URL"])), "{l}");
-    call(&w.api, "PUT", &format!("{links}/redis/cache"), Some(json!({}))).await;
+    let (st, l) = call(&w.api, "PUT", &format!("{links}/search/logs"), Some(json!({}))).await;
+    assert_eq!((st, &l["vars"]), (StatusCode::OK, &json!(["ELASTICSEARCH_URL", "ELASTICSEARCH_API_KEY"])), "{l}");
+    let (_, l) = call(&w.api, "PUT", &format!("{links}/search/logs"), Some(json!({"prefix": "LOGS"}))).await;
+    assert_eq!(l["vars"], json!(["LOGS_ELASTICSEARCH_URL", "LOGS_ELASTICSEARCH_API_KEY"]), "{l}");
     assert_eq!(*MINTED.lock(), [format!("link {id} key0")]);
+    // Kept sealed: never in the database in the clear.
+    let raw = [std::fs::read(w.apps.cfg.home.join("apps.db")).unwrap(), std::fs::read(w.apps.cfg.home.join("apps.db-wal")).unwrap_or_default()].concat();
+    assert!(!raw.windows(11).any(|x| x == b"key0-secret"));
     let base = format!("/v1/apps/services/{id}/environments/production");
-    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "DATABASE_URL,ORDERS_DATABASE_URL,REDIS_URL"}}))).await;
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "DATABASE_URL,ORDERS_DATABASE_URL,LOGS_ELASTICSEARCH_API_KEY"}}))).await;
     let (_, r) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
     let (st, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), r["id"].as_str().unwrap()).await;
     assert_eq!(st, StatusCode::OK, "{body}");
-    assert_eq!(body["vars"], json!({"DATABASE_URL": "postgres://app:pw@db.roll.test:5432/main", "ORDERS_DATABASE_URL": "postgres://app:pw@db.roll.test:5432/orders", "REDIS_URL": "redis://key0@cache.roll.test:6379"}));
+    assert_eq!(body["vars"], json!({"DATABASE_URL": "postgres://app:pw@db.roll.test:5432/main", "ORDERS_DATABASE_URL": "postgres://app:pw@db.roll.test:5432/orders", "LOGS_ELASTICSEARCH_API_KEY": "key0-secret"}));
     // Unlinking revokes them, and so does deleting the service.
-    assert_eq!(call(&w.api, "DELETE", &format!("{links}/redis/cache"), None).await.0, StatusCode::NO_CONTENT);
-    call(&w.api, "PUT", &format!("{links}/redis/cache"), Some(json!({}))).await;
+    assert_eq!(call(&w.api, "DELETE", &format!("{links}/search/logs"), None).await.0, StatusCode::NO_CONTENT);
+    call(&w.api, "PUT", &format!("{links}/search/logs"), Some(json!({}))).await;
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(*MINTED.lock(), [format!("link {id} key0"), "unlink key0".into(), format!("link {id} key2"), "unlink key2".into()]);
     // Linked when it's made, the first deploy has them; a link that doesn't resolve makes nothing.
@@ -944,7 +959,7 @@ async fn a_link_puts_its_variables_in_the_instances() {
     // Two requests making one link at once: one credential stays, the other is revoked.
     let (racer, _) = image_service(&w, "racer", json!({"port": 80})).await;
     let rid = racer["id"].as_str().unwrap().to_string();
-    let path = format!("/v1/apps/services/{rid}/links/redis/cache");
+    let path = format!("/v1/apps/services/{rid}/links/search/logs");
     let before = MINTED.lock().len();
     let (a, b) = tokio::join!(call(&w.api, "PUT", &path, Some(json!({}))), call(&w.api, "PUT", &path, Some(json!({}))));
     assert_eq!((a.0, b.0), (StatusCode::OK, StatusCode::OK));
@@ -3696,6 +3711,8 @@ struct GitHost {
     branches: Mutex<std::collections::BTreeMap<String, code_git::ObjectId>>,
     /// A private repository's login: reads need it.
     login: Mutex<Option<(String, String)>>,
+    /// Pull requests' heads (`refs/pull/N/head`), by number.
+    pulls: Mutex<std::collections::BTreeMap<u64, code_git::ObjectId>>,
 }
 
 /// roll previews' side of a Git URL's pushes: what it was handed.
@@ -3706,6 +3723,9 @@ struct FakePushes(Mutex<Vec<apps_control::integrations::GitPush>>);
 impl apps_control::integrations::GitPushes for FakePushes {
     async fn pushed(&self, push: apps_control::integrations::GitPush) {
         self.0.lock().push(push);
+    }
+    fn takes_pulls(&self) -> bool {
+        true
     }
 }
 
@@ -3757,6 +3777,7 @@ impl code_git::GitBackend for GitHost {
     async fn refs(&self, _repo: &str) -> code_git::GitResult<code_git::RefList> {
         let mut refs: Vec<code_git::Ref> = self.main.lock().iter().map(|oid| code_git::Ref { name: "refs/heads/main".into(), oid: *oid, peeled: None }).collect();
         refs.extend(self.branches.lock().iter().map(|(b, oid)| code_git::Ref { name: format!("refs/heads/{b}"), oid: *oid, peeled: None }));
+        refs.extend(self.pulls.lock().iter().map(|(n, oid)| code_git::Ref { name: format!("refs/pull/{n}/head"), oid: *oid, peeled: None }));
         Ok(code_git::RefList { head: Some("refs/heads/main".into()), refs })
     }
     async fn read_object(&self, _repo: &str, oid: &code_git::ObjectId) -> code_git::GitResult<Option<code_git::Object>> {
@@ -3831,7 +3852,7 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     };
     let (st, v) = answer(raw("application/json", Some("push"), json!({ "ref": "refs/tags/v1", "after": third }).to_string())).await;
     assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("not a branch"), "{v}");
-    let (st, v) = answer(raw("application/json", Some("pull_request"), json!({ "action": "opened" }).to_string())).await;
+    let (st, v) = answer(raw("application/json", Some("issues"), json!({ "action": "opened" }).to_string())).await;
     assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("isn't a push"), "{v}");
     let (st, v) = answer(raw("application/json", None, json!({ "star": true }).to_string())).await;
     assert!(st == StatusCode::OK && v["ignored"] == "not a push", "{v}");
@@ -3903,6 +3924,36 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let skip = git.commit_saying(&[pkg, ("server.js", "require('http') // v6"), ("README.md", "even more docs"), toml, ("api.js", "y")], "wip [skip ci]");
     let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/main", "after": skip, "head_commit": { "message": "ship it" } }))).await;
     assert!(v["ignored"].as_str().unwrap().contains("[skip ci]"), "{v}");
+    // Pull requests go to previews with their number, title and page: a same-repository one on
+    // its branch, a fork's as `pull/N` once `refs/pull/N/head` agrees, a close with no commit.
+    let pr = |action: &str, n: u64, branch: &str, sha: &str, head_repo: u64| {
+        json!({ "action": action, "number": n, "pull_request": { "number": n, "title": "Try it", "head": { "ref": branch, "sha": sha, "repo": { "id": head_repo } }, "base": { "repo": { "id": 1 } } } }).to_string()
+    };
+    // One from a branch an environment follows (staging's) is that environment's, not a preview.
+    let (_, v) = answer(raw("application/json", Some("pull_request"), pr("opened", 6, "feature", &code, 1))).await;
+    assert!(v["ignored"].as_str().unwrap().contains("an environment's branch"), "{v}");
+    git.branches.lock().insert("topic".into(), code.parse().unwrap());
+    let (st, v) = answer(raw("application/json", Some("pull_request"), pr("opened", 7, "topic", &code, 1))).await;
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("handed to roll previews"), "{v}");
+    git.pulls.lock().insert(8, first.parse().unwrap());
+    let (_, v) = answer(raw("application/json", Some("pull_request"), pr("synchronize", 8, "main", &code, 2))).await;
+    assert!(v["ignored"].as_str().unwrap().contains("refs/pull/8/head at"), "a fork's head that isn't refs/pull/8/head: {v}");
+    answer(raw("application/json", Some("pull_request"), pr("synchronize", 8, "main", &first, 2))).await;
+    answer(raw("application/json", Some("pull_request"), pr("closed", 8, "main", &first, 2))).await;
+    let got: Vec<_> = pushes.0.lock()[3..].iter().map(|p| (p.branch.clone(), p.sha.clone(), p.pull.as_ref().map(|q| (q.number, q.fork, q.url.clone(), q.title.clone())))).collect();
+    let page = |n: u64| format!("{url}/pull/{n}");
+    assert_eq!(got, vec![
+        ("topic".to_string(), Some(code.clone()), Some((7, false, page(7), "Try it".to_string()))),
+        ("pull/8".to_string(), Some(first.clone()), Some((8, true, page(8), "Try it".to_string()))),
+        ("pull/8".to_string(), None, Some((8, true, page(8), "Try it".to_string()))),
+    ]);
+    // GitLab's merge request: its own event and fields, its page under `/-/merge_requests/`.
+    let mr = json!({ "object_kind": "merge_request", "object_attributes": { "iid": 3, "title": "Try it on GitLab", "action": "open", "source_branch": "topic", "source_project_id": 5, "target_project_id": 5, "last_commit": { "id": code } } }).to_string();
+    let r = Request::builder().method("POST").uri(hook.clone()).header("content-type", "application/json").header("x-gitlab-event", "Merge Request Hook").body(Body::from(mr)).unwrap();
+    let (_, v) = answer(r).await;
+    assert!(v["ignored"].as_str().unwrap().contains("handed to roll previews"), "{v}");
+    let last = pushes.0.lock().last().cloned().unwrap();
+    assert_eq!((last.branch.as_str(), last.pull.map(|p| (p.number, p.fork, p.url))), ("topic", Some((3, false, format!("{url}/-/merge_requests/3")))));
 }
 
 /// A private repository on any Git host: the service's own login (sealed, never returned, sent
