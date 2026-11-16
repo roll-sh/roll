@@ -1155,6 +1155,7 @@ impl Code {
                 source: "native",
                 github_url: None,
                 state: WorkState::Open,
+                outside: false,
             },
         )?;
         let w = self.work_or_404(&id)?;

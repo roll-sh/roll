@@ -116,6 +116,8 @@ CREATE TABLE IF NOT EXISTS work_items (
     lease_until INTEGER,
     -- Length of the current lease, so heartbeats renew it by the same amount.
     lease_s INTEGER,
+    -- Opened by someone who can't push (a GitHub issue): MCP's lockdown withholds its text.
+    outside INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     UNIQUE (repo_id, number)
@@ -245,6 +247,7 @@ fn change_row(r: &Row<'_>) -> code_sql::Result<Change> {
         trusted: r.get::<_, i64>(19)? != 0,
         draft: r.get::<_, i64>(20)? != 0,
         run_approved: r.get::<_, i64>(21)? != 0,
+        outside: r.get::<_, i64>(19)? == 0,
         labels: serde_json::from_str(&r.get::<_, String>(22)?).unwrap_or_default(),
         queue: None,
         blockers: Vec::new(),
@@ -306,7 +309,7 @@ pub struct RepoQueue {
 }
 
 const WORK_COLS: &str =
-    "id, repo_id, number, title, body, labels, priority, state, source, github_url, claimed_by, lease_until, created_at, updated_at";
+    "id, repo_id, number, title, body, labels, priority, state, source, github_url, claimed_by, lease_until, created_at, updated_at, outside";
 
 fn work_row(r: &Row<'_>) -> code_sql::Result<WorkItem> {
     Ok(WorkItem {
@@ -326,6 +329,7 @@ fn work_row(r: &Row<'_>) -> code_sql::Result<WorkItem> {
         changes: Vec::new(),
         created_at: r.get(12)?,
         updated_at: r.get(13)?,
+        outside: r.get::<_, i64>(14)? != 0,
     })
 }
 
@@ -361,6 +365,8 @@ pub struct NewWork<'a> {
     pub source: &'a str,
     pub github_url: Option<&'a str>,
     pub state: WorkState,
+    /// Opened by someone who can't push (see [`WorkItem::outside`]).
+    pub outside: bool,
 }
 
 /// Fields of a new change.
@@ -425,6 +431,11 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("agent_sandboxes", "last_active_at", "INTEGER"),
     // Automation runs from before a wake during a step's attempt was kept.
     ("automation_runs", "woken", "INTEGER NOT NULL DEFAULT 0"),
+    // Work items from before issues said whether their author can push (the next sync says).
+    ("work_items", "outside", "INTEGER NOT NULL DEFAULT 0"),
+    // Reviews and comments from before they said whether their author can push.
+    ("reviews", "outside", "INTEGER NOT NULL DEFAULT 0"),
+    ("review_comments", "outside", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 impl Db {
@@ -975,8 +986,8 @@ impl Db {
             let t = now();
             c.execute(
                 "INSERT INTO work_items (id, repo_id, number, title, body, labels, priority, state, source, github_url, \
-                 created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, repo_id, number, w.title, w.body, labels, w.priority, w.state.as_str(), w.source, w.github_url, t, t],
+                 outside, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, repo_id, number, w.title, w.body, labels, w.priority, w.state.as_str(), w.source, w.github_url, w.outside as i64, t, t],
             )?;
             Ok(())
         })
@@ -1085,8 +1096,8 @@ impl Db {
     pub fn update_work(&self, w: &WorkItem) -> Result<()> {
         self.sql.execute(
             "UPDATE work_items SET title = ?, body = ?, labels = ?, priority = ?, state = ?, claimed_by = ?, lease_until = ?, \
-             github_url = ?, updated_at = ? WHERE id = ?",
-            params![w.title, w.body, json(&w.labels), w.priority, w.state.as_str(), w.claimed_by, w.lease_until, w.github_url, now(), w.id],
+             github_url = ?, outside = ?, updated_at = ? WHERE id = ?",
+            params![w.title, w.body, json(&w.labels), w.priority, w.state.as_str(), w.claimed_by, w.lease_until, w.github_url, w.outside as i64, now(), w.id],
         )?;
         Ok(())
     }

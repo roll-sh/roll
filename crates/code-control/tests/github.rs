@@ -621,13 +621,18 @@ async fn connect_import_webhooks_and_mirror() {
     assert_eq!(work.as_array().unwrap().len(), 1, "closed issues aren't imported: {work}");
     assert_eq!(work[0]["source"], "github#1");
     assert_eq!(work[0]["priority"], 1);
+    // Its author can't push (no association: anyone could have opened it), so MCP's lockdown withholds it.
+    assert_eq!(work[0]["outside"], true);
     let changes = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await;
     assert_eq!(changes[0]["github_pr"], 3);
+    assert_eq!(changes[0]["outside"], false, "a pull request from the repo itself");
     assert_eq!(changes[0]["branch"], "feature");
     let pr_change = changes[0]["id"].as_str().unwrap().to_string();
 
     // Webhooks: signature checked, deliveries idempotent.
-    let opened = json!({ "action": "opened", "issue": issue_json(4, "Add dark mode", "open", &["P0"]), "repository": repo_json(&g.mock), "installation": { "id": INSTALLATION } });
+    let mut by_owner = issue_json(4, "Add dark mode", "open", &["P0"]);
+    by_owner["author_association"] = json!("OWNER");
+    let opened = json!({ "action": "opened", "issue": by_owner, "repository": repo_json(&g.mock), "installation": { "id": INSTALLATION } });
     assert_eq!(hook(&a, "issues", "d-1", &opened, "wrong").await, StatusCode::UNAUTHORIZED);
     assert_eq!(hook(&a, "issues", "d-1", &opened, SECRET).await, StatusCode::OK);
     assert_eq!(hook(&a, "issues", "d-1", &opened, SECRET).await, StatusCode::OK);
@@ -635,7 +640,7 @@ async fn connect_import_webhooks_and_mirror() {
     let work = a.ok("GET", "/v1/code/repos/acme/app/work", None).await;
     let fours: Vec<&Value> = work.as_array().unwrap().iter().filter(|w| w["source"] == "github#4").collect();
     assert_eq!(fours.len(), 1, "{work}");
-    assert_eq!(fours[0]["priority"], 0);
+    assert_eq!((&fours[0]["priority"], &fours[0]["outside"]), (&json!(0), &json!(false)));
     // Closed on GitHub: done in roll, and nothing is said back.
     let mut closed_issue = issue_json(4, "Add dark mode", "closed", &[]);
     closed_issue["state_reason"] = json!("completed");
@@ -716,6 +721,7 @@ async fn connect_import_webhooks_and_mirror() {
             pages: Vec::new(),
             speed_budget: None,
             visual_review: None,
+            notes: Vec::new(),
         }),
     };
     let preview_calls = |path: &str| g.mock.calls.lock().iter().filter(|(_, p, _)| p.contains(path)).cloned().collect::<Vec<_>>();
@@ -1111,6 +1117,9 @@ async fn reviews_both_ways() {
     assert_eq!(verdict_of("contrib").as_deref(), Some("comment"));
     assert_eq!(verdict_of("unknown").as_deref(), Some("comment"));
     assert_eq!(verdict_of("maintainer").as_deref(), Some("approve"));
+    // And MCP's lockdown withholds what the outsiders wrote: their reviews are `outside`.
+    let outside_of = |login: &str| rs.as_array().unwrap().iter().find(|r| r["reviewer"]["name"] == login).map(|r| r["outside"].clone());
+    assert_eq!([outside_of("drive-by"), outside_of("unknown"), outside_of("maintainer")], [Some(json!(true)), Some(json!(true)), Some(json!(false))]);
     assert_eq!(verdict_of("org-member").as_deref(), Some("request_changes"));
 }
 

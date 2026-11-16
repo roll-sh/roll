@@ -25,14 +25,18 @@ pub mod fleet;
 pub mod esql;
 pub mod graph;
 pub mod ilm;
+pub mod ilm_run;
+pub mod inference;
 pub mod internal;
 pub mod logstash;
 pub mod migration;
 pub mod misc;
 pub mod ml;
+pub mod rollup;
 pub mod mvt;
 pub mod searchable_snapshots;
 pub mod security;
+pub mod slm;
 pub mod sql;
 pub mod store;
 pub mod streams;
@@ -66,6 +70,10 @@ pub struct Runtime {
     pub esql_telemetry: esql::telemetry::Telemetry,
     /// Transforms running a trigger right now.
     pub transforms: transform::Runs,
+    /// Rollup jobs running a trigger right now.
+    pub rollups: rollup::Runs,
+    /// Snapshot lifecycle policies taking a snapshot right now.
+    pub slm_running: std::sync::atomic::AtomicUsize,
 }
 
 /// The `_nodes` header plus the node, as the cache-clearing APIs answer.
@@ -112,8 +120,17 @@ pub fn unknown_field(ctx: &Ctx, parser: &str, key: &str) -> crate::error::EsErro
 
 macro_rules! handlers {
     ($ctx:ident; $( $($api:ident)|+ => $e:expr, )*) => {
-        /// Runs an x-pack API ([`implemented`] said it is one).
+        /// Runs an x-pack API ([`implemented`] said it is one). Its internal calls
+        /// ([`internal::call`]) are made as the client, so they read and write only what it may,
+        /// under its document and field level security; work that needs the cluster's own
+        /// authority (system indices) uses [`internal::call_system`].
         pub async fn dispatch($ctx: &Ctx<'_>) -> EsResult<Reply> {
+            // Boxed: the handlers' futures are large, and a second copy inline would double the
+            // dispatch's stack.
+            internal::as_caller(internal::Caller::of($ctx), Box::pin(dispatch_api($ctx))).await
+        }
+
+        async fn dispatch_api($ctx: &Ctx<'_>) -> EsResult<Reply> {
             match $ctx.api {
                 $( $(Api::$api)|+ => $e, )*
                 other => Err(crate::error::EsError::not_implemented(other.name())),
@@ -255,6 +272,20 @@ handlers! { ctx;
     MlStopTrainedModelDeployment => ml::models::stop_deployment(ctx),
     MlClearTrainedModelDeploymentCache => ml::models::clear_cache(ctx),
     MlInferTrainedModel => ml::models::infer(ctx),
+
+    InferencePut | InferencePutAi21 | InferencePutAlibabacloud | InferencePutAmazonbedrock | InferencePutAmazonsagemaker | InferencePutAnthropic
+        | InferencePutAzureaistudio | InferencePutAzureopenai | InferencePutCohere | InferencePutContextualai | InferencePutCustom
+        | InferencePutDeepseek | InferencePutElasticsearch | InferencePutElser | InferencePutFireworksai | InferencePutGoogleaistudio
+        | InferencePutGooglevertexai | InferencePutGroq | InferencePutHuggingFace | InferencePutJinaai | InferencePutLlama | InferencePutMistral
+        | InferencePutNvidia | InferencePutOpenai | InferencePutOpenshiftAi | InferencePutVoyageai | InferencePutWatsonx => inference::put(ctx).await,
+    InferenceGet => inference::get(ctx),
+    InferenceDelete => inference::delete(ctx).await,
+    InferenceUpdate => inference::update(ctx).await,
+    InferenceInference | InferenceTextEmbedding | InferenceSparseEmbedding | InferenceRerank | InferenceCompletion | InferenceEmbedding => inference::infer(ctx).await,
+    InferenceStreamCompletion | InferenceChatCompletionUnified => inference::stream_route(ctx).await,
+    InferencePutRegionPolicy => inference::region::put(ctx).await,
+    InferenceGetRegionPolicy => inference::region::get(ctx),
+    InferenceDeleteRegionPolicy => inference::region::delete(ctx).await,
     MlPutDataFrameAnalytics => ml::dfa::put(ctx).await,
     MlGetDataFrameAnalytics => ml::dfa::get(ctx),
     MlGetDataFrameAnalyticsStats => ml::dfa::stats(ctx),
@@ -331,6 +362,15 @@ handlers! { ctx;
     TransformSetUpgradeMode => transform::set_upgrade_mode(ctx),
     CatTransforms => transform::cat(ctx),
 
+    RollupPutJob => rollup::put(ctx).await,
+    RollupGetJobs => rollup::get(ctx),
+    RollupStartJob => rollup::start(ctx).await,
+    RollupStopJob => rollup::stop(ctx).await,
+    RollupDeleteJob => rollup::delete(ctx).await,
+    RollupGetRollupCaps => rollup::caps(ctx),
+    RollupGetRollupIndexCaps => rollup::index_caps(ctx),
+    RollupRollupSearch => rollup::rollup_search(ctx).await,
+
     EnrichPutPolicy => enrich::put_policy(ctx).await,
     EnrichGetPolicy => enrich::get_policy(ctx),
     EnrichDeletePolicy => enrich::delete_policy(ctx).await,
@@ -401,6 +441,15 @@ handlers! { ctx;
     IlmRetry => ilm::retry(ctx).await,
     IlmMoveToStep => ilm::move_to_step(ctx).await,
     IlmMigrateToDataTiers => ilm::migrate_to_data_tiers(ctx),
+    SlmPutLifecycle => slm::put_lifecycle(ctx).await,
+    SlmGetLifecycle => slm::get_lifecycle(ctx),
+    SlmDeleteLifecycle => slm::delete_lifecycle(ctx).await,
+    SlmExecuteLifecycle => slm::execute_lifecycle(ctx).await,
+    SlmExecuteRetention => slm::execute_retention(ctx).await,
+    SlmGetStats => slm::get_stats(ctx),
+    SlmGetStatus => slm::get_status(ctx),
+    SlmStart => slm::set_mode(ctx, true).await,
+    SlmStop => slm::set_mode(ctx, false).await,
 
     WatcherPutWatch => watcher::put_watch(ctx).await,
     WatcherGetWatch => watcher::get_watch(ctx),

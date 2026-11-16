@@ -3223,7 +3223,9 @@ async fn reference_variables_are_filled_at_the_deploy() {
         .header("content-type", "application/json")
         .body(Body::from(json!({"set": {"STOLEN": "${{ db.PASS }}"}}).to_string()))
         .unwrap();
+    // As rolld's gate sends an operator's token on: the grant, and the operator marker beside it.
     req.extensions_mut().insert(grant);
+    req.extensions_mut().insert(roll_auth::Operator);
     assert_eq!(w.api.clone().oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN);
     // Sealed (Railway's): run with, never shown again, nor through a reference; a new value
     // stays sealed, and so does a copy into another environment.

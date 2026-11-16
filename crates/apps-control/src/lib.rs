@@ -1698,9 +1698,9 @@ impl Apps {
             let Some(target) = self.db(move |s| Ok(s.services(Some(&p))?.into_iter().find(|x| x.name == n))).await? else {
                 return Err(Error::BadRequest(format!("${{{{ {name}.… }}}} names no service of this project")));
             };
-            if !who.operator
-                && let Some(g) = who.grant
-            {
+            // A grant decides whenever there is one: rolld's gate puts the operator marker beside
+            // an operator's token, narrowed by its rules, so the marker alone would read as all.
+            if let Some(g) = who.grant {
                 let resource = roll_auth::scope::Resource { product: "apps".into(), id: Some(target.id.clone()), project: Some(project.to_string()), environment: Some(env.to_string()), ..Default::default() };
                 if g.allows(&resource, roll_auth::scope::Action::Reveal) != roll_auth::scope::Outcome::Allow {
                     return Err(Error::Forbidden(format!("a reference to {name}'s variables needs reveal on {name}")));

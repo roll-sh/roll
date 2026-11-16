@@ -21,6 +21,13 @@ pub(crate) mod attr {
     /// so every tokenizer has it except one built with the plain attribute factory
     /// (`char_group`).
     pub const TERM_FREQ: u32 = 8;
+    /// The Japanese and Korean morphological attributes (`crate::morph::explain`).
+    pub const JA_BASE_FORM: u32 = 16;
+    pub const JA_POS: u32 = 32;
+    pub const JA_READING: u32 = 64;
+    pub const JA_INFLECTION: u32 = 128;
+    pub const KO_POS: u32 = 256;
+    pub const KO_READING: u32 = 512;
 }
 
 /// The default token type (`TypeAttribute.DEFAULT_TYPE`).
@@ -44,6 +51,9 @@ pub(crate) struct Tok {
     /// Set by a filter that fails at analysis time (an unparsable payload, a script error); the
     /// filter then ends the stream and the chain reports the error.
     pub error: Option<Box<crate::error::AnalysisError>>,
+    /// The dictionary entry of a `kuromoji_tokenizer` or `nori_tokenizer` token (Lucene's
+    /// part-of-speech, reading, base form … attributes).
+    pub morph: crate::morph::Morph,
 }
 
 impl Default for Tok {
@@ -61,6 +71,7 @@ impl Default for Tok {
             has_payload: false,
             term_freq: 1,
             error: None,
+            morph: crate::morph::Morph::None,
         }
     }
 }
@@ -88,6 +99,7 @@ impl Clone for Tok {
             self.payload.clear();
         }
         self.term_freq = o.term_freq;
+        self.morph.clone_from(&o.morph);
     }
 }
 
@@ -106,6 +118,7 @@ impl Tok {
         self.has_payload = false;
         self.payload.clear();
         self.term_freq = 1;
+        self.morph = crate::morph::Morph::None;
     }
 
     /// `AttributeSource.endAttributes()`: what `end()` starts from (the position increment is

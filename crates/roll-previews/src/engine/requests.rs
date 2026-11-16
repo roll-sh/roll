@@ -24,6 +24,10 @@ impl Engine {
         let mut here: Vec<crate::notes::Note> = self.source.feedback(change).await?.into_iter().filter(|n| !resolved.contains(&n.id)).collect();
         let skip = here.len().saturating_sub(500);
         here.drain(..skip);
+        let cropped = self.store.cropped_notes(preview)?;
+        for n in &mut here {
+            n.crop = cropped.contains(&n.id);
+        }
         Ok(here)
     }
 

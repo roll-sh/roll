@@ -575,7 +575,7 @@ ext_groups() {
 }
 
 # ext_config <profile> <options...>: the cluster configuration of a group in globals
-# (EXT_PROFILE, EXT_LICENSE, EXT_SECURITY, EXT_SETTINGS, EXT_JVM, EXT_USERS, EXT_LOGIN, EXT_ADMIN, EXT_ROLES,
+# (EXT_PROFILE, EXT_LICENSE, EXT_SECURITY, EXT_SETTINGS, EXT_ROLL_SETTINGS, EXT_JVM, EXT_USERS, EXT_LOGIN, EXT_ADMIN, EXT_ROLES,
 # EXT_CONFIGS, EXT_RUNNER, EXT_MEMORY, EXT_HEAP).
 ext_config() {
   EXT_PROFILE=$1
@@ -583,6 +583,7 @@ ext_config() {
   EXT_LICENSE=trial EXT_SECURITY= EXT_JVM= EXT_USERS=$EXT_REST_USER:$EXT_ROOT_ROLE
   EXT_LOGIN=$EXT_REST_USER EXT_ADMIN= EXT_ROLES= EXT_MEMORY=1536m EXT_HEAP=768m
   EXT_SETTINGS=()
+  EXT_ROLL_SETTINGS=()
   EXT_CONFIGS=()
   EXT_RUNNER=()
   case $EXT_PROFILE in
@@ -596,6 +597,7 @@ ext_config() {
   for opt in "$@"; do
     case $opt in
       setting=*) EXT_SETTINGS+=("${opt#setting=}") ;;
+      roll=*) EXT_ROLL_SETTINGS+=("${opt#roll=}") ;;
       jvm=*) EXT_JVM+="${EXT_JVM:+ }${opt#jvm=}" ;;
       users=*) EXT_USERS+=",${opt#users=}" ;;
       login=*) EXT_LOGIN=${opt#login=} ;;
@@ -917,6 +919,7 @@ roll_extended() {
         *) ROLL_EXTRA_ARGS+=(-E "$kv") ;;
       esac
     done
+    for kv in "${EXT_ROLL_SETTINGS[@]}"; do ROLL_EXTRA_ARGS+=(-E "$kv"); done
     # The suite's config files (custom user agent regexes, …) go to a directory search-dev reads
     # as its `path.conf`.
     if (( ${#EXT_CONFIGS[@]} )); then

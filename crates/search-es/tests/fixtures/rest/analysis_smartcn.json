@@ -1,0 +1,255 @@
+{
+  "description" : "analysis-smartcn: the HMM segmenter's words, Latin and digit runs, delimiters and sentences, the analyzer's stemming and stop words, smartcn_stop",
+  "steps" : [
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "smartcn_tokenizer",
+        "text" : "我购买了道具和服装。iPhone15和ＡＢＣ１２３，第二句！研究生命起源"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "我",
+            "start_offset" : 0,
+            "end_offset" : 1,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "购买",
+            "start_offset" : 1,
+            "end_offset" : 3,
+            "type" : "word",
+            "position" : 1
+          },
+          {
+            "token" : "了",
+            "start_offset" : 3,
+            "end_offset" : 4,
+            "type" : "word",
+            "position" : 2
+          },
+          {
+            "token" : "道具",
+            "start_offset" : 4,
+            "end_offset" : 6,
+            "type" : "word",
+            "position" : 3
+          },
+          {
+            "token" : "和",
+            "start_offset" : 6,
+            "end_offset" : 7,
+            "type" : "word",
+            "position" : 4
+          },
+          {
+            "token" : "服装",
+            "start_offset" : 7,
+            "end_offset" : 9,
+            "type" : "word",
+            "position" : 5
+          },
+          {
+            "token" : ",",
+            "start_offset" : 9,
+            "end_offset" : 10,
+            "type" : "word",
+            "position" : 6
+          },
+          {
+            "token" : "iphone",
+            "start_offset" : 10,
+            "end_offset" : 16,
+            "type" : "word",
+            "position" : 7
+          },
+          {
+            "token" : "15",
+            "start_offset" : 16,
+            "end_offset" : 18,
+            "type" : "word",
+            "position" : 8
+          },
+          {
+            "token" : "和",
+            "start_offset" : 18,
+            "end_offset" : 19,
+            "type" : "word",
+            "position" : 9
+          },
+          {
+            "token" : "abc",
+            "start_offset" : 19,
+            "end_offset" : 22,
+            "type" : "word",
+            "position" : 10
+          },
+          {
+            "token" : "123",
+            "start_offset" : 22,
+            "end_offset" : 25,
+            "type" : "word",
+            "position" : 11
+          },
+          {
+            "token" : ",",
+            "start_offset" : 25,
+            "end_offset" : 26,
+            "type" : "word",
+            "position" : 12
+          },
+          {
+            "token" : "第二",
+            "start_offset" : 26,
+            "end_offset" : 28,
+            "type" : "word",
+            "position" : 13
+          },
+          {
+            "token" : "句",
+            "start_offset" : 28,
+            "end_offset" : 29,
+            "type" : "word",
+            "position" : 14
+          },
+          {
+            "token" : ",",
+            "start_offset" : 29,
+            "end_offset" : 30,
+            "type" : "word",
+            "position" : 15
+          },
+          {
+            "token" : "研究",
+            "start_offset" : 30,
+            "end_offset" : 32,
+            "type" : "word",
+            "position" : 16
+          },
+          {
+            "token" : "生命",
+            "start_offset" : 32,
+            "end_offset" : 34,
+            "type" : "word",
+            "position" : 17
+          },
+          {
+            "token" : "起源",
+            "start_offset" : 34,
+            "end_offset" : 36,
+            "type" : "word",
+            "position" : 18
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "analyzer" : "smartcn",
+        "text" : "Running RUNS 我的电脑。"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "run",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "run",
+            "start_offset" : 8,
+            "end_offset" : 12,
+            "type" : "word",
+            "position" : 1
+          },
+          {
+            "token" : "我",
+            "start_offset" : 13,
+            "end_offset" : 14,
+            "type" : "word",
+            "position" : 2
+          },
+          {
+            "token" : "的",
+            "start_offset" : 14,
+            "end_offset" : 15,
+            "type" : "word",
+            "position" : 3
+          },
+          {
+            "token" : "电脑",
+            "start_offset" : 15,
+            "end_offset" : 17,
+            "type" : "word",
+            "position" : 4
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "smartcn_tokenizer",
+        "filter" : [
+          {
+            "type" : "smartcn_stop",
+            "stopwords" : [
+              "_smartcn_",
+              "的"
+            ]
+          }
+        ],
+        "text" : "我的电脑，坏了！"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "我",
+            "start_offset" : 0,
+            "end_offset" : 1,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "电脑",
+            "start_offset" : 2,
+            "end_offset" : 4,
+            "type" : "word",
+            "position" : 2
+          },
+          {
+            "token" : "坏",
+            "start_offset" : 5,
+            "end_offset" : 6,
+            "type" : "word",
+            "position" : 4
+          },
+          {
+            "token" : "了",
+            "start_offset" : 6,
+            "end_offset" : 7,
+            "type" : "word",
+            "position" : 5
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

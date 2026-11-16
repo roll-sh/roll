@@ -828,6 +828,7 @@ fn preview_comment(c: &Change, teardown: Option<&str>) -> String {
             if let Some(line) = release_line(e) {
                 out.push_str(&line);
             }
+            out.push_str(&notes_block(&e.notes));
             out.push_str(&format!(
                 "Costs about ${:.2} a month asleep and ${:.3} an hour in use. It sleeps when nobody visits; the first request wakes it.\n",
                 e.sleeping_usd_month, e.active_usd_hour
@@ -918,6 +919,39 @@ fn api_line(api: &crate::model::PreviewTextDiff, breaking: &[String], branch: &s
 /// What in the schema changes would hurt production, unfolded above them (PlanetScale's deploy
 /// request warnings). The names are the change's migrations': each risk in a code span nothing in
 /// it can close.
+/// Text from people (a note on a preview's page) as plain words in the comment: one line, no
+/// markdown (no links, images, mentions or HTML), at most 280 characters.
+fn plain_words(s: &str) -> String {
+    let one: String = s.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(280).collect();
+    let mut out = String::with_capacity(one.len());
+    for ch in one.chars() {
+        if "\\`*_[]()<>!#@|~".contains(ch) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// The preview page's open notes (Vercel's comments in the pull request): each one's page, who,
+/// what, and a public preview's picture of its element (roll's own signed link).
+fn notes_block(notes: &[crate::model::PreviewNoteLink]) -> String {
+    if notes.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("**Notes on its pages** ({} open):\n", notes.len());
+    for n in notes {
+        let path = n.path.replace('`', "'").chars().take(100).collect::<String>();
+        out.push_str(&format!("- `{path}` · {}: {}", plain_words(&n.by), plain_words(&n.note)));
+        if let Some(url) = n.crop_url.as_ref().filter(|u| (u.starts_with("https://") || u.starts_with("http://")) && !u.contains([')', ' ', '\n', '"'])) {
+            out.push_str(&format!(" ([what it's about]({url}))"));
+        }
+        out.push('\n');
+    }
+    out.push('\n');
+    out
+}
+
 fn risks_line(risks: &[String]) -> String {
     if risks.is_empty() {
         return String::new();
@@ -942,6 +976,23 @@ fn word(state: &str) -> String {
 mod preview_tests {
     use super::*;
     use crate::model::{PreviewEnvironment, PreviewGithub, PreviewResourceLink, PreviewServiceLink};
+
+    /// The preview page's open notes reach the pull request: page, who, what and the picture's
+    /// link; a note's text can't link, embed, mention or close anything, and a link that isn't
+    /// roll's plain URL is left out.
+    #[test]
+    fn the_pages_notes_are_listed_as_plain_words() {
+        let n = |note: &str, crop: Option<&str>| crate::model::PreviewNoteLink { path: "/pricing".into(), note: note.into(), by: "ada".into(), crop_url: crop.map(Into::into) };
+        let out = super::notes_block(&[
+            n("The heading is cut off", Some("https://api.roll.sh/v1/previews/pv_1/screenshot.png?note=rv_1&exp=1&sig=ab")),
+            n("see ![x](https://evil.example/t.png) and [here](https://evil.example) @team <b>", Some("javascript:alert(1)")),
+        ]);
+        assert!(out.starts_with("**Notes on its pages** (2 open):\n"));
+        assert!(out.contains("- `/pricing` · ada: The heading is cut off ([what it's about](https://api.roll.sh/v1/previews/pv_1/screenshot.png?note=rv_1&exp=1&sig=ab))"));
+        assert!(out.contains("see \\!\\[x\\]\\(https://evil.example/t.png\\) and \\[here\\]\\(https://evil.example\\) \\@team \\<b\\>"), "{out}");
+        assert!(!out.contains("javascript:"));
+        assert_eq!(super::notes_block(&[]), "");
+    }
 
     #[test]
     fn a_preview_comment_lists_services_data_and_cost() {
@@ -973,6 +1024,7 @@ mod preview_tests {
             pages: Vec::new(),
             speed_budget: None,
             visual_review: None,
+            notes: Vec::new(),
         };
         let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
         let (status, deploy, _) = preview_states(Some(&p));
