@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 pub const RULES: &[Rule] = &[
     // OAuth for MCP clients (docs/mcp.md, "Authorization"): discovery, registration, the token
     // endpoint and revocation are public by the spec; they're merged in front of the gate.
-    Rule { route: "/.well-known", access: Access::Public("OAuth discovery for MCP clients") },
+    Rule { route: "/.well-known", access: Access::Public("OAuth discovery for MCP clients, and the AI Catalog naming MCP's server card") },
     Rule { route: "/v1/access/oauth/register", access: Access::Public("OAuth dynamic client registration (public clients, PKCE)") },
     Rule { route: "/v1/access/oauth/token", access: Access::Public("OAuth token endpoint: codes and refresh tokens are the credentials") },
     Rule { route: "/v1/access/oauth/revoke", access: Access::Public("OAuth token revocation") },
@@ -31,6 +31,7 @@ pub const RULES: &[Rule] = &[
     // roll's MCP server answers 401 itself, naming the OAuth metadata; grants are decided by the
     // evaluator before it, and each tool call goes through the gate again.
     Rule { route: "/v1/mcp", access: Access::Product("MCP: 401 with OAuth discovery without a token") },
+    Rule { route: "/v1/mcp/server-card", access: Access::Public("MCP's server card: who roll's MCP server is and where to connect, before connecting") },
     // Scoped tokens: the operator's, and each signed-in user's own (the routes check which).
     Rule { route: "/v1/access", access: Access::User("access: a user's own tokens, approvals and audit") },
     // …except where approvals are posted and where the audit log streams: the operator's.

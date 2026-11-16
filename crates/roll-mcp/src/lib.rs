@@ -25,6 +25,7 @@
 //! - Search mode: `?tools=search` (or `X-MCP-Tools: search`) lists a search tool and two run tools
 //!   instead of every tool ([`search`]).
 
+pub mod card;
 pub mod lockdown;
 pub mod modern;
 pub mod prompts;
@@ -59,6 +60,11 @@ const URL_ELICITATION_REQUIRED: i64 = -32042;
 
 /// Protocol versions spoken, newest first.
 pub const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// Every version roll speaks, newest first, as `server/discover` and the server card list them.
+pub(crate) fn supported_versions() -> Vec<&'static str> {
+    std::iter::once(modern::MODERN).chain(PROTOCOL_VERSIONS).collect()
+}
 const SSE_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(15);
 /// How often a call that asked for progress (`_meta.progressToken`) hears it's still running (it
 /// may be waiting on a person's approval), so a client doesn't give up on it.
@@ -731,7 +737,7 @@ Read the resource roll://access/me for what this connection may do, in words, an
 
 /// roll's Horizon mark for clients that show a server's icon (2025-11-25): the dashboard's favicon,
 /// the brand export's output, inline so it needs no public URL. Sent once, in `initialize`.
-fn server_icon() -> Value {
+pub(crate) fn server_icon() -> Value {
     use base64::Engine;
     static ICON: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         // The crate's own copy of the dashboard's favicon (`@roll/brand`'s export): roll-mcp builds

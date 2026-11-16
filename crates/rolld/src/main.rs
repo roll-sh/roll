@@ -613,6 +613,7 @@ async fn run() -> anyhow::Result<()> {
         .info_route(cluster.node_id().to_string())
         .merge(on.off_routes())
         .merge(roll_access::oauth::public_router(access.clone()))
+        .merge(roll_mcp::card::routes(&access::api_url(&args), &args.web_url))
         .merge(auth.gate("api", router));
     let mut router = auth.cors(router).layer(axum::middleware::from_fn(logs::access));
     if let Some(c) = &code {

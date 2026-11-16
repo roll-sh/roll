@@ -272,6 +272,16 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
   `onprogress`). The call stays the request's: a client that goes away cancels it, as before.
 - `serverInfo` carries roll's Horizon mark as an icon (2025-11-25 `icons`, an inline SVG: the
   dashboard's favicon), for clients that show one next to the server.
+- **Server card** (SEP-2127, the experimental `server-card` extension; `roll_mcp::card`): what a
+  registry, a crawler or a client learns before connecting, public and the same for everyone.
+  - `GET /v1/mcp/server-card` (`application/mcp-server-card+json`, the location MCP reserves)
+    holds roll's name (`sh.roll/roll`), version, title, description, icon and website, and one
+    `streamable-http` remote: `/v1/mcp`, an optional `Authorization: Bearer` header (without one,
+    OAuth), and the versions `server/discover` answers.
+  - `GET /.well-known/ai-catalog.json` (`application/ai-catalog+json`) is the domain's AI Catalog,
+    with one entry pointing at the card.
+  - It never lists tools or anything a token decides, and clients may not trust it for access
+    decisions (the spec's rule). It validates against the extension's `schema.json`.
 - Requests with an `Origin` header must come from the dashboard's or the API's origin (DNS
   rebinding).
 - Results come back as `structuredContent` (the route's JSON; arrays as `{"items": […]}`) and a
