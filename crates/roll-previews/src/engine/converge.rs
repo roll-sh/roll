@@ -648,11 +648,8 @@ impl Engine {
                     }
                 }
                 let (store, id, head) = (self.store.clone(), r.id.clone(), r.build().to_string());
-                let kept = tokio::task::spawn_blocking(move || {
-                    store.set_screenshot(&id, &head, &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok()
-                        && store.set_page_report(&id, shot.health.as_ref(), shot.a11y.as_ref(), shot.text.as_deref(), shot.links.as_ref(), shot.api.as_deref()).is_ok()
-                        && store.set_page_shots(&id, &head, &pages, &wanted).is_ok()
-                })
+                // One transaction: a comparison never sees the picture without its checks and pages.
+                let kept = tokio::task::spawn_blocking(move || store.keep_shot(&id, &head, &shot, &pages, &wanted).is_ok())
                 .await
                 .unwrap_or(false);
                 if kept && r.change_id.is_some() {
