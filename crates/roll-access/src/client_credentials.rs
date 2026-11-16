@@ -64,14 +64,26 @@ pub async fn token(a: Arc<Access>, headers: &HeaderMap, f: &HashMap<String, Stri
     let client = tokio::task::spawn_blocking(move || a2.store.machine_client(&id)).await.map_err(|e| Error::Internal(e.to_string()))??.ok_or_else(unknown)?;
     match assertion {
         Err(secret) => {
-            let stored = client.secret_hash.as_deref().ok_or_else(unknown)?;
-            if !same(&hash(&secret), stored) {
+            // Its secret, or the one before a rotation while that still works.
+            let h = hash(&secret);
+            if ![&client.secret_hash, &client.old_secret_hash].into_iter().flatten().any(|s| same(&h, s)) {
                 return Err(unknown());
             }
         }
         Ok(jwt) => {
-            let jwk = client.jwk.as_deref().ok_or_else(unknown)?;
-            let (jti, exp) = verify(&jwt, jwk, &client_id, &api)?;
+            let keys: Vec<&str> = [&client.jwk, &client.old_jwk].into_iter().flatten().map(String::as_str).collect();
+            if keys.is_empty() {
+                return Err(unknown());
+            }
+            // Its key, or the one before a rotation: the first that verifies.
+            let mut checked = Err(unknown());
+            for jwk in keys {
+                checked = verify(&jwt, jwk, &client_id, &api);
+                if checked.is_ok() {
+                    break;
+                }
+            }
+            let (jti, exp) = checked?;
             let a2 = a.clone();
             let id = client_id.clone();
             if !tokio::task::spawn_blocking(move || a2.store.first_jti(&id, &jti, exp)).await.map_err(|e| Error::Internal(e.to_string()))?? {

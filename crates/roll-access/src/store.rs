@@ -784,6 +784,10 @@ impl Store {
         db.add_column("oauth_clients", "confidential", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("oauth_clients", "secret_hash", "TEXT")?;
         db.add_column("oauth_clients", "jwk", "TEXT")?;
+        // Its previous credential, still accepted until `old_until` after a rotation.
+        db.add_column("oauth_clients", "old_secret_hash", "TEXT")?;
+        db.add_column("oauth_clients", "old_jwk", "TEXT")?;
+        db.add_column("oauth_clients", "old_until", "INTEGER")?;
         // Where an approval's chat card is (`{install, channel, ts}`), once posted.
         if !db.has_column("approvals", "chat")? {
             db.add_column("approvals", "chat", "TEXT")?;
@@ -1225,7 +1229,9 @@ impl Store {
             // A machine client's secret: its grant, and so every token it got.
             let id = match id {
                 Some(id) => Some(id),
-                None => c.query_row("SELECT g.id FROM oauth_clients o JOIN grants g ON g.client_id = o.id WHERE o.secret_hash = ?", [&h], |r| r.get(0)).optional()?,
+                None => c
+                    .query_row("SELECT g.id FROM oauth_clients o JOIN grants g ON g.client_id = o.id WHERE o.secret_hash = ? OR (o.old_secret_hash = ? AND o.old_until > ?)", params![h, h, now], |r| r.get(0))
+                    .optional()?,
             };
             let Some(id) = id else { return Ok::<_, Error>(None) };
             let n = c.execute("UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND revoked_at IS NULL", params![now, why, id])?;

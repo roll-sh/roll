@@ -135,6 +135,22 @@ pub enum MachineCmd {
     List,
     /// Revoke a machine client: its tokens stop working at once, and it gets no more.
     Revoke { id: String },
+    /// A new credential for a machine client, keeping its id and rules: a new key with
+    /// --public-key, else a new secret (shown once). The old one stops now, with the tokens it
+    /// got, unless --keep-old keeps it working while the automation moves over.
+    ///
+    /// Examples:
+    ///   roll token client rotate mcl_… --keep-old 1h
+    ///   roll token client rotate mcl_… --public-key ci-2026.pub.pem
+    Rotate {
+        id: String,
+        /// Its new public key: a PEM file (Ed25519 or P-256) or a JWK.
+        #[arg(long)]
+        public_key: Option<std::path::PathBuf>,
+        /// The old credential keeps working this long (1h, 2d; at most 7d).
+        #[arg(long)]
+        keep_old: Option<String>,
+    },
 }
 
 #[derive(Args)]
@@ -217,6 +233,26 @@ async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<(
             for c in &list {
                 println!("{}  {}", s(&c["client_id"]), if c["signs_with_key"] == true { "signs with a key" } else { "a secret" });
                 print_grant(&c["grant"]);
+            }
+        }
+        MachineCmd::Rotate { id, public_key, keep_old } => {
+            let jwk = match &public_key {
+                Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
+                None => None,
+            };
+            let keep = keep_old.as_deref().map(|k| span(k, "--keep-old")).transpose()?.flatten().map(|ms| ms / 1000);
+            let made = api.post(&format!("/v1/access/clients/{}/rotate", urlencoding::encode(&id)), json!({ "public_jwk": jwk, "keep_old_for_s": keep })).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&made)?);
+                return Ok(());
+            }
+            let old = if keep.is_some_and(|s| s > 0) { "The old one keeps working for now." } else { "The old one stopped working, with the tokens it got." };
+            match made["client_secret"].as_str() {
+                Some(secret) => {
+                    println!("{secret}");
+                    eprintln!("{old} Copy the new secret now: it isn't shown again.");
+                }
+                None => eprintln!("{id} signs with the new key now. {old}"),
             }
         }
         MachineCmd::Revoke { id } => {

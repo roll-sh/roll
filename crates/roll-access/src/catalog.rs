@@ -277,6 +277,7 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/policy", "the rules for every token are the operator's"),
     ("/v1/access/clients", "a token makes no machine clients: the operator, or a person signed in, makes their own"),
     ("/v1/access/clients/{id}", "a token revokes no machine clients: the operator, or a person signed in, revokes their own"),
+    ("/v1/access/clients/{id}/rotate", "a token rotates no machine client's credential: the operator, or a person signed in, rotates their own"),
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),

@@ -153,6 +153,11 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
   wrong credential look alike.
 - **The metadata** lists `client_secret_basic`, `client_secret_post` and `private_key_jwt`, the
   signature algorithms (`EdDSA`, `ES256`, `RS256`) and the grant type.
+- **Rotating one:** `POST /v1/access/clients/{id}/rotate {public_jwk?, keep_old_for_s?}` (or
+  `roll token client rotate <id> [--public-key f] [--keep-old 1h]`) gives it a new key, or a new
+  secret shown once, keeping its id and rules. The old credential stops at once, and so do the
+  tokens it got, unless `keep_old_for_s` (at most a week) keeps it working while the automation
+  moves over. A leaked old secret still revokes the client while it works.
 - **From the CLI:** `roll token client create <name> [rules] [--public-key ci.pub.pem]` (rules
   as `roll token create` takes them; the key an openssl PEM, Ed25519 or P-256, or a JWK; without
   one, roll makes a secret and shows it once), `roll token client list` and

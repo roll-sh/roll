@@ -127,3 +127,47 @@ pub(crate) async fn revoke(State(a): S, ext: Extensions, Path(id): Path<String>)
     .map_err(|e| Error::Internal(e.to_string()))??;
     Ok(Json(json!({ "grant": grant })))
 }
+
+/// `POST /v1/access/clients/{id}/rotate`, `{public_jwk?, keep_old_for_s?}`: a new credential,
+/// keeping the client's id and rules (a new key, or without one a new secret, shown once). The
+/// old one stops now, with the tokens it got, or works that much longer (at most a week).
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct Rotate {
+    #[serde(default)]
+    public_jwk: Option<Value>,
+    #[serde(default)]
+    keep_old_for_s: Option<i64>,
+}
+
+pub(crate) async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
+    let person = owner(&a, &ext, "rotate machine clients")?;
+    let body: Rotate = if body.iter().all(u8::is_ascii_whitespace) { Rotate::default() } else { serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))? };
+    if body.keep_old_for_s.is_some_and(|s| s < 0 || s * 1000 > crate::store::MAX_KEEP_OLD_MS) {
+        return Err(Error::BadRequest("keep_old_for_s is 0 to 604800 (a week)".into()));
+    }
+    let key = match &body.public_jwk {
+        Some(jwk) => ClientKey::Jwk(check_jwk(jwk)?),
+        None => ClientKey::Secret,
+    };
+    let a2 = a.clone();
+    let (grant, secret) = tokio::task::spawn_blocking(move || -> crate::Result<_> {
+        let missing = || Error::NotFound(format!("machine client {id}"));
+        let (_, grant_id, _) = a2.store.machine_clients()?.into_iter().find(|(c, ..)| *c == id).ok_or_else(missing)?;
+        let grant = a2.store.get(&grant_id)?;
+        if !theirs(&person, &grant) {
+            return Err(missing());
+        }
+        // A new credential is a new way in: it meets the policy, as a token's rotation does.
+        a2.check_policy(grant.expires_at)?;
+        let secret = a2.store.rotate_machine_client(&id, key, body.keep_old_for_s.map(|s| s * 1000))?;
+        Ok((a2.store.get(&grant_id)?, secret))
+    })
+    .await
+    .map_err(|e| Error::Internal(e.to_string()))??;
+    let mut out = json!({ "grant": grant });
+    if let Some(s) = secret {
+        out["client_secret"] = json!(s);
+    }
+    Ok(Json(out))
+}

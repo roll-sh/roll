@@ -1439,6 +1439,26 @@ async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
     assert_eq!(search(signed["access_token"].as_str().unwrap().to_string()).await, StatusCode::OK);
     assert_eq!(assert_with(jwt).await.0, StatusCode::UNAUTHORIZED, "a replayed assertion");
 
+    // Rotated, it keeps its id: kept a minute, the old secret works beside the new one; rotated
+    // again keeping nothing, the old ones stop at once, and so do the tokens they got.
+    let (_, rot) = d.call(OPERATOR, Method::POST, "/v1/access/clients", Some(json!({ "name": "rotating", "rules": rules }))).await;
+    let rid = rot["client_id"].as_str().unwrap().to_string();
+    let trade = |s: String| {
+        let (d, rid) = (&d, rid.clone());
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", "client_credentials"), ("client_id", &rid), ("client_secret", &s)]).await }
+    };
+    let first = rot["client_secret"].as_str().unwrap().to_string();
+    let early = trade(first.clone()).await.1["access_token"].as_str().unwrap().to_string();
+    let rotate = |body: Value| {
+        let (d, path) = (&d, format!("/v1/access/clients/{rid}/rotate"));
+        async move { d.call(OPERATOR, Method::POST, &path, Some(body)).await.1["client_secret"].as_str().unwrap().to_string() }
+    };
+    let second = rotate(json!({ "keep_old_for_s": 60 })).await;
+    assert_eq!((trade(first.clone()).await.0, trade(second.clone()).await.0), (StatusCode::OK, StatusCode::OK));
+    let third = rotate(json!({})).await;
+    assert_eq!((trade(first).await.0, trade(second).await.0, trade(third).await.0), (StatusCode::UNAUTHORIZED, StatusCode::UNAUTHORIZED, StatusCode::OK));
+    assert_eq!(search(early).await, StatusCode::UNAUTHORIZED, "what the old secret got stops too");
+
     // A leaked secret (found in a push, say) revokes the client, and so its tokens, at once.
     assert!(roll_access::checksum_ok(&secret));
     assert_eq!(d.access.revoke_leaked(std::slice::from_ref(&secret), "a test").unwrap().len(), 1);

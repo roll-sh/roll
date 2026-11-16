@@ -18,11 +18,14 @@ pub enum ClientKey {
     Jwk(String),
 }
 
-/// A machine client as the token endpoint checks it.
+/// A machine client as the token endpoint checks it: its credential, and the one it had before a
+/// rotation while that one still works.
 pub struct MachineClient {
     pub grant_id: String,
     pub secret_hash: Option<String>,
     pub jwk: Option<String>,
+    pub old_secret_hash: Option<String>,
+    pub old_jwk: Option<String>,
 }
 
 /// A machine client's secret prefix (with a checksum, as every roll secret has).
@@ -56,14 +59,45 @@ impl Store {
         let now = code_sql::now_ms();
         Ok(self.db.read(|c| {
             c.query_row(
-                "SELECT g.id, o.secret_hash, o.jwk FROM oauth_clients o JOIN grants g ON g.client_id = o.id \
+                "SELECT g.id, o.secret_hash, o.jwk, CASE WHEN o.old_until > ? THEN o.old_secret_hash END, CASE WHEN o.old_until > ? THEN o.old_jwk END \
+                 FROM oauth_clients o JOIN grants g ON g.client_id = o.id \
                  WHERE o.id = ? AND o.confidential = 1 AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at > ?) \
                  AND (g.pending IS NULL OR g.pending = 0)",
-                params![client_id, now],
-                |r| Ok(MachineClient { grant_id: r.get(0)?, secret_hash: r.get(1)?, jwk: r.get(2)? }),
+                params![now, now, client_id, now],
+                |r| Ok(MachineClient { grant_id: r.get(0)?, secret_hash: r.get(1)?, jwk: r.get(2)?, old_secret_hash: r.get(3)?, old_jwk: r.get(4)? }),
             )
             .optional()
         })?)
+    }
+
+    /// A new credential for a machine client, keeping its id and rules: a new secret (answered,
+    /// once) or a new key. The old one stops now, along with the tokens it got, or keeps working
+    /// for `keep_old_ms` (at most a week) while its automation moves over.
+    pub fn rotate_machine_client(&self, client_id: &str, key: ClientKey, keep_old_ms: Option<i64>) -> Result<Option<String>> {
+        let secret = matches!(key, ClientKey::Secret).then(|| crate::new_secret(CLIENT_SECRET_PREFIX));
+        let (secret_hash, jwk) = match &key {
+            ClientKey::Secret => (secret.as_deref().map(hash), None),
+            ClientKey::Jwk(j) => (None, Some(j.clone())),
+        };
+        let now = code_sql::now_ms();
+        let keep = keep_old_ms.filter(|ms| *ms > 0).map(|ms| ms.min(MAX_KEEP_OLD_MS));
+        self.db.write(|c| {
+            let grant: Option<String> = c.query_row("SELECT g.id FROM oauth_clients o JOIN grants g ON g.client_id = o.id WHERE o.id = ? AND o.confidential = 1", [client_id], |r| r.get(0)).optional()?;
+            let Some(grant) = grant else { return Err(Error::NotFound(format!("machine client {client_id}"))) };
+            match keep {
+                Some(ms) => c.execute(
+                    "UPDATE oauth_clients SET old_secret_hash = secret_hash, old_jwk = jwk, old_until = ?, secret_hash = ?, jwk = ? WHERE id = ?",
+                    params![now + ms, secret_hash, jwk, client_id],
+                )?,
+                None => {
+                    // A credential rotated because it may be out: what it got stops too.
+                    c.execute("DELETE FROM grant_secrets WHERE grant_id = ? AND kind = 'access'", [&grant])?;
+                    c.execute("UPDATE oauth_clients SET old_secret_hash = NULL, old_jwk = NULL, old_until = NULL, secret_hash = ?, jwk = ? WHERE id = ?", params![secret_hash, jwk, client_id])?
+                }
+            };
+            Ok::<_, Error>(())
+        })?;
+        Ok(secret)
     }
 
     /// An hour's access token on a machine client's grant.
