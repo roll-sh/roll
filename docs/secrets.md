@@ -2786,7 +2786,8 @@ In pull requests to main, each green: #67 (transit in the Go and Python clients,
 windows), #87 (encryption keys by name), #88 (password policies), #92 (SaaS rotators, the
 credential checked at registration), #97 (search keys say `access: data`), #102 (Kubernetes
 service-account tokens), #105 (Java), #110 (.NET with `IConfiguration`), #113 (an AWS Lambda
-extension that logs in with the function's role) and #117 (an Ansible collection).
+extension that logs in with the function's role), #117 (an Ansible collection) and #132 (LDAP and
+Active Directory).
 
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
@@ -2794,15 +2795,19 @@ extension that logs in with the function's role) and #117 (an Ansible collection
 2. **Landing the stacks together where it saves a lock cycle** (#128 on #105, #124 on #102, #95 on
    #79, #117 on #121), and the Spring integration's first CI run (#128). (The TypeScript client's
    `fromEnv` and `oidcTokenFromEnv` are on #117, so the three clients' surfaces match.)
-3. **LDAP and Active Directory passwords** (building: `feature/roll-secrets-ldap`): a directory
-   registered with a bind account; managed links rotate a service account's password, and dynamic
-   links make a short-lived user (Vault's LDAP secrets engine, Infisical's).
+3. **LDAP and Active Directory passwords** (#132): a directory registered with a bind account;
+   managed links rotate a service account's password, and dynamic links make a short-lived user
+   (Vault's LDAP secrets engine, Infisical's). Checked against a real OpenLDAP over LDAPS and
+   StartTLS; Active Directory's steps next, against Samba AD, then usernames as UPNs as well as DNs
+   and an MCP tool for directories.
    Since roll search's #100, roll apps' search links use roll secrets' search provider, so #97's
    data-only check covers them too.
 4. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
    backup schedules, rotation windows): the resources once their routes are on main (each kind's
    PR predates main's provider changes, so a resource now would conflict), the tools with roll MCP.
-5. **Snowflake credentials and a Pulumi provider** (bridged from the Terraform provider).
+5. **Snowflake credentials** (building: `feature/roll-secrets-snowflake`, on #132): key pairs
+   rotated through a user's two key slots without downtime, passwords, and short-lived users (Vault's
+   Snowflake plugin); then **a Pulumi provider** (bridged from the Terraform provider).
 6. **Access requests**: a time-boxed `reveal` on a protected environment that an approver grants
    (Infisical's and 1Password's), once projects have members.
 7. **A gateway into private networks** (Infisical's and Akeyless'); **ACME on project CAs**.
