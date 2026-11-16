@@ -1331,6 +1331,8 @@ impl Seen {
             ua: text(header::USER_AGENT, 256),
             host: text(header::HOST, 255),
             page: req.method() == axum::http::Method::GET
+                // A cache refresh is roll's own request, not a visitor's page view.
+                && req.extensions().get::<crate::resp_cache::Refresh>().is_none()
                 && match req.headers().get("sec-fetch-dest").and_then(|v| v.to_str().ok()) {
                     Some(dest) => dest.eq_ignore_ascii_case("document"),
                     None => req.headers().get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/html")),
@@ -1377,10 +1379,11 @@ impl Access {
     /// An answer from the cache: no instance saw it, its bytes still went out.
     fn write_cached(&self, status: u16, began: Instant, bytes: u64) {
         let s = &self.seen;
-        let line = serde_json::json!({
+        let mut line = serde_json::json!({
             "method": s.method, "path": s.path, "status": status, "ms": began.elapsed().as_millis() as u64,
             "bytes": bytes, "by": "cache", "ip": s.ip, "ua": s.ua, "host": s.host,
         });
+        s.mark(&mut line);
         self.log.line(line.to_string());
     }
 
