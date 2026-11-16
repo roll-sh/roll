@@ -266,7 +266,9 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     or dark as the host is: times as UTC, columns empty in every row dropped, and links roll
     answered (an approval's page, a preview) opened by the host (`ui/open-link`) where it can.
     `access_wait_approval` points at it too: while a call waits for a person, the view is a card
-    with roll's approval page to open.
+    with roll's approval page to open. A deploy or a job (`apps_get_deploy`, `apps_get_job` and their
+    `apps_wait_*` twins) shows too: an object's own fields (status, commit) above its list (the
+    steps).
     - **Declaring it:** a 2026-07-28 request on itself; in `initialize`, the session id carries it
       (`~ui.` after its prefix), as URL elicitation does.
     - **Safety:** the view has no network (its resource declares no domains), writes every value

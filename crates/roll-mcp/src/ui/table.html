@@ -21,6 +21,7 @@
   td.mono, dd.mono { font-family: ui-monospace, "Geist Mono", monospace; font-size: 12px; }
   dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
   dt { color: var(--muted); }
+  dl.own { margin-bottom: 8px; }
   dd { margin: 0; overflow-wrap: anywhere; }
   .error { color: #e5484d; }
   a { color: var(--accent); text-decoration: none; cursor: pointer; }
@@ -118,6 +119,15 @@
         body.append(tr);
       });
       table.append(body);
+      // An object with a list in it (a deploy and its steps): its own fields first.
+      if (!Array.isArray(data)) {
+        const own = Object.entries(data).filter(([, v]) => !blank(v) && (v === null || typeof v !== "object")).slice(0, 12);
+        if (own.length) {
+          const dl = el("dl", undefined, "own");
+          own.forEach(([k, v]) => dl.append(el("dt", k), value("dd", k, v)));
+          view.append(dl);
+        }
+      }
       const wrap = el("div", undefined, "wrap"); wrap.append(table); view.append(wrap);
       document.getElementById("count").textContent = rows.length > 500 ? `first 500 of ${rows.length}` : `${rows.length} ${rows.length === 1 ? "row" : "rows"}`;
     } else if (data && typeof data === "object") {
