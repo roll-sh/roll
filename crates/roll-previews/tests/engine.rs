@@ -922,6 +922,57 @@ async fn a_roll_apps_preview_costs_what_it_runs_with() {
 
 /// The notes on a page, by the preview's environment name (how roll apps' proxy asks for them):
 /// that page's only, nothing for an environment that isn't a preview's.
+/// Only the pages a push can change are taken again (Chromatic's TurboSnap): another service that
+/// runs what it ran at the push before keeps its pages without a browser run; once its data is
+/// reset they're taken again.
+#[tokio::test]
+async fn a_service_that_didnt_change_keeps_its_pages() {
+    // A change in acme/api: api is the change's (taken every push), web the project's other
+    // service, running acme/web's default branch whatever the change pushes.
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "pages": ["web:/"] } }));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    let runs = |svc: &str| e.apps.shot_services.lock().iter().filter(|s| *s == svc).count();
+    async fn taken(apps: &common::FakeApps, svc: &str, n: usize) {
+        for _ in 0..3000 {
+            if apps.shot_services.lock().iter().filter(|s| *s == svc).count() >= n {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+    let mut c = change("chg_ts", 3);
+    c.repo = "acme/api".into();
+    e.code.open(c);
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_ts").unwrap().unwrap();
+    // The change's run takes api's page, then web's.
+    taken(&e.apps, "web", 1).await;
+    let web_before = runs("web");
+    assert!(web_before >= 1, "web's page taken at first");
+    let api_before = runs("api");
+    // A push to api: web runs what it ran, so its page is kept, not taken again.
+    e.code.edit("chg_ts", |c| c.head = "cs_4a".into());
+    e.engine.pass().await.unwrap();
+    taken(&e.apps, "api", api_before + 1).await;
+    for _ in 0..3000 {
+        if e.engine.store.screenshot_head(&p.id).unwrap().as_deref() == Some("cs_4a") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(runs("web"), web_before, "an unchanged service's pages are kept");
+    assert!(e.engine.store.preview(&p.id).unwrap().pages.iter().any(|x| x.path == "web:/"), "and still listed");
+    // Its data reset since: taken again.
+    let now = e.engine.store.now_ms().unwrap();
+    e.engine.store.update(&p.id, |r| r.last_reset_at = Some(now)).unwrap();
+    e.code.edit("chg_ts", |c| c.head = "cs_5a".into());
+    e.engine.pass().await.unwrap();
+    taken(&e.apps, "web", web_before + 1).await;
+    assert_eq!(runs("web"), web_before + 1, "after a reset its pages are taken again");
+}
+
 /// A note left with the page's Feedback button gets a picture of its element: the next screenshot
 /// run crops it by its selector (only selectors roll accepts, from the preview's code), keeps it
 /// with the note and lists it; a note already cropped isn't asked again, and one whose element
