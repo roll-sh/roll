@@ -78,6 +78,87 @@ impl Apps {
     }
 }
 
+/// A visitor: a day, an address and a user agent (counted, never kept).
+type Visitor = (i64, String, String);
+/// Views and the visitors that made them.
+type Counted = (u64, std::collections::HashSet<Visitor>);
+
+/// Lines one analytics answer reads at most (newest first).
+const MAX_ANALYTICS_LINES: usize = 200_000;
+
+impl Apps {
+    /// `GET …/environments/{env}/analytics?minutes=` (60 to 10,080, default 1,440): visitors and
+    /// page views from the access log already kept (Vercel's Web Analytics, Plausible's way: no
+    /// script, no cookie). A page view is a browser's page load answered 2xx or 304; a visitor is
+    /// one address and user agent on one day, counted in memory for this answer and never kept.
+    /// Top pages, referring sites (their hosts) and countries (the edge's), and a series.
+    pub async fn analytics(self: &Arc<Self>, service: &str, env: &str, minutes: i64) -> Result<Value> {
+        self.service_env(service, env).await?;
+        let minutes = minutes.clamp(60, 10_080);
+        let now = code_sql::now_ms();
+        let since = now - minutes * 60_000;
+        let step = if minutes <= 360 { 5 } else if minutes <= 2_880 { 60 } else { 360 };
+        let (lines, cut) = self.logs.read(&format!("http:{service}/{env}"), |_| true, Some(since), None, MAX_ANALYTICS_LINES).await;
+        let cut = cut || lines.len() >= MAX_ANALYTICS_LINES;
+        let day = |t: i64| t / 86_400_000;
+        let mut visitors: std::collections::HashSet<Visitor> = std::collections::HashSet::new();
+        let mut pages: HashMap<String, Counted> = HashMap::new();
+        let mut referrers: HashMap<String, u64> = HashMap::new();
+        let mut countries: HashMap<String, u64> = HashMap::new();
+        let buckets = (minutes / step) as usize + 1;
+        let mut series: Vec<Counted> = (0..buckets).map(|_| (0, Default::default())).collect();
+        let mut views = 0u64;
+        for l in &lines {
+            let Ok(v) = serde_json::from_str::<Value>(&l.text) else { continue };
+            let status = v["status"].as_u64().unwrap_or(0);
+            if v["page"] != true || !((200..300).contains(&status) || status == 304) {
+                continue;
+            }
+            views += 1;
+            let who = (day(l.t), v["ip"].as_str().unwrap_or("").to_string(), v["ua"].as_str().unwrap_or("").to_string());
+            let path = v["path"].as_str().unwrap_or("/").split(['?', '#']).next().unwrap_or("/").chars().take(200).collect::<String>();
+            if pages.len() < MAX_GROUPS || pages.contains_key(&path) {
+                let p = pages.entry(path).or_default();
+                p.0 += 1;
+                p.1.insert(who.clone());
+            }
+            if let Some(r) = v["ref"].as_str()
+                && (referrers.len() < MAX_GROUPS || referrers.contains_key(r))
+            {
+                *referrers.entry(r.to_string()).or_default() += 1;
+            }
+            if let Some(c) = v["country"].as_str() {
+                *countries.entry(c.to_string()).or_default() += 1;
+            }
+            let b = (((l.t - since).max(0) / 60_000) / step) as usize;
+            if let Some(s) = series.get_mut(b) {
+                s.0 += 1;
+                s.1.insert(who.clone());
+            }
+            visitors.insert(who);
+        }
+        let top = |m: HashMap<String, u64>, key: &str| {
+            let mut v: Vec<(String, u64)> = m.into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            v.into_iter().take(TOP).map(|(k, n)| json!({ key: k, "views": n })).collect::<Vec<_>>()
+        };
+        let mut page_rows: Vec<(String, u64, usize)> = pages.into_iter().map(|(p, (n, w))| (p, n, w.len())).collect();
+        page_rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let series: Vec<Value> = series.into_iter().enumerate().map(|(i, (n, w))| json!({ "t": since + i as i64 * step * 60_000, "views": n, "visitors": w.len() })).collect();
+        Ok(json!({
+            "minutes": minutes,
+            "step": step,
+            "page_views": views,
+            "visitors": visitors.len(),
+            "pages": page_rows.into_iter().take(TOP).map(|(p, n, w)| json!({ "path": p, "views": n, "visitors": w })).collect::<Vec<_>>(),
+            "referrers": top(referrers, "host"),
+            "countries": top(countries, "country"),
+            "series": series,
+            "cut": cut,
+        }))
+    }
+}
+
 /// A path as a route: no query, at most 12 segments, an id-like segment `:id`.
 pub fn route_of(path: &str) -> String {
     let path = path.split(['?', '#']).next().unwrap_or("/");

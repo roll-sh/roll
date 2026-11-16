@@ -1300,9 +1300,28 @@ struct Seen {
     ip: Option<String>,
     ua: String,
     host: String,
+    /// A browser's page load (its document), for visitor analytics.
+    page: bool,
+    /// The referring site's host, when it's another site's (never its path: it can carry tokens).
+    referrer: Option<String>,
+    /// The visitor's country as the edge saw it (Cloudflare's `CF-IPCountry`), when there is one.
+    country: Option<String>,
 }
 
 impl Seen {
+    /// What analytics read, on the line only when there's something to say.
+    fn mark(&self, line: &mut serde_json::Value) {
+        if self.page {
+            line["page"] = serde_json::Value::Bool(true);
+        }
+        if let Some(r) = &self.referrer {
+            line["ref"] = r.clone().into();
+        }
+        if let Some(c) = &self.country {
+            line["country"] = c.clone().into();
+        }
+    }
+
     fn of(req: &Request) -> Seen {
         let text = |h: header::HeaderName, n: usize| req.headers().get(h).map(|v| String::from_utf8_lossy(v.as_bytes()).chars().take(n).collect()).unwrap_or_default();
         Seen {
@@ -1311,6 +1330,22 @@ impl Seen {
             ip: crate::live::client_ip(roll_cluster::client_addr(req).as_deref()).map(|ip| ip.to_string()),
             ua: text(header::USER_AGENT, 256),
             host: text(header::HOST, 255),
+            page: req.method() == axum::http::Method::GET
+                && match req.headers().get("sec-fetch-dest").and_then(|v| v.to_str().ok()) {
+                    Some(dest) => dest.eq_ignore_ascii_case("document"),
+                    None => req.headers().get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/html")),
+                },
+            referrer: req
+                .headers()
+                .get(header::REFERER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|r| url::Url::parse(r).ok())
+                .and_then(|u| u.host_str().map(|h| h.trim_start_matches("www.").to_ascii_lowercase()))
+                .filter(|h| {
+                    let own = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).map(|h| h.split(':').next().unwrap_or(h).trim_start_matches("www.").to_ascii_lowercase());
+                    own.as_deref() != Some(h.as_str()) && h.len() <= 255
+                }),
+            country: req.headers().get("cf-ipcountry").and_then(|v| v.to_str().ok()).filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_alphabetic()) && *c != "XX" && *c != "T1").map(|c| c.to_ascii_uppercase()),
         }
     }
 }
@@ -1330,11 +1365,12 @@ impl Access {
     #[allow(clippy::too_many_arguments)]
     fn write(&self, status: u16, began: Instant, bytes: u64, instance: &str, request_id: &str, cold: bool, waited_ms: u64) {
         let s = &self.seen;
-        let line = serde_json::json!({
+        let mut line = serde_json::json!({
             "method": s.method, "path": s.path, "status": status, "ms": began.elapsed().as_millis() as u64,
             "bytes": bytes, "instance": instance, "request_id": request_id, "cold": cold, "waited_ms": waited_ms,
             "ip": s.ip, "ua": s.ua, "host": s.host,
         });
+        s.mark(&mut line);
         self.log.line(line.to_string());
     }
 
@@ -1351,10 +1387,11 @@ impl Access {
     /// An answer roll gave itself (no instance saw the request).
     fn write_by(&self, status: u16, began: Instant, by: &str) {
         let s = &self.seen;
-        let line = serde_json::json!({
+        let mut line = serde_json::json!({
             "method": s.method, "path": s.path, "status": status, "ms": began.elapsed().as_millis() as u64,
             "bytes": 0, "by": by, "ip": s.ip, "ua": s.ua, "host": s.host,
         });
+        s.mark(&mut line);
         self.log.line(line.to_string());
     }
 }

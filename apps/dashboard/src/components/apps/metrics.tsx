@@ -12,7 +12,7 @@
 
 import { Table2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, formatMs, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats } from "@/lib/apps-api";
+import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats } from "@/lib/apps-api";
 import { formatBytes } from "@/lib/roll-api";
 import { btn, CopyButton, panel, useCopy } from "../ui";
 import { usePageVisible } from "./live";
@@ -194,6 +194,43 @@ const ROUTE_SORTS: { key: RouteSort; label: string }[] = [
 ];
 
 /** Errors and latency by route (Vercel's Observability): the last hour's access log, ids folded. */
+/** Visitors and page views from the access log: no script, no cookie (an address and browser a day). */
+function Visitors({ a }: { a: Analytics }) {
+  const lists: { title: string; rows: { label: string; n: number }[] }[] = [
+    { title: "Pages", rows: a.pages.map((p) => ({ label: p.path, n: p.views })) },
+    { title: "Referrers", rows: a.referrers.map((r) => ({ label: r.host, n: r.views })) },
+    { title: "Countries", rows: a.countries.map((c) => ({ label: c.country, n: c.views })) },
+  ];
+  return (
+    <section className={`${panel} overflow-hidden`} aria-label="Visitors">
+      <div className="border-b border-line px-4 py-2.5">
+        <p className="text-[12px] text-muted">
+          Visitors <span className="text-subtle">· {count(a.visitors)} visitors, {count(a.page_views)} page views{a.cut ? ", the newest read" : ""}; from the access log, no script or cookie</span>
+        </p>
+      </div>
+      <div className="grid gap-px bg-line sm:grid-cols-3">
+        {lists.map((l) => (
+          <div key={l.title} className="bg-panel px-4 py-3">
+            <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">{l.title}</p>
+            {l.rows.length === 0 ? (
+              <p className="text-[12px] text-subtle">None yet.</p>
+            ) : (
+              <ul className="space-y-1">
+                {l.rows.slice(0, 8).map((r) => (
+                  <li key={r.label} className="flex items-center justify-between gap-3 text-[12px]">
+                    <span className="min-w-0 truncate font-mono text-[11.5px]">{r.label}</span>
+                    <span className="font-mono text-muted">{count(r.n)}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function Routes({ stats }: { stats: RouteStats }) {
   const [sort, setSort] = useState<RouteSort>("requests");
   const rows = useMemo(() => {
@@ -261,6 +298,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
   const [raw, setM] = useState<MetricsData | null>(null);
   const [deploys, setDeploys] = useState<Deployment[]>([]);
   const [routes, setRoutes] = useState<RouteStats | null>(null);
+  const [visitors, setVisitors] = useState<Analytics | null>(null);
   const size = raw ? Math.max(1, Math.ceil(raw.minutes.length / MAX_POINTS)) : 1;
   const m = useMemo(() => (raw ? bucketed(raw, size) : null), [raw, size]);
   // Minutes a point stands for: rolld's step (an hour past a week) times the buckets here.
@@ -284,11 +322,17 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
     const load = async () => {
       try {
         // The deploys only mark the charts: metrics still show without them.
-        const [next, deps, byRoute] = await Promise.all([appsApi.metrics(service, env, range.minutes), appsApi.deploys(service, env).catch(() => null), appsApi.routes(service, env).catch(() => null)]);
+        const [next, deps, byRoute, seen] = await Promise.all([
+          appsApi.metrics(service, env, range.minutes),
+          appsApi.deploys(service, env).catch(() => null),
+          appsApi.routes(service, env).catch(() => null),
+          appsApi.analytics(service, env, Math.min(Math.max(range.minutes, 60), 10_080)).catch(() => null),
+        ]);
         if (alive) {
           setM(next);
           if (deps) setDeploys(deps);
           if (byRoute) setRoutes(byRoute);
+          if (seen) setVisitors(seen);
           setError(null);
         }
       } catch (e) {
@@ -425,6 +469,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
         </div>
       )}
       {routes && <Routes stats={routes} />}
+      {visitors && visitors.page_views > 0 && <Visitors a={visitors} />}
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-subtle">
         <span>For a scraper:</span>
         <code className="min-w-0 truncate font-mono text-[11.5px] text-muted">{scrape}</code>
