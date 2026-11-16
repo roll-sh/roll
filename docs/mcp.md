@@ -741,7 +741,7 @@ waits on a sibling PR reaching main is last.
    filtered list marked `filters_itself`, and two lines in roll-auth's `Selector::matches`;
    review the roll-auth part when it comes.
 10. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
-   roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
+   roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_`, `rlc_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
 11. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
