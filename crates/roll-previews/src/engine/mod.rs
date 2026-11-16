@@ -147,6 +147,8 @@ pub struct Engine {
     shots_failed: Mutex<std::collections::HashSet<(String, String)>>,
     /// What this node did, for rolld's metrics (`Engine::stats`).
     counters: Counters,
+    /// The hosts each preview's egress proxy refused that its activity already says.
+    egress_told: Mutex<HashMap<String, std::collections::HashSet<String>>>,
     /// Screenshots taken at once on this node ([`screenshot_slots`]).
     shooting: Arc<tokio::sync::Semaphore>,
     /// Services a converge just deployed at a change's new head, woken after the pass (`warm`).
@@ -212,6 +214,7 @@ impl Engine {
             shots_failed: Mutex::new(std::collections::HashSet::new()),
             counters: Counters::default(),
             shooting: Arc::new(tokio::sync::Semaphore::new(screenshot_slots())),
+            egress_told: Mutex::new(HashMap::new()),
             warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
@@ -311,6 +314,7 @@ impl Engine {
         }
         while set.join_next().await.is_some() {}
         self.tend_leases().await;
+        self.note_refused_egress().await;
         // Services those converges deployed at a new head, woken so their first visit is warm (a
         // few at a time, off the pass).
         let warm: Vec<(String, String)> = std::mem::take(&mut *self.warm_wanted.lock());
@@ -477,6 +481,34 @@ impl Engine {
                 let _ = self.store.drop_lease(&l.preview, &l.lease);
             }
             Err(e) => warn!(preview = %l.preview, lease = %l.lease, error = %e, "previews: revoking a dynamic credential"),
+        }
+    }
+
+    /// What the egress proxies of this node's previews refused since they were last asked: said
+    /// in each preview's activity, a host once.
+    async fn note_refused_egress(&self) {
+        let Ok(rows) = self.store.rows(None) else { return };
+        for r in rows.into_iter().filter(|r| r.desired == Desired::Active) {
+            let Ok(s) = self.store.settings(&r.project_id) else { continue };
+            if s.egress != crate::settings::EgressRule::Roll || s.egress_hosts.is_empty() {
+                continue;
+            }
+            let local = match self.cluster.get() {
+                Some(c) => matches!(c.route_async(&preview_key(&r.id)).await, Ok(roll_cluster::Route::Local(_))),
+                None => true,
+            };
+            if !local {
+                continue;
+            }
+            let fresh: Vec<String> = {
+                let refused = self.apps.egress_refused(&r.id).await;
+                let mut told = self.egress_told.lock();
+                let seen = told.entry(r.id.clone()).or_default();
+                refused.into_iter().filter(|h| seen.insert(h.clone())).collect()
+            };
+            if !fresh.is_empty() {
+                let _ = self.store.log(&r.id, &format!("its code tried to reach {} (not in the project's egress_hosts): refused", fresh.join(", ")));
+            }
         }
     }
 
