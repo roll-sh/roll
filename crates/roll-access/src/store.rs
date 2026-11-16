@@ -14,6 +14,8 @@ use serde_json::Value;
 mod device;
 pub use device::{DEVICE_TTL_MS, DeviceRequest, normalize_user_code, show_user_code};
 mod tasks;
+mod machine;
+pub use machine::{CLIENT_SECRET_PREFIX, ClientKey, MachineClient};
 pub use tasks::{McpTask, TASK_STALE_MS, TASK_TTL_MS, TASKS_PER_OWNER, TaskUpdate, iso};
 
 const SCHEMA: &str = "
@@ -150,6 +152,13 @@ CREATE TABLE IF NOT EXISTS mcp_tasks (
     expires_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS mcp_tasks_owner ON mcp_tasks (owner, status);
+-- Machine clients' JWT assertion ids, refused when seen again (store/machine.rs).
+CREATE TABLE IF NOT EXISTS client_jtis (
+    client_id TEXT NOT NULL,
+    jti TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY (client_id, jti)
+) WITHOUT ROWID;
 ";
 
 /// A grant's secret prefixes: scoped tokens, OAuth access and refresh tokens.
@@ -770,6 +779,11 @@ impl Store {
     pub fn new(db: Db) -> Result<Store> {
         db.ensure_schema(SCHEMA)?;
         db.ensure_schema(crate::sinks::SCHEMA)?;
+        // Machine clients (client credentials): a confidential client's secret hash or key.
+        // `add_column` checks for itself, so every database gets them, however old.
+        db.add_column("oauth_clients", "confidential", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("oauth_clients", "secret_hash", "TEXT")?;
+        db.add_column("oauth_clients", "jwk", "TEXT")?;
         // Where an approval's chat card is (`{install, channel, ts}`), once posted.
         if !db.has_column("approvals", "chat")? {
             db.add_column("approvals", "chat", "TEXT")?;
@@ -1208,6 +1222,11 @@ impl Store {
         let why: String = why.chars().take(300).collect();
         let id = self.db.write(|c| {
             let id: Option<String> = c.query_row("SELECT grant_id FROM grant_secrets WHERE hash = ? AND (expires_at IS NULL OR expires_at > ?)", params![h, now], |r| r.get(0)).optional()?;
+            // A machine client's secret: its grant, and so every token it got.
+            let id = match id {
+                Some(id) => Some(id),
+                None => c.query_row("SELECT g.id FROM oauth_clients o JOIN grants g ON g.client_id = o.id WHERE o.secret_hash = ?", [&h], |r| r.get(0)).optional()?,
+            };
             let Some(id) = id else { return Ok::<_, Error>(None) };
             let n = c.execute("UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND revoked_at IS NULL", params![now, why, id])?;
             c.execute("DELETE FROM grant_secrets WHERE grant_id = ?", [&id])?;

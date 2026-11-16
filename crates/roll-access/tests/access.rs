@@ -1393,6 +1393,61 @@ async fn approvals_can_be_remembered() {
     assert_eq!(values("production").await.1["code"], "approval_pending");
 }
 
+/// Machine clients (OAuth client credentials): the operator makes one with rules; it trades its
+/// secret, or a JWT it signs with its key, for an hour's token that does what its rules allow and
+/// nothing more; an assertion works once; and revoking the client ends its tokens.
+#[tokio::test]
+async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
+    use base64::Engine;
+    let d = Daemon::new(50);
+    let rules = json!([{ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "read": "allow" } }]);
+    let (s, made) = d.call(OPERATOR, Method::POST, "/v1/access/clients", Some(json!({ "name": "ci", "rules": rules }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{made}");
+    let (id, secret) = (made["client_id"].as_str().unwrap().to_string(), made["client_secret"].as_str().unwrap().to_string());
+    let (s, wrong) = d.form("/v1/access/oauth/token", &[("grant_type", "client_credentials"), ("client_id", &id), ("client_secret", "rlc_nope")]).await;
+    assert_eq!((s, wrong["error"].as_str()), (StatusCode::UNAUTHORIZED, Some("invalid_client")));
+    let (s, got) = d.form("/v1/access/oauth/token", &[("grant_type", "client_credentials"), ("client_id", &id), ("client_secret", &secret)]).await;
+    assert_eq!(s, StatusCode::OK, "{got}");
+    let token = got["access_token"].as_str().unwrap().to_string();
+    let search = |t: String| {
+        let d = &d;
+        async move { d.call(&t, Method::POST, "/v1/search/clusters/cl_1/indices/logs/search", Some(json!({}))).await.0 }
+    };
+    assert_eq!(search(token.clone()).await, StatusCode::OK);
+    assert_eq!(d.call(&token, Method::GET, "/v1/secrets/projects/prj_a/transit", None).await.0, StatusCode::FORBIDDEN, "only what its rules allow");
+    assert_eq!(d.call(&token, Method::GET, "/v1/access/clients", None).await.0, StatusCode::FORBIDDEN, "a client never manages clients");
+
+    // A key it signs with: nothing secret is stored, and an assertion works once.
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).unwrap();
+    let public = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
+    let jwk = json!({ "kty": "OKP", "crv": "Ed25519", "x": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.as_bytes()) });
+    let (s, keyed) = d.call(OPERATOR, Method::POST, "/v1/access/clients", Some(json!({ "name": "deployer", "rules": rules, "public_jwk": jwk }))).await;
+    assert!(s == StatusCode::CREATED && keyed.get("client_secret").is_none(), "{keyed}");
+    let kid = keyed["client_id"].as_str().unwrap().to_string();
+    let mut der = vec![0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20];
+    der.extend_from_slice(&seed);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let claims = json!({ "iss": kid, "sub": kid, "aud": made["token_endpoint"], "exp": now + 60, "jti": "one" });
+    let jwt = jsonwebtoken::encode(&jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA), &claims, &jsonwebtoken::EncodingKey::from_ed_der(&der)).unwrap();
+    let assert_with = |jwt: String| {
+        let d = &d;
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", "client_credentials"), ("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"), ("client_assertion", &jwt)]).await }
+    };
+    let (s, signed) = assert_with(jwt.clone()).await;
+    assert_eq!(s, StatusCode::OK, "{signed}");
+    assert_eq!(search(signed["access_token"].as_str().unwrap().to_string()).await, StatusCode::OK);
+    assert_eq!(assert_with(jwt).await.0, StatusCode::UNAUTHORIZED, "a replayed assertion");
+
+    // A leaked secret (found in a push, say) revokes the client, and so its tokens, at once.
+    assert!(roll_access::checksum_ok(&secret));
+    assert_eq!(d.access.revoke_leaked(std::slice::from_ref(&secret), "a test").unwrap().len(), 1);
+    assert_eq!(search(token).await, StatusCode::UNAUTHORIZED);
+    // Revoking one by hand does the same.
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/clients/{kid}"), None).await.0, StatusCode::OK);
+    assert_eq!(search(signed["access_token"].as_str().unwrap().to_string()).await, StatusCode::UNAUTHORIZED);
+}
+
 /// A rule can grant one encryption key of a secrets project: its routes are decided key by key,
 /// and the project's list stays shut to it (secrets doesn't filter the list by key yet).
 #[tokio::test]

@@ -125,6 +125,40 @@ Data planes keep their own credentials (Postgres passwords, Redis users, S3 keys
 token never opens a data plane. It can be allowed to **reveal** those credentials, which is then
 an explicit action of its own.
 
+### Machine clients
+
+Automation with no person (CI, a scheduled agent) uses OAuth client credentials
+(`io.modelcontextprotocol/oauth-client-credentials`): it trades a credential at the token
+endpoint for an hour's access token, rather than holding a long-lived token in a header.
+
+- **Making one:** the operator calls `POST /v1/access/clients {name, rules, expires_at?,
+  public_jwk?}`. The rules are exactly a token's, and so is the token policy (maximum life, an
+  expiry it must have).
+- **What it is:** a confidential OAuth client plus one OAuth grant holding those rules. Each token
+  it gets is one more access secret on that grant, so revoking the client
+  (`DELETE /v1/access/clients/{id}`) ends them all, and grants are looked up per request as
+  always.
+- **How it proves itself:**
+  - **`private_key_jwt`** (preferred: nothing secret is stored): a JWT signed with the key whose
+    public half (`public_jwk`: Ed25519, P-256 or RSA of 2048 bits or more) was registered. It
+    needs `iss` = `sub` = the client id, `aud` the token endpoint or the issuer, at most five
+    minutes to live, and a `jti` never used before (a replay is refused). A JWK carrying private
+    material is refused.
+  - **`client_secret_basic` or `client_secret_post`:** a secret roll makes (`rlc_…`, shown once,
+    stored as its hash, with a checksum, so a leaked one is found and revokes its client, as a
+    leaked token does).
+- **The request:** `grant_type=client_credentials`; its `resource`, if any, must be roll's API or
+  MCP server. The answer has no refresh token: the client trades its credential again for the
+  next one. Every failure to authenticate is the same `invalid_client`, so an unknown client and a
+  wrong credential look alike.
+- **The metadata** lists `client_secret_basic`, `client_secret_post` and `private_key_jwt`, the
+  signature algorithms (`EdDSA`, `ES256`, `RS256`) and the grant type.
+- **Who:** machine clients are the operator's to make, list and revoke (grants never reach these
+  routes). A person's own, acting as them within their reach, comes later (docs/mcp.md, Next).
+- **Tests:** `roll-access/tests/access.rs::a_machine_client_trades_its_credential_for_a_token_its_rules_bound`
+  (secret and key, rules bounding the token, a replayed assertion, a leaked secret, a revoked
+  client).
+
 ## The grant
 
 ```ts

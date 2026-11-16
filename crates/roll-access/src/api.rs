@@ -41,6 +41,8 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/audit/sinks/{id}/retry", post(retry_sink))
         .route("/v1/access/notify", get(notify).put(set_notify))
         .route("/v1/access/policy", get(policy).put(set_policy))
+        .route("/v1/access/clients", get(crate::clients_api::list).post(crate::clients_api::create))
+        .route("/v1/access/clients/{id}", axum::routing::delete(crate::clients_api::revoke))
         .route("/v1/access/oauth/clients", get(clients))
         .route("/v1/access/oauth/clients/{id}", get(client))
         .route("/v1/access/oauth/authorize", post(crate::oauth::authorize))
@@ -195,7 +197,7 @@ pub(crate) fn actor(ext: &Extensions) -> String {
     ext.get::<roll_auth::SignedIn>().map_or_else(|| "operator".to_string(), |u| u.user.clone())
 }
 
-fn operator_only(access: &Access, ext: &Extensions, what: &str) -> crate::Result<()> {
+pub(crate) fn operator_only(access: &Access, ext: &Extensions, what: &str) -> crate::Result<()> {
     match who(access, ext)? {
         Who::Operator => Ok(()),
         Who::Grant(_) | Who::User(_) => Err(Error::Forbidden(format!("only the operator can {what}"))),
