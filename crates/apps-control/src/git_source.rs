@@ -133,6 +133,12 @@ impl<'a> Remote<'a> {
         self.client.ls_refs(self.url, self.auth.as_ref()).await
     }
 
+    /// Where one ref is now (`refs/pull/7/head`), none when the repository hasn't it.
+    pub async fn ref_at(&self, name: &str) -> anyhow::Result<Option<String>> {
+        let refs = self.client.ls_refs_with(self.url, self.auth.as_ref(), &[name]).await?;
+        Ok(refs.get(name).map(|r| r.oid.to_string()))
+    }
+
     async fn fetch(&self, args: &FetchArgs) -> anyhow::Result<code_git::Fetched> {
         self.client.fetch(self.url, self.auth.as_ref(), args).await
     }

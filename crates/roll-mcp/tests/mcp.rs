@@ -488,6 +488,23 @@ async fn a_2026_client_is_served_without_initialize() {
     assert_eq!((r["resultType"].as_str(), r["supportedVersions"][0].as_str(), r["_meta"]["io.modelcontextprotocol/serverInfo"]["name"].as_str()), (Some("complete"), Some("2026-07-28"), Some("roll")), "{out}");
     assert!(r["supportedVersions"].as_array().unwrap().iter().any(|v| v == "2025-11-25"), "legacy too: {out}");
     assert!(h.get("mcp-session-id").is_none(), "no session");
+    // The server card (SEP-2127), public, says the same before a client connects, and the
+    // domain's AI Catalog names it.
+    let get = |path: &str| {
+        let req = Request::builder().uri(path).header("accept", "application/mcp-server-card+json").body(Body::empty()).unwrap();
+        async move {
+            let res = roll_mcp::card::routes("https://api.example.com", "https://roll.example.com").oneshot(req).await.unwrap();
+            let kind = res.headers()["content-type"].to_str().unwrap().to_string();
+            (kind, serde_json::from_slice::<Value>(&res.into_body().collect().await.unwrap().to_bytes()).unwrap())
+        }
+    };
+    let (kind, card) = get("/v1/mcp/server-card").await;
+    assert_eq!(kind, "application/mcp-server-card+json");
+    let remote = &card["remotes"][0];
+    assert_eq!((remote["url"].as_str(), &remote["supportedProtocolVersions"]), (Some("https://api.example.com/v1/mcp"), &r["supportedVersions"]), "{card}");
+    assert_eq!(card["version"], r["_meta"]["io.modelcontextprotocol/serverInfo"]["version"], "{card}");
+    let (_, catalog) = get("/.well-known/ai-catalog.json").await;
+    assert_eq!(catalog["entries"][0]["url"], "https://api.example.com/v1/mcp/server-card", "{catalog}");
 
     let (s, h, out) = send(OPERATOR, 2, "tools/list", json!({}), std_headers("tools/list", None)).await;
     assert_eq!((s, out["result"]["cacheScope"].as_str(), out["result"]["ttlMs"].as_u64()), (StatusCode::OK, Some("private"), Some(60_000)), "{out}");

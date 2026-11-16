@@ -14,7 +14,7 @@
 //! - [`Access::Product`] routes decide everything themselves, anonymous callers included (roll
 //!   code's owners, tokens and public repositories; signed internal hops).
 //! - [`Access::User`] routes take the operator or any signed-in user; the product scopes what a
-//!   user sees (workspace projects).
+//!   user sees (workspace projects, search clusters).
 //! - [`Access::UserOrCredential`] routes take both: a signed-in user, whom the product scopes, or a
 //!   request with an `Authorization` header the product verifies (roll secrets: a person's own
 //!   projects, or a secrets token).
@@ -434,7 +434,7 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
         Access::UserOrCredential(_) if authorization || signed_in.is_some() => next.run(req).await,
         _ if signed_in.is_some() => error(
             StatusCode::FORBIDDEN,
-            "your account can use roll code, agents and projects; this API is for roll's admins for now",
+            "your account can use roll code, agents, projects and search; this API is for roll's admins for now",
             "operator_only",
         ),
         _ => unauthorized(),
