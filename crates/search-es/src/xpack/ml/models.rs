@@ -615,6 +615,33 @@ fn eval_tree(tree: &Value, doc: &Value) -> f64 {
     0.0
 }
 
+/// A `text_expansion` trained model as the `inference_id` of a `sparse_vector` query
+/// (`CoordinatedInferenceAction` falls back from endpoints to trained models): `None` when `id`
+/// names no such model. roll runs no PyTorch models: a deployed one expands a text into the
+/// words of its vocabulary that the text holds, each weighted 1 (BERT's basic tokenization,
+/// lowercased when the model's tokenizer lowercases).
+pub(crate) fn text_expansion(cluster: &crate::cluster::Cluster, id: &str, text: &str) -> Option<EsResult<Vec<(String, f32)>>> {
+    let st = cluster.state();
+    let deps = cluster.xpack.deployments.inner.lock();
+    let model_id = resolve(&st, id).or_else(|| deps.get(id).map(|d| d.model_id.clone()))?;
+    let m = st.metadata.xpack.get(MODELS, &model_id)?;
+    let cfg = m.pointer(&["inference_config", "text_expansion"])?;
+    if !deps.contains_key(id) && !deps.values().any(|d| d.model_id == model_id) {
+        return Some(Err(conflict(format!("Trained model [{model_id}] is not deployed"))));
+    }
+    let lower = cfg.pointer(&["tokenization", "bert", "do_lower_case"]).and_then(Value::as_bool).unwrap_or(false);
+    let vocab = roll_state(m).get("vocabulary").and_then(Value::as_array).cloned().unwrap_or_default();
+    let vocab: std::collections::HashSet<String> = vocab.iter().map(Value::to_es_string).collect();
+    let mut out: Vec<(String, f32)> = Vec::new();
+    for word in text.split(|c: char| c.is_whitespace() || c.is_ascii_punctuation()).filter(|w| !w.is_empty()) {
+        let word = if lower { word.to_lowercase() } else { word.to_string() };
+        if vocab.contains(&word) && !out.iter().any(|(t, _)| *t == word) {
+            out.push((word, 1.0));
+        }
+    }
+    Some(Ok(out))
+}
+
 pub fn infer(ctx: &Ctx) -> EsResult<Reply> {
     let st = ctx.state();
     let id = ctx.path_param("model_id").unwrap_or_default();

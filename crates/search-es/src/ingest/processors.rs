@@ -129,6 +129,7 @@ pub enum Kind {
     DateIndexName { field: String, prefix: Template, rounding: String, formats: Vec<String>, timezone: Option<String>, locale: crate::time::DateLocale, index_format: String },
     Dissect { field: String, dissect: Arc<search_painless::dissect::Dissect>, ignore_missing: bool },
     Grok { field: String, groks: Vec<Arc<search_painless::grok::Grok>>, ignore_missing: bool, trace: bool, validate_only: bool },
+    Redact { field: String, groks: Vec<Arc<search_painless::grok::Grok>>, prefix: String, suffix: String, ignore_missing: bool, trace: bool },
     Fail { message: Template },
     Drop,
     Script { bound: crate::scripting::Bound },
@@ -418,28 +419,20 @@ impl Kind {
             }
             "grok" => {
                 let f = field()?;
-                let patterns: Vec<String> = match cfg.get("patterns") {
-                    Some(Value::Arr(a)) if !a.is_empty() => a.iter().map(|v| v.to_es_string()).collect(),
-                    Some(Value::Arr(_)) => return Err(config_error(ptype, tag, "patterns", "List of patterns must not be empty")),
-                    _ => return Err(config_error(ptype, tag, "patterns", "required property is missing")),
-                };
-                let ecs = s(cfg, "ecs_compatibility").unwrap_or_else(|| "disabled".into());
-                let base = if ecs == "v1" { search_painless::grok::PatternBank::ecs_v1() } else { search_painless::grok::PatternBank::legacy() };
-                let bank = match cfg.get("pattern_definitions") {
-                    Some(Value::Obj(defs)) => {
-                        let extra: Vec<(String, String)> = defs.iter().map(|(k, v)| (k.clone(), v.to_es_string())).collect();
-                        base.extend_with(&extra).map_err(|e| EsError::new(400, e.kind, e.message.clone()))?
-                    }
-                    _ => base.clone(),
-                };
-                let watchdog = grok_watchdog(cluster, "ingest.grok.watchdog.max_execution_time");
-                let mut groks = Vec::new();
-                for p in &patterns {
-                    let g = search_painless::grok::Grok::new(&bank, p)
-                        .map_err(|e| config_error(ptype, tag, "patterns", &format!("Invalid regex pattern found in: [{}]. {}", patterns.join(", "), e.message)))?;
-                    groks.push(Arc::new(g.with_max_execution_time(watchdog)));
-                }
+                let groks = compile_groks(cluster, cfg, ptype, tag)?;
                 Kind::Grok { field: f, groks, ignore_missing: im, trace: b(cfg, "trace_match", false), validate_only: b(cfg, "validate_only", false) }
+            }
+            "redact" => {
+                let f = field()?;
+                let groks = compile_groks(cluster, cfg, ptype, tag)?;
+                Kind::Redact {
+                    field: f,
+                    groks,
+                    prefix: s(cfg, "prefix").unwrap_or_else(|| "<".into()),
+                    suffix: s(cfg, "suffix").unwrap_or_else(|| ">".into()),
+                    ignore_missing: im,
+                    trace: b(cfg, "trace_redact", false),
+                }
             }
             "fail" => Kind::Fail { message: Template::new(&req(cfg, ptype, tag, "message")?)? },
             "drop" => Kind::Drop,
@@ -1006,6 +999,25 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
             }
             return Err(EsError::illegal_argument("Provided Grok expressions do not match field value: [".to_string() + s + "]"));
         }
+        Kind::Redact { field, groks, prefix, suffix, ignore_missing, trace } => {
+            let text = match d.get_opt(field) {
+                Some(Value::Str(s)) => s.clone(),
+                None | Some(Value::Null) if *ignore_missing => return Ok(Flow::Continue),
+                None | Some(Value::Null) => return Err(EsError::illegal_argument(format!("field [{field}] is null or missing"))),
+                Some(v) => return Err(EsError::illegal_argument(format!("field [{field}] of type [{}] cannot be cast to [java.lang.String]", java_type(v)))),
+            };
+            let mut regions = Vec::new();
+            for g in groks {
+                regions.extend(g.capture_regions(&text).map_err(grok_match_error)?);
+            }
+            let redacted = !regions.is_empty();
+            if redacted {
+                d.set(field, Value::Str(redact(&text, regions, prefix, suffix)))?;
+            }
+            if *trace {
+                d.ingest.insert("_redact".into(), crate::obj! { "_is_redacted" => redacted });
+            }
+        }
         Kind::Fail { message } => {
             return Err(EsError::new(500, "fail_processor_exception", message.render(d)?));
         }
@@ -1570,6 +1582,56 @@ fn zone_name(z: &crate::time::Zone) -> String {
         }
         crate::time::Zone::Named(t) => t.name().to_string(),
     }
+}
+
+/// A grok or redact processor's `patterns`, with its `pattern_definitions` added to the
+/// built-in bank (`ecs_compatibility` picks it).
+fn compile_groks(cluster: &crate::Cluster, cfg: &Map, ptype: &str, tag: Option<&str>) -> EsResult<Vec<Arc<search_painless::grok::Grok>>> {
+    let patterns: Vec<String> = match cfg.get("patterns") {
+        Some(Value::Arr(a)) if !a.is_empty() => a.iter().map(|v| v.to_es_string()).collect(),
+        Some(Value::Arr(_)) => return Err(config_error(ptype, tag, "patterns", "List of patterns must not be empty")),
+        _ => return Err(config_error(ptype, tag, "patterns", "required property is missing")),
+    };
+    let ecs = s(cfg, "ecs_compatibility").unwrap_or_else(|| "disabled".into());
+    let base = if ecs == "v1" { search_painless::grok::PatternBank::ecs_v1() } else { search_painless::grok::PatternBank::legacy() };
+    let bank = match cfg.get("pattern_definitions") {
+        Some(Value::Obj(defs)) => {
+            let extra: Vec<(String, String)> = defs.iter().map(|(k, v)| (k.clone(), v.to_es_string())).collect();
+            base.extend_with(&extra).map_err(|e| EsError::new(400, e.kind, e.message.clone()))?
+        }
+        _ => base.clone(),
+    };
+    let watchdog = grok_watchdog(cluster, "ingest.grok.watchdog.max_execution_time");
+    let mut groks = Vec::new();
+    for p in &patterns {
+        let g = search_painless::grok::Grok::new(&bank, p).map_err(|e| config_error(ptype, tag, "patterns", &format!("Invalid regex pattern found in: [{}]. {}", patterns.join(", "), e.message)))?;
+        groks.push(Arc::new(g.with_max_execution_time(watchdog)));
+    }
+    Ok(groks)
+}
+
+/// `text` with each region replaced by `prefix`, its capture name and `suffix`
+/// (`RedactProcessor.RegionTrackingMatchExtractor`): overlapping regions merge into the first.
+fn redact(text: &str, mut regions: Vec<(String, usize, usize)>, prefix: &str, suffix: &str) -> String {
+    regions.sort_by_key(|r| r.1);
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    let mut i = 0;
+    while i < regions.len() {
+        let (name, start, mut end) = regions[i].clone();
+        i += 1;
+        while i < regions.len() && regions[i].1 < end {
+            end = end.max(regions[i].2);
+            i += 1;
+        }
+        out.push_str(&text[at..start]);
+        out.push_str(prefix);
+        out.push_str(&name);
+        out.push_str(suffix);
+        at = end;
+    }
+    out.push_str(&text[at..]);
+    out
 }
 
 /// The grok watchdog limit from a static node setting (`ingest.grok.watchdog.max_execution_time`,
