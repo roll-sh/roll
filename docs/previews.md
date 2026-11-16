@@ -451,7 +451,8 @@ outside address, and the host reaches its server at its address. Containers ther
 the host either way (the host's firewall), so the products' reach is the same as on the default
 bridge. On the fleet, where products listen on every interface, the network's gateway reaches
 them. It's reversible: `"open"` is the default, and the setting only adds a network. It covers
-services roll's runtime runs; a service hosted on roll apps follows roll apps' own networking.
+services roll's runtime runs; a service hosted on roll apps follows roll apps' own networking
+(the Rules dialog says so when the project has one: its previews still reach the internet).
 Changing it restarts the services (it's part of what they're deployed with). Live in
 `scripts/preview-cost.sh`: the service reached 1.1.1.1 with `open`, then ran on
 `roll-previews-net-<id>`, was still served through roll, and got "network unreachable".
