@@ -364,9 +364,7 @@ pub struct Secrets {
     oidc: oidc::Keys,
     /// Logins per identity and per client address in the last minute.
     logins: oidc::Window,
-    /// Value reads per principal in the last minute, and how many it may make (read.rs,
-    /// `read_quota`; 0: no limit).
-    reads: oidc::Window,
+    /// How many reads of values a principal may make a minute (read.rs, `read_quota`; 0: no limit).
     reads_per_minute: std::sync::atomic::AtomicU32,
     /// roll code's search, once rolld has it (health's `code` check).
     code_refs: std::sync::OnceLock<Arc<dyn health::CodeRefs>>,
@@ -394,6 +392,7 @@ impl Secrets {
     pub fn new(db: Db, workspace: Arc<roll_workspace::Workspace>, opts: Options) -> Result<Secrets> {
         db.ensure_schema(SCHEMA)?;
         db.ensure_schema(shares::SCHEMA)?;
+        db.ensure_schema(read::READS_SCHEMA)?;
         db.ensure_schema(syncs::SCHEMA)?;
         db.ensure_schema(sinks::SCHEMA)?;
         db.ensure_schema(folder_policy::SCHEMA)?;
@@ -478,7 +477,7 @@ impl Secrets {
         if let (Some(outside), Ok(keys)) = (&opts.outside, &opts.keyring) {
             links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), outside: outside.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, oidc: Default::default(), logins: Default::default(), reads: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, oidc: Default::default(), logins: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls })
     }
 
     pub fn links(&self) -> &Links {

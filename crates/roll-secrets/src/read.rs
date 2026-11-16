@@ -279,7 +279,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
     Ok(out)
 }
 
-/// Value reads a principal may make in a minute on one node unless the operator says otherwise
+/// Value reads a principal may make in a minute across every node unless the operator says otherwise
 /// (`ROLL_SECRETS_READS_PER_MINUTE`), as Vault's rate-limit quotas: a token or a person in a loop is
 /// told to slow down (429) before it decrypts, audits and issues without end. roll's own runtimes
 /// (apps, previews, checks, syncs, workload identities' logins) and the operator aren't held to it.
@@ -297,12 +297,38 @@ impl Secrets {
         if max == 0 || caller.runtime || caller.principal == "operator" {
             return Ok(());
         }
-        if !self.reads.allow(&caller.principal, max) {
+        // Counted in the database every node shares, so a fleet allows the limit, not N times it.
+        let minute = self.db.now_ms()? / 60_000;
+        let n: i64 = self.db.write(|c| {
+            c.query_row(
+                "INSERT INTO read_counts (principal, minute, n) VALUES (?, ?, 1) ON CONFLICT (principal, minute) DO UPDATE SET n = read_counts.n + 1 RETURNING n",
+                params![caller.principal, minute],
+                |r| r.get(0),
+            )
+        })?;
+        if n > max as i64 {
             return Err(Error::TooMany(format!("more than {max} reads of values a minute: slow down, or cache them (watches follow the digest)")));
         }
         Ok(())
     }
+
+    /// Minutes of read counts that have passed (the sweeper).
+    pub(crate) fn forget_read_counts(&self) -> Result<()> {
+        let minute = self.db.now_ms()? / 60_000;
+        self.db.write(|c| c.execute("DELETE FROM read_counts WHERE minute < ?", [minute - 1]))?;
+        Ok(())
+    }
 }
+
+/// Reads of values per principal and minute, for the read quota.
+pub(crate) const READS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS read_counts (
+    principal TEXT NOT NULL,
+    minute INTEGER NOT NULL,
+    n INTEGER NOT NULL,
+    PRIMARY KEY (principal, minute)
+) WITHOUT ROWID;
+";
 
 impl Secrets {
     /// The effective entries of a folder; `shared` leaves out the caller's personal values.

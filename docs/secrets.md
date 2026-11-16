@@ -2042,7 +2042,8 @@ code owner (`ada/…`).
 
 ### Read quotas
 
-A token or a person reads values at most 600 times a minute on a node (the operator sets it:
+A token or a person reads values at most 600 times a minute, counted across every node in the
+database they share (the operator sets it:
 `ROLL_SECRETS_READS_PER_MINUTE`, 0 for no limit), as Vault's rate-limit quotas: past that,
 `…/values`, `…/resolve` and a key's reveal answer 429 (`rate_limited`) for the rest of the minute,
 before anything is decrypted, issued or audited. roll's own runtimes (apps, previews, checks,
