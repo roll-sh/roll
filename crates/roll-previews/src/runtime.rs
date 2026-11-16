@@ -1076,7 +1076,7 @@ impl Apps for Runtime {
         }
         let tail = code_preview::docker::logs_tail(&egress_name(preview), 200).await;
         let mut out: Vec<String> = Vec::new();
-        for h in tail.lines().filter_map(|l| l.strip_prefix("refused ")).map(|h| h.trim().chars().take(253).collect::<String>()) {
+        for h in tail.lines().filter_map(|l| l.strip_prefix("refused ")).map(|h| h.trim().chars().take(262).collect::<String>()) {
             if !h.is_empty() && !out.contains(&h) {
                 out.push(h);
             }
