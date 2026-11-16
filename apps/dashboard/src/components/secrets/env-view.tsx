@@ -428,7 +428,8 @@ function AddSecret({ path, keys, refs, onAdd, onCancel }: { path: string; keys: 
   const tagsOk = tagList.every((t) => TAG.test(t));
   const warn = useRefWarnings(value, key, refs);
   const exists = keys.has(key) && !personal;
-  const unfit = misfit(required.find((r) => r.key === key && r.path === path), value);
+  const rule = required.find((r) => r.key === key && r.path === path);
+  const unfit = misfit(rule, value);
   const submit = async () => {
     if (!keyOk || !tagsOk || unfit || busy) return;
     setBusy(true);
@@ -456,7 +457,7 @@ function AddSecret({ path, keys, refs, onAdd, onCancel }: { path: string; keys: 
           {exists && <span className="mt-1 block text-[11px] text-muted">{key} exists: this writes a new version.</span>}
         </label>
         <div>
-          <ValueHead onGenerate={() => setValue(generateValue())} />
+          <ValueHead onGenerate={() => setValue(generateValue(48, rule?.password))} />
           <RefInput aria-label="Value" value={value} onValue={setValue} source={refs} rows={value.includes("\n") ? 4 : 1} placeholder="value, or ${OTHER_KEY}, ${production.KEY}" spellCheck={false} autoComplete="off" className={`${field} h-auto min-h-8 resize-y py-1.5 font-mono`} />
           {unfit && value && <span className="mt-1 block text-[11px] text-danger">{unfit}</span>}
         </div>
@@ -751,7 +752,8 @@ function Editor({
   const tagsOk = tagList.every((t) => TAG.test(t));
   const warn = useRefWarnings(value, s.key, refs, touched && !linked);
   const { required } = useSecrets();
-  const unfit = touched && !linked ? misfit(required.find((r) => r.key === s.key && r.path === s.path), value) : null;
+  const rule = required.find((r) => r.key === s.key && r.path === s.path);
+  const unfit = touched && !linked ? misfit(rule, value) : null;
   const save = async () => {
     if (!tagsOk || unfit || busy) return;
     setBusy(true);
@@ -789,7 +791,7 @@ function Editor({
       )}
       <div className="grid gap-2 sm:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <div>
-          <ValueHead onGenerate={linked ? undefined : () => (setValue(generateValue()), setTouched(true))} />
+          <ValueHead onGenerate={linked ? undefined : () => (setValue(generateValue(48, rule?.password)), setTouched(true))} />
           {linked ? (
             <div className="flex h-8 items-center gap-2 text-[11.5px] text-muted">
               The value comes from the link.

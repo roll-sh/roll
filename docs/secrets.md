@@ -519,6 +519,17 @@ that doesn't fit (`misfit` on its cell, the rule it breaks), for a caller who ma
 The dashboard's add and edit forms check a typed key's value as it's typed, with the same rules
 and messages (`apps/dashboard/src/lib/secrets-required.ts`).
 
+**Password policies** (Vault's password policies, AWS Secrets Manager's generator rules). A
+required key can say what its values are made of: `password: {length, classes?, symbols?}`, a
+length of 8–256 every value has at least, and the classes (`lower`, `upper`, `digit`, `symbol`;
+default the first three) a value must use one of each of and nothing outside them. `symbols` says
+which characters `symbol` means (1–32 ASCII punctuation; default `!#%&*+-=?^_~`), for a target's own
+rules: no `@` or `:` in a connection URL's password, no quotes for a shell. Writes are checked as
+typed keys are (`DB_PASSWORD needs at least a digit`, never the value). The generators follow it:
+`roll secrets set KEY --generate` makes `length` characters of its classes, one of each (a longer
+`--generate N` if asked), and so do the dashboard's Generate buttons. Set one with `roll secrets
+required add DB_PASSWORD --password-length 32 --classes lower,upper,digit,symbol --symbols '-_'`.
+
 ### Owners
 
 A required key can name its `owner` (a plain name: letters, digits, spaces and `@._-/`, since it goes
@@ -2464,7 +2475,7 @@ type Grid = { path: string; environments: string[]; rows: { key: string; cells: 
 type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
 type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
-type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */ };
+type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */; password?: { length: number; classes?: ("lower" | "upper" | "digit" | "symbol")[]; symbols?: string } };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };

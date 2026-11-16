@@ -32,6 +32,100 @@ pub struct Required {
     /// Who supplies it (a person or team, `@payments`): health and the daily notice name them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// What a value must be made of, and what generators make (as Vault's password policies).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<Policy>,
+}
+
+/// A password policy: a length every value has at least (and generators make), and the
+/// character classes a value must use one of each of, and nothing outside them.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Policy {
+    pub length: u16,
+    #[serde(default = "letters_and_digits")]
+    pub classes: Vec<Class>,
+    /// Which characters `symbol` means (default [`SYMBOLS`]): a target's own rules, say no `@` or
+    /// `:` in a connection URL's password, no quotes for a shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbols: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum Class {
+    Lower,
+    Upper,
+    Digit,
+    Symbol,
+}
+
+/// The symbols a policy's `symbol` class means unless it says: safe in a URL's password once
+/// escaped, in YAML and in a shell's double quotes.
+pub const SYMBOLS: &str = "!#%&*+-=?^_~";
+
+fn letters_and_digits() -> Vec<Class> {
+    vec![Class::Lower, Class::Upper, Class::Digit]
+}
+
+impl Class {
+    fn name(self) -> &'static str {
+        match self {
+            Class::Lower => "a lowercase letter",
+            Class::Upper => "an uppercase letter",
+            Class::Digit => "a digit",
+            Class::Symbol => "a symbol",
+        }
+    }
+}
+
+impl Policy {
+    fn symbols(&self) -> &str {
+        self.symbols.as_deref().unwrap_or(SYMBOLS)
+    }
+
+    fn class_of(&self, c: char) -> Option<Class> {
+        if c.is_ascii_lowercase() {
+            Some(Class::Lower)
+        } else if c.is_ascii_uppercase() {
+            Some(Class::Upper)
+        } else if c.is_ascii_digit() {
+            Some(Class::Digit)
+        } else if self.symbols().contains(c) {
+            Some(Class::Symbol)
+        } else {
+            None
+        }
+    }
+
+    fn check(&mut self, key: &str) -> Result<()> {
+        self.classes.sort();
+        self.classes.dedup();
+        if !(8..=256).contains(&self.length) || self.classes.is_empty() {
+            return Err(Error::BadRequest(format!("{key}: a password policy is 8–256 characters of at least one class (lower, upper, digit, symbol)")));
+        }
+        if let Some(s) = &self.symbols
+            && (s.is_empty() || s.len() > 32 || !s.chars().all(|c| c.is_ascii_punctuation()))
+        {
+            return Err(Error::BadRequest(format!("{key}: a policy's symbols are 1–32 ASCII punctuation characters")));
+        }
+        Ok(())
+    }
+
+    /// Why `v` breaks the policy, if it does. Never quotes the value.
+    fn misfit(&self, key: &str, v: &str) -> Option<String> {
+        if v.chars().count() < self.length as usize {
+            return Some(format!("{key} must be at least {} characters", self.length));
+        }
+        let mut seen = vec![];
+        for c in v.chars() {
+            match self.class_of(c) {
+                Some(class) if self.classes.contains(&class) => seen.push(class),
+                _ => return Some(format!("{key} may only use {}", self.classes.iter().map(|c| c.name()).collect::<Vec<_>>().join(", "))),
+            }
+        }
+        self.classes.iter().find(|c| !seen.contains(c)).map(|c| format!("{key} needs at least {}", c.name()))
+    }
 }
 
 /// A typed key's type.
@@ -100,9 +194,10 @@ impl Rule<'_> {
             return Some(format!("{} must be {}", r.key, t.name()));
         }
         match (&self.pattern, &r.pattern) {
-            (Some(re), Some(p)) if !re.is_match(v) => Some(format!("{} must match {p}", r.key)),
-            _ => None,
+            (Some(re), Some(p)) if !re.is_match(v) => return Some(format!("{} must match {p}", r.key)),
+            _ => {}
         }
+        r.password.as_ref().and_then(|p| p.misfit(&r.key, v))
     }
 }
 
@@ -112,7 +207,7 @@ impl Required {
     }
 
     fn typed(&self) -> bool {
-        self.kind.is_some() || self.pattern.is_some()
+        self.kind.is_some() || self.pattern.is_some() || self.password.is_some()
     }
 }
 
@@ -121,8 +216,16 @@ fn root() -> String {
 }
 
 pub(crate) fn of(c: &Conn<'_>, project: &str) -> Result<Vec<Required>> {
-    Ok(c.query("SELECT key, path, comment, type, pattern, owner FROM required WHERE project_id = ? ORDER BY path, key", [project], |r| {
-        Ok(Required { key: r.get(0)?, path: r.get(1)?, comment: r.get(2)?, kind: r.get::<_, Option<String>>(3)?.and_then(|t| serde_json::from_value(serde_json::Value::String(t)).ok()), pattern: r.get(4)?, owner: r.get(5)? })
+    Ok(c.query("SELECT key, path, comment, type, pattern, owner, password FROM required WHERE project_id = ? ORDER BY path, key", [project], |r| {
+        Ok(Required {
+            key: r.get(0)?,
+            path: r.get(1)?,
+            comment: r.get(2)?,
+            kind: r.get::<_, Option<String>>(3)?.and_then(|t| serde_json::from_value(serde_json::Value::String(t)).ok()),
+            pattern: r.get(4)?,
+            owner: r.get(5)?,
+            password: r.get::<_, Option<String>>(6)?.and_then(|p| serde_json::from_str(&p).ok()),
+        })
     })?)
 }
 
@@ -155,6 +258,9 @@ impl Secrets {
                 }
                 compile(p)?;
             }
+            if let Some(p) = &mut r.password {
+                p.check(&r.key)?;
+            }
         }
         list.sort_by(|a, b| (&a.path, &a.key).cmp(&(&b.path, &b.key)));
         list.dedup_by(|a, b| a.path == b.path && a.key == b.key);
@@ -164,7 +270,8 @@ impl Secrets {
             c.execute("DELETE FROM required WHERE project_id = ?", [project])?;
             for r in &list {
                 let kind = r.kind.and_then(|t| serde_json::to_value(t).ok()).and_then(|v| v.as_str().map(str::to_string));
-                c.execute("INSERT INTO required (project_id, path, key, comment, created_at, type, pattern, owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params![project, r.path, r.key, r.comment, now, kind, r.pattern, r.owner])?;
+                let password = r.password.as_ref().map(|p| serde_json::to_string(p).unwrap_or_default());
+                c.execute("INSERT INTO required (project_id, path, key, comment, created_at, type, pattern, owner, password) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", params![project, r.path, r.key, r.comment, now, kind, r.pattern, r.owner, password])?;
             }
             let keys: Vec<String> = list.iter().map(|r| r.key.clone()).collect();
             audit::record(c, project, caller, "required.set", None, None, &keys, &format!("{} required", crate::write::plural(list.len(), "key")), now)?;

@@ -11,5 +11,10 @@ describe("typed keys", () => {
     const region = { key: "REGION", path: "/", comment: "", pattern: "[a-z]{2}-[a-z]+-[0-9]" };
     expect(misfit(region, "Europe")).toBe("REGION must match [a-z]{2}-[a-z]+-[0-9]");
     expect(misfit(region, "eu-west-1")).toBeNull();
+    const pw = { key: "DB_PASSWORD", path: "/", comment: "", password: { length: 12, classes: ["lower" as const, "digit" as const] } };
+    expect(misfit(pw, "short1")).toBe("DB_PASSWORD must be at least 12 characters");
+    expect(misfit(pw, "lettersonlyhere")).toBe("DB_PASSWORD needs at least a digit");
+    expect(misfit(pw, "has-a-dash-and-9")).toBe("DB_PASSWORD may only use a lowercase letter, a digit");
+    expect(misfit(pw, "lower1and2digits")).toBeNull();
   });
 });

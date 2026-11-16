@@ -648,6 +648,17 @@ async fn the_grid_flags_differences_and_promote_copies_them() {
     api.set("development", "PORT", "${WRONG}").await;
     let problems = api.values("development", "/").await["problems"].clone();
     assert!(problems.as_array().unwrap().iter().any(|p| p["key"] == "PORT" && p["problem"] == "PORT must be a port (1–65535)"), "{problems}");
+    // A password policy: a value too short, missing a class or using another is refused by key,
+    // never echoed; a policy nobody could meet isn't taken.
+    let (s, _) = api.call(Method::PUT, "/required", Some(json!([{ "key": "DB_PASSWORD", "password": { "length": 4 } }]))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "8 characters at least");
+    api.ok(Method::PUT, "/required", Some(json!([{ "key": "PORT", "type": "port" }, { "key": "DB_PASSWORD", "password": { "length": 12, "classes": ["lower", "digit", "symbol"], "symbols": "-_" } }]))).await;
+    for (value, why) in [("short-1", "DB_PASSWORD must be at least 12 characters"), ("no-digits-here", "DB_PASSWORD needs at least a digit"), ("Upper-case-1x", "DB_PASSWORD may only use a lowercase letter, a digit, a symbol")] {
+        let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/DB_PASSWORD", Some(json!({ "value": value }))).await;
+        assert_eq!((s, e["error"].as_str()), (StatusCode::BAD_REQUEST, Some(why)), "{value}");
+    }
+    api.set("staging", "DB_PASSWORD", "lower-and-digit-9").await;
+    assert_eq!(api.ok(Method::GET, "/required", None).await[0]["password"]["symbols"], "-_");
     // A type added after the values: the grid says which don't fit, to whoever may reveal them.
     api.ok(Method::PUT, "/required", Some(json!([{ "key": "SAME_OR_NOT", "type": "int" }]))).await;
     let grid = api.ok(Method::GET, "/grid", None).await;
