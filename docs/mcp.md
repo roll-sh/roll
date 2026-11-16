@@ -334,6 +334,28 @@ is `-32602`.
 | `tune_slow_query` | `project` | A slow query made faster on a branch first (Neon's query tuning): its plan, an index tried on a copy, both plans compared, main only when you say so. | `postgres_get_project`, `postgres_slow_queries`, `postgres_explain`, `postgres_create_branch`, `postgres_execute`, `postgres_delete_branch` |
 | `debug_failing_service` | `service`, `env` | Why an environment is failing (what roll already flags in its `attention`, the whole timeline, deploys, deploy logs, failing requests and routes, metrics), then a fix or a rollback it asks about first. | `apps_get_environment`, `apps_activity`, `apps_route_stats`, `apps_list_deploys`, `apps_deploy_logs`, `apps_logs`, `apps_metrics` |
 
+### As skills
+
+The same workflows, and the guide, are Agent Skills too (`io.modelcontextprotocol/skills`,
+SEP-2640; `crates/roll-mcp/src/skills.rs`), for hosts that load skills rather than offer slash
+commands:
+
+- **Declared:** `server/discover` (and `initialize`) list the extension as `{}`. roll serves no
+  directories.
+- **Listing and getting:** `skills/list` and `skills/get` answer each skill's entry: its frontmatter
+  (`name`, `description`) and its one file with its size and `sha256` digest. An unknown or
+  unoffered URI is `-32602`.
+- **Reading:** `resources/read` of `skill://roll/<name>/SKILL.md` answers the file. `resources/list`
+  lists them too.
+- **What's served:** `using-roll` (the guide) for everyone, plus one skill per workflow the
+  connection's tools allow, its arguments written as `<project>`. The listing is per connection
+  (`cacheScope: "private"`).
+- **Safety:** skills come only from roll's binary, never from tenant text. They name no
+  `allowed-tools` and nothing to run, and the gate decides every tool call they lead to.
+- **Checked by:** `skills_are_the_workflows_a_connection_has` (each file reads back with its listed
+  size and digest, and its frontmatter matches the entry) and
+  `skills::tests::every_skill_follows_the_agent_skills_rules`.
+
 ## Tools
 
 Arguments are checked against each tool's JSON Schema (closed: unknown arguments are refused).

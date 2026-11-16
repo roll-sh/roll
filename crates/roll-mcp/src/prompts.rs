@@ -224,6 +224,27 @@ fn offered<'a>(tools: &'a [String]) -> impl Iterator<Item = &'static Prompt> + '
     PROMPTS.iter().filter(move |p| p.needs.iter().all(|n| tools.iter().any(|t| t == n)))
 }
 
+/// A workflow as a skill sees it (skills.rs): its text with each argument written as `<name>`.
+pub(crate) struct Workflow {
+    pub name: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub text: String,
+    /// Each argument's name and what it is.
+    pub args: Vec<(&'static str, &'static str)>,
+    pub tools: &'static [&'static str],
+}
+
+/// The workflows a connection with `tools` is offered.
+pub(crate) fn workflows(tools: &[String]) -> Vec<Workflow> {
+    offered(tools)
+        .map(|p| {
+            let arg = |k: &str| format!("<{k}>");
+            Workflow { name: p.name, title: p.title, description: p.description, text: (p.text)(&arg), args: p.args.iter().map(|a| (a.name, a.description)).collect(), tools: p.needs }
+        })
+        .collect()
+}
+
 /// Whether prompt `name` is offered to a connection with `tools`.
 pub fn offered_to(name: &str, tools: &[String]) -> bool {
     offered(tools).any(|p| p.name == name)

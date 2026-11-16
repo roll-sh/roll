@@ -30,6 +30,7 @@ pub mod modern;
 pub mod prompts;
 pub mod resources;
 pub mod search;
+pub mod skills;
 pub mod tools;
 
 use axum::body::Body;
@@ -602,7 +603,11 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     }
                 }
             }
-            "resources/list" => rpc_result(id, json!({ "resources": resources::list() })),
+            "resources/list" => {
+                let mut all = resources::list().as_array().cloned().unwrap_or_default();
+                all.extend(skills::resources(&tool_names(ctx)));
+                rpc_result(id, json!({ "resources": all }))
+            }
             "resources/read" => match params.get("uri").and_then(Value::as_str) {
                 Some(resources::GUIDE) => rpc_result(id, resources::guide()),
                 Some(resources::ME) => match read_me(ctx).await {
@@ -621,7 +626,17 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                         }
                     }
                 }
+                Some(uri) if uri.starts_with("skill://") => match skills::read(uri, &tool_names(ctx)) {
+                    Some(v) => rpc_result(id, v),
+                    // The Skills extension's answer for a file roll doesn't serve.
+                    None => rpc_error(id, -32602, format!("No skill file is served at {uri}")),
+                },
                 other => rpc_error(id, -32002, format!("resource not found: {}", other.unwrap_or(""))),
+            },
+            "skills/list" => rpc_result(id, skills::list(&tool_names(ctx))),
+            "skills/get" => match skills::get(params.get("uri").and_then(Value::as_str).unwrap_or(""), &tool_names(ctx)) {
+                Ok(v) => rpc_result(id, v),
+                Err(e) => rpc_error(id, -32602, e),
             },
             "resources/templates/list" => rpc_result(id, json!({ "resourceTemplates": resources::templates(&tool_names(ctx)) })),
             "prompts/list" => rpc_result(id, prompts::list(&tool_names(ctx))),
@@ -704,7 +719,14 @@ fn initialize(ctx: &Ctx, params: &Value) -> Value {
 
 /// What roll offers, the same in `initialize` and `server/discover`.
 fn capabilities() -> Value {
-    json!({ "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false }, "completions": {} })
+    json!({
+        "tools": { "listChanged": false },
+        "resources": { "listChanged": false, "subscribe": false },
+        "prompts": { "listChanged": false },
+        "completions": {},
+        // Skills over MCP: `skills/list`, `skills/get`, and their files as resources (no directories).
+        "extensions": { skills::EXT: {} },
+    })
 }
 
 /// How to use roll, for the model: who the connection is and how approvals work.
