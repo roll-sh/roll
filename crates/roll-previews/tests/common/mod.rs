@@ -95,6 +95,21 @@ impl Source for FakeCode {
             self.teardowns.lock().push((p.id.clone(), t.to_string()));
         }
     }
+    /// A plain body from the preview's state (roll code builds the real one from its summary).
+    fn git_report_body(&self, p: &Preview, _s: &Settings, deleted: Option<Option<&str>>) -> Option<roll_previews::ports::GitReportBody> {
+        let state = match (deleted, p.state) {
+            (Some(_), _) => None,
+            (None, roll_previews::State::Ready | roll_previews::State::Sleeping) => Some("success"),
+            (None, roll_previews::State::Failed) => Some("failure"),
+            (None, _) => Some("pending"),
+        };
+        Some(roll_previews::ports::GitReportBody {
+            state: state.map(str::to_string),
+            description: format!("{:?}", p.state),
+            target_url: p.services.first().map(|s| s.url.clone()),
+            comment: format!("{:?} at {}{}", p.state, p.head, if deleted.is_some() { ", deleted" } else { "" }),
+        })
+    }
     async fn budget(&self, repos: &[String], alert: &roll_previews::ports::BudgetAlert) -> anyhow::Result<()> {
         self.budgets.lock().push((repos.to_vec(), alert.clone()));
         Ok(())
@@ -328,6 +343,41 @@ impl Apps for FakeApps {
 }
 
 /// roll secrets as previews see it: every `ensure` (environment, trusted). With `dynamic`, each
+/// A Git URL service's repository: records each status and comment (a comment gets id 77,
+/// edits name it). `connected: false` posts nothing.
+/// A posted status: service, sha, state, description, link.
+pub type PostedStatus = (String, String, String, String, Option<String>);
+
+pub struct FakeGitReport {
+    pub connected: std::sync::atomic::AtomicBool,
+    pub statuses: Mutex<Vec<PostedStatus>>,
+    pub comments: Mutex<Vec<(u64, Option<u64>, String)>>,
+}
+
+impl Default for FakeGitReport {
+    fn default() -> Self {
+        FakeGitReport { connected: std::sync::atomic::AtomicBool::new(true), statuses: Mutex::new(Vec::new()), comments: Mutex::new(Vec::new()) }
+    }
+}
+
+#[async_trait]
+impl roll_previews::ports::GitReport for FakeGitReport {
+    async fn status(&self, service: &str, sha: &str, state: &str, description: &str, target_url: Option<&str>) -> anyhow::Result<bool> {
+        if !self.connected.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        self.statuses.lock().push((service.into(), sha.into(), state.into(), description.into(), target_url.map(Into::into)));
+        Ok(true)
+    }
+    async fn comment(&self, _service: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>> {
+        if !self.connected.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        self.comments.lock().push((number, existing, body.into()));
+        Ok(Some(77))
+    }
+}
+
 /// resolve issues a credential (`DB_PASSWORD=pw-<n>` under lease `lease-<n>`); renewals and
 /// revocations are recorded, and a lease in `ended` can't be renewed.
 #[derive(Default)]

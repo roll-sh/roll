@@ -179,6 +179,12 @@ CREATE TABLE IF NOT EXISTS bypass (
     hash TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS git_reports (
+    preview_id TEXT PRIMARY KEY,
+    status TEXT,
+    comment_id INTEGER,
+    comment_hash TEXT
+);
 CREATE TABLE IF NOT EXISTS git_pulls (
     preview_id TEXT PRIMARY KEY,
     number INTEGER NOT NULL,
@@ -885,7 +891,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -2054,6 +2060,25 @@ impl Store {
                 return Err(Error::Conflict("only a pull request from a fork waits for an approval".into()));
             }
             Ok(())
+        })
+    }
+
+    /// What was last posted on a Git URL service's repository for a preview: the status (its sha,
+    /// state and description, as one string), the pull request comment's id and its body's hash.
+    pub fn git_report(&self, id: &str) -> Result<(Option<String>, Option<i64>, Option<String>)> {
+        Ok(self.db.read(|c| c.query_row("SELECT status, comment_id, comment_hash FROM git_reports WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?.unwrap_or((None, None, None)))
+    }
+
+    pub fn set_git_report(&self, id: &str, status: Option<&str>, comment: Option<(i64, &str)>) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("INSERT INTO git_reports (preview_id) VALUES (?1) ON CONFLICT (preview_id) DO NOTHING", [id])?;
+            if let Some(s) = status {
+                c.execute("UPDATE git_reports SET status = ?2 WHERE preview_id = ?1", params![id, s])?;
+            }
+            if let Some((cid, hash)) = comment {
+                c.execute("UPDATE git_reports SET comment_id = ?2, comment_hash = ?3 WHERE preview_id = ?1", params![id, cid, hash])?;
+            }
+            Ok::<_, Error>(())
         })
     }
 

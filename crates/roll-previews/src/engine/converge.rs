@@ -1024,7 +1024,12 @@ impl Engine {
         }
         let view = self.store.preview(&r.id)?;
         // The change hears it went, and how its teardown failed if it did.
-        self.source.forget(&view, self.store.teardown_error(&r.id)?.as_deref()).await;
+        let teardown = self.store.teardown_error(&r.id)?;
+        self.source.forget(&view, teardown.as_deref()).await;
+        // A Git URL service's pull request too.
+        if let Ok(s) = self.store.settings(&r.project_id) {
+            self.report_on_git(&view, &s, Some(teardown.as_deref())).await;
+        }
         // What it cost this month stays counted against the project's budget.
         self.store.add_spend(&r.project_id, crate::store::month_start(self.store.now_ms()?), view.cost.month_to_date_usd)?;
         self.store.remove(&r.id)?;
@@ -1051,6 +1056,48 @@ impl Engine {
                 }).collect();
             }
             self.source.report(&p, &s).await;
+            self.report_on_git(&p, &s, None).await;
+        }
+    }
+
+    /// A Git URL service's preview on its repository (Vercel's status and comment): the
+    /// `roll/preview` status on its head and, for a pull request's, the comment edited in place,
+    /// each posted only when it changed (what was posted is kept, so a restart posts nothing new).
+    /// `deleted`: the preview went (its comment says so). Best effort: a failure is logged and
+    /// tried at the next report.
+    pub(super) async fn report_on_git(&self, p: &Preview, s: &crate::Settings, deleted: Option<Option<&str>>) {
+        let (Some(gr), Some(service)) = (self.git_report.get(), p.repo.strip_prefix("git:")) else { return };
+        let Some(mut body) = self.source.git_report_body(p, s, deleted) else { return };
+        // A fork's pull request waits for a writer in roll's sheet (not roll code's
+        // `approve-run`), and nothing of it is linked: it hasn't run.
+        if deleted.is_none() && p.state == State::AwaitingApproval {
+            body.description = "Waiting for a writer to approve running this fork (Approve and run, in roll)".into();
+            body.target_url = None;
+        }
+        let Ok((last_status, comment_id, last_hash)) = self.store.git_report(&p.id) else { return };
+        if let Some(state) = &body.state {
+            let key = format!("{}:{state}:{}", p.head, body.description);
+            if last_status.as_deref() != Some(key.as_str()) {
+                match gr.status(service, &p.head, state, &body.description, body.target_url.as_deref()).await {
+                    Ok(true) => {
+                        let _ = self.store.set_git_report(&p.id, Some(&key), None);
+                    }
+                    Ok(false) => return,
+                    Err(e) => tracing::warn!(preview = %p.id, error = %e, "previews: a Git URL preview's status"),
+                }
+            }
+        }
+        let Ok(Some(pull)) = self.store.git_pull(&p.id) else { return };
+        let hash = format!("{:016x}", body.comment.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, x| (h ^ x as u64).wrapping_mul(0x0100_0000_01b3)));
+        if last_hash.as_deref() == Some(hash.as_str()) {
+            return;
+        }
+        match gr.comment(service, pull.number as u64, &body.comment, comment_id.map(|i| i as u64)).await {
+            Ok(Some(id)) => {
+                let _ = self.store.set_git_report(&p.id, None, Some((id as i64, &hash)));
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(preview = %p.id, error = %e, "previews: a Git URL preview's pull request comment"),
         }
     }
 
