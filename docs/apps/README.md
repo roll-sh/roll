@@ -1794,7 +1794,12 @@ app installed and no roll code mirror. `git_source.rs` is the whole of it:
   do) and GitHub Deployments of each environment (Vercel's: made when a deploy starts,
   `in_progress`, then `success` with the environment's URL or `failure`; production is GitHub's
   production environment, none is transient; the id is kept per deployment,
-  `github_deployments`). Installations span tenants (an installation's token reads any repository it sees), so the
+  `github_deployments`). And it needs no hook: the App's own pushes and pull requests, which roll
+  code receives and verifies (`X-Hub-Signature-256`, once per delivery: `Code::on_github_event`),
+  are queued for every service connected to that repository through that installation
+  (`github_events`, only what deciding reads) and run on each service's owner within a second,
+  as its hook's would be (`git_event`: the refs checked, every following environment deployed,
+  pull requests and other branches to roll previews; actor `github app`). Installations span tenants (an installation's token reads any repository it sees), so the
   route is operator-only in the permissions catalogue (`OPERATOR_ONLY`), as connecting a repo is
   roll code's admin token's. That keeps grants out; sessions are kept out by rolld's gate, which
   gives signed-in people no `/v1/apps` route (an admin's session carries `Operator`). If roll apps
@@ -2269,22 +2274,19 @@ put items 1–11 first. A second review that day (after #78, against the same si
    doesn't follow and every pull request (`GitPush`, `GitPull`), each checked against the
    repository's refs; previews builds the environments, comments and gates forks behind a
    writer's approval (its side is the previews thread's, stacked on this).
-2. **The rest of GitHub's App on a Git URL service** (connecting, installation tokens, commit
-   statuses and Deployments are done): pushes and pull requests
-   from the App's own webhook (`X-Hub-Signature-256`) routed from roll code to the service, so no
-   per-environment hook is needed, and roll previews' `GitReport` posting `roll/preview` through
-   the same port. Or, without roll code: `git_login` reading a secrets key (secrets' #73 issues
-   per-lease installation tokens from the project's own GitHub App).
-3. **Search links in roll.toml**: once roll search's #100 is on main, `[databases]` takes
+2. **Search links in roll.toml**: once roll search's #100 is on main, `[databases]` takes
    `kind = "search"` (apps-build's `DB_KINDS`), so a project file declares a search link and
    `roll apps export` writes it instead of naming it in its notes.
-4. **Response caching for web services** (Vercel's CDN with `s-maxage` and ISR, Netlify's, Render's
+3. **Response caching for web services** (Vercel's CDN with `s-maxage` and ISR, Netlify's, Render's
    edge caching): the owner's proxy keeps answers that say `Cache-Control: s-maxage` or
    `stale-while-revalidate` (per environment, bounded, keyed by host, path, query and `Vary`),
    cleared on every deploy, so a sleeping service answers cached pages without waking.
-5. **Visitor analytics and traces** (Vercel's Web Analytics and Observability, Netlify's, Cloud Run's
+4. **Visitor analytics and traces** (Vercel's Web Analytics and Observability, Netlify's, Cloud Run's
    Cloud Trace): page views, referrers and countries from the access log already kept (no script
    to add), then an OTLP endpoint per environment with spans kept in roll search.
+5. **A Git login from roll secrets** (no roll code needed for GitHub): `git_login` reading a
+   project secret, so secrets' #73 per-lease installation tokens from the project's own GitHub
+   App (or a rotated deploy token) are fetched fresh at each use.
 6. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
    on main, `watch_secrets` holds one `SecretSource::wait_digest` long poll per watched
    environment instead of polling every minute. Each watched environment needs a task of its

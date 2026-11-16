@@ -138,6 +138,13 @@ impl Code {
         self.github.get()
     }
 
+    /// Hear the App's verified `push` and `pull_request` deliveries (roll apps' Git URL services
+    /// connected to the App), for repositories roll code has or not. Set once; it must only queue
+    /// work (the webhook's answer waits on it).
+    pub fn on_github_event(&self, listener: crate::GitHubListener) {
+        let _ = self.github_listener.set(listener);
+    }
+
     /// The App's GitHub host (`github.com`, or a GitHub Enterprise Server's), lowercase; None
     /// without the App. Other products (roll apps' Git URL services) connect through it.
     pub fn github_host(&self) -> Option<String> {

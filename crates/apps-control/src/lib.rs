@@ -245,6 +245,8 @@ pub struct Apps {
     watching_secrets: std::sync::atomic::AtomicBool,
     /// Scaling workers' backlogs are being read (on their own task).
     scaling: std::sync::atomic::AtomicBool,
+    /// The App's queued events are being run on this node.
+    github_running: std::sync::atomic::AtomicBool,
     /// Static sites' file indexes, by image digest, as this node read them.
     sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Per environment, for the live site's key: its earlier static deployments' site keys.
@@ -387,6 +389,7 @@ impl Apps {
             watching: std::sync::atomic::AtomicBool::new(false),
             watching_secrets: std::sync::atomic::AtomicBool::new(false),
             scaling: std::sync::atomic::AtomicBool::new(false),
+            github_running: std::sync::atomic::AtomicBool::new(false),
             sites: Mutex::new(HashMap::new()),
             earlier_sites: Mutex::new(HashMap::new()),
             site_loads: Mutex::new(HashMap::new()),
@@ -748,6 +751,56 @@ impl Apps {
         let sid = service.to_string();
         self.db(move |s| s.delete_git_github(&sid)).await?;
         self.service(service).await
+    }
+
+    /// One of roll's GitHub App's verified `push` or `pull_request` deliveries (roll code passes
+    /// them on, signature checked): queued for each Git URL service connected to its repository
+    /// through its installation, run on the service's owner as the service's own hook's would be
+    /// (so a connected service needs no hook). Only what deciding reads is kept.
+    pub async fn github_event(self: &Arc<Self>, event: &str, body: &[u8]) {
+        let Ok(p) = serde_json::from_slice::<Value>(body) else { return };
+        let (Some(repo), Some(installation)) = (p["repository"]["full_name"].as_str().map(str::to_string), p["installation"]["id"].as_u64()) else { return };
+        let Ok(services) = self.db(move |s| s.connected_to(installation, &repo)).await else { return };
+        if services.is_empty() {
+            return;
+        }
+        let pr = &p["pull_request"];
+        let kept = match event {
+            "push" => json!({ "ref": p["ref"], "after": p["after"], "head_commit": { "message": p["head_commit"]["message"] } }),
+            "pull_request" => json!({ "action": p["action"], "number": p["number"], "pull_request": {
+                "number": pr["number"], "title": pr["title"],
+                "head": { "ref": pr["head"]["ref"], "sha": pr["head"]["sha"], "repo": { "id": pr["head"]["repo"]["id"] } },
+                "base": { "repo": { "id": pr["base"]["repo"]["id"] } },
+            } }),
+            _ => return,
+        };
+        let (event, kept) = (event.to_string(), kept.to_string());
+        for svc in services {
+            let (e, k) = (event.clone(), kept.clone());
+            if let Err(err) = self.db(move |s| s.queue_github_event(&svc, &e, &k)).await {
+                tracing::warn!(error = %err, "apps: a GitHub App event couldn't be queued");
+            }
+        }
+    }
+
+    /// Run the queued App events of the services this node owns (each claimed before it runs).
+    pub(crate) async fn run_github_events(self: &Arc<Self>) {
+        let Ok(queued) = self.db(|s| s.github_events()).await else { return };
+        for (id, service, event, body) in queued.into_iter().filter(|(_, s, ..)| self.owns(s)) {
+            let claimed = id.clone();
+            if !self.db(move |s| s.take_github_event(&claimed)).await.unwrap_or(false) {
+                continue;
+            }
+            let sid = service.clone();
+            let Ok(svc) = self.db(move |s| s.service(&sid)).await else { continue };
+            let Ok(body) = serde_json::from_str::<Value>(&body) else { continue };
+            let w = hooks::Webhook { body, event: Some(event) };
+            match self.git_event(&service, &svc, &w, None, "github app").await {
+                Ok(hooks::HookOutcome::Ignored(why)) => self.logs.sink(format!("env:{service}/production"), crate::logs::Stream::System).line(format!("GitHub: {why}")),
+                Ok(_) => {}
+                Err(e) => self.logs.sink(format!("env:{service}/production"), crate::logs::Stream::System).line(format!("GitHub: {e}")),
+            }
+        }
     }
 
     /// Where roll's GitHub App is, once rolld has it. Set once.
