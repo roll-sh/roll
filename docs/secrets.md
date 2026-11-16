@@ -2811,11 +2811,13 @@ Active Directory) and #136 (Snowflake, on #132).
 5. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
    backup schedules, rotation windows, directories, Snowflake accounts, ACME bindings): the
    resources once their routes are on main, the tools with roll MCP.
-6. **A gateway into private networks** (Infisical's Gateway, Akeyless'): a small process inside a
+6. **A gateway into private networks** (building: `feature/roll-secrets-gateway`; Infisical's Gateway, Akeyless'): a small process inside a
    VPC that dials out to roll and carries rotations, dynamic credentials, directory calls and ACME
    challenges to private addresses, so private databases need neither a public address nor
    `allow_private`, and pre-authorized ACME names can be checked after all. Its link is a
-   workload identity; it carries only the conversations rolld starts.
+   workload identity; it carries only the conversations rolld starts, only to the hosts its own
+   local allow-list names (a compromised roll can't scan the network through it), as bytes with TLS
+   end to end; on a fleet its link and the calls through it run on one lease holder.
 7. **A Pulumi provider**, bridged from the Terraform provider (Pulumi's own path for
    plugin-framework providers), with TypeScript, Python and Go SDKs generated.
 8. **Access requests**: a time-boxed `reveal` on a protected environment that an approver grants
