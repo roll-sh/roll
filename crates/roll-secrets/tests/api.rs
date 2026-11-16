@@ -203,11 +203,14 @@ impl roll_secrets::outside::OutsideDb for Outside {
     }
 }
 
+/// A fake directory's entry: its password, groups and description.
+type Entry = (String, Vec<String>, String);
+
 /// An LDAP directory outside roll: its entries (DN → password, groups, description), the binds it
 /// proved, and a flag that fails a new user's group membership after making the user.
 #[derive(Default)]
 struct FakeDirectory {
-    entries: Mutex<BTreeMap<String, (String, Vec<String>, String)>>,
+    entries: Mutex<BTreeMap<String, Entry>>,
     binds: std::sync::atomic::AtomicUsize,
     fail_groups: std::sync::atomic::AtomicBool,
 }
