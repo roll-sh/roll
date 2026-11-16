@@ -115,9 +115,20 @@ pub struct IndexMeta {
     /// Set when the index was restored from a snapshot: the recovery source `_recovery`
     /// reports (`repository`, `snapshot`, `version`, `index`, `restoreUUID`).
     pub recovery_source: Option<Arc<Map>>,
+    /// When the index was rolled over, per rollover target (alias or data stream name):
+    /// `IndexMetadata.rolloverInfos`.
+    pub rollover_info: BTreeMap<String, RolloverInfo>,
     /// The dialect of the cluster the index lives in (not persisted): which field types and
     /// mapping parameters its mapping may use.
     pub dialect: crate::cluster::Dialect,
+}
+
+/// One rollover of an index (`RolloverInfo`): the conditions that were met (`max_age` =>
+/// `"1d"`, …; none for an unconditional rollover) and when.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct RolloverInfo {
+    pub met_conditions: Map,
+    pub time: i64,
 }
 
 impl IndexMeta {
@@ -160,7 +171,7 @@ impl IndexMeta {
         for (k, a) in &self.aliases {
             aliases.insert(k.clone(), a.to_value());
         }
-        obj! {
+        let mut v = obj! {
             "uuid" => self.uuid.clone(),
             "state" => self.state.as_str(),
             "settings" => self.settings.to_flat_json(),
@@ -174,7 +185,17 @@ impl IndexMeta {
             "primary_terms" => self.primary_terms.iter().map(|t| Value::from(*t)).collect::<Vec<_>>(),
             "system" => self.system,
             "recovery_source" => self.recovery_source.as_ref().map(|r| Value::Obj((**r).clone())).unwrap_or(Value::Null),
+        };
+        if let (false, Value::Obj(m)) = (self.rollover_info.is_empty(), &mut v) {
+            m.insert("rollover_info".into(), self.rollover_info_value());
         }
+        v
+    }
+
+    /// `rollover_info` as the cluster state prints it: per target, the met conditions and the
+    /// time.
+    pub fn rollover_info_value(&self) -> Value {
+        Value::Obj(self.rollover_info.iter().map(|(k, r)| (k.clone(), obj! { "met_conditions" => Value::Obj(r.met_conditions.clone()), "time" => r.time })).collect())
     }
 
     pub fn from_json(name: &str, v: &Value) -> Result<IndexMeta, EsError> {
@@ -211,6 +232,18 @@ impl IndexMeta {
             primary_terms: v.get("primary_terms").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_i64).map(|t| t as u64).collect()).unwrap_or_default(),
             system: v.get("system").and_then(Value::as_bool).unwrap_or(false),
             recovery_source: v.get("recovery_source").and_then(Value::as_object).map(|m| Arc::new(m.clone())),
+            rollover_info: v
+                .get("rollover_info")
+                .and_then(Value::as_object)
+                .map(|m| {
+                    m.iter()
+                        .map(|(k, r)| {
+                            let met_conditions = r.get("met_conditions").and_then(Value::as_object).cloned().unwrap_or_default();
+                            (k.clone(), RolloverInfo { met_conditions, time: r.get("time").and_then(Value::as_i64).unwrap_or(0) })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             dialect,
         })
     }

@@ -191,9 +191,14 @@ async fn lifecycle() {
     let r = e.http.get(format!("{}/products", e.es)).header("authorization", format!("ApiKey {key}")).send().await.unwrap();
     assert_eq!(r.status().as_u16(), 200);
 
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/products/_doc/1?refresh=true", Some(json!({"title": "shoe"}))).await;
+    assert_eq!(s, 201, "{v}");
+
     let shown = e.get(&format!("/v1/search/clusters/{id}")).await;
     assert_eq!(shown["status"]["state"], "loaded");
     assert_eq!(shown["status"]["indices"], 1);
+    // Live, while the metered `docs` waits for the next sample.
+    assert_eq!(shown["status"]["docs"], 1, "{shown}");
 
     // Indices listing.
     let idx = e.get(&format!("/v1/search/clusters/{id}/indices")).await;
@@ -267,10 +272,10 @@ async fn lifecycle() {
     e.control.sample().await.unwrap();
     let u = e.get(&format!("/v1/search/clusters/{id}/usage?days=1")).await;
     assert_eq!(u["cluster_id"], id.as_str());
-    // Every request the node admitted: 6 from clients (also across the unload), the indices
+    // Every request the node admitted: 7 from clients (also across the unload), the indices
     // listing and 5 console requests. Not counted: wrong passwords, the 413, the console's own
     // 400s.
-    assert_eq!(u["requests"], 12, "the node's request counts are metered: {u}");
+    assert_eq!(u["requests"], 13, "the node's request counts are metered: {u}");
     assert!(u["loaded_seconds"].as_i64().unwrap() >= 1, "{u}");
     assert!(u["loaded_gib_hours"].as_f64().unwrap() > 0.0);
     let cost = &u["cost"];
@@ -572,6 +577,10 @@ async fn per_index_routes() {
     assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(2)), "{v}");
     let (_, v) = e.call(reqwest::Method::GET, &format!("{base}/books"), None).await;
     assert_eq!(v["books"]["mappings"]["properties"]["year"]["type"], "integer", "{v}");
+    let (_, v) = e.call(reqwest::Method::GET, &format!("{base}/books/mapping"), None).await;
+    assert_eq!(v["books"]["mappings"]["properties"]["year"]["type"], "integer", "{v}");
+    let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/analyze"), Some(json!({"field": "title", "text": "Rust Book"}))).await;
+    assert_eq!((s, v["tokens"].as_array().map(Vec::len)), (200, Some(2)), "{v}");
     let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/delete_by_query?refresh=true"), Some(json!({"query": {"term": {"year": 2018}}}))).await;
     assert_eq!((s, v["deleted"].as_i64()), (200, Some(1)), "{v}");
     let (s, _) = e.call(reqwest::Method::DELETE, &format!("{base}/books/docs/3"), None).await;
@@ -613,6 +622,51 @@ async fn api_keys() {
     assert_eq!(s, 404);
     // The cluster's own password still works.
     assert_eq!(e.es(&user, &pw, reqwest::Method::GET, "/notes/_count", None).await.0, 200);
+    // A data key writes documents but can't make keys or users of its own.
+    let d = e.post("/v1/search/clusters/keys/keys", json!({"name": "app", "access": "data"})).await;
+    // The answer says which access it made (the default is admin).
+    assert_eq!((d["access"].as_str(), k["access"].as_str()), (Some("data"), Some("admin")));
+    let h = format!("ApiKey {}", d["api_key"].as_str().unwrap());
+    let send = |m: reqwest::Method, path: &str, body: Value| {
+        let r = e.http.request(m, format!("{}{path}", e.es)).header("Authorization", h.clone()).json(&body).send();
+        async move { r.await.unwrap().status().as_u16() }
+    };
+    assert_eq!(send(reqwest::Method::PUT, "/notes/_doc/2", json!({"t": "y"})).await, 201);
+    assert_eq!(send(reqwest::Method::POST, "/_security/api_key", json!({"name": "more"})).await, 403);
+    assert_eq!(send(reqwest::Method::PUT, "/_security/user/x", json!({"password": "pw-pw-pw-pw", "roles": ["superuser"]})).await, 403);
+    let (s, _) = e.call(reqwest::Method::POST, "/v1/search/clusters/keys/keys", Some(json!({"name": "x", "access": "root"}))).await;
+    assert_eq!(s, 400);
+}
+
+/// Masking a branch (roll previews: `_update_by_query`, then `only_expunge_deletes` with
+/// `expunge_deletes_allowed: 0`) rewrites the segments it shares with its parent, so the old
+/// values are gone from the branch's term dictionaries (`_terms_enum`, suggesters), while the
+/// parent keeps them.
+#[tokio::test]
+async fn expunging_a_branch_rewrites_the_segments_it_shares() {
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "masked"})).await;
+    let (user, pw) = creds(&c);
+    let (s, _) = e.es(&user, &pw, reqwest::Method::PUT, "/people/_doc/1?refresh=true", Some(json!({"name": "Alice Example"}))).await;
+    assert_eq!(s, 201);
+    let b = e.post("/v1/search/clusters/masked/branches", json!({"name": "masked-b"})).await;
+    let (bu, bp) = creds(&b);
+    let terms = |u: String, p: String| {
+        let e = &e;
+        async move { e.es(&u, &p, reqwest::Method::POST, "/people/_terms_enum", Some(json!({"field": "name.keyword"}))).await.1["terms"].to_string() }
+    };
+    let mask = json!({"query": {"exists": {"field": "name"}}, "script": {"source": "ctx._source.name = '[masked]'"}});
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, "/people/_update_by_query?conflicts=proceed&refresh=true", Some(mask)).await;
+    assert_eq!(s, 200, "{v}");
+    // Masked but not yet rewritten: the shared segment still holds the old term.
+    assert!(terms(bu.clone(), bp.clone()).await.contains("Alice Example"));
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::PUT, "/people/_settings", Some(json!({"index.merge.policy.expunge_deletes_allowed": 0}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, "/people/_forcemerge?only_expunge_deletes=true", None).await;
+    assert_eq!(s, 200, "{v}");
+    let branch = terms(bu, bp).await;
+    assert!(!branch.contains("Alice Example") && branch.contains("[masked]"), "{branch}");
+    assert!(terms(user, pw).await.contains("Alice Example"), "the parent keeps its documents");
 }
 
 #[tokio::test]
@@ -902,6 +956,11 @@ async fn a_due_transform_wakes_its_sleeping_cluster() {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
+    // Asleep, a cluster says when its next job wakes it (unless that already happened).
+    let (_, v) = e.call(reqwest::Method::GET, "/v1/search/clusters/jobs", None).await;
+    assert!(v["status"]["state"] == "loaded" || v["status"]["wakes_at"].as_i64().is_some_and(|t| t > 0), "{v}");
+    let (_, v) = e.call(reqwest::Method::GET, "/v1/search/clusters/idle", None).await;
+    assert_eq!((v["status"]["state"].as_str(), v["status"].get("wakes_at")), (Some("asleep"), None), "{v}");
     // No request: the transform's next trigger loads its cluster again.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
     while !e.control.node.loaded().iter().any(|n| &**n == "jobs") {
@@ -909,6 +968,324 @@ async fn a_due_transform_wakes_its_sleeping_cluster() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert!(!e.control.node.loaded().iter().any(|n| &**n == "idle"), "a cluster without jobs stays asleep");
+}
+
+/// A data stream lifecycle's retention wakes its sleeping cluster when a backing index comes
+/// due for deletion, as Elasticsearch's lifecycle deletes it on its next poll; the write index
+/// stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_due_retention_deletion_wakes_its_sleeping_cluster() {
+    let e = env_with(|c| c.job_wake_interval = Some(std::time::Duration::from_millis(200))).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "logs"})).await;
+    let (user, pw) = creds(&c);
+    let template = json!({"index_patterns": ["logs-app*"], "data_stream": {}, "template": {"lifecycle": {"data_retention": "5s"}}});
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/_index_template/app", Some(template)).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/_data_stream/logs-app", None).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&user, &pw, reqwest::Method::POST, "/logs-app/_rollover", None).await;
+    assert_eq!(s, 200, "{v}");
+    let old = v["old_index"].as_str().unwrap().to_string();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/logs/unload", Some(json!({}))).await;
+        assert_eq!(s, 200, "{v}");
+        if v["unloaded"] == true || !e.control.node.loaded().iter().any(|n| &**n == "logs") {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "never unloaded: {v}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let (_, v) = e.call(reqwest::Method::GET, "/v1/search/clusters/logs", None).await;
+    assert!(v["status"]["state"] == "loaded" || v["status"]["wakes_at"].as_i64().is_some_and(|t| t > 0), "{v}");
+    // No request: the retention's deadline loads the cluster, and the lifecycle deletes the
+    // old backing index.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !e.control.node.loaded().iter().any(|n| &**n == "logs") {
+        assert!(tokio::time::Instant::now() < deadline, "the due deletion never woke its cluster");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    loop {
+        let (s, v) = e.es(&user, &pw, reqwest::Method::GET, "/_data_stream/logs-app", None).await;
+        assert_eq!(s, 200, "{v}");
+        let indices: Vec<String> = v["data_streams"][0]["indices"].as_array().unwrap().iter().map(|i| i["index_name"].as_str().unwrap().to_string()).collect();
+        if !indices.contains(&old) {
+            assert_eq!(indices.len(), 1, "the write index stays: {indices:?}");
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the old backing index was never deleted: {indices:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// A snapshot lifecycle policy's next run wakes its sleeping cluster, which takes the snapshot
+/// on schedule, as Elasticsearch's scheduler does, into the default repository every cluster
+/// has without setup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_due_slm_run_wakes_its_sleeping_cluster() {
+    let e = env_with(|c| c.job_wake_interval = Some(std::time::Duration::from_millis(200))).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "snaps"})).await;
+    let (user, pw) = creds(&c);
+    let calls = [
+        (reqwest::Method::PUT, "/_cluster/settings", json!({"persistent": {"slm.minimum_interval": "0s"}})),
+        (reqwest::Method::PUT, "/docs/_doc/1?refresh=true", json!({"a": 1})),
+        (reqwest::Method::PUT, "/_slm/policy/p", json!({"schedule": "4s", "name": "<snap-{now/d}>", "repository": "found-snapshots"})),
+    ];
+    for (m, uri, body) in calls {
+        let (s, v) = e.es(&user, &pw, m, uri, Some(body)).await;
+        assert!(s < 300, "{uri}: {v}");
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/snaps/unload", Some(json!({}))).await;
+        assert_eq!(s, 200, "{v}");
+        if v["unloaded"] == true || !e.control.node.loaded().iter().any(|n| &**n == "snaps") {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "never unloaded: {v}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let (_, v) = e.call(reqwest::Method::GET, "/v1/search/clusters/snaps", None).await;
+    assert!(v["status"]["state"] == "loaded" || v["status"]["wakes_at"].as_i64().is_some_and(|t| t > 0), "{v}");
+    // No request: the policy's next run loads the cluster, and the snapshot is taken.
+    while !e.control.node.loaded().iter().any(|n| &**n == "snaps") {
+        assert!(tokio::time::Instant::now() < deadline, "the due policy never woke its cluster");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    loop {
+        let (s, v) = e.es(&user, &pw, reqwest::Method::GET, "/_slm/policy/p", None).await;
+        assert_eq!(s, 200, "{v}");
+        if v["p"]["stats"]["snapshots_taken"].as_i64() >= Some(1) {
+            let name = v["p"]["last_success"]["snapshot_name"].as_str().unwrap().to_string();
+            let (s, v) = e.es(&user, &pw, reqwest::Method::GET, &format!("/_snapshot/found-snapshots/{name}"), None).await;
+            assert_eq!((s, &v["snapshots"][0]["metadata"]["policy"]), (200, &json!("p")), "{v}");
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the policy never took its snapshot: {v}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// An S3-compatible bucket in memory (path-style requests): objects, `If-None-Match: *` writes,
+/// `ListObjectsV2`, and the access key each request was signed with.
+#[derive(Clone, Default)]
+struct MockBucket {
+    objects: Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
+    signed_by: Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+    /// Listings never end: every page is truncated, with 1,000 keys of 1 KiB.
+    endless: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl MockBucket {
+    async fn start() -> (String, MockBucket) {
+        let m = MockBucket::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let router = axum::Router::new().fallback(Self::handle).with_state(m.clone());
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        (endpoint, m)
+    }
+
+    fn keys(&self, prefix: &str) -> Vec<String> {
+        self.objects.lock().unwrap().keys().filter(|k| k.starts_with(prefix)).cloned().collect()
+    }
+
+    async fn handle(axum::extract::State(m): axum::extract::State<MockBucket>, method: axum::http::Method, uri: axum::http::Uri, headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default();
+        if let Some(key) = auth.split("Credential=").nth(1).and_then(|c| c.split('/').next()) {
+            m.signed_by.lock().unwrap().insert(key.to_string());
+        }
+        let key = uri.path().strip_prefix("/backups").unwrap_or_default().trim_start_matches('/').to_string();
+        let mut objects = m.objects.lock().unwrap();
+        match method.as_str() {
+            "GET" if key.is_empty() && m.endless.load(std::sync::atomic::Ordering::Relaxed) => {
+                let items: String = (0..1000).map(|i| format!("<Contents><Key>prod/roll/indices/{i}{}</Key><Size>1</Size></Contents>", "k".repeat(1024))).collect();
+                format!("<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>more</NextContinuationToken>{items}</ListBucketResult>").into_response()
+            }
+            "GET" if key.is_empty() => {
+                let query = uri.query().unwrap_or_default();
+                let prefix = query.split('&').find_map(|p| p.strip_prefix("prefix=")).unwrap_or_default().replace("%2F", "/");
+                let items: String = objects.iter().filter(|(k, _)| k.starts_with(&prefix)).map(|(k, v)| format!("<Contents><Key>{k}</Key><Size>{}</Size></Contents>", v.len())).collect();
+                format!("<ListBucketResult><IsTruncated>false</IsTruncated>{items}</ListBucketResult>").into_response()
+            }
+            "GET" => match objects.get(&key) {
+                Some(v) => v.clone().into_response(),
+                None => (axum::http::StatusCode::NOT_FOUND, "<Error><Code>NoSuchKey</Code><Message>no</Message></Error>").into_response(),
+            },
+            "PUT" if headers.get("if-none-match").is_some() && objects.contains_key(&key) => axum::http::StatusCode::PRECONDITION_FAILED.into_response(),
+            "PUT" => {
+                objects.insert(key, body.to_vec());
+                axum::http::StatusCode::OK.into_response()
+            }
+            "DELETE" => {
+                objects.remove(&key);
+                axum::http::StatusCode::NO_CONTENT.into_response()
+            }
+            _ => axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response(),
+        }
+    }
+}
+
+/// An `s3` repository in a tenant's bucket: credentials sign every request and are never shown,
+/// snapshots are incremental, another cluster registering the bucket restores them (ids,
+/// routing, versions and sequence numbers intact), deleting a snapshot keeps what a later one
+/// shares, and `_cleanup` removes what no snapshot references.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_s3_repository_moves_indices_between_clusters() {
+    let (endpoint, bucket) = MockBucket::start().await;
+    let e = env_with(|c| {
+        c.node_settings.push((search_control::S3_ALLOW_PRIVATE.into(), "true".into()));
+        c.sealer = search_control::Sealer::from_secret("0123456789abcdef0123456789abcdef");
+    })
+    .await;
+    let (ua, pa) = creds(&e.post("/v1/search/clusters", json!({"name": "src"})).await);
+    let (ub, pb) = creds(&e.post("/v1/search/clusters", json!({"name": "dst"})).await);
+    let repo = json!({"type": "s3", "settings": {
+        "bucket": "backups", "base_path": "prod", "endpoint": endpoint, "path_style_access": true,
+        "access_key": "AKIDTENANT", "secret_key": "tenant-secret-key",
+    }});
+    for i in 0..20 {
+        let (s, v) = e.es(&ua, &pa, reqwest::Method::PUT, &format!("/docs/_doc/{i}?routing=r{}", i % 3), Some(json!({"n": i, "text": "hello world"}))).await;
+        assert_eq!(s, 201, "{v}");
+    }
+    e.es(&ua, &pa, reqwest::Method::POST, "/docs/_refresh", None).await;
+    let (s, v) = e.es(&ua, &pa, reqwest::Method::PUT, "/_snapshot/backup", Some(repo.clone())).await;
+    assert_eq!(s, 200, "{v}");
+    for (s, v) in [e.es(&ua, &pa, reqwest::Method::GET, "/_snapshot/backup", None).await, e.es(&ua, &pa, reqwest::Method::GET, "/_cluster/state/metadata", None).await] {
+        assert_eq!(s, 200);
+        assert!(!v.to_string().contains("tenant-secret-key") && !v.to_string().contains("AKIDTENANT"), "credentials shown: {v}");
+    }
+    let (s, v) = e.es(&ua, &pa, reqwest::Method::PUT, "/_snapshot/backup/one?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
+    assert_eq!((s, v["snapshot"]["state"].as_str()), (200, Some("SUCCESS")), "{v}");
+    assert_eq!(bucket.signed_by.lock().unwrap().iter().cloned().collect::<Vec<_>>(), vec!["AKIDTENANT".to_string()]);
+
+    // A second snapshot after one more document uploads only the new segment.
+    let (s, _) = e.es(&ua, &pa, reqwest::Method::PUT, "/docs/_doc/20?routing=r2&refresh=true", Some(json!({"n": 20}))).await;
+    assert_eq!(s, 201);
+    let (s, v) = e.es(&ua, &pa, reqwest::Method::PUT, "/_snapshot/backup/two?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&ua, &pa, reqwest::Method::GET, "/_snapshot/backup/two/_status", None).await;
+    let stats = &v["snapshots"][0]["stats"];
+    assert!(stats["incremental"]["file_count"].as_i64() < stats["total"]["file_count"].as_i64(), "{v}");
+
+    // Another cluster finds both and restores the first, as it was.
+    let (s, v) = e.es(&ub, &pb, reqwest::Method::PUT, "/_snapshot/backup", Some(repo)).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&ub, &pb, reqwest::Method::GET, "/_snapshot/backup/_all", None).await;
+    let names: Vec<&str> = v["snapshots"].as_array().unwrap().iter().filter_map(|s| s["snapshot"].as_str()).collect();
+    assert_eq!(names, ["one", "two"], "{v}");
+    let (s, v) = e.es(&ub, &pb, reqwest::Method::POST, "/_snapshot/backup/one/_restore?wait_for_completion=true", Some(json!({}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&ub, &pb, reqwest::Method::GET, "/docs/_count", None).await;
+    assert_eq!(v["count"], 20, "{v}");
+    let (_, from) = e.es(&ua, &pa, reqwest::Method::GET, "/docs/_doc/7?routing=r1", None).await;
+    let (s, to) = e.es(&ub, &pb, reqwest::Method::GET, "/docs/_doc/7?routing=r1", None).await;
+    assert_eq!(s, 200, "{to}");
+    for k in ["_source", "_seq_no", "_version", "_primary_term", "_routing"] {
+        assert_eq!(from[k], to[k], "{k}: {from} vs {to}");
+    }
+
+    // Deleting the first keeps what the second shares; the second still restores whole.
+    let (s, v) = e.es(&ua, &pa, reqwest::Method::DELETE, "/_snapshot/backup/one", None).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&ub, &pb, reqwest::Method::POST, "/_snapshot/backup/two/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "docs2"}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&ub, &pb, reqwest::Method::GET, "/docs2/_count", None).await;
+    assert_eq!(v["count"], 21, "{v}");
+
+    // `_cleanup` deletes what no snapshot references.
+    bucket.objects.lock().unwrap().insert("prod/roll/indices/stray/0/0123456789abcdef0123456789abcdef-1.0.gz".into(), vec![0; 10]);
+    let (s, v) = e.es(&ua, &pa, reqwest::Method::POST, "/_snapshot/backup/_cleanup", None).await;
+    assert_eq!((s, v["results"]["deleted_blobs"].as_i64()), (200, Some(1)), "{v}");
+    assert!(bucket.keys("prod/roll/indices/stray/").is_empty());
+}
+
+fn gzip(raw: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    enc.write_all(raw).unwrap();
+    enc.finish().unwrap()
+}
+
+/// A tenant's bucket is someone else's input. Repository data that parses past its bounds, a
+/// document larger than any write could send and a listing that never ends fail
+/// without being held; index names and global state the APIs would refuse fail the restore.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_s3_repository_bounds_and_checks_what_a_bucket_holds() {
+    use std::io::Read;
+    let (endpoint, bucket) = MockBucket::start().await;
+    let e = env_with(|c| c.node_settings.push((search_control::S3_ALLOW_PRIVATE.into(), "true".into()))).await;
+    let (u, p) = creds(&e.post("/v1/search/clusters", json!({"name": "bounds"})).await);
+    let es = |method: reqwest::Method, path: &'static str, body: Option<Value>| e.es(&u, &p, method, path, body);
+    let repo = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "prod", "endpoint": endpoint, "path_style_access": true}});
+    assert_eq!(es(reqwest::Method::PUT, "/docs/_doc/1?refresh=true", Some(json!({"n": 1}))).await.0, 201);
+    assert_eq!(es(reqwest::Method::PUT, "/_snapshot/backup", Some(repo)).await.0, 200);
+    let (s, v) = es(reqwest::Method::PUT, "/_snapshot/backup/one?wait_for_completion=true", Some(json!({"indices": "docs", "include_global_state": true}))).await;
+    assert_eq!(s, 200, "{v}");
+    let object = |k: &str| bucket.objects.lock().unwrap().get(k).cloned().unwrap();
+    let put = |k: String, v: Vec<u8>| bucket.objects.lock().unwrap().insert(k, v);
+    let latest: i64 = String::from_utf8(object("prod/roll/index.latest")).unwrap().trim().parse().unwrap();
+    let mut text = Vec::new();
+    flate2::read::GzDecoder::new(&object(&format!("prod/roll/index-{latest}"))[..]).read_to_end(&mut text).unwrap();
+    let data: Value = serde_json::from_slice(&text).unwrap();
+    // Each change is committed as the next generation, as another writer would.
+    let mut generation = latest;
+    let mut commit = |edit: &dyn Fn(&mut Value)| {
+        generation += 1;
+        let mut d = data.clone();
+        d["generation"] = json!(generation);
+        edit(&mut d["snapshots"][0]);
+        put(format!("prod/roll/index-{generation}"), gzip(d.to_string().as_bytes()));
+        put("prod/roll/index.latest".into(), generation.to_string().into_bytes());
+    };
+    let restore = |body: Value| e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/one/_restore?wait_for_completion=true", Some(body));
+    let mut problems = Vec::new();
+    let mut expect = |what: &str, (s, v): (u16, Value), status: u16, text: &str| {
+        if s != status || !v.to_string().contains(text) {
+            let problem = format!("{what}: wanted {status} with [{text}], got {s} {v}");
+            eprintln!("{problem}");
+            problems.push(problem);
+        }
+    };
+
+    // A document longer than `http.max_content_length` (100mb), though the chunk is small.
+    let chunk = bucket.keys("prod/roll/indices/").into_iter().find(|k| k.ends_with(".0.gz")).unwrap();
+    let saved = object(&chunk);
+    put(chunk.clone(), gzip(format!("{{\"id\":\"1\",\"routing\":null,\"seq_no\":0,\"primary_term\":1,\"version\":1,\"len\":{}}}\n", 200 << 20).as_bytes()));
+    expect("oversized document", restore(json!({"rename_pattern": "docs", "rename_replacement": "big"})).await, 500, "out of bounds");
+    put(chunk, saved);
+
+    // Names and global state the APIs refuse.
+    commit(&|s| {
+        s["indices"] = json!(["_x"]);
+        let meta = s["index_meta"]["docs"].take();
+        s["index_meta"] = json!({"_x": meta});
+    });
+    expect("index name", restore(json!({})).await, 400, "invalid_index_name_exception");
+    commit(&|s| s["global"]["persistent"] = json!({"cluster.election.back_off_time": "1s"}));
+    expect("static setting", restore(json!({"include_global_state": true, "rename_pattern": "docs", "rename_replacement": "g1"})).await, 400, "not dynamically updateable");
+    commit(&|s| s["global"]["pipelines"] = json!({"p": {"processors": [{"no_such_processor": {}}]}}));
+    expect("pipeline", restore(json!({"include_global_state": true, "rename_pattern": "docs", "rename_replacement": "g2"})).await, 400, "no_such_processor");
+    let (_, v) = es(reqwest::Method::GET, "/_cat/indices?format=json&h=index", None).await;
+    let restored = v.as_array().into_iter().flatten().any(|i| ["_x", "g1", "g2"].contains(&i["index"].as_str().unwrap_or_default()));
+    expect("nothing restored", (200, json!(restored)), 200, "false");
+
+    // Repository data that would parse into more values than its bound (its inflated size is
+    // bounded too: `inflate`'s unit test). Unbounded, this one aborts the process.
+    generation += 1;
+    let mut dense = b"[".to_vec();
+    dense.extend(b"0,".repeat(9 << 20));
+    dense.extend(b"0]");
+    put(format!("prod/roll/index-{generation}"), gzip(&dense));
+    expect("value bomb", es(reqwest::Method::GET, "/_snapshot/backup/_all", None).await, 500, "values");
+    bucket.objects.lock().unwrap().remove(&format!("prod/roll/index-{generation}"));
+
+    // A listing that never ends.
+    bucket.endless.store(true, std::sync::atomic::Ordering::Relaxed);
+    let cleanup = tokio::time::timeout(Duration::from_secs(60), es(reqwest::Method::POST, "/_snapshot/backup/_cleanup", None)).await;
+    expect("endless listing", cleanup.unwrap_or((0, Value::Null)), 500, "listing");
+    assert!(problems.is_empty(), "{problems:#?}");
 }
 
 /// ES|QL and SQL read as their client: an API key limited to one index (what roll secrets hands
@@ -1023,4 +1400,75 @@ async fn field_security_hides_a_field_on_every_read_path() {
         assert_eq!(s, 200, "{path}: {v}");
         assert!(text.contains("\"name") && !text.contains("\"secret"), "{path} lists the hidden field: {text}");
     }
+}
+
+/// An app's link to a cluster gets a credential of its own (apps' `Resources::link`): it reads and
+/// writes the data, can't manage the cluster's security, and stops working once revoked: an API
+/// key on an Elasticsearch-flavor cluster, an internal user of OpenSearch Security on an
+/// OpenSearch-flavor one (which has no API keys).
+#[tokio::test]
+async fn a_link_credential_uses_the_data_and_is_revoked() {
+    let e = env().await;
+    for (name, flavor) in [("es-link", "elasticsearch"), ("os-link", "opensearch")] {
+        e.post("/v1/search/clusters", json!({"name": name, "flavor": flavor})).await;
+        let cred = e.control.mint_link(name, "svc_1").await.unwrap();
+        let vars: std::collections::HashMap<_, _> = cred.vars.iter().cloned().collect();
+        let send = |method: reqwest::Method, path: &str, body: Option<Value>| {
+            let mut r = match (vars.get("ELASTICSEARCH_URL"), vars.get("OPENSEARCH_URL")) {
+                (Some(u), _) => e.http.request(method, format!("{}{path}", e.es)).header("Host", host_of(u)).header("Authorization", format!("ApiKey {}", vars["ELASTICSEARCH_API_KEY"])),
+                (_, Some(u)) => {
+                    let parsed = reqwest::Url::parse(u).unwrap();
+                    let user = urlencoding::decode(parsed.username()).unwrap().into_owned();
+                    let pw = urlencoding::decode(parsed.password().unwrap()).unwrap().into_owned();
+                    e.http.request(method, format!("{}{path}", e.es)).basic_auth(user, Some(pw))
+                }
+                _ => panic!("no URL in {vars:?}"),
+            };
+            if let Some(b) = body {
+                r = r.json(&b);
+            }
+            async move { r.send().await.unwrap().status().as_u16() }
+        };
+        assert_eq!(send(reqwest::Method::PUT, "/items/_doc/1?refresh=true", Some(json!({"n": 1}))).await, 201, "{name}");
+        assert_eq!(send(reqwest::Method::GET, "/items/_doc/1", None).await, 200, "{name}");
+        let (path, user) = match flavor {
+            "opensearch" => ("/_plugins/_security/api/internalusers/intruder", json!({"password": "correcthorsebattery", "opendistro_security_roles": ["all_access"]})),
+            _ => ("/_security/user/intruder", json!({"password": "intruder-pass-1", "roles": ["superuser"]})),
+        };
+        assert_eq!(send(reqwest::Method::PUT, path, Some(user)).await, 403, "{name}: no security");
+        e.control.revoke_link(name, &cred.kept).await.unwrap();
+        assert_eq!(send(reqwest::Method::GET, "/items/_doc/1", None).await, 401, "{name}: revoked");
+        e.control.revoke_link(name, &cred.kept).await.unwrap();
+    }
+    // The keys route on an OpenSearch-flavor cluster (roll secrets): an internal user of its own,
+    // the data role, removed on DELETE, and refused once its expiry passes.
+    let as_user = |u: &str, p: &str, method: reqwest::Method, path: &str, body: Option<Value>| {
+        let mut r = e.http.request(method, format!("{}{path}", e.es)).basic_auth(u, Some(p));
+        if let Some(b) = body {
+            r = r.json(&b);
+        }
+        async move { r.send().await.unwrap().status().as_u16() }
+    };
+    let k = e.post("/v1/search/clusters/os-link/keys", json!({"name": "worker", "access": "data"})).await;
+    assert!(k.get("api_key").is_none(), "{k}");
+    let (u, p) = (k["username"].as_str().unwrap().to_string(), k["password"].as_str().unwrap().to_string());
+    assert_eq!(as_user(&u, &p, reqwest::Method::PUT, "/items/_doc/2", Some(json!({"n": 2}))).await, 201);
+    assert_eq!(as_user(&u, &p, reqwest::Method::PUT, "/_plugins/_security/api/internalusers/x", Some(json!({"password": "correcthorsebattery"}))).await, 403);
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("/v1/search/clusters/os-link/keys/{}", k["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, 204);
+    assert_eq!(as_user(&u, &p, reqwest::Method::GET, "/items/_doc/2", None).await, 401, "removed");
+    let (s, _) = e.call(reqwest::Method::DELETE, "/v1/search/clusters/os-link/keys/admin", None).await;
+    assert_eq!(s, 404, "the keys route removes only users it made");
+    // Three seconds, not one: a loaded host can take a second between minting and first use.
+    let k = e.post("/v1/search/clusters/os-link/keys", json!({"name": "brief", "expires_in_s": 3})).await;
+    assert!(k["expires_at"].as_i64().is_some(), "{k}");
+    let (u, p) = (k["username"].as_str().unwrap().to_string(), k["password"].as_str().unwrap().to_string());
+    assert_eq!(as_user(&u, &p, reqwest::Method::GET, "/items/_doc/2", None).await, 200);
+    tokio::time::sleep(std::time::Duration::from_millis(3100)).await;
+    assert_eq!(as_user(&u, &p, reqwest::Method::GET, "/items/_doc/2", None).await, 401, "expired");
+}
+
+/// The host of a URL (its cluster's name on the edge, a node's address otherwise).
+fn host_of(url: &str) -> String {
+    reqwest::Url::parse(url).unwrap().host_str().unwrap_or_default().to_string()
 }

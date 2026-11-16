@@ -531,6 +531,7 @@ mod tests {
                 primary_terms: vec![1],
                 system: false,
                 recovery_source: None,
+                rollover_info: Default::default(),
                 dialect: Default::default(),
             };
             for (a, h) in aliases {

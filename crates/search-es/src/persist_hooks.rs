@@ -103,6 +103,7 @@ impl Engine {
         table.key = crate::engine::table_key(st, idx);
         // Segments written after the wake must be sorted like the ones before it.
         table.schema = table.schema.clone().with_index_sort(crate::engine::index_sort(idx, &table));
+        table.stripped_vectors = crate::engine::source_vectors::stripped(idx, &table);
         let mut shards = Vec::new();
         for i in 0..idx.number_of_shards() {
             let shard = self.storage.open(&idx.uuid, i, table.schema.clone())?;
@@ -144,6 +145,15 @@ impl Engine {
             out.push(shard.searcher());
         }
         Ok(out)
+    }
+
+    /// The vector fields of `idx` a copy of its documents puts back into their source
+    /// ([`crate::engine::source_vectors::copied`]), from its mapping: for searchers that aren't
+    /// the index's own (a closed index's snapshot copy).
+    pub fn copied_vectors(&self, cluster: &crate::Cluster, st: &ClusterState, idx: &IndexMeta) -> EsResult<Vec<Arc<crate::engine::fields::FieldInfo>>> {
+        let analysis = Arc::new(cluster.index_analysis(st, idx)?);
+        let table = FieldTable::build(idx.mapping.clone(), analysis, &idx.mapping_ctx(), &Numbers::default(), &similarities(idx))?;
+        Ok(crate::engine::source_vectors::copied(&table))
     }
 
     /// Applies one logged operation to shard `shard` of `idx` again (recovery). The index must
