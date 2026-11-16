@@ -2803,9 +2803,11 @@ Active Directory) and #136 (Snowflake, on #132).
    request); `dns-01` through public DNS and `http-01` through the guarded client; names a binding
    pre-authorizes for clusters whose names roll can't reach (off by default, the EAB key then the
    whole proof). Nonces and orders in the database, so any node answers.
-4. **Active Directory against Samba AD** (building, on #132): every step #132 wrote from
-   Microsoft's documentation run against a real domain controller with a delegated bind account,
-   the permissions table corrected, and UPN / `sAMAccountName` usernames next to the DN.
+4. **Active Directory, done against Samba AD** (#132): every step run against a real domain
+   controller with a delegated bind account. It found AD's hour-long acceptance of a reset account's
+   previous password, now closed by a throwaway reset first; logins also hand out the UPN and
+   `sAMAccountName`. Left for a Windows Server: its password policies, AD CS certificates, LDAP
+   signing and channel binding, replication between domain controllers (an account of the user's).
 5. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
    backup schedules, rotation windows, directories, Snowflake accounts, ACME bindings): the
    resources once their routes are on main, the tools with roll MCP.
