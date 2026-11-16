@@ -786,6 +786,15 @@ the key's or secret's id at the vendor (plain). Keys of one environment linked t
 registration share one issue: linking `TWILIO_API_KEY` to `id` and `TWILIO_API_SECRET` to `secret`
 gives one Twilio key.
 
+Registering checks the credential with the vendor first, read only, so a credential the vendor
+refuses, or one that can't manage keys, is refused at once (400, naming the vendor and the status)
+instead of at the first rotation:
+- SendGrid: `GET /v3/scopes`, which must include `api_keys.create` and `api_keys.delete`;
+- Twilio: one page of the account's keys;
+- Okta: the app's secrets;
+- Entra: sign in, then the application;
+- Auth0: sign in, then the client.
+
 | `vendor` | `target` | `credential` | Issue | Revoke |
 | --- | --- | --- | --- | --- |
 | `sendgrid` | `{scopes?: string[]}` (none: full access) | an API key that may manage API keys | `POST https://api.sendgrid.com/v3/api_keys {name, scopes?}` (Bearer) → `api_key`, `api_key_id` | `DELETE /v3/api_keys/{id}` |

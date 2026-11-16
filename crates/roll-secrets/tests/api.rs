@@ -158,6 +158,10 @@ impl roll_secrets::Deliver for Sent {
                 v.live.push(sid.clone());
                 (201, json!({ "sid": sid, "secret": format!("twilio-secret-{}", v.made) }))
             }
+            // Registering checks the credential: SendGrid's scopes, Twilio's key list.
+            ("GET", "https://api.sendgrid.com/v3/scopes") if auth == "Bearer SG.admin" => (200, json!({ "scopes": ["api_keys.create", "api_keys.delete", "mail.send"] })),
+            ("GET", "https://api.sendgrid.com/v3/scopes") if auth == "Bearer SG.mail-only" => (200, json!({ "scopes": ["mail.send"] })),
+            ("GET", u) if u == format!("{TWILIO_KEYS}.json?PageSize=1") && auth == twilio_auth => (200, json!({ "keys": [] })),
             ("DELETE", u) if (u.starts_with("https://api.sendgrid.com/v3/api_keys/") && auth == "Bearer SG.admin") || (u.starts_with(TWILIO_KEYS) && auth == twilio_auth) => {
                 let id = u.rsplit('/').next().unwrap().trim_end_matches(".json").to_string();
                 let found = v.live.contains(&id);
@@ -1337,6 +1341,11 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
 #[tokio::test]
 async fn a_saas_rotator_issues_and_revokes_vendor_keys() {
     let api = Api::new().await;
+    // A credential the vendor refuses, or one that can't manage keys, isn't kept.
+    for cred in ["SG.wrong", "SG.mail-only"] {
+        let (s, e) = api.call(Method::POST, "/saas", Some(json!({ "name": "mail", "vendor": "sendgrid", "target": {}, "credential": cred }))).await;
+        assert!(s == StatusCode::BAD_REQUEST && !e.to_string().contains(cred), "{cred}: {e}");
+    }
     let sg = api.ok(Method::POST, "/saas", Some(json!({ "name": "mail", "vendor": "sendgrid", "target": { "scopes": ["mail.send"] }, "credential": "SG.admin" }))).await;
     let tw = api.ok(Method::POST, "/saas", Some(json!({ "name": "sms", "vendor": "twilio", "target": { "account_sid": TWILIO_SID }, "credential": "twilio-token" }))).await;
     assert_eq!((sg["vendor"].as_str(), sg["target"].clone()), (Some("sendgrid"), json!({ "scopes": ["mail.send"] })), "{sg}");

@@ -451,6 +451,42 @@ pub(crate) fn revoke(d: &dyn Deliver, vendor: &Vendor, credential: &Value, handl
     Ok(())
 }
 
+/// That the credential works for what roll will do with it, read only (nothing is made): a
+/// registration with a credential the vendor refuses, or that can't manage keys, is refused at
+/// once instead of at the first rotation.
+pub(crate) fn probe(d: &dyn Deliver, vendor: &Vendor, credential: &Value) -> Result<()> {
+    let step = "checking the credential";
+    match vendor {
+        Vendor::Sendgrid { .. } => {
+            #[derive(Deserialize)]
+            struct A {
+                scopes: Vec<String>,
+            }
+            let answer = send(d, vendor, step, "GET", "https://api.sendgrid.com/v3/scopes", &[("authorization", &bearer(credential))], None, false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            if let Some(missing) = ["api_keys.create", "api_keys.delete"].into_iter().find(|s| !a.scopes.iter().any(|x| x == s)) {
+                return Err(Error::Link(format!("this SendGrid key can't manage API keys: it lacks the {missing} scope")));
+            }
+        }
+        Vendor::Twilio { account_sid } => {
+            send(d, vendor, step, "GET", &format!("https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Keys.json?PageSize=1"), &[("authorization", &twilio_auth(account_sid, credential))], None, false)?;
+        }
+        Vendor::Okta { domain, app_id } => {
+            let auth = Value::new(format!("SSWS {}", credential.expose()));
+            send(d, vendor, step, "GET", &format!("https://{domain}/api/v1/apps/{app_id}/credentials/secrets"), &[("authorization", &auth)], None, false)?;
+        }
+        Vendor::Entra { object_id, .. } => {
+            let token = token(d, vendor, credential)?;
+            send(d, vendor, step, "GET", &format!("https://graph.microsoft.com/v1.0/applications/{object_id}?$select=id"), &[("authorization", &bearer(&token))], None, false)?;
+        }
+        Vendor::Auth0 { domain, app_client_id, .. } => {
+            let token = token(d, vendor, credential)?;
+            send(d, vendor, step, "GET", &format!("https://{domain}/api/v2/clients/{app_client_id}?fields=client_id"), &[("authorization", &bearer(&token))], None, false)?;
+        }
+    }
+    Ok(())
+}
+
 /// Basic auth for Twilio: the account and its Auth Token, or a main API key given as `SK…:secret`.
 fn twilio_auth(account_sid: &str, credential: &Value) -> Value {
     use base64::Engine;
@@ -493,6 +529,9 @@ impl Secrets {
             return Err(Error::BadRequest(format!("credential is the {} credential roll issues keys with, one line", vendor.name())));
         }
         let dek = self.project(project)?;
+        // Asked of the vendor before anything is kept (outside any transaction).
+        let deliver = self.deliver.clone().ok_or_else(|| Error::BadRequest("SaaS rotators aren't on this server".into()))?;
+        probe(deliver.as_ref(), &vendor, &Value::new(credential)).map_err(|e| Error::BadRequest(format!("roll couldn't use this credential: {e}")))?;
         let id = names::new_id("sas", 16);
         let target = vendor.target().to_string();
         let sealed = dek.seal(&aad(project, &id, vendor.name(), &target), &Value::new(credential));
@@ -599,6 +638,17 @@ mod tests {
         let body: Json = serde_json::from_str(sent[0].split("[] ").nth(1).unwrap()).unwrap();
         assert_eq!(body, json!({ "grant_type": "client_credentials", "client_id": "mgmt", "client_secret": "c&s=1", "audience": "https://acme.us.auth0.com/api/v2/" }));
         assert_eq!(sent[1], "POST https://acme.us.auth0.com/api/v2/clients/web/rotate-secret [Bearer tok] ");
+
+        // Registering checks the credential read only: Okta's app secrets, Entra's application and
+        // Auth0's client, each after signing in where the vendor needs it.
+        let sent = run(vec![(200, "[]"), (200, r#"{"access_token":"tok"}"#), (200, r#"{"id":"x"}"#), (200, r#"{"access_token":"tok"}"#), (200, r#"{"client_id":"web"}"#)], |d| {
+            probe(d, &okta, &cred).unwrap();
+            probe(d, &entra, &cred).unwrap();
+            probe(d, &auth0, &cred).unwrap();
+        });
+        assert_eq!(sent[0], "GET https://acme.okta.com/api/v1/apps/0oa1/credentials/secrets [SSWS c&s=1] ");
+        assert_eq!(sent[2], format!("GET https://graph.microsoft.com/v1.0/applications/{guid}?$select=id [Bearer tok] "));
+        assert_eq!(sent[4], "GET https://acme.us.auth0.com/api/v2/clients/web?fields=client_id [Bearer tok] ");
 
         // An error names the vendor and the status, never what it answered.
         let e = run(vec![(401, r#"{"errorSummary":"Invalid token c&s=1"}"#)], |d| {
