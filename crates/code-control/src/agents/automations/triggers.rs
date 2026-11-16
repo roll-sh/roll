@@ -94,7 +94,14 @@ fn code_event(kind: &str) -> EventInfo {
             json!({ "id": "wi_0123456789abcd", "number": 7, "title": "main is broken: test", "body": "`test` failed on main at 4b825dc.", "labels": ["broken-main"], "priority": 1,
                 "state": "open", "source": "roll", "github_url": null, "claimed_by": null, "changes": [], "created_at": 1_762_000_000_000_i64, "updated_at": 1_762_000_000_000_i64 }),
         ),
-        "preview" => (&["change", "preview.state", "preview.url"], json!({ "change": change_id, "preview": { "state": "running", "url": "https://chg-12.preview.roll.sh", "error": null, "created_at": 1_762_000_000_000_i64 } })),
+        // A roll previews environment's summary rides along (`PreviewEnvironment`): its visual
+        // review is what "tell me when a visual change waits" filters on.
+        "preview" => (
+            &["change", "preview.state", "preview.url", "preview.environment.state", "preview.environment.visual_review.state"],
+            json!({ "change": change_id, "preview": { "state": "running", "url": "https://chg-12.preview.roll.sh", "error": null, "created_at": 1_762_000_000_000_i64,
+                "environment": { "id": "pv_0123456789ab", "slug": "pr12-shop", "state": "ready", "dashboard_url": "https://roll.sh/dashboard/projects/prj_0123456789ab/previews?preview=pv_0123456789ab",
+                    "visual_review": { "state": "changed", "branch": "main", "percent": 8.0, "by": null, "required": false } } } }),
+        ),
         "budget" => (
             &["budget.project", "budget.percent"],
             json!({ "budget": { "project": "prj_0123456789ab", "project_name": "shop", "percent": 80, "spent_usd_month": 8.1, "max_usd_month": 10.0 }, "dashboard_url": null }),

@@ -12,7 +12,7 @@
 
 use crate::cluster::Cluster;
 use crate::error::{EsError, EsResult};
-use crate::json::Value;
+use crate::json::{Map, Value};
 use crate::rest::EsRequest;
 use std::future::Future;
 use std::pin::Pin;
@@ -31,25 +31,97 @@ pub struct Caller {
 
 tokio::task_local! {
     static CALLER: Caller;
+    static ACTING: crate::xpack::security::Principal;
+    /// Set inside [`as_principal`]: a job's internal calls are its own, never the caller's.
+    static JOB: ();
+}
+
+/// Runs `f` with its internal calls that carry no credentials made as `principal` (when there
+/// is one): a watch runs as the user who stored it, as Elasticsearch runs it with the stored
+/// security headers. Only the user and roles are kept, never credentials.
+pub async fn as_principal<F: Future>(principal: Option<crate::xpack::security::Principal>, f: F) -> F::Output {
+    // The job's own identity, never that of the request that set it off (an `_execute`, a
+    // `_start`): there is no caller inside.
+    let f = JOB.scope((), f);
+    match principal {
+        Some(p) => ACTING.scope(p, f).await,
+        None => f.await,
+    }
+}
+
+/// The user a background job (a watch, a rollup job) runs as ([`as_principal`]), kept with
+/// it: `None` for a superuser (the job runs with the cluster's authority). Only the user and
+/// its roles (an API key's role descriptors), never credentials.
+pub fn stored_user(p: &crate::xpack::security::Principal) -> Option<Value> {
+    if p.is_superuser() {
+        return None;
+    }
+    let mut m = Map::new();
+    m.insert("username".into(), p.username.clone().into());
+    m.insert("roles".into(), Value::Arr(p.roles.iter().map(Value::from).collect()));
+    m.insert("realm_name".into(), p.realm_name.into());
+    m.insert("realm_type".into(), p.realm_type.into());
+    if let crate::xpack::security::AuthKind::ApiKey(a) = &p.kind {
+        m.insert("api_key".into(), crate::obj! { "id" => a.id.clone(), "name" => a.name.clone(), "role_descriptors" => a.role_descriptors.clone(), "limited_by" => a.limited_by.clone(), "cross_cluster" => a.cross_cluster });
+    }
+    Some(Value::Obj(m))
+}
+
+/// The principal [`stored_user`] kept.
+pub fn principal_of(u: &Value) -> Option<crate::xpack::security::Principal> {
+    const REALMS: [&str; 8] = ["reserved", "default_native", "native", "default_file", "file", "_es_api_key", "_service_account", "__attach"];
+    let known = |s: Option<&str>, d: &'static str| -> &'static str { s.and_then(|s| REALMS.iter().find(|r| **r == s).copied()).unwrap_or(d) };
+    let kind = match u.get("api_key") {
+        Some(a) => crate::xpack::security::AuthKind::ApiKey(Box::new(crate::xpack::security::ApiKeyAuth {
+            id: a.get("id").map(Value::to_es_string).unwrap_or_default(),
+            name: a.get("name").cloned().unwrap_or(Value::Null),
+            role_descriptors: a.get("role_descriptors").cloned().unwrap_or(Value::Null),
+            limited_by: a.get("limited_by").cloned().unwrap_or(Value::Null),
+            cross_cluster: a.get("cross_cluster").and_then(Value::as_bool).unwrap_or(false),
+        })),
+        None => crate::xpack::security::AuthKind::Realm,
+    };
+    // Built from the owner's defaults, so fields this doesn't keep stay neutral.
+    let mut p = crate::xpack::security::Principal::owner();
+    p.username = u.get("username")?.to_es_string();
+    p.roles = u.get("roles").and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default();
+    p.full_name = Value::Null;
+    p.email = Value::Null;
+    p.metadata = Value::object();
+    p.realm_name = known(u.get("realm_name").and_then(Value::as_str), "default_native");
+    p.realm_type = known(u.get("realm_type").and_then(Value::as_str), "native");
+    p.kind = kind;
+    Some(p)
+}
+
+/// Marks a [`call_system`] request, which keeps the cluster's authority inside
+/// [`as_principal`] too. A client sending it gains nothing: outside `as_principal` it changes
+/// nothing.
+pub const SYSTEM_HEADER: &str = "x-roll-internal-system";
+
+/// The principal an internal request without credentials runs as ([`as_principal`]).
+pub fn acting_principal(req: &EsRequest) -> Option<crate::xpack::security::Principal> {
+    if req.header("authorization").is_some() || req.header(crate::xpack::security::AUTHENTICATED_HEADER).is_some() || req.header(SYSTEM_HEADER).is_some() {
+        return None;
+    }
+    ACTING.try_with(Clone::clone).ok()
 }
 
 impl Caller {
     /// The client of `ctx`, unless it may read everything anyway.
     pub fn of(ctx: &crate::rest::Ctx<'_>) -> Option<Caller> {
-        use crate::xpack::security::{AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER};
+        use crate::xpack::security::{AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, RUN_AS_HEADER};
         let p = ctx.principal.get()?;
         if p.is_superuser() {
             return None;
         }
-        let mut headers = Vec::new();
-        match ctx.request.header(AUTHENTICATED_HEADER) {
-            // The node authenticated the owner, narrowed to some indices (a per-index route).
-            Some(user) => {
-                headers.push((AUTHENTICATED_HEADER.to_string(), user.to_string()));
-                headers.push((INDEX_SCOPE_HEADER.to_string(), ctx.request.header(INDEX_SCOPE_HEADER)?.to_string()));
-            }
-            None => headers.push(("Authorization".to_string(), ctx.request.header("authorization")?.to_string())),
-        }
+        // The headers that made it this principal: the node's authentication (narrowed to some
+        // indices on a per-index route) or the client's credentials, and its run-as user.
+        let headers = [AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, "Authorization", RUN_AS_HEADER]
+            .into_iter()
+            .filter(|h| *h != "Authorization" || ctx.request.header(AUTHENTICATED_HEADER).is_none())
+            .filter_map(|h| ctx.request.header(h).map(|v| (h.to_string(), v.to_string())))
+            .collect();
         Some(Caller { headers, security: crate::xpack::security::dls::ReadSecurity::of(ctx) })
     }
 }
@@ -64,6 +136,9 @@ pub async fn as_caller<F: Future>(caller: Option<Caller>, f: F) -> F::Output {
 
 /// The client the running request's internal calls are made as ([`as_caller`]).
 pub fn caller() -> Option<Caller> {
+    if JOB.try_with(|_| ()).is_ok() {
+        return None;
+    }
     CALLER.try_with(Caller::clone).ok()
 }
 
@@ -74,13 +149,19 @@ pub fn call<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Option<&Val
         req.body = bytes::Bytes::from(b.to_json());
         req.headers.push(("Content-Type".into(), "application/json".into()));
     }
-    let _ = CALLER.try_with(|c| req.headers.extend(c.headers.iter().cloned()));
-    send(cluster, req)
+    // The caller is read when the call runs, so `as_caller(c, call(…))` calls as `c` too.
+    Box::pin(async move {
+        if let Some(c) = caller() {
+            req.headers.extend(c.headers);
+        }
+        send(cluster, req).await
+    })
 }
 
-/// [`call`] with the cluster's own authority, also inside [`as_caller`].
+/// [`call`] with the cluster's own authority, also inside [`as_caller`] and [`as_principal`].
 pub fn call_system<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Option<&Value>) -> Call<'a> {
     let mut req = EsRequest::new(method, uri);
+    req.headers.push((SYSTEM_HEADER.into(), "true".into()));
     if let Some(b) = body {
         req.body = bytes::Bytes::from(b.to_json());
         req.headers.push(("Content-Type".into(), "application/json".into()));
@@ -109,6 +190,9 @@ pub fn call_as<'a>(ctx: &crate::rest::Ctx<'_>, cluster: &'a Cluster, method: &st
     {
         req.headers.push(("Authorization".into(), a.to_string()));
     }
+    if let Some(user) = ctx.request.header(crate::xpack::security::RUN_AS_HEADER) {
+        req.headers.push((crate::xpack::security::RUN_AS_HEADER.into(), user.to_string()));
+    }
     Box::pin(async move {
         let resp = crate::rest::handle(cluster, req).await;
         let v = if resp.body.is_empty() { Value::Null } else { crate::json::parse(&resp.body).ok().flatten().unwrap_or(Value::Null) };
@@ -122,6 +206,10 @@ pub fn call_ndjson<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Stri
     req.body = bytes::Bytes::from(body);
     req.headers.push(("Content-Type".into(), "application/x-ndjson".into()));
     Box::pin(async move {
+        // As the caller too ([`call`]): a bulk write is authorized per item as the client.
+        if let Some(c) = caller() {
+            req.headers.extend(c.headers);
+        }
         let resp = crate::rest::handle(cluster, req).await;
         let v = crate::json::parse(&resp.body).ok().flatten().unwrap_or(Value::Null);
         if resp.status < 300 { Ok(v) } else { Err(error_from_body(resp.status, &v)) }
@@ -207,5 +295,19 @@ mod tests {
         assert_eq!(e, EsError::index_not_found("x"));
         let e = error_from_body(400, &obj! { "error" => obj! { "type" => "illegal_argument_exception", "reason" => "bad" } });
         assert_eq!(e, EsError::illegal_argument("bad"));
+    }
+
+    #[test]
+    fn stored_users_round_trip() {
+        use crate::xpack::security::{AuthKind, Principal};
+        let mut p = Principal::owner();
+        p.username = "watcher_manager".into();
+        p.roles = vec!["watcher_manager".into()];
+        p.realm_name = "default_file";
+        p.realm_type = "file";
+        let back = principal_of(&stored_user(&p).unwrap()).unwrap();
+        assert_eq!((back.username.as_str(), back.roles.clone(), back.realm_name, back.kind), ("watcher_manager", p.roles.clone(), "default_file", AuthKind::Realm));
+        // A superuser's job runs with the cluster's authority.
+        assert!(stored_user(&Principal::owner()).is_none());
     }
 }

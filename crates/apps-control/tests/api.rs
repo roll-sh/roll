@@ -3200,14 +3200,16 @@ async fn reference_variables_are_filled_at_the_deploy() {
     assert!(log.to_string().contains("SELF: MISSING"), "{log}");
     // A token that may write apps but not reveal db's values can't reference them.
     let scope: roll_auth::scope::Scope = serde_json::from_value(json!([{"product": "apps", "resources": "*", "actions": {"write": "allow", "read": "allow"}}])).unwrap();
-    let grant = roll_auth::Grant { id: "tok_t".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(scope), ask_otherwise: false };
+    let grant = roll_auth::Grant { id: "tok_t".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(scope), user: None, ask_otherwise: false };
     let mut req = Request::builder()
         .method("PATCH")
         .uri(format!("/v1/apps/services/{id}/environments/production/variables"))
         .header("content-type", "application/json")
         .body(Body::from(json!({"set": {"STOLEN": "${{ db.PASS }}"}}).to_string()))
         .unwrap();
+    // As rolld's gate sends an operator's token on: the grant, and the operator marker beside it.
     req.extensions_mut().insert(grant);
+    req.extensions_mut().insert(roll_auth::Operator);
     assert_eq!(w.api.clone().oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN);
     // Sealed (Railway's): run with, never shown again, nor through a reference; a new value
     // stays sealed, and so does a copy into another environment.

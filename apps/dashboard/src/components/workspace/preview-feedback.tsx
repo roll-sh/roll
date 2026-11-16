@@ -22,6 +22,31 @@ export function feedbackFrom(query: string): PreviewFeedback | undefined {
   return { path: s("fb_path"), selector: s("fb_selector"), box: s("fb_box") || undefined, viewport: s("fb_viewport") || undefined, note: s("fb_note") };
 }
 
+/** The note a preview page's Reply or Resolve opened roll for (`?fb_reply=` / `?fb_resolve=<review
+ * id>`), or none: the sheet shows its thread with both. */
+export function resolveFrom(query: string): string | undefined {
+  const params = new URLSearchParams(query);
+  const id = (params.get("fb_resolve") ?? params.get("fb_reply") ?? "").trim();
+  return /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : undefined;
+}
+
+const REPLY = "**Reply on the preview** · ";
+
+/** A reply's review body: the note it answers (its review id), then the reply
+ * (`roll_previews::notes::parse_reply` reads it back). */
+export function replyBody(note: string, text: string): string {
+  return `${REPLY}\`${note}\`\n\n${text.trim().slice(0, 2000)}`;
+}
+
+/** The note a review replies to, and the reply, if it is one. */
+export function replyOf(body: string): { note: string; text: string } | undefined {
+  const at = body.indexOf("\n\n");
+  if (at < 0 || !body.startsWith(REPLY)) return undefined;
+  const id = body.slice(REPLY.length, at).match(/^`([A-Za-z0-9_-]{1,64})`$/)?.[1];
+  const text = body.slice(at + 2).trim();
+  return id && text ? { note: id, text } : undefined;
+}
+
 /** The review's body: where on the preview, then the note. The page's own names (its path, the
  * element's selector) come from the preview's code, so they're kept to one inert line each. */
 export function feedbackBody(p: Preview, f: PreviewFeedback, note: string): string {

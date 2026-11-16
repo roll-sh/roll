@@ -1,0 +1,62 @@
+{
+  "plugins_security.rolesmapping": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/security/access-control/api/",
+      "description": "Role mappings of the Security plugin."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_security/api/rolesmapping",
+          "methods": [
+            "GET",
+            "PATCH"
+          ]
+        },
+        {
+          "path": "/_plugins/_security/api/rolesmapping/{name}",
+          "methods": [
+            "GET",
+            "PUT",
+            "DELETE",
+            "PATCH"
+          ],
+          "parts": {
+            "name": {
+              "type": "string",
+              "description": "The entry's name"
+            }
+          }
+        },
+        {
+          "path": "/_opendistro/_security/api/rolesmapping",
+          "methods": [
+            "GET",
+            "PATCH"
+          ]
+        },
+        {
+          "path": "/_opendistro/_security/api/rolesmapping/{name}",
+          "methods": [
+            "GET",
+            "PUT",
+            "DELETE",
+            "PATCH"
+          ],
+          "parts": {
+            "name": {
+              "type": "string",
+              "description": "The entry's name"
+            }
+          }
+        }
+      ]
+    },
+    "params": {},
+    "body": {
+      "description": "The entry, or a JSON patch",
+      "required": false
+    }
+  }
+}

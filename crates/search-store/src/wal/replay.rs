@@ -331,9 +331,12 @@ impl Wal {
                 _ => HashMap::new(),
             })
             .collect();
+        // Counted as active before listing: replays started together (a cluster's shards, a
+        // node's takeover) then share the cache, rather than one finishing and emptying it
+        // while the others still list.
+        let _active = self.sh.replay_cache.begin();
         let cache = Listings::default();
         self.freeze(sources, &cache).await?;
-        let _active = self.sh.replay_cache.begin();
         let mut stats = ReplayStats { max_seq_no: after_seq_no, ..Default::default() };
         for (src, local) in sources.iter_mut().zip(locals) {
             let to = src.to.unwrap_or(u64::MAX);

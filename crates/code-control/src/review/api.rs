@@ -45,6 +45,12 @@ async fn patch_settings(State(code): S, caller: Caller, Path((owner, repo)): Pat
     Ok(Json(code.patch_review_settings(&r, &caller, &b).await?))
 }
 
+/// Where a caller's review or comment comes from: roll, and outside the repo when the caller can
+/// comment but not write (a public repo's reader), for MCP's lockdown.
+fn by(caller: &Caller, r: &crate::model::RepoRow) -> Origin<'static> {
+    Origin { outside: !Code::may_decide(caller, r), ..Origin::ROLL }
+}
+
 // ── reviews ──
 
 async fn list_reviews(State(code): S, caller: Caller, Path(id): Path<String>) -> Result<Json<Vec<super::Review>>> {
@@ -61,7 +67,7 @@ async fn submit(State(code): S, caller: Caller, headers: HeaderMap, Path(id): Pa
         return Err(Error::Forbidden(format!("approving or requesting changes on {} needs write access", r.full_name())));
     }
     code.prepare_review(&r, &c).await;
-    let mut review = code.submit_review(&r, &c, &reviewer, &b, &Origin::ROLL).await?;
+    let mut review = code.submit_review(&r, &c, &reviewer, &b, &by(&caller, &r)).await?;
     review.stale = false;
     Ok((StatusCode::CREATED, Json(serde_json::to_value(review).map_err(|e| Error::Internal(e.into()))?)))
 }
@@ -126,7 +132,7 @@ async fn create_thread(State(code): S, caller: Caller, headers: HeaderMap, Path(
     code.check_comment(&caller, &r)?;
     let reviewer = code.reviewer(&caller, &headers)?;
     let t: ThreadInput = serde_json::from_value(b).map_err(|e| Error::Invalid(e.to_string()))?;
-    let th = code.create_thread(&r, &c, &reviewer, &t, &Origin::ROLL).await?;
+    let th = code.create_thread(&r, &c, &reviewer, &t, &by(&caller, &r)).await?;
     if let Some(cm) = th.comments.first() {
         code.ai_on_comment(&caller, &r, &c, &th, &cm.id);
     }
@@ -142,7 +148,7 @@ async fn reply(State(code): S, caller: Caller, headers: HeaderMap, Path(id): Pat
     code.check_comment(&caller, &r)?;
     let reviewer = code.reviewer(&caller, &headers)?;
     let body = b.get("body").and_then(Value::as_str).unwrap_or("");
-    let th = code.reply(&r, &c, &th, &reviewer, body, &Origin::ROLL)?;
+    let th = code.reply(&r, &c, &th, &reviewer, body, &by(&caller, &r))?;
     if let Some(cm) = th.comments.last() {
         code.ai_on_comment(&caller, &r, &c, &th, &cm.id);
     }

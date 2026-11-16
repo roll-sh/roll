@@ -250,6 +250,7 @@ fn resize(st: &mut ClusterState, kind: ResizeType, source: &str, target: &str, r
         primary_terms: vec![term; target_shards as usize],
         system: src.system,
         recovery_source: None,
+        rollover_info: Default::default(),
         dialect: src.dialect,
     };
     st.metadata.indices.insert(target.to_string(), Arc::new(idx));
