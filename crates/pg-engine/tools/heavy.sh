@@ -50,13 +50,19 @@ trap 'rm -rf "$HELD"' EXIT INT TERM
 find "$ROOT/target/debug/deps" -name '*.o' -mmin +240 -delete 2>/dev/null
 # Incremental caches keep every old session's data; drop them when they grow past
 # HEAVY_MAX_INCREMENTAL_GB or the disk gets low.
-INC="$ROOT/target/debug/incremental"
-INC_GB=$(du -sk "$INC" 2>/dev/null | awk '{print int($1/1048576)}')
-FREE_GB=$(free_gb)
-if [ "${INC_GB:-0}" -ge "$MAX_INCREMENTAL_GB" ] || [ "${FREE_GB:-0}" -lt $((MIN_FREE_GB + 15)) ]; then
-  rm -rf "$INC"
-  echo "heavy.sh: incremental ${INC_GB:-0}G, ${FREE_GB}G free, cleared target/debug/incremental" >&2
-fi
+# `verify` (tools/quick-check.sh's profile) is incremental too: its cache of the engine alone is
+# ~4 GB, so it has a cap of its own (HEAVY_MAX_VERIFY_INCREMENTAL_GB).
+for prof in debug verify; do
+  INC="$ROOT/target/$prof/incremental"
+  INC_GB=$(du -sk "$INC" 2>/dev/null | awk '{print int($1/1048576)}')
+  FREE_GB=$(free_gb)
+  CAP=$MAX_INCREMENTAL_GB
+  [ $prof = verify ] && CAP=${HEAVY_MAX_VERIFY_INCREMENTAL_GB:-12}
+  if [ "${INC_GB:-0}" -ge "$CAP" ] || [ "${FREE_GB:-0}" -lt $((MIN_FREE_GB + 15)) ]; then
+    rm -rf "$INC"
+    echo "heavy.sh: incremental ${INC_GB:-0}G, ${FREE_GB}G free, cleared target/$prof/incremental" >&2
+  fi
+done
 # The machine is shared: heavy jobs run at the lowest priority, and a number in $LOCK.jobs caps
 # cargo's build jobs and each test binary's threads for every agent at once (test binaries
 # otherwise start one thread per core). An explicit RUST_TEST_THREADS below the cap is kept.

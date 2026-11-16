@@ -312,3 +312,21 @@ codegen-units = 1
 inherits = "release"
 lto = "fat"
 codegen-units = 1
+
+# pg-engine's verification builds (crates/pg-engine/tools/quick-check.sh and
+# verification-train.sh): release's optimisation without its link-time optimisation, which made
+# every test binary a link of minutes (the train's release build of ~65 test binaries took 200 to
+# 450 minutes; running them, 12), and incremental, for an agent's rebuilds after an edit (the
+# train builds afresh with CARGO_INCREMENTAL=0, so 16 codegen units).
+[profile.verify]
+inherits = "release"
+lto = "off"
+codegen-units = 256
+incremental = true
+
+# The same with the debug build's checks (debug assertions, overflow checks) at release speed:
+# the train's debug crate tests ran 90 minutes (golden alone 33).
+[profile.verify-checked]
+inherits = "verify"
+debug-assertions = true
+overflow-checks = true
