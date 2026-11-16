@@ -3361,6 +3361,129 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - Item 2's batches past the scan (joined rows from batches, the probe hits aggregated from
       columns), item 4 (streaming merge joins) and item 5 (work_mem for hash tables and sorts)
       are not started.
+- **Executor, round 18: index scans' row fetches as one sorted multi-get, nested loops and
+  Aggregates rescanned, cheaper hash-join tuple sizes** (agent 238; BENCH.md "Executor, round
+  18"). Lane C, all three servers at max_parallel_workers_per_gather 2, max_parallel_workers 8
+  and a 2 GB cache, five interleaved rounds (each round PostgreSQL, pgrust, the base and the head,
+  the order rotated), the host at load 20-45 (other sessions' builds, this round's train):
+  TPC-H SF1 plain dist 12.63 (base) -> 12.88 s (head) against PostgreSQL's 16.29 and pgrust's
+  10.47 (CPU 33.11 -> 34.27 s against 42.00 and 16.87); user instructions q02 -10.9%, q11
+  -7.1%, q20 -3.2%, q17 -2.6%, every other query within +-0.5% (22-query sum -0.45%); cycles q02
+  -12.4%, q11 -10.7%, q20 -5.6%, but +2 to +10% on queries whose instructions didn't move (q01
+  +7.0, q03 +10.0, q19 +8.2, q13 +5.7: placement in the fat-LTO binary, as agent 234 saw;
+  22-query cycles +2.62%). PGO builds of the same two commits, five more interleaved rounds that
+  day: 11.50 -> 11.25 s against PostgreSQL's 15.86 and pgrust's 10.04 (CPU 30.13 -> 29.97 s
+  against 40.98 and 16.11); instructions q02 -12.2, q11 -7.7, q20 -3.5, q17 -3.5%, cycles q02
+  -13.8, q11 -17.2, q20 -10.6, q17 -5.9%, the 22-query sums -0.85 / -0.65%, nothing worse past
+  the noise. The landed head is these commits rebased on agents 231 / 239's storage format 2 (`c25ffbd79`;
+  the multi-get, the rescans, the golden and a point read's code as before: as `Block::seek`
+  made of calls to `restart_for` / `seek_from`, then with `first_restart` and `restart_cmp` out of
+  line in it, and with the multi-get's step list in the point reader's buffers, lane A's point
+  selects moved +0.4 to +1.1% in instructions; `seek` is the base's again, 0xe89 against 0xe81
+  bytes with the same calls). Against `c25ffbd79` (plain dist, 22 queries, three rounds, the
+  first round's base pass at 1.09 foreign cores): instructions q02 -11.0 / -10.9 / -10.9, q11
+  -7.2 / -7.0 / -6.9, q20 -3.3 / -3.2 / -3.2, q17 -3.5 / -4.3 / -3.9, every other query within
+  +-1 but q13 +1.9 once, sums -0.34 / -0.61 / -0.56%; cycles -5.50 / -5.09 / -2.49%; gate wall
+  medians q02 0.620 -> 0.526 s, q11 0.247 -> 0.188, q20 0.358 -> 0.307, q17 0.972 -> 0.820, the
+  22 14.01 -> 12.79 s. (On agent 237's `bf9366246` the same commits measured q02 -10.8 to -11.2,
+  q11 -6.8 to -7.1, sums -0.41 to -0.53%.) Lane A's point selects against `c25ffbd79` (user instructions an
+  operation, median of the clean pairs): -0.1% at 8 clients (5 pairs), +0.2% at 32 (8 pairs). All 22 result hashes PostgreSQL's in every pass.
+  - **A sorted batch of row fetches is one multi-get** (`PointReader::get_sorted`,
+    `Store::get_sorted`, `Txn::get_sorted_snap`; `Block::restart_for` / `seek_from` /
+    `prefetch_restarts` / `prefetch_restart`, `SstReader::block_holds`): an index scan's heap
+    fetches (`exec::scan::get_sorted`, from `fetch_rows` / `fetch_stored`: q02's 1,984 runs of 80
+    partsupp rows, q11's 2 x 405 runs of 80, q20's lineitem rows of 8,332 SubPlan runs) went
+    through a merging scan sought from key to key (`Scan::fetch_sorted`: per key every source's
+    `Cursor::seek`, `Merge::min`, `Scan::position`, a `Vec` for the cursor's start key), the rows
+    into a `RowBatch` (each key copied) and then matched back to the keys. Now L1 is read a step
+    at a time for the whole batch: every key's file and block (`find_block`, or none when the key
+    is in the block the key before it went to, or in the block the reader holds), then the
+    blocks from the cache with their restarts asked for (`_mm_prefetch`), then each block's first
+    seek's restart with its entries and values asked for, then the seeks (the keys after the
+    first in a block sought on from the one before), each row into its key's place. The sources
+    above L1 (memtables, frozen ones, L0) are read per key first, as `get_raw` reads them
+    (`newest_above_l1`), range deletions and out-of-line values as `get_raw` / `toast::resolve`
+    treat them. Against the base (`m001`, the change alone, three clean rounds): user
+    instructions q11 -6.6 / -6.8 / -6.8, q02 -4.6 / -4.5 / -4.5, q20 -3.3 / -3.5 / -3.3, q03 /
+    q07 / q09 within +-2; cycles q11 -8.3 / -15.6 / -17.2, q02 -7.7 / -6.1 / -3.9, q20 -12.9 /
+    -7.2 / -2.1; gate wall medians q11 0.224 -> 0.173 s, q20 0.336 -> 0.296. `Scan::fetch_sorted`,
+    `Txn::get_sorted_snap_into` and `Store::get_sorted_into` are gone.
+  - **Nested loops and Aggregates rescan; tuple sizes without counting again** (agent 232's
+    dropped c005 and c007, re-measured on the multi-get as the brief asked, plus a fast path):
+    `NestLoopNode::rescan` (ExecReScanNestLoop: the outer side rescanned, or opened again from
+    its plan when it can't be, as a sequential scan; an unparameterized inner side's node kept
+    once the join has been rescanned and rescanned for each collection), `AggNode::rescan`
+    opening again only an input that can't rescan, so q02's correlated SubPlan tree (nested
+    loops over region, 1,309 runs) is kept (agent 227's `subplan_trees`); `varlena_payload` not
+    counting an ASCII char(n)'s characters again and a numeric's digit groups in u64;
+    `workmem::data_len` sizing an ASCII bpchar from its length and typmod (a hash join sizes every
+    inner row: q02's 158,720). Against the multi-get (`c006` on `c005`, three rounds, the first
+    two at 1.03-1.51 foreign cores): user instructions q02 -6.5 / -6.4 / -6.5 (every round over
+    the 3% bar), q17 +0.6 / -1.3 / -1.7; cycles q02 -10.4 / -5.7 / -8.0, q17 -5.2 / -4.0 / -1.6;
+    q02 gate wall medians 0.640 -> 0.555 s. Golden `a232_nestloop_rescan` (agent 232's file,
+    recorded now from PostgreSQL 18.6): inner / left / semi / anti joins in a SubPlan, an outer
+    sequential scan opened again, a SubPlan in a hash join's condition, an Aggregate over a
+    bitmap heap scan.
+  - Dropped (patches with numbers in `~/.cache/a238/patches/`):
+    - Lead 2, the hot ranges' lock off the read path (agent 232's c001 on the `PrefixBits` type
+      of its c004, `Hot::kept`): user instructions -0.15 to -0.30% over the 22 queries; cycles
+      -1.57 / -2.06% in the first gate's two clean rounds, then +2.10 / -0.75 / -0.63 / +0.11% in
+      four more clean rounds (median about -0.7%); q07 cycles -2.5 to -10.3% in seven of eight
+      rounds, q08 -1.5 to -11.9 in seven of eight; own-run walls (5 pairs, host load 26-78) q07
+      0.633 -> 0.651 s (2 of 5 pairs), q08 0.394 -> 0.358 (4 of 5); lane A point selects at 8
+      clients (3 clean pairs) -1.5% instructions, +1.7% cycles, -7.9% ops/s, at 32 clients (5
+      clean pairs) +0.5% / -2.2% / +2.1%, short transactions at 8 clients one clean pair. Not
+      the clear cycles win with nothing losing that the coordinator's rule asks. A point read
+      takes the lock only while some range is kept (`Hot::any`), so lane A's point reads, whose
+      tables are too big to keep, can't show it.
+    - A prefetch-only pass before the merging scan's reads (`warm_l1`, c002): user instructions
+      q02 +4.3, q11 +5.7 to +6.8, q20 +5.1, cycles unclear: the reads made every step again
+      (file search, block index, the block cache's mutex and map), so the misses stayed serial.
+      The multi-get above makes each step once.
+    - The workers' lookups (`exec::lookup::Lookup::fetch`, q07 / q05 / q03's index rows of one
+      key) through the multi-get: user instructions q07 +18.7%, q03 +20.7%, q05 +9.4% with the
+      first version, still +6.7 / +3.8 / +2.5% against the base with the same-block and held
+      paths: the per-key point reads there keep the reader's block from lookup to lookup, and an
+      order's lineitem rows are adjacent, so there is little to overlap. `Lookup::fetch` is as it
+      was.
+    - A level cursor's start key into its own buffer on a seek past its block (c003): not
+      measured (its binary was built from the wrong commit); after the multi-get no index fetch
+      goes through it.
+  - Measured, not changed:
+    - q02 on the head (0.51 s against PostgreSQL's 0.25, cycles): the fetch path is still 19%
+      (`get_sorted_snap` 6.2, `block_with` 3.1, `Block::read` 3.0, `seek_from` 2.7,
+      `restart_for` 1.5, `find_block` 1.3), and 3.2% of q02's cycles sit on one load, the fetched
+      row's first byte (`toast::has_external`, a miss the row's decode pays anyway: the value's
+      line isn't prefetched, only its restart's); the rest is the joined rows: `Value` drops and
+      clones and `concat_rows` 10.5%, malloc / free 7.6%, sizing 2.5%, the 8 batches' spill 1-2%.
+    - q07 / q05 / q08's workers' lookups (base, cycles): the point path is 41% of q07 (`Block::seek`
+      13.4, `block_with` 8.9, `get_with` 6.0, `find_block` 6.0); per outer row an index entry
+      probe then its rows, one key at a time.
+    - q13 (lead 4; base, cycles): `run_stages` 13.8% self, `partial_row`'s closure 10.8,
+      `Partials::add_words` 8.5, `Built::lookup` 8.1: the probe of customer's hash and each row's
+      partial aggregation by c_custkey (150,000 groups) in the workers, after agent 234's batch
+      aggregation (count(o_orderkey) over a left join's rows goes the row way).
+  - Tests: storage unit tests (43; the model test also reads every other key through one reader
+    in two batches, the second's first keys in the block it holds); golden `a232_nestloop_rescan`
+    in-process, over the wire and shuffled. The verification train (`tools/verification-train.sh`,
+    `TRAIN_NO_CHECKOUT=1`) on `3ef2aee82` (the round's commits on agent 237's `bf9366246`): release
+    crate tests pass, Clippy 20 warnings (none in the changed code; `nodes.rs`'s is the test
+    module's place, as before), crash_random seeds 1-30 x 4, power_cut 4 passed, the power and
+    async power crash rounds pass, debug crate tests pass, the regression suite 51,148 / 51,150
+    units with none newly differing, isolation 1,647 / 1,648 permutations (intra-grant-inplace,
+    as on the other trains), pg_dump TAP 14,609 passed. (An earlier train on these commits on
+    `7c1493375`, before the point-read commit, passed the same.) Rebased on `262443ded` (storage format 2, agent 236's build
+    flags, agent 242's verification tiers): `tools/quick-check.sh` green (verify profile, Clippy
+    no new warning in a changed file, 433 tests in 28 binaries with golden, wire and wire_waits,
+    crash_random seeds 1-3 x 2 and power_cut_at_every_point, the regression suite 51,148 /
+    51,150 with none newly differing, isolation 1,647 / 1,648, pg_dump TAP 14,609); handed in as
+    `cand/a238` for the batch train.
+  - Next steps (largest first): the fetched rows' values prefetched once the seeks are done (a
+    pass between the seeks and the values: 3.2% of q02 on one load); the workers' lookups batched
+    across outer rows (an outer batch's index keys probed together, then their rows by the
+    multi-get: q07 / q05 / q08, 41% of q07); q02's joined rows (the nested loop's `concat_rows`
+    and the Hash's sizing and spill per row); q13's probe and per-row partial aggregation; the
+    block cache's mutex and reference count per lookup (`block_with`, 3% of q02, 9% of q07).
 - **Executor, round 17: storage sources found by binary search, memtables skipped by relation,
   numeric hash keys without allocation, one statement-start clock reading** (agent 232; BENCH.md
   "Executor, round 17"). Lane C, all three servers at max_parallel_workers_per_gather 2,

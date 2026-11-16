@@ -480,6 +480,130 @@ Dropped (patches in `~/.cache/a235/patches/`):
 | the memtable's skiplist under one epoch pin | 8 | +3.4% | -1.19% | -1.3% (every pair) | -4.7% | 3 |
 | | 32 | -1.9% | about 0 (-1.7, +2.6, -1.7, +1.3) | +0.6% | +2.3% | 4 |
 
+## Executor, round 18 (2026-11-15, agent 238)
+
+HANDOFF "Executor, round 18" has what changed: an index scan's sorted row fetches read as one
+multi-get (L1 a step at a time for the batch, each step prefetching the next one's lines), and
+agent 232's dropped nested-loop / Aggregate rescans and hash-join tuple sizes, re-measured.
+**base** is `5526bfef4` (origin's head), **head** `ab9421e63` (the two changes and the golden on
+it); `m001` the multi-get alone, `c005`..`c008` the steps. Plain dist builds (fat LTO, line
+tables) from one build worktree with its own target dir; PGO builds with `tools/dist-pgo.sh` of
+each commit in that worktree (training on CPUs 0,1,18,19).
+
+Lane C: each server in its own container on CPUs 14,15,32,33 (`--memory 8g`, host network), the
+client on 16,17,34,35, every pass under `~/.cache/lane-c.lock`. All three servers at
+`max_parallel_workers_per_gather = 2`, `max_parallel_workers = 8` and a 2 GB cache (roll
+`--cache-mb 2048`; PostgreSQL 18.6 `shared_buffers = 2GB`; pgrust `shared_buffers = 2GB` and both
+parallel settings with ALTER SYSTEM, a restart and SHOW). TPC-H SF1 from `bench tpch-load --sf
+1`, the engine's data directory restored before every start. A pass: a fresh engine (PostgreSQL
+and pgrust stay up), a warm-up pass, then per query three runs (roll's inside one `perf stat -e
+instructions:u,cycles:u` window); each pass waited up to 15 minutes for the lane under 25% busy
+and records its foreign load (busy jiffies of the server CPUs not the server's, in cores). Five
+rounds, each PostgreSQL, pgrust, base and head, the order rotated; a pass over 1.0 foreign core
+isn't counted. The host ran at load 20-45 (other sessions' builds, this round's train); other
+sessions' unpinned `rustc` ran on lane C's CPUs at times.
+
+### TPC-H SF1, plain dist (medians of the clean passes: 5 base, 4 head, 5 PostgreSQL, 5 pgrust)
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| PostgreSQL s | 2.86 | 0.25 | 0.53 | 0.20 | 0.38 | 0.53 | 0.50 | 0.22 | 1.60 | 0.80 | 0.10 | 0.78 | 0.90 | 0.24 | 0.44 | 0.31 | 0.96 | 3.65 | 0.08 | 0.11 | 0.74 | 0.12 | 16.29 |
+| base s | 0.54 | 0.60 | 0.52 | 0.30 | 0.46 | 0.48 | 0.59 | 0.32 | 1.33 | 0.73 | 0.20 | 0.52 | 1.05 | 0.23 | 0.41 | 0.35 | 0.86 | 1.91 | 0.07 | 0.32 | 0.71 | 0.12 | 12.63 |
+| head s | 0.57 | 0.51 | 0.58 | 0.27 | 0.45 | 0.48 | 0.57 | 0.30 | 1.44 | 0.74 | 0.19 | 0.54 | 1.08 | 0.24 | 0.47 | 0.38 | 0.84 | 2.00 | 0.08 | 0.30 | 0.74 | 0.12 | 12.88 |
+| pgrust s | 0.37 | 0.17 | 0.35 | 0.15 | 0.22 | 0.44 | 0.48 | 0.17 | 1.74 | 0.93 | 0.07 | 0.69 | 0.46 | 0.07 | 0.23 | 0.27 | 0.65 | 2.26 | 0.06 | 0.11 | 0.54 | 0.06 | 10.47 |
+| PostgreSQL CPU, s | 8.41 | 0.32 | 1.49 | 0.55 | 1.08 | 1.35 | 1.36 | 0.63 | 4.29 | 2.06 | 0.10 | 2.24 | 2.42 | 0.57 | 1.11 | 0.74 | 1.09 | 9.40 | 0.22 | 0.14 | 2.09 | 0.34 | 42.00 |
+| base CPU, s | 1.60 | 0.58 | 1.49 | 0.85 | 1.03 | 1.24 | 1.63 | 0.65 | 3.90 | 1.99 | 0.20 | 1.48 | 2.62 | 0.50 | 1.20 | 1.04 | 1.86 | 6.24 | 0.20 | 0.32 | 2.14 | 0.35 | 33.11 |
+| head CPU, s | 1.67 | 0.51 | 1.64 | 0.80 | 1.06 | 1.33 | 1.64 | 0.60 | 4.27 | 2.06 | 0.19 | 1.56 | 2.73 | 0.51 | 1.29 | 1.06 | 1.79 | 6.50 | 0.21 | 0.31 | 2.17 | 0.37 | 34.27 |
+| pgrust CPU, s | 0.83 | 0.23 | 0.73 | 0.31 | 0.41 | 0.86 | 0.98 | 0.31 | 3.31 | 1.02 | 0.07 | 1.26 | 0.89 | 0.15 | 0.45 | 0.43 | 0.72 | 2.48 | 0.06 | 0.13 | 1.13 | 0.11 | 16.87 |
+
+- Head against base, user instructions (medians of the passes with counts): q02 -10.9%, q11
+  -7.1%, q20 -3.2%, q17 -2.6%, every other query within +-0.5%; 22-query sum -0.45%. Cycles q02
+  -12.4%, q11 -10.7%, q20 -5.6%, but +2 to +10% on queries whose instructions didn't move (q01
+  +7.0, q03 +10.0, q19 +8.2, q13 +5.7; sum +2.62%): placement in the fat-LTO binary (agent 234's
+  round saw the same); the PGO pair below has none of it.
+- Peak memory (VmHWM over a pass): base 1,695-1,710 MiB, head 1,692-1,706; PostgreSQL's
+  container after a pass 1,568 MiB (anon + shmem), pgrust's 1,729-1,750.
+- All 22 result hashes PostgreSQL's in every pass of every build.
+
+### TPC-H SF1, PGO (the same day and lane, five rounds, every pass clean)
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| PostgreSQL s | 2.79 | 0.23 | 0.53 | 0.20 | 0.40 | 0.52 | 0.46 | 0.23 | 1.62 | 0.78 | 0.12 | 0.83 | 0.93 | 0.20 | 0.41 | 0.30 | 0.90 | 3.48 | 0.06 | 0.10 | 0.68 | 0.10 | 15.86 |
+| base PGO s | 0.62 | 0.50 | 0.46 | 0.23 | 0.38 | 0.43 | 0.53 | 0.29 | 1.26 | 0.70 | 0.17 | 0.53 | 0.95 | 0.21 | 0.45 | 0.33 | 0.78 | 1.57 | 0.06 | 0.26 | 0.69 | 0.11 | 11.50 |
+| head PGO s | 0.57 | 0.42 | 0.46 | 0.24 | 0.38 | 0.45 | 0.53 | 0.25 | 1.24 | 0.69 | 0.14 | 0.58 | 0.96 | 0.21 | 0.44 | 0.31 | 0.69 | 1.60 | 0.06 | 0.24 | 0.68 | 0.11 | 11.25 |
+| pgrust s | 0.39 | 0.16 | 0.37 | 0.15 | 0.21 | 0.38 | 0.46 | 0.17 | 1.59 | 0.91 | 0.05 | 0.67 | 0.44 | 0.08 | 0.22 | 0.26 | 0.64 | 2.21 | 0.05 | 0.10 | 0.46 | 0.06 | 10.04 |
+| PostgreSQL CPU, s | 8.32 | 0.31 | 1.43 | 0.54 | 1.11 | 1.40 | 1.36 | 0.63 | 4.15 | 2.12 | 0.11 | 2.36 | 2.46 | 0.54 | 1.12 | 0.68 | 1.03 | 8.73 | 0.19 | 0.14 | 1.95 | 0.30 | 40.98 |
+| base PGO CPU, s | 1.83 | 0.49 | 1.32 | 0.67 | 0.85 | 1.24 | 1.47 | 0.55 | 3.65 | 1.90 | 0.17 | 1.53 | 2.38 | 0.46 | 1.24 | 0.93 | 1.68 | 5.03 | 0.17 | 0.28 | 1.97 | 0.32 | 30.13 |
+| head PGO CPU, s | 1.70 | 0.44 | 1.29 | 0.68 | 0.86 | 1.30 | 1.44 | 0.52 | 3.63 | 1.88 | 0.15 | 1.66 | 2.39 | 0.45 | 1.27 | 0.93 | 1.50 | 5.15 | 0.17 | 0.26 | 2.01 | 0.29 | 29.97 |
+| pgrust CPU, s | 0.79 | 0.20 | 0.74 | 0.31 | 0.39 | 0.83 | 0.91 | 0.31 | 3.26 | 0.99 | 0.06 | 1.11 | 0.89 | 0.17 | 0.42 | 0.43 | 0.69 | 2.40 | 0.06 | 0.12 | 0.90 | 0.13 | 16.11 |
+
+- Head against base: user instructions q02 -12.2%, q11 -7.7%, q20 -3.5%, q17 -3.5%, q08 -2.3%,
+  others -1.4 to +1.0%; 22-query sum -0.85%. Cycles q02 -13.8%, q11 -17.2%, q20 -10.6%, q17
+  -5.9%, q01 -5.9%, others -3.8 to +4.6%; sum -0.65%. Wall 11.50 -> 11.25 s, CPU 30.13 ->
+  29.97 s.
+- Roll's PGO head against PostgreSQL: 11.25 s against 15.86 (0.71x), CPU 29.97 against 40.98 s;
+  against pgrust 1.12x wall, 1.86x CPU. Still slower than PostgreSQL: q02 (0.42 / 0.23), q20
+  (0.24 / 0.10), q11 (0.14 / 0.12), q04 (0.24 / 0.20), q07 (0.53 / 0.46), q08 (0.25 / 0.23),
+  q15 (0.44 / 0.41), q13 (0.96 / 0.93); level: q14, q19, q21.
+- Peak memory: base PGO 1,688-1,695 MiB, head PGO 1,689-1,703; PostgreSQL 1,568, pgrust
+  1,735-1,780 (after a pass).
+
+### The changes, gated (user instructions a run, % against the build before, per round; plain dist)
+
+| change | targets, instructions % | cycles % | others | kept |
+|---|---|---|---|---|
+| `m001` the sorted multi-get (against base; 3 clean rounds) | q11 -6.6 / -6.8 / -6.8, q02 -4.6 / -4.5 / -4.5, q20 -3.3 / -3.5 / -3.3 | q11 -8.3 / -15.6 / -17.2, q02 -7.7 / -6.1 / -3.9, q20 -12.9 / -7.2 / -2.1 | q03 / q07 / q09 within +-2 (their workers' lookups don't use it); gate walls q11 0.224 -> 0.173 s, q20 0.336 -> 0.296 | yes |
+| `c006` nested loop / Aggregate rescans, tuple sizes (against `c005`; rounds 1-2 at 1.03-1.51 foreign cores) | q02 -6.5 / -6.4 / -6.5, q17 +0.6 / -1.3 / -1.7 | q02 -10.4 / -5.7 / -8.0, q17 -5.2 / -4.0 / -1.6 | q11 / q20 within +-1; q02 gate walls 0.640 -> 0.555 s | yes |
+| `c001` hot ranges' lock off the read path (against base; 6 clean rounds of 22) | q07 -0.2 to -0.9, q08 -0.3 to -0.6 | 22-query -1.57 / -2.06 / +2.10 / -0.75 / -0.63 / +0.11; q07 -2.5 to -10.3 in 7 of 8 rounds | q07 own-run walls 0.633 -> 0.651 s (2 of 5 pairs), q08 0.394 -> 0.358 (4 of 5); lane A point selects, 8 clients (3 clean pairs) instr -1.5, cycles +1.7, ops/s -7.9; 32 clients (5) +0.5 / -2.2 / +2.1 | no: no clear cycles win with nothing losing |
+| `c002` prefetch-only pass before the merging scan (against `c001`) | q02 +4.3 / +4.3 / +4.5, q11 +5.7 / +6.8 / +6.4, q20 +5.1 x3 | q02 +5.6 / +12.9 / -0.8, q11 +5.6 / +32.8 / -9.2 | | no |
+| `c005` + `c007`: the workers' lookups through the multi-get (against `c001` / `c006`) | q07 +18.7 / +18.6 / +18.7 then -10.1 / -10.1 / -10.3 (+6.7 compounded), q03 +20.7 then -14 (+3.8), q05 +9.4 then -6.3 (+2.5) | | | no (`Lookup::fetch` as before) |
+
+Dropped patches with their numbers: `~/.cache/a238/patches/`.
+
+### Point selects on lane A (plain dist; 10 s runs, a fresh server and 100,000-row fixture each, 5 alternating pairs, agent 230's harness)
+
+User instructions an operation of the server's threads over 8 s (perf stat), the median of the
+clean pairs (a pair over 1.0 foreign core flagged); per pair in brackets.
+
+| head build (base) | 8 clients | 32 clients |
+|---|---|---|
+| `f001` = `ab9421e63` (`5526bfef4`) | +0.4% (+0.4, +1.6, +0.4, +0.8, -0.4) | +0.7% (-0.4, +1.6, -0.3, +1.4, +0.7) |
+| `f002`: rebased on `7c1493375`, `restart_for` / `seek_from` inlined (`7c1493375`) | -0.65% (-1.4, +0.1, +1.5, -4.3; one flagged) | +0.9% (+2.1, +0.5, +1.3, -0.3; one flagged) |
+| `f003`: `first_restart` inlined too (`7c1493375`) | +0.7% (+0.2, +0.8, +1.6, +0.7, -1.0) | +1.1% (-0.5, +1.1, +1.8, -0.2, +1.7) |
+| `3ef2aee82` (`bf9366246`): the multi-get's step list out of the point reader's buffers too | **-0.4%** (+5.7, +0.3, -1.1, -1.2; one flagged) | **-0.85%** (-0.4, -0.9, -0.8, -2.3; one flagged) |
+| **landed head, the same commits on storage format 2** (`c25ffbd79`) | **-0.1%** (+3.4, +0.1, -0.1, -0.4, -0.7) | **+0.2%** over 8 clean pairs (+0.5, -3.4, +1.3; then -0.9, 0.0, -0.3, +0.4, +1.5; two flagged) |
+The pairs move by -1 to +2% between two runs of the same two binaries; the medians straddle the
++0.3% bar without a trend that follows the code. Three things did change a point read's code and
+were taken out: `Block::seek` made of two calls (`restart_for`, `seek_from`: `f001`), then
+`first_restart` out of line in it (`f002`; the base inlines it into `seek`, the multi-get had
+become its second caller), then `restart_cmp` (`f003`); `f004` / `f005`'s `seek` has the base's
+size (0xe89 against 0xe81 bytes) and calls. An instruction-sampled profile of two pairs at 32
+clients (`f004` against `7c1493375`, `perf record -e instructions:u -c 20011`, the shares times
+perf stat's instructions an operation): 38,874 -> 37,813 (-2.7%) an operation, no point-read
+function past the noise but one new cost, the multi-get's step list dropped with the point
+reader's buffers on every read (+51 instructions an operation), which the landed head moves out of
+those buffers. The landed head sampled the same way (two pairs each against `bf9366246`): 8
+clients 38,502 -> 38,362 (-0.36%), no function past the noise and none new; 32 clients 38,159 ->
+37,668 (-1.3%) in the clean pair.
+
+### The landed head against storage format 2 (`c25ffbd79`, plain dist, 22 queries, three rounds)
+
+The round's commits rebased on agents 231 / 239's format 2. User instructions q02 -11.0 / -10.9 /
+-10.9%, q11 -7.2 / -7.0 / -6.9, q20 -3.3 / -3.2 / -3.2, q17 -3.5 / -4.3 / -3.9, every other query
+within +-1% but q13 +1.9 once; sums -0.34 / -0.61 / -0.56%. Cycles -5.50 / -5.09 / -2.49% (round
+1's base pass 1.09 foreign cores). Gate wall medians (three runs a pass): q02 0.620 -> 0.526 s, q11
+0.247 -> 0.188, q20 0.358 -> 0.307, q17 0.972 -> 0.820; the 22 14.01 -> 12.79 s. Peaks 1,689-1,692
+MiB base, 1,688-1,693 head. All 22 hashes PostgreSQL's.
+
+### The same commits on agent 237's base (`3ef2aee82` on `bf9366246`, plain dist, 22 queries, three rounds)
+
+User instructions q02 -10.8 / -10.9 / -11.2%, q11 -7.0 / -6.8 / -7.1, q20 -3.1 / -3.1 / -3.2,
+q17 -2.8 / -3.6 / -3.8, every other query within +-1% but single rounds of q09 +2.7, q22 +2.5,
+q16 -2.5; 22-query sums -0.53 / -0.41 / -0.43%. Cycles +3.63 / +0.16 / +2.47% (round 1's head
+pass 1.06 and round 3's base pass 1.26 foreign cores; the clean round +0.16%; unchanged queries
++2 to +15% at the same instructions, the placement the PGO pair doesn't show). Peaks 1,694-1,698
+MiB base, 1,695-1,707 head. All 22 hashes PostgreSQL's.
 ## Build flags (2026-11-15, agent 236)
 
 HANDOFF "Build flags" has the decision and the recipe. The shipped builds now pad branches for
