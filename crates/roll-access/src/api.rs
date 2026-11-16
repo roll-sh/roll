@@ -74,6 +74,9 @@ fn change_name(method: &axum::http::Method, route: &str) -> String {
         (&Method::PUT, "/v1/access/notify") => "notify".into(),
         (&Method::POST, "/v1/access/audit/sinks") => "add_sink".into(),
         (&Method::DELETE, "/v1/access/audit/sinks/{id}") => "remove_sink".into(),
+        (&Method::POST, "/v1/access/clients") => "create_client".into(),
+        (&Method::DELETE, "/v1/access/clients/{id}") => "revoke_client".into(),
+        (&Method::POST, "/v1/access/clients/{id}/rotate") => "rotate_client".into(),
         // …/rotate, …/approve, …/deny, …/tighten, …/retry.
         _ => last.trim_matches(|c| c == '{' || c == '}').to_string(),
     }

@@ -10,7 +10,7 @@
 use crate::store::{ACCESS_TTL_MS, NewGrant};
 use crate::{Access, Error};
 use axum::extract::State;
-use axum::http::{Extensions, HeaderMap, StatusCode, header};
+use axum::http::{Extensions, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Form, Json, Router};
@@ -397,16 +397,21 @@ fn token_answer(grant: &crate::store::Grant, access: String, refresh: String) ->
         .into_response()
 }
 
-async fn token(State(a): S, headers: HeaderMap, Form(f): Form<HashMap<String, String>>) -> Response {
+async fn token(State(a): S, req: axum::extract::Request) -> Response {
+    // The caller's address (a machine client's sign-in is audited with it), then the form.
+    let ip = crate::evaluate::client_ip(&req, &a.config);
+    let headers = req.headers().clone();
+    let Ok(body) = axum::body::to_bytes(req.into_body(), 64 << 10).await else { return Error::OAuth("invalid_request", "the request is too large".into()).into_response() };
+    let f: HashMap<String, String> = url::form_urlencoded::parse(&body).into_owned().collect();
     let get = |k: &str| f.get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     // A machine client, with no person (its id may be in a header or its assertion).
     let grant = get("grant_type");
     if matches!(grant.as_deref(), Some(crate::client_credentials::GRANT | crate::client_credentials::JWT_GRANT)) {
         let scope = if crate::client_credentials::read_only_scope(&f).unwrap_or(false) { "read-only" } else { "granted" };
         let made = if grant.as_deref() == Some(crate::client_credentials::JWT_GRANT) {
-            crate::client_credentials::federated(a, &f).await
+            crate::client_credentials::federated(a, &f, ip).await
         } else {
-            crate::client_credentials::token(a, &headers, &f).await
+            crate::client_credentials::token(a, &headers, &f, ip).await
         };
         return match made {
             // No refresh token: the client trades its credential again for the next one.

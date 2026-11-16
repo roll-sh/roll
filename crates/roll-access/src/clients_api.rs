@@ -143,7 +143,10 @@ pub(crate) async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes
     if let Some(s) = secret {
         out["client_secret"] = json!(s);
     }
-    Ok((StatusCode::CREATED, Json(out)).into_response())
+    // The client's grant is what the audit row is about (its log tells the client's story).
+    let mut res = (StatusCode::CREATED, Json(out)).into_response();
+    res.extensions_mut().insert(crate::api::Changed(grant.id.clone()));
+    Ok(res)
 }
 
 /// Whether a person (`None`: the operator) sees a machine client's grant.
@@ -171,7 +174,7 @@ pub(crate) async fn list(State(a): S, ext: Extensions) -> crate::Result<Json<Val
     Ok(Json(json!(rows)))
 }
 
-pub(crate) async fn revoke(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+pub(crate) async fn revoke(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Response> {
     let person = owner(&a, &ext, "revoke machine clients")?;
     let a2 = a.clone();
     let grant = tokio::task::spawn_blocking(move || -> crate::Result<_> {
@@ -185,7 +188,10 @@ pub(crate) async fn revoke(State(a): S, ext: Extensions, Path(id): Path<String>)
     })
     .await
     .map_err(|e| Error::Internal(e.to_string()))??;
-    Ok(Json(json!({ "grant": grant })))
+    let changed = crate::api::Changed(grant.id.clone());
+    let mut res = Json(json!({ "grant": grant })).into_response();
+    res.extensions_mut().insert(changed);
+    Ok(res)
 }
 
 /// `POST /v1/access/clients/{id}/rotate`, `{public_jwk?, keep_old_for_s?}`: a new credential,
@@ -202,7 +208,7 @@ struct Rotate {
     keep_old_for_s: Option<i64>,
 }
 
-pub(crate) async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
+pub(crate) async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Response> {
     let person = owner(&a, &ext, "rotate machine clients")?;
     let body: Rotate = if body.iter().all(u8::is_ascii_whitespace) { Rotate::default() } else { serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))? };
     if body.keep_old_for_s.is_some_and(|s| !(0..=crate::store::MAX_KEEP_OLD_MS / 1000).contains(&s)) {
@@ -224,9 +230,12 @@ pub(crate) async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>,
     })
     .await
     .map_err(|e| Error::Internal(e.to_string()))??;
+    let changed = crate::api::Changed(grant.id.clone());
     let mut out = json!({ "grant": grant });
     if let Some(s) = secret {
         out["client_secret"] = json!(s);
     }
-    Ok(Json(out))
+    let mut res = Json(out).into_response();
+    res.extensions_mut().insert(changed);
+    Ok(res)
 }

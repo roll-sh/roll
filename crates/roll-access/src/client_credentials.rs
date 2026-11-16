@@ -15,6 +15,7 @@
 
 use crate::{Access, Error, hash};
 use axum::http::HeaderMap;
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -52,7 +53,7 @@ fn same(a: &str, b: &str) -> bool {
 }
 
 /// The token for a machine client's request, or why not.
-pub async fn token(a: Arc<Access>, headers: &HeaderMap, f: &HashMap<String, String>) -> Result<(crate::store::Grant, String), Error> {
+pub async fn token(a: Arc<Access>, headers: &HeaderMap, f: &HashMap<String, String>, ip: Option<std::net::IpAddr>) -> Result<(crate::store::Grant, String), Error> {
     let get = |k: &str| f.get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     let api = check_resource(&a, f)?;
     let read_only = read_only_scope(f)?;
@@ -70,6 +71,7 @@ pub async fn token(a: Arc<Access>, headers: &HeaderMap, f: &HashMap<String, Stri
     let a2 = a.clone();
     let id = client_id.clone();
     let client = tokio::task::spawn_blocking(move || a2.store.machine_client(&id)).await.map_err(|e| Error::Internal(e.to_string()))??.ok_or_else(unknown)?;
+    let credential = if assertion.is_err() { "secret" } else { "key" };
     match assertion {
         Err(secret) => {
             // Its secret, or the one before a rotation while that still works.
@@ -101,7 +103,13 @@ pub async fn token(a: Arc<Access>, headers: &HeaderMap, f: &HashMap<String, Stri
         }
     }
     let (grant_id, generation) = (client.grant_id.clone(), client.generation);
-    tokio::task::spawn_blocking(move || a.store.issue_client_access(&grant_id, &client_id, generation, read_only)).await.map_err(|e| Error::Internal(e.to_string()))?
+    tokio::task::spawn_blocking(move || {
+        let made = a.store.issue_client_access(&grant_id, &client_id, generation, read_only)?;
+        audit_sign_in(&a, &made.0, &client_id, json!({ "by": client_id, "credential": credential, "read_only": read_only }), ip);
+        Ok(made)
+    })
+    .await
+    .map_err(|e| Error::Internal(e.to_string()))?
 }
 
 /// The `sub` of a JWT, before it's verified: only to find whose key verifies it.
@@ -140,6 +148,34 @@ fn verify(jwt: &str, jwk: &str, client_id: &str, api: &str) -> Result<(String, i
     Ok((jti.to_string(), exp))
 }
 
+/// A machine client's sign-in, in the audit log (source `access`, `sign_in`) on its grant: who,
+/// with which kind of credential (and a CI token's issuer and subject), from where. Never a secret.
+fn audit_sign_in(a: &Access, grant: &crate::store::Grant, client_id: &str, args: serde_json::Value, ip: Option<std::net::IpAddr>) {
+    let e = crate::store::AuditEvent {
+        id: crate::new_id("aud"),
+        at: code_sql::now_ms(),
+        grant_id: Some(grant.id.clone()),
+        grant_name: Some(grant.name.clone()),
+        source: "access".into(),
+        tool: None,
+        method: "POST".into(),
+        route: "/v1/access/oauth/token".into(),
+        product: Some("access".into()),
+        action: Some("admin".into()),
+        resource: Some(client_id.to_string()),
+        decision: "sign_in".into(),
+        approval: None,
+        status: 200,
+        args: Some(args),
+        ip: ip.map(|i| i.to_string()),
+        duration_ms: 0,
+        client: None,
+    };
+    if let Some(e) = a.store.queue_audit(e) {
+        a.store.audit(&e);
+    }
+}
+
 /// What `scope` asks of a machine client's token: nothing narrower (none, or "granted"), or
 /// `read-only` (its rules' reads alone). A token never gets more than its client's rules.
 pub fn read_only_scope(f: &HashMap<String, String>) -> Result<bool, Error> {
@@ -165,7 +201,7 @@ fn check_resource(a: &Access, f: &HashMap<String, String>) -> Result<String, Err
 
 /// The token for a trusted machine client's `jwt-bearer` grant: its CI's OIDC token checked
 /// against the identity it trusts (or, after a rotation that kept it, the one before).
-pub async fn federated(a: Arc<Access>, f: &HashMap<String, String>) -> Result<(crate::store::Grant, String), Error> {
+pub async fn federated(a: Arc<Access>, f: &HashMap<String, String>, ip: Option<std::net::IpAddr>) -> Result<(crate::store::Grant, String), Error> {
     check_resource(&a, f)?;
     let read_only = read_only_scope(f)?;
     let get = |k: &str| f.get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
@@ -209,7 +245,10 @@ pub async fn federated(a: Arc<Access>, f: &HashMap<String, String>) -> Result<(c
             if !a.oidc_logins.allow(&client_id, SIGN_INS_PER_MINUTE) {
                 return Err(Error::TooMany(format!("at most {SIGN_INS_PER_MINUTE} sign-ins a minute for one machine client")));
             }
-            return a.store.issue_client_access(&client.grant_id, &client_id, client.generation, read_only);
+            let made = a.store.issue_client_access(&client.grant_id, &client_id, client.generation, read_only)?;
+            // Which CI run it was: the token's subject (`repo:acme/web:ref:…`), never the token.
+            audit_sign_in(&a, &made.0, &client_id, json!({ "by": client_id, "credential": "oidc", "issuer": i.issuer, "subject": sub, "read_only": read_only }), ip);
+            return Ok(made);
         }
         Err(refused(why))
     })

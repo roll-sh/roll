@@ -1432,6 +1432,14 @@ async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
     let full = trade("granted").await.1["access_token"].as_str().unwrap().to_string();
     assert_eq!(d.call(&full, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "yes" }))).await.0, StatusCode::CREATED, "its rules otherwise");
     assert_eq!(trade("full").await.1["error"], "invalid_scope", "never wider");
+    // Each sign-in is in the audit log on the client's grant: who, with what (never a secret);
+    // and its making is too, named for what it was.
+    let wgrant = w["grant"]["id"].as_str().unwrap().to_string();
+    let log = d.audit_until(&format!("/v1/access/audit?grant={wgrant}"), |l| l.as_array().unwrap().iter().filter(|e| e["decision"] == "sign_in").count() >= 2).await;
+    let sign_in = log.as_array().unwrap().iter().find(|e| e["decision"] == "sign_in").unwrap();
+    assert_eq!((sign_in["args"]["by"].as_str(), sign_in["args"]["credential"].as_str()), (Some(wid.as_str()), Some("secret")), "{sign_in}");
+    assert!(!log.to_string().contains(&wsecret), "no secret in the log");
+    assert!(log.as_array().unwrap().iter().any(|e| e["decision"] == "create_client"), "{log}");
     // Its id is no ordinary OAuth client's: no device or consent flow may hang another grant on
     // it (someone else's, which its sign-ins could then land on).
     let (s, e) = d.form("/v1/access/oauth/device_authorization", &[("client_id", &id)]).await;
@@ -1537,6 +1545,11 @@ async fn a_ci_job_signs_in_with_its_own_oidc_token() {
     let token = got["access_token"].as_str().unwrap().to_string();
     assert_eq!(d.call(&token, Method::POST, "/v1/search/clusters/cl_1/indices/logs/search", Some(json!({}))).await.0, StatusCode::OK);
     assert_eq!(d.call(&token, Method::GET, "/v1/secrets/projects/prj_a/transit", None).await.0, StatusCode::FORBIDDEN, "only what its rules allow");
+    // The audit log says which CI run signed in: the token's subject, never the token.
+    let grant = made["grant"]["id"].as_str().unwrap();
+    let log = d.audit_until(&format!("/v1/access/audit?grant={grant}"), |l| l.as_array().unwrap().iter().any(|e| e["decision"] == "sign_in")).await;
+    let row = log.as_array().unwrap().iter().find(|e| e["decision"] == "sign_in").unwrap();
+    assert_eq!((row["args"]["credential"].as_str(), row["args"]["subject"].as_str()), (Some("oidc"), Some("repo:acme/web:ref:refs/heads/main")), "{row}");
 
     for (why, jwt) in [
         ("another repository", mint(&ci_key, claims("repo:evil/web:ref:refs/heads/main", &aud, now + 300))),

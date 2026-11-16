@@ -179,6 +179,11 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
   wrong credential look alike.
 - **The metadata** lists `client_secret_basic`, `client_secret_post` and `private_key_jwt`, the
   signature algorithms (`EdDSA`, `ES256`, `RS256`) and the grant type.
+- **In the audit log** (source `access`, on the client's grant): `create_client`, `rotate_client`,
+  `revoke_client` with who did it, and a `sign_in` row for every token a client gets. That row
+  holds the client, the kind of credential (`secret`, `key`, or `oidc` with the CI token's issuer
+  and subject, such as `repo:acme/web:ref:refs/heads/main`), whether it was read-only, and the
+  address it came from. It never holds a secret or a token.
 - **Rotating one:** `POST /v1/access/clients/{id}/rotate {public_jwk?, keep_old_for_s?}` (or
   `roll token client rotate <id> [--public-key f] [--keep-old 1h]`) gives it a new key, or a new
   secret shown once, keeping its id and rules. The old credential stops at once, and so do the
