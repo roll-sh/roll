@@ -226,7 +226,7 @@ function NewClient({ onMade, onCancel }: { onMade: (m: MadeMachineClient) => Pro
               ["key", "A key or a secret"],
             ] as const
           ).map(([v, label]) => (
-            <button key={v} role="radio" aria-checked={how === v} onClick={() => setHow(v)} className={`${btn} ${how === v ? "border-line-2 text-fg" : "text-muted"}`}>
+            <button key={v} role="radio" aria-checked={how === v} onClick={() => setHow(v)} className={`${btn} ${how === v ? "border-line-2 bg-panel-2 font-medium text-fg" : "text-muted"}`}>
               {label}
             </button>
           ))}
@@ -312,7 +312,12 @@ function Made({ made }: { made: MadeMachineClient }) {
           ? "Trade it for a token with client_secret_basic (or client_secret_post):"
           : "Sign a JWT with its private key (iss and sub the client id, aud the token endpoint, a new jti, at most 5 minutes to live), then trade it:"}
       </p>
-      <pre className="overflow-x-auto rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px]">{curl}</pre>
+      <div className="relative">
+        <pre className="overflow-x-auto rounded-lg border border-line bg-bg py-2 pl-3 pr-10 font-mono text-[12px]">{curl}</pre>
+        <span className="absolute right-2 top-2">
+          <CopyButton id="trade" text={curl} copied={copied} onCopy={copy} />
+        </span>
+      </div>
     </div>
   );
 }
