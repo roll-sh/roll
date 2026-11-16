@@ -2791,9 +2791,10 @@ extension that logs in with the function's role) and #117 (an Ansible collection
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
-2. **Finish what's in review:** screenshots for #102's registration form and Link dialog; a test of
-   #102's own-CA client against a real TLS server (a throwaway container); the client methods the
-   Ansible collection borrows (`_call`, `_cached`) made public in all three clients.
+2. **Finish what's in review:** the client methods the Ansible collection borrows (`_call`,
+   `_cached`) made public in all three clients: writing and deleting a key, and reading a folder
+   without dynamic keys (`dynamic=false`). (#102's screenshots and a test of its own-CA client
+   against a real TLS server on localhost are done.)
 3. **Kubernetes generated roles** (`role_rules`: a service account, Role and RoleBinding per lease,
    deleted on revoke, as Vault's), on #102.
 4. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
