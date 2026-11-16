@@ -291,6 +291,23 @@ pub trait Reach: Send + Sync {
 }
 
 /// roll previews' notes for roll apps' feedback button, by the preview's environment name.
+/// roll apps' pushes to branches of a Git URL service that none of its environments follows: each
+/// branch's preview (`Engine::git_push`). Handed off at once, the hook is waiting.
+pub struct GitPushes(pub std::sync::Weak<roll_previews::Engine>);
+
+#[async_trait]
+impl apps_control::integrations::GitPushes for GitPushes {
+    async fn pushed(&self, push: apps_control::integrations::GitPush) {
+        let Some(engine) = self.0.upgrade() else { return };
+        let p = roll_previews::ports::GitPush { service: push.service, url: push.url, branch: push.branch, sha: push.sha, message: push.message };
+        tokio::spawn(async move {
+            if let Err(e) = engine.git_push(&p).await {
+                tracing::warn!(service = %p.service, branch = %p.branch, error = %e, "previews: a Git URL service's push");
+            }
+        });
+    }
+}
+
 pub struct Notes(pub std::sync::Weak<roll_previews::Engine>);
 
 #[async_trait]

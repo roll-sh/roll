@@ -326,6 +326,29 @@ behind the `Apps` trait:
   the repo. npm, pnpm, yarn, bun, pip, uv, cargo and go are pointed into it, so the second
   preview installs from what the first downloaded. The cache goes with the repo's last preview.
 
+## Git URL services on roll apps
+
+A roll apps service built from a public Git URL (roll apps' `Source::Git`, no roll code repo)
+gets a preview per branch, as a roll code repo's branches do. roll apps' push hook (the
+repository's own webhook: GitHub, GitLab, Bitbucket) hands previews each push to a branch that
+none of the service's environments follows, after checking the branch really is at that commit
+(`apps_control::integrations::GitPushes`; rolld wires it to `Engine::git_push`). Then:
+
+- In each project whose canvas holds the service, under its rules (previews on, the branch
+  matching `branches`, no `[skip preview]` in the message, room under `max_previews`), the
+  branch's preview is made, or moved to the pushed commit. A deletion deletes it. The same push
+  twice changes nothing.
+- The preview's repo is `git:<service id>` (the catalog says so for Git sources), so its
+  services deploy at the pushed commit through roll apps' own `deploys {revision}`, with every
+  data branch, mask, egress rule and screenshot as any preview has. Another Git URL service of
+  the project builds its own (production's) commit.
+- Only the repository's writers move its branches (roll apps checks the push), so these previews
+  are trusted.
+- roll code's discovery leaves them alone (they follow pushes, not roll code's branches), and
+  keeps them while the service is on the canvas.
+
+`a_git_url_services_branch_push_makes_its_preview`.
+
 ## Secrets
 
 A preview's secrets are an environment of the project's secrets (`feature/roll-secrets`,
