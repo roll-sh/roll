@@ -152,6 +152,67 @@ impl Scorer for SetScorer {
         };
         self.doc
     }
+    /// Reads the set directly (a bit set a word at a time) instead of a `next` per doc.
+    fn next_block(&mut self, upto: u32, live: Option<&search_codec::LiveDocs>, out: &mut [u32]) -> usize {
+        if self.beaten || live.is_some() || out.is_empty() {
+            return crate::search::next_block_per_doc(self, upto, live, out);
+        }
+        let mut d = self.doc;
+        let mut n = 0;
+        match &*self.set {
+            DocIdSet::Empty => d = NO_MORE_DOCS,
+            DocIdSet::All(len) => {
+                let end = upto.min(*len);
+                while d < end && n < out.len() {
+                    out[n] = d;
+                    n += 1;
+                    d += 1;
+                }
+                if d >= *len {
+                    d = NO_MORE_DOCS;
+                }
+            }
+            DocIdSet::Sparse(v) => {
+                let mut i = self.idx;
+                while let Some(&x) = v.get(i) {
+                    if x >= upto || n == out.len() {
+                        break;
+                    }
+                    out[n] = x;
+                    n += 1;
+                    i += 1;
+                }
+                self.idx = i;
+                d = v.get(i).copied().unwrap_or(NO_MORE_DOCS);
+            }
+            DocIdSet::Dense(b) => {
+                if d < b.len() {
+                    let words = b.words();
+                    let mut wi = (d >> 6) as usize;
+                    // The current doc and the set bits after it in its word.
+                    let mut w = words[wi] & (u64::MAX << (d & 63));
+                    d = 'fill: loop {
+                        while w != 0 {
+                            let doc = (wi as u32) * 64 + w.trailing_zeros();
+                            if doc >= upto || n == out.len() {
+                                break 'fill doc;
+                            }
+                            out[n] = doc;
+                            n += 1;
+                            w &= w - 1;
+                        }
+                        wi += 1;
+                        match words.get(wi) {
+                            Some(&x) => w = x,
+                            None => break NO_MORE_DOCS,
+                        }
+                    };
+                }
+            }
+        }
+        self.doc = d;
+        n
+    }
     fn cost(&self) -> u64 {
         self.cost
     }
@@ -211,6 +272,9 @@ impl Scorer for ConstScorer {
     }
     fn max_score(&mut self, _upto: u32) -> f32 {
         self.score
+    }
+    fn next_block(&mut self, upto: u32, live: Option<&search_codec::LiveDocs>, out: &mut [u32]) -> usize {
+        self.inner.next_block(upto, live, out)
     }
     fn apply_required(&mut self, docs: &mut [u32], scores: &mut [f64], len: usize) -> usize {
         let k = self.inner.apply_filter(docs, scores, len);
@@ -807,5 +871,43 @@ impl Query for FieldExistsQuery {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::bitset::FixedBitSet;
+
+    /// `next_block` reads a doc set as `next` per doc does: the same docs, and the scorer left
+    /// on the same doc, across word boundaries, `upto` and a full buffer.
+    #[test]
+    fn set_scorer_blocks_match_next() {
+        let max_doc = 1000u32;
+        let picked: Vec<u32> = (0..max_doc).filter(|d| d % 7 != 3 && (d / 64) % 5 != 2).collect();
+        let mut bits = FixedBitSet::new(max_doc);
+        picked.iter().for_each(|&d| bits.set(d));
+        for set in [DocIdSet::All(max_doc), DocIdSet::Sparse(picked), DocIdSet::Dense(bits), DocIdSet::Empty] {
+            let set = Arc::new(set);
+            for (from, upto, cap) in [(0, NO_MORE_DOCS, 256), (5, 700, 64), (63, 64, 3), (200, 1000, 1), (999, NO_MORE_DOCS, 10)] {
+                let (mut blocks, mut docs) = (SetScorer::new(set.clone(), 1.0), SetScorer::new(set.clone(), 1.0));
+                blocks.advance(from);
+                docs.advance(from);
+                let mut out = vec![0u32; cap];
+                loop {
+                    let n = blocks.next_block(upto, None, &mut out);
+                    let mut expect = Vec::new();
+                    while expect.len() < cap && docs.doc() < upto {
+                        expect.push(docs.doc());
+                        docs.next();
+                    }
+                    assert_eq!(out[..n], expect[..], "from {from} upto {upto} cap {cap}");
+                    assert_eq!(blocks.doc(), docs.doc());
+                    if n == 0 {
+                        break;
+                    }
+                }
+            }
+        }
     }
 }
