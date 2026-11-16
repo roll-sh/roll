@@ -29,6 +29,7 @@ GET /v1/apps/services/{id}/environments/{env}/metrics
 POST /v1/apps/services/{id}/environments/{env}/promote
 POST /v1/apps/services/{id}/environments/{env}/redeploy
 POST /v1/apps/services/{id}/environments/{env}/restart
+POST /v1/apps/services/{id}/environments/{env}/cache/purge
 POST /v1/apps/services/{id}/environments/{env}/rollback
 GET /v1/apps/services/{id}/environments/{env}/routes
 GET /v1/apps/services/{id}/environments/{env}/runs

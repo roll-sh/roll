@@ -807,6 +807,23 @@ impl Apps {
         }
     }
 
+    /// `POST …/cache/purge {paths?}`: the environment's kept answers for those paths (a trailing
+    /// `*` is a prefix; at most 100), or all of them. Runs on the owner, which keeps them.
+    pub async fn purge_cache(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Value> {
+        self.service_env(service, env).await?;
+        let paths = match body.get("paths") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(a)) if !a.is_empty() && a.len() <= 100 => Some(
+                a.iter()
+                    .map(|p| p.as_str().filter(|p| p.starts_with('/') && p.len() <= 2048).map(str::to_string).ok_or_else(|| Error::BadRequest("paths are absolute paths (`/blog/*` for a prefix)".into())))
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            Some(_) => return Err(Error::BadRequest("paths is 1–100 paths, or left out for everything".into())),
+        };
+        let n = self.responses.purge(&env_key(service, env), paths.as_deref());
+        Ok(json!({ "purged": n }))
+    }
+
     /// Where roll's GitHub App is, once rolld has it. Set once.
     pub fn set_github_app(&self, app: Arc<dyn integrations::GitHubApp>) {
         let _ = self.github.set(app);

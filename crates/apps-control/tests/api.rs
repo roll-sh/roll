@@ -343,6 +343,11 @@ async fn a_shared_cache_answers_without_reaching_the_app() {
     assert_eq!(count().await, before, "the app wasn't asked");
     assert_eq!(get("/page-a?b=1", false).await.0.as_deref(), Some("MISS"), "another query, another answer");
     assert_eq!(get("/page-a", true).await.0, None, "Authorization goes past it");
+    // Purged on demand (an app revalidating a page): that path's answers, then everything.
+    let purge = format!("/v1/apps/services/{id}/environments/production/cache/purge");
+    assert_eq!(call(&w.api, "POST", &purge, Some(json!({"paths": ["/page-*"]}))).await.1, json!({"purged": 2}));
+    assert_eq!(get("/page-a", false).await.0.as_deref(), Some("MISS"));
+    assert_eq!(call(&w.api, "POST", &purge, None).await.1, json!({"purged": 1}));
     // A new live deployment's answers aren't the old one's.
     let (_, r) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/redeploy"), Some(json!({}))).await;
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;

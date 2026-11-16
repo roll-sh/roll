@@ -689,6 +689,13 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// Drop roll's cached answers (on-demand revalidation): these paths (`/blog/*` for a prefix),
+    /// or everything.
+    Purge {
+        #[command(flatten)]
+        target: Target,
+        paths: Vec<String>,
+    },
     /// Replace the instances with fresh ones (the same deployment).
     Restart {
         #[command(flatten)]
@@ -3125,6 +3132,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 let user = username.ok_or_else(|| anyhow::anyhow!("--username, with the password or token on stdin (or --remove)"))?;
                 api.call(reqwest::Method::PUT, &path, Some(json!({ "username": user, "password": secret_from_stdin("the password or token")? }))).await?
             }
+        }
+        AppsCmd::Purge { target, paths } => {
+            let svc = service(api, &target).await?;
+            let body = if paths.is_empty() { serde_json::json!({}) } else { serde_json::json!({ "paths": paths }) };
+            api.post(&format!("{}/cache/purge", env_path(&svc, &target.env)), body).await?
         }
         AppsCmd::Github { target, remove } => {
             let svc = service(api, &target).await?;
