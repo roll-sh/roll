@@ -93,7 +93,7 @@ export function SearchClusters() {
 function Overview({ info, clusters }: { info: SearchInfo; clusters: SearchCluster[] }) {
   const loaded = clusters.filter((c) => c.status.state === "loaded");
   const stored = clusters.reduce((s, c) => s + c.stored_bytes, 0);
-  const docs = clusters.reduce((s, c) => s + c.docs, 0);
+  const docs = clusters.reduce((s, c) => s + (c.status.docs ?? c.docs), 0);
   const indices = clusters.reduce((s, c) => s + (c.status.indices ?? c.indices), 0);
   return (
     <div className="mt-6">
@@ -153,7 +153,7 @@ function ClusterList({
                 <div className="hidden min-w-0 font-mono text-[11px] text-subtle md:block">
                   <p className="truncate">
                     <span className={on ? "text-fg" : ""}>{formatCount(c.status.indices ?? c.indices)}</span>{" "}
-                    {(c.status.indices ?? c.indices) === 1 ? "index" : "indices"} · {formatCount(c.docs)} {c.docs === 1 ? "doc" : "docs"}
+                    {(c.status.indices ?? c.indices) === 1 ? "index" : "indices"} · {formatCount(c.status.docs ?? c.docs)} {(c.status.docs ?? c.docs) === 1 ? "doc" : "docs"}
                   </p>
                   <p className="truncate">{formatBytes(c.stored_bytes)} stored</p>
                 </div>
