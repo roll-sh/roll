@@ -121,6 +121,8 @@ fn postgres() -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/health", get(|| async { axum::Json(json!({ "findings": [] })) }))
+        .route("/v1/secrets/projects/{project}/transit", get(|| async { axum::Json(json!([])) }))
+        .route("/v1/secrets/projects/{project}/transit/{name}/encrypt", axum::routing::post(|| async { axum::Json(json!({ "ciphertext": "roll:v1:x" })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/promote", axum::routing::post(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/imports", axum::routing::put(|| async { axum::Json(json!({})) }))
@@ -1389,6 +1391,24 @@ async fn approvals_can_be_remembered() {
     assert_eq!(approve(apr, json!("1h")).await.0, StatusCode::OK);
     assert_eq!(values("development").await.0, StatusCode::OK);
     assert_eq!(values("production").await.1["code"], "approval_pending");
+}
+
+/// A rule can grant one encryption key of a secrets project: its routes are decided key by key,
+/// and the project's list stays shut to it (secrets doesn't filter the list by key yet).
+#[tokio::test]
+async fn a_rule_can_grant_one_encryption_key() {
+    let d = Daemon::new(50);
+    let (pay, _) = d.token(json!([{ "product": "secrets", "resources": [{ "id": "prj_a", "index": "payments" }], "actions": { "read": "allow", "write": "allow" } }]), json!({})).await;
+    let encrypt = |key: &str| {
+        let (d, t, path) = (&d, pay.clone(), format!("/v1/secrets/projects/prj_a/transit/{key}/encrypt"));
+        async move { d.call(&t, Method::POST, &path, Some(json!({ "plaintext": "aGk=" }))).await.0 }
+    };
+    assert_eq!(encrypt("payments").await, StatusCode::OK);
+    assert_eq!(encrypt("billing").await, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(&pay, Method::GET, "/v1/secrets/projects/prj_a/transit", None).await.0, StatusCode::FORBIDDEN);
+    // A rule on the whole project still reaches every key.
+    let (all, _) = d.token(json!([{ "product": "secrets", "resources": [{ "id": "prj_a" }], "actions": { "write": "allow" } }]), json!({})).await;
+    assert_eq!(d.call(&all, Method::POST, "/v1/secrets/projects/prj_a/transit/billing/encrypt", Some(json!({ "plaintext": "aGk=" }))).await.0, StatusCode::OK);
 }
 
 /// A rule can grant some indices of a search cluster: index routes are decided name by name, the
