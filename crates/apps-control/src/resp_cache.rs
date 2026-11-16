@@ -199,6 +199,36 @@ impl ResponseCache {
         }
     }
 
+    /// Purge kept answers (on-demand revalidation): those of `paths` (a path with any query; one
+    /// ending in `*` is a prefix), or everything. How many went.
+    pub fn purge(&self, env: &str, paths: Option<&[String]>) -> usize {
+        let mut envs = self.envs.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(e) = envs.get_mut(env) else { return 0 };
+        let doomed: Vec<String> = e
+            .entries
+            .keys()
+            .filter(|k| {
+                let path = k.split('?').next().unwrap_or(k);
+                paths.is_none_or(|ps| ps.iter().any(|p| match p.strip_suffix('*') {
+                    Some(prefix) => path.starts_with(prefix),
+                    None => path == p,
+                }))
+            })
+            .cloned()
+            .collect();
+        let mut n = 0;
+        for k in doomed {
+            if let Some(list) = e.entries.remove(&k) {
+                for x in &list {
+                    e.bytes -= x.body.len() + k.len() + 256;
+                }
+                e.count -= list.len();
+                n += list.len();
+            }
+        }
+        n
+    }
+
     /// Everything kept for an environment goes (its live deployment changed).
     pub fn clear(&self, env: &str) {
         self.envs.lock().unwrap_or_else(|p| p.into_inner()).remove(env);

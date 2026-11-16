@@ -90,6 +90,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/volume/backups"), get(backups).post(backup_volume))
         .route(&format!("{env}/volume/backups/{{bid}}/restore"), post(restore_volume))
         .route(&format!("{env}/restart"), post(restart))
+        .route(&format!("{env}/cache/purge"), post(purge_cache))
         .route(&format!("{env}/instances/{{name}}/restart"), post(restart_instance))
         .route(&format!("{env}/files"), get(read_files).put(write_files).layer(DefaultBodyLimit::max(crate::shell::FILES_MAX)))
         .route(&format!("{env}/sleep"), post(sleep))
@@ -1016,6 +1017,12 @@ async fn rollback_previous(State(apps): S, Path((id, env)): Path<(String, String
 
 async fn cancel(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
     ok(apps.cancel(&id, &env, &dep).await?)
+}
+
+async fn purge_cache(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    let v = apps.purge_cache(&id, &env, if b.is_empty() { json!({}) } else { body(&b)? }).await?;
+    apps.audit("cache.purged", &id, &env, actor(&ext), v.clone()).await;
+    ok(v)
 }
 
 async fn restart(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
