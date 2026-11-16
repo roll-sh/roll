@@ -2785,9 +2785,10 @@ next to the branch's `DATABASE_URL`) is the parent's, and a preview's code, a fo
 staging's database. It's first below.
 
 On main: #20, #62, #63 (the CSI provider), #65 (conditional reads and client caches), #85
-(roll-access's tokens), #74 (live links' digests) and #66 (Terraform without values in state).
-In pull requests to main, each green: #67 (transit in the Go and Python clients, next to land),
-#68 (AWS through roll's issuer; roles and users edited in place), #69–#73, #75–#77, #79 with #95,
+(roll-access's tokens), #74 (live links' digests), #66 (Terraform without values in state) and
+#67 (transit in the Go and Python clients, 2026-11-17 as 0fa832ddf).
+In pull requests to main, each green: #68 (AWS through roll's issuer; roles and users edited in
+place; next to land, pre-gated on main), #69–#73, #75–#77, #79 with #95,
 #81 (read quotas across the fleet), #82 (metrics), #83 (scheduled backups), #86 (rotation
 windows), #87 (encryption keys by name), #88 (password policies), #92 (SaaS rotators, the
 credential checked at registration), #97 (search keys say `access: data`), #102 (Kubernetes
