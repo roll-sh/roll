@@ -44,6 +44,9 @@ const RANGES = [
   { minutes: 60, label: "hour", short: "1h" },
   { minutes: 24 * 60, label: "day", short: "24h" },
   { minutes: 7 * 24 * 60, label: "week", short: "7d" },
+  // Past a week rolld answers a point an hour (its hourly rollups, kept 90 days).
+  { minutes: 30 * 24 * 60, label: "30 days", short: "30d" },
+  { minutes: 90 * 24 * 60, label: "90 days", short: "90d" },
 ] as const;
 type Range = (typeof RANGES)[number];
 
@@ -260,7 +263,9 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
   const [routes, setRoutes] = useState<RouteStats | null>(null);
   const size = raw ? Math.max(1, Math.ceil(raw.minutes.length / MAX_POINTS)) : 1;
   const m = useMemo(() => (raw ? bucketed(raw, size) : null), [raw, size]);
-  const per = size === 1 ? "min" : `${size} min`;
+  // Minutes a point stands for: rolld's step (an hour past a week) times the buckets here.
+  const span = size * (raw?.step ?? 1);
+  const per = span === 1 ? "min" : span === 60 ? "hour" : span % 60 === 0 ? `${span / 60} h` : `${span} min`;
   const [error, setError] = useState<string | null>(null);
   const [table, setTable] = useState(false);
   const { copied, copy } = useCopy();
@@ -342,7 +347,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-[12px] text-subtle">
-          {size === 1 ? "Per minute" : `Per ${size} minutes`}, the last {range.label}. Asleep minutes are zeros: nothing ran.
+          {span === 1 ? "Per minute" : span === 60 ? "Per hour" : span % 60 === 0 ? `Per ${span / 60} hours` : `Per ${span} minutes`}, the last {range.label}. Asleep minutes are zeros: nothing ran.
         </p>
         <div className="flex items-center gap-2">
           <div className="flex rounded-lg border border-line p-0.5" role="radiogroup" aria-label="Range">

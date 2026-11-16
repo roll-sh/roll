@@ -477,6 +477,7 @@ type RouteStat = { method: string; route: string; requests: number; errors: numb
 type RouteStats = { minutes: number; requests: number; cut: boolean /* only the newest 50,000 requests read */; routes: RouteStat[] };
 
 type Metrics = {
+  step: number;              // minutes a point stands for: 1 up to a week (minutes=10080), 60 past it (up to 90 days: hourly rollups, counts summed, the rest their peak)
   minutes: number[];         // unix minute of each point, oldest first
   requests: number[]; errors: number[]; // 5xx
   p50_ms: number[]; p95_ms: number[]; p99_ms: number[];

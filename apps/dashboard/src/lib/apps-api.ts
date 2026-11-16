@@ -598,6 +598,8 @@ export interface RouteStats {
 }
 
 export interface Metrics {
+  /** Minutes a point stands for: 1, or 60 past a week. */
+  step?: number;
   minutes: number[];
   requests: number[];
   errors: number[];

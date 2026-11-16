@@ -2391,21 +2391,51 @@ impl Apps {
         Ok(out)
     }
 
+    /// An environment's metrics over the last `minutes`: a point a minute for up to a week, a
+    /// point an hour past that (up to 90 days: the week's minutes grouped into hours, older hours
+    /// from the rollups). `step` says which, in minutes.
     pub async fn metrics(self: &Arc<Self>, service: &str, env: &str, minutes: i64) -> Result<Value> {
         self.service_env(service, env).await?;
-        let minutes = minutes.clamp(5, 7 * 24 * 60);
+        let minutes = minutes.clamp(5, 90 * 24 * 60);
+        let step: i64 = if minutes > 7 * 24 * 60 { 60 } else { 1 };
         let now_min = code_sql::now_ms() / 60_000;
-        let since = now_min - minutes + 1;
+        let since = (now_min - minutes + 1) / step * step;
         let (sid, e) = (service.to_string(), env.to_string());
-        let mut rows: HashMap<i64, store::MinuteRow> = self.db(move |s| s.minutes(&sid, &e, since)).await?.into_iter().map(|r| (r.minute, r)).collect();
+        let mut minute_rows = self.db(move |s| s.minutes(&sid, &e, since)).await?;
         if let Some(l) = self.lives.lock().get(&env_key(service, env))
             && let Some(cur) = l.meter.lock().current()
         {
-            rows.insert(cur.minute, cur);
+            minute_rows.retain(|r| r.minute != cur.minute);
+            minute_rows.push(cur);
         }
-        let mut out: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
-        for m in since..=now_min {
+        if step > 1 {
+            let (sid, e) = (service.to_string(), env.to_string());
+            minute_rows.extend(self.db(move |s| s.hours(&sid, &e, since / 60)).await?);
+        }
+        // Each point: its counts summed, the rest their peak.
+        let mut rows: HashMap<i64, store::MinuteRow> = HashMap::new();
+        for r in minute_rows {
+            let at = r.minute / step * step;
+            let p = rows.entry(at).or_insert_with(|| store::MinuteRow { minute: at, ..Default::default() });
+            p.requests += r.requests;
+            p.errors += r.errors;
+            p.cold_starts += r.cold_starts;
+            p.egress_bytes += r.egress_bytes;
+            p.over_capacity += r.over_capacity;
+            p.p50_ms = p.p50_ms.max(r.p50_ms);
+            p.p95_ms = p.p95_ms.max(r.p95_ms);
+            p.p99_ms = p.p99_ms.max(r.p99_ms);
+            p.cpu = p.cpu.max(r.cpu);
+            p.memory_bytes = p.memory_bytes.max(r.memory_bytes);
+            p.instances = p.instances.max(r.instances);
+            p.cold_start_ms = p.cold_start_ms.max(r.cold_start_ms);
+        }
+        let mut out: BTreeMap<&str, Value> = BTreeMap::new();
+        out.insert("step", step.into());
+        let mut series: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
+        for m in (since..=now_min).step_by(step as usize) {
             let r = rows.remove(&m).unwrap_or(store::MinuteRow { minute: m, ..Default::default() });
+            let out = &mut series;
             out.entry("minutes").or_default().push(m.into());
             out.entry("requests").or_default().push(r.requests.into());
             out.entry("errors").or_default().push(r.errors.into());
@@ -2420,6 +2450,7 @@ impl Apps {
             out.entry("egress_bytes").or_default().push(r.egress_bytes.into());
             out.entry("over_capacity").or_default().push(r.over_capacity.into());
         }
+        out.extend(series.into_iter().map(|(k, v)| (k, Value::Array(v))));
         Ok(serde_json::to_value(out).expect("JSON"))
     }
 

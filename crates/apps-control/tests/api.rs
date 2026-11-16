@@ -4030,3 +4030,28 @@ async fn a_public_repos_roll_toml_imports_by_url() {
     assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
     assert!(e["error"].as_str().unwrap().contains("has no roll.toml"), "{e}");
 }
+
+/// Minutes older than a week are rolled up into hours before they go (counts summed, peaks
+/// kept), and a range past a week answers a point an hour, those hours and the week's minutes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metrics_past_a_week_come_from_hourly_rollups() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let now = code_sql::now_ms() / 60_000;
+    let old = (now - 10 * 24 * 60) / 60 * 60;
+    let row = |m: i64, requests: i64, p95: f64| apps_control::store::MinuteRow { minute: m, requests, p95_ms: p95, instances: 1, ..Default::default() };
+    // Two minutes of one hour ten days ago, and one two days ago.
+    w.apps.store.put_minutes(&id, "production", &[row(old + 1, 30, 120.0), row(old + 2, 12, 400.0), row(now - 2 * 24 * 60, 5, 50.0)]).unwrap();
+    w.apps.store.prune_metrics(now - 7 * 24 * 60).unwrap();
+    let base = format!("/v1/apps/services/{id}/environments/production/metrics");
+    let (_, m) = call(&w.api, "GET", &format!("{base}?minutes={}", 30 * 24 * 60), None).await;
+    assert_eq!(m["step"], 60, "{}", m["step"]);
+    let requests: Vec<i64> = m["requests"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect();
+    assert_eq!(requests.iter().sum::<i64>(), 47, "every request counted once");
+    let at = m["minutes"].as_array().unwrap().iter().position(|v| v.as_i64() == Some(old)).expect("the old hour");
+    assert_eq!((requests[at], m["p95_ms"][at].as_f64()), (42, Some(400.0)), "summed, and the peak");
+    // A week is minutes again, without the rolled-up ones.
+    let (_, wk) = call(&w.api, "GET", &format!("{base}?minutes={}", 7 * 24 * 60), None).await;
+    assert_eq!((wk["step"].as_i64(), wk["requests"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).sum::<i64>()), (Some(1), 5));
+}
