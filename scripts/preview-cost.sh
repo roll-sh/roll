@@ -538,7 +538,12 @@ for _ in $(seq 1 240); do
   [ "$LINKS_NEW" = 1 ] && break
   sleep 0.5
 done
-[ "$LINKS_NEW" = 1 ] || { echo "the broken link should be new against main: $LINKS_NEW"; exit 1; }
+[ "$LINKS_NEW" = 1 ] || {
+  echo "the broken link should be new against main: $LINKS_NEW"
+  echo "base_change: $(api GET "/v1/previews/$PV" | jq_ "{k: v for k, v in (d.get('base_change') or {}).items() if k in ('branch', 'head', 'errors_added', 'links_added', 'a11y_added', 'seo_added')}")"
+  echo "main's page_links: $(api GET "/v1/previews?project=$PRJ" | jq_ "[(p.get('branch'), p.get('page_links'), p.get('screenshot_at')) for p in d if p.get('change') is None]")"
+  exit 1
+}
 case "$HEALTH" in *"; 0 failed") ;; *) echo "the link check's own requests aren't the page's: $HEALTH"; exit 1;; esac
 # The test page has no language and no title: the screenshot's browser says so.
 # By axe-core's rules (a bare text page breaks its landmark ones), with no lang and no title.
