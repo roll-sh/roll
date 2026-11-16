@@ -4,11 +4,9 @@ import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
-import java.security.KeyPair;
-import java.security.KeyPairGenerator;
 import java.security.PrivateKey;
 import java.security.PublicKey;
-import java.security.interfaces.XECPublicKey;
+import java.security.SecureRandom;
 import java.security.spec.NamedParameterSpec;
 import java.security.spec.XECPrivateKeySpec;
 import java.security.spec.XECPublicKeySpec;
@@ -33,6 +31,7 @@ public final class SealKey {
     private static final byte[] INFO = "roll-seal-v1".getBytes(StandardCharsets.US_ASCII);
     private static final Base64.Encoder B64 = Base64.getUrlEncoder().withoutPadding();
     private static final Base64.Decoder UNB64 = Base64.getUrlDecoder();
+    private static final SecureRandom RANDOM = new SecureRandom();
 
     private final PrivateKey key;
     private final byte[] pub;
@@ -44,11 +43,14 @@ public final class SealKey {
 
     /** A fresh key pair. */
     public static SealKey generate() {
+        // 32 random bytes are an X25519 private key (RFC 7748 clamps them), and one way in keeps
+        // the public key's derivation the one the test vector checks.
+        byte[] raw = new byte[32];
+        RANDOM.nextBytes(raw);
         try {
-            KeyPair kp = KeyPairGenerator.getInstance("X25519").generateKeyPair();
-            return new SealKey(kp.getPrivate(), encode(((XECPublicKey) kp.getPublic()).getU()));
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("this JDK has no X25519", e);
+            return fromPrivateBytes(raw);
+        } finally {
+            java.util.Arrays.fill(raw, (byte) 0);
         }
     }
 
@@ -134,16 +136,6 @@ public final class SealKey {
         mac.update(INFO);
         mac.update((byte) 1);
         return mac.doFinal(); // one block: exactly the 32 bytes needed
-    }
-
-    /** A u-coordinate as RFC 7748's 32 little-endian bytes. */
-    static byte[] encode(BigInteger u) {
-        byte[] be = u.toByteArray();
-        byte[] out = new byte[32];
-        for (int i = 0; i < 32 && i < be.length; i++) {
-            out[i] = be[be.length - 1 - i];
-        }
-        return out;
     }
 
     /** RFC 7748's decoding: little-endian, the top bit masked. */

@@ -42,7 +42,8 @@ class RollSecretsTest {
         assertEquals("{\"DB_URL\":\"postgres://db/shop\"}", new String(k.open(VECTOR_BOX, VECTOR_CONTEXT), StandardCharsets.UTF_8));
         assertThrows(IllegalArgumentException.class, () -> k.open(VECTOR_BOX, "roll-secrets:prj_a:staging:app:web"));
         assertThrows(IllegalArgumentException.class, () -> SealKey.generate().open(VECTOR_BOX, VECTOR_CONTEXT));
-        assertEquals(43, SealKey.generate().publicKey().length());
+        // The public key seal_to sends, as Node's own X25519 derives it from the vector's key.
+        assertEquals("B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw", k.publicKey());
     }
 
     /**

@@ -109,6 +109,13 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    c = roll_secrets.from_env()
    c.watch("production", lambda v: reload(v.values))
    ```
+
+   In Java, `sdk/java/secrets` (`sh.roll:roll-secrets`, Java 17 and the JDK only):
+
+   ```java
+   RollSecrets c = RollSecrets.builder().build(); // ROLL_API_URL, ROLL_TOKEN or ROLL_IDENTITY, ROLL_PROJECT
+   Watch w = c.watch("production", WatchOptions.of(v -> reload(v.values())));
+   ```
 8. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
@@ -2782,8 +2789,10 @@ rotating a database's admin password and editing registrations in place (#75), s
    lives), and Terraform updating registrations in place (#72, after #75).
 8. **More dynamic credentials**: Kubernetes service account tokens, Snowflake, LDAP and Active
    Directory passwords (Vault, Infisical).
-9. **Java and .NET clients, a Pulumi provider, a Lambda extension and an Ansible lookup** (Spring,
-   `IConfiguration`; AWS's Parameters and Secrets extension; Vault's and 1Password's Ansible).
+9. **.NET client, a Pulumi provider, a Lambda extension and an Ansible lookup** (`IConfiguration`;
+   AWS's Parameters and Secrets extension; Vault's and 1Password's Ansible). Java is built
+   (`sdk/java/secrets`, `feature/roll-secrets-java`: values, sealed resolves, long-polled watches,
+   the cache); its Spring `PropertySource` adapter is next.
 10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
    CAs**.
 11. *The user's call:* land the stack (#62, then #63–#73; roll search before #62).
