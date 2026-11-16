@@ -37,6 +37,9 @@ type Client struct {
 	// issues and audits nothing. A folder holding dynamic credentials is never kept (they end with
 	// their lease). Zero: off.
 	CacheTTL time.Duration
+	// CacheSize caps how many folders CacheTTL keeps; past it, the one read longest ago goes. Zero:
+	// no cap.
+	CacheSize int
 	// Now is the clock CacheTTL is measured with (for tests); time.Now when nil.
 	Now func() time.Time
 
@@ -349,6 +352,15 @@ func (c *Client) revalidate(ctx context.Context, token, path string, hit cached,
 	} else {
 		if c.cache == nil {
 			c.cache = map[string]cached{}
+		}
+		if _, kept := c.cache[path]; !kept && c.CacheSize > 0 && len(c.cache) >= c.CacheSize {
+			oldest := ""
+			for k, x := range c.cache {
+				if oldest == "" || x.at.Before(c.cache[oldest].at) {
+					oldest = k
+				}
+			}
+			delete(c.cache, oldest)
 		}
 		c.cache[path] = cached{values: &v, etag: etag, at: now()}
 	}

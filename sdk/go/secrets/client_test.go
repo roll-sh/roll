@@ -187,4 +187,17 @@ func TestValuesAreCachedAndRevalidatedWithTheirDigest(t *testing.T) {
 	if get() != "2" || get() != "2" || len(asked) != 4 {
 		t.Fatalf("a change, then dynamic credentials read every time: %q", asked)
 	}
+	// CacheSize: past it, the folder read longest ago goes.
+	mu.Lock()
+	dynamic = []string{}
+	mu.Unlock()
+	c = &Client{API: srv.URL, Token: "rlt_x", Project: "prj_1", CacheTTL: 20 * time.Second, CacheSize: 1, Now: func() time.Time { return clock }}
+	for _, env := range []string{"production", "production", "staging", "production"} {
+		if _, err := c.Values(ctx, env, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(asked) != 7 {
+		t.Fatalf("one folder kept: %q", asked)
+	}
 }

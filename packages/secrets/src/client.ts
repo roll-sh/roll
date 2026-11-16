@@ -18,6 +18,8 @@ export type ClientOptions = {
    * their lease). Off by default.
    */
   cacheTtlMs?: number;
+  /** How many folders `cacheTtlMs` keeps; past it, the one read longest ago goes. No cap by default. */
+  cacheSize?: number;
   /** For tests: the clock (ms) the cache's TTL is measured with; `Date.now` by default. */
   now?: () => number;
 };
@@ -136,7 +138,14 @@ export function createClient(options: ClientOptions) {
     // Never kept: dynamic credentials (they end with their lease) or a key that didn't resolve
     // (the digest may not move when the link recovers).
     if (v.dynamic.length || v.problems.length) cache.delete(url);
-    else cache.set(url, { values: v, etag, at: now() });
+    else {
+      if (!cache.has(url) && options.cacheSize && cache.size >= options.cacheSize) {
+        let oldest: string | null = null;
+        for (const [k, x] of cache) if (oldest === null || x.at < cache.get(oldest)!.at) oldest = k;
+        if (oldest !== null) cache.delete(oldest);
+      }
+      cache.set(url, { values: v, etag, at: now() });
+    }
     return v;
   }
 
