@@ -567,7 +567,7 @@ async fn run() -> anyhow::Result<()> {
     // above this line, or its links 404.
     // People's accounts: what a person made acts while they can sign in, and a person's canvas
     // stands only for what's theirs (roll_workspace::Workspace::trusts, asked by every consumer).
-    let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()) };
+    let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()), search: search.as_ref().map(|s| s.control.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
     // Its tokens are roll-access's: grants for syncs a token made, workload tokens for identities.
     let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people)?;
