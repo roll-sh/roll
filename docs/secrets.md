@@ -2819,7 +2819,7 @@ Active Directory), #136 (Snowflake, on #132) and #144 (ACME on project CAs).
    workload identity; it carries only the conversations rolld starts, only to the hosts its own
    local allow-list names (a compromised roll can't scan the network through it), as bytes with TLS
    end to end; on a fleet its link and the calls through it run on one lease holder.
-7. **A Pulumi provider**, bridged from the Terraform provider (Pulumi's own path for
+7. **A Pulumi provider** (building: `feature/roll-secrets-pulumi`), bridged from the Terraform provider (Pulumi's own path for
    plugin-framework providers), with TypeScript, Python and Go SDKs generated.
 8. **Access requests**: a time-boxed `reveal` on a protected environment that an approver grants
    (Infisical's and 1Password's). First check roll-access's `ask` rules (roll MCP's design), which
