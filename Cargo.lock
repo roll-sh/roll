@@ -7070,6 +7070,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-oidc"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ring",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "roll-previews"
 version = "0.1.0"
 dependencies = [
@@ -7125,6 +7135,7 @@ dependencies = [
  "regex",
  "ring",
  "roll-auth",
+ "roll-oidc",
  "roll-workspace",
  "rsa",
  "serde",
