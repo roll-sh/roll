@@ -1054,9 +1054,11 @@ impl Apps for Runtime {
             Err(_) => anyhow::bail!("the service didn't start in time"),
         }
         let name = container_name(&host);
-        // The port the runtime published (the service's own), not whatever else its image exposes.
-        let ports = code_preview::docker::docker(&["inspect", "-f", "{{range $p, $_ := .HostConfig.PortBindings}}{{$p}} {{end}}", &name]).await?;
-        let port = ports.split_whitespace().next().and_then(|p| p.split('/').next()).and_then(|p| p.parse::<u16>().ok()).ok_or_else(|| anyhow::anyhow!("the service publishes no port"))?;
+        // The service's own port, as its container says (`sh.roll.code.port`: with `egress: roll`
+        // it's on a network of its own and publishes nothing), else the one the runtime published
+        // (a container made before the label), never whatever else its image exposes.
+        let said = code_preview::docker::docker(&["inspect", "-f", &format!("{{{{index .Config.Labels \"{}.port\"}}}} {{{{range $p, $_ := .HostConfig.PortBindings}}}}{{{{$p}}}} {{{{end}}}}", code_preview::docker::LABEL), &name]).await?;
+        let port = said.split_whitespace().find_map(|p| p.split('/').next().and_then(|p| p.parse::<u16>().ok())).ok_or_else(|| anyhow::anyhow!("the service says no port"))?;
         self.screenshot_in(&name, port, opts).await.map(Some)
     }
 

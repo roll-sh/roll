@@ -730,6 +730,7 @@ curl -sS -o /dev/null -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60 
 OUT_BEFORE=$(docker exec "$CONT2" python -c "$REACH" 2>&1 || true); OUT_BEFORE=$(echo "$OUT_BEFORE" | tail -1)
 # The premise: by default a preview's service reaches the internet.
 [ "$OUT_BEFORE" = out ] || { echo "a preview's service should reach the internet by default (egress open): $OUT_BEFORE"; exit 1; }
+SHOT_BEFORE=$(api GET "/v1/previews/$PV" | jq_ "d.get('screenshot_at')")
 api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"roll"}' >/dev/null
 NETS=""
 for _ in $(seq 1 120); do
@@ -743,6 +744,15 @@ BODY3=$(curl -sS -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60)
 echo "$BODY3" | grep -q "preview of change 1" || { echo "the service on its own network should still be served through roll: $BODY3"; exit 1; }
 OUT_AFTER=$(docker exec "$CONT2" python -c "$REACH" 2>&1 || true); OUT_AFTER=$(echo "$OUT_AFTER" | tail -1)
 case "$OUT_AFTER" in *unreachable*|*Errno*|*timed*) ;; *) echo "with egress roll the service shouldn't reach the internet: $OUT_AFTER"; exit 1;; esac
+# Its screenshot is still taken there (the browser in the service's own network: nothing is
+# published, the port comes from the container's label).
+SHOT_ROLL=""
+for _ in $(seq 1 240); do
+  SHOT_ROLL=$(api GET "/v1/previews/$PV" | jq_ "d.get('screenshot_at')")
+  [ "$SHOT_ROLL" != "$SHOT_BEFORE" ] && [ "$SHOT_ROLL" != None ] && break
+  sleep 1
+done
+[ "$SHOT_ROLL" != "$SHOT_BEFORE" ] && [ "$SHOT_ROLL" != None ] || { echo "with egress roll the screenshot should still be taken: $SHOT_BEFORE then $SHOT_ROLL"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d if 'screenshot' in a['message']][:5]"; exit 1; }
 # A host the project allows: reached through the preview's egress proxy, anything else refused
 # and said in the activity.
 api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"roll","egress_hosts":["github.com"]}' >/dev/null
@@ -795,7 +805,7 @@ BRANCHES_LEFT=$(api GET /v1/redis/databases | jq_ "len([x for x in d if x['name'
 cat <<EOF
 | What | Measured |
 | --- | --- |
-| egress: roll: the service's network / 1.1.1.1:443 from it before and after | ${NETS% } / $OUT_BEFORE, then: ${OUT_AFTER:0:60} |
+| egress: roll: the service's network / 1.1.1.1:443 from it before and after / its screenshot | ${NETS% } / $OUT_BEFORE, then: ${OUT_AFTER:0:60} / taken |
 | egress_hosts ["github.com"]: github.com / example.com, through the preview's egress proxy | $ALLOWED / ${REFUSED:0:60} |
 | A note's element, cropped by the next head's screenshot run (a PNG) | $CROP_NOTE |
 | A visit to a service frozen after sleep_after (it read as sleeping), instead of a cold start | $((T7 - T6)) ms, the same container |

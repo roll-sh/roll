@@ -434,7 +434,9 @@ no route out. Its service containers join that network instead of the default br
 publish no port. roll's proxy reaches each one at its address on that network, and a container
 reaches roll's products at that network's gateway (`host.docker.internal` points there, not at
 `docker0`). The screenshot run already joins the service's network, so the page's own code
-can't reach out either.
+can't reach out either; it finds the app's port on the container's `sh.roll.code.port` label,
+since nothing is published (screenshots failed under `"roll"` until 2026-11-16: the live check
+now takes one there).
 
 Why this way, rather than the alternatives:
 
