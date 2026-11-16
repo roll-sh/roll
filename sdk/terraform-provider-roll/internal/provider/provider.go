@@ -68,11 +68,11 @@ func (p *rollProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 
 func (p *rollProvider) Resources(context.Context) []func() resource.Resource {
 	return []func() resource.Resource{newEnvironmentResource, newSecretResource, newIdentityResource, newSyncResource, newTokenResource,
-		newAppServiceResource, newAppVariableResource, newAppDomainResource}
+		newAppServiceResource, newAppVariableResource, newAppDomainResource, newAppEnvironmentResource, newAppLinkResource, newAppNotificationResource}
 }
 
 func (p *rollProvider) DataSources(context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{newValuesDataSource}
+	return []func() datasource.DataSource{newValuesDataSource, newAppServiceDataSource}
 }
 
 // EphemeralResources are read for one run and never written to the plan or the state.

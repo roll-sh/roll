@@ -1266,6 +1266,9 @@ static ROWS: &[Row] = &[
     // A private registry's login (never answered back), and unlinking a database: settings.
     row("PUT", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
     row("DELETE", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
+    // A private Git repository's login (never answered back), as a registry's.
+    row("PUT", "/v1/apps/services/{id}/git-login", "apps", W, one(PG, "service")),
+    row("DELETE", "/v1/apps/services/{id}/git-login", "apps", W, one(PG, "service")),
     // A link puts the linked resource's address and password in the service's variables, where
     // its code reads them: reveal on that resource too.
     row("PUT", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")).lends(Lend::Path("kind", "ref")),
