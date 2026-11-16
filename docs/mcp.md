@@ -263,14 +263,19 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     declares HTML views (`mimeTypes: ["text/html;profile=mcp-app"]`), the read-only tools that
     answer rows (lists, queries, logs, reads, usage) point at `ui://roll/table` (`_meta.ui`). The
     host renders that view in a sandboxed iframe, and it shows the tool's result as a table, light
-    or dark as the host is.
+    or dark as the host is: times as UTC, columns empty in every row dropped, and links roll
+    answered (an approval's page, a preview) opened by the host (`ui/open-link`) where it can.
+    `access_wait_approval` points at it too: while a call waits for a person, the view is a card
+    with roll's approval page to open.
     - **Declaring it:** a 2026-07-28 request on itself; in `initialize`, the session id carries it
       (`~ui.` after its prefix), as URL elicitation does.
     - **Safety:** the view has no network (its resource declares no domains), writes every value
-      as text, and calls no tools. An approval is never decided from a view, because an agent's
-      token could drive it.
-    - **Checked:** `a_host_that_renders_apps_gets_the_table_view` (roll-mcp), and the view rendered
-      by a stand-in host (`~/.local/share/roll-mcp/users-live/app-shot.mjs`).
+      as text, and calls no tools. It only asks the host to open an `http(s)` link roll answered.
+      An approval is never decided from a view, because an agent's token could drive it.
+    - **Checked:** `a_host_that_renders_apps_gets_the_table_view` (roll-mcp); the table in
+      ext-apps' reference host (`examples/basic-host` v2.0.4, `users-live/host-shot.mjs`); the
+      table and the approval card in a stand-in host that checks the handshake as the SDK's
+      AppBridge does (`users-live/app-shot.mjs`).
   - **Tasks** (`roll_mcp::tasks`, the `io.modelcontextprotocol/tasks` extension, SEP-2663):
     - **When:** a client that declares the extension on its request gets a task handle
       (`resultType: "task"`) for a call still running after 3 s, or one waiting for a person's
