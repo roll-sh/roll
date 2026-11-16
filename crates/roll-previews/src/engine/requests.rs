@@ -148,8 +148,16 @@ impl Engine {
     /// `max_previews`), moved to the pushed sha, or deleted with its branch. The service's
     /// previews are the repo `git:<service>` with the branch: the same push twice changes
     /// nothing. Only the repository's writers move its branches, so these previews are trusted.
+    ///
+    /// A pull request ([`crate::ports::GitPull`]) names the preview by its title and links it.
+    /// A same-repo one is its branch's preview; a fork's (`pull/<n>`) is untrusted (secrets
+    /// resolve untrusted) and runs only at the head a writer approved ([`Engine::approve`]);
+    /// a close deletes it. A row is never made trusted again by a later push.
     pub async fn git_push(&self, p: &crate::ports::GitPush) -> Result<()> {
         let repo = format!("git:{}", p.service);
+        let fork = p.pull.as_ref().is_some_and(|pl| pl.fork);
+        // The pull request's title as plain words: no control characters, at most 200 characters.
+        let pull_title = p.pull.as_ref().map(|pl| pl.title.chars().map(|c| if c.is_control() { ' ' } else { c }).take(200).collect::<String>().trim().to_string());
         let projects: Vec<roll_workspace::Project> = self
             .workspace
             .list(roll_workspace::Scope::All)?
@@ -161,56 +169,107 @@ impl Engine {
             let existing = rows.iter().find(|r| r.change_id.is_none() && r.repo == repo && r.branch.as_deref() == Some(p.branch.as_str()) && r.desired == Desired::Active).cloned();
             match (&p.sha, existing) {
                 (None, Some(r)) => {
-                    self.mark_deleted(&r.id, &format!("its branch {} was deleted", p.branch))?;
+                    let why = match &p.pull {
+                        Some(pl) => format!("its pull request #{} closed", pl.number),
+                        None => format!("its branch {} was deleted", p.branch),
+                    };
+                    self.mark_deleted(&r.id, &why)?;
                 }
                 (None, None) => {}
                 (Some(sha), Some(r)) => {
-                    if r.head != *sha {
+                    if let Some(pl) = &p.pull {
+                        self.store.set_git_pull(&r.id, pl.number as i64, https_only(&pl.url), pl.fork, sha)?;
+                    }
+                    let title = pull_title.clone().filter(|t| !t.is_empty() && *t != r.title);
+                    if r.head != *sha || title.is_some() || (fork && r.trusted) {
                         let now = self.store.now_ms()?;
                         self.store.update(&r.id, |x| {
-                            x.head = sha.clone();
-                            x.last_active_at = now;
-                            x.next_at = 0;
-                            if matches!(x.state, State::Ready | State::Sleeping | State::Failed) {
-                                x.state = State::Updating;
+                            if let Some(t) = &title {
+                                x.title = t.clone();
+                            }
+                            x.trusted = x.trusted && !fork;
+                            if x.head != *sha {
+                                x.head = sha.clone();
+                                x.last_active_at = now;
+                                x.next_at = 0;
+                                if matches!(x.state, State::Ready | State::Sleeping | State::Failed) {
+                                    x.state = State::Updating;
+                                }
                             }
                         })?;
-                        self.store.log(&r.id, &format!("{} pushed: {}", p.branch, short(sha)))?;
+                        if r.head != *sha {
+                            self.store.log(&r.id, &format!("{} pushed: {}", p.branch, short(sha)))?;
+                        }
                     }
                 }
                 (Some(sha), None) => {
                     let s = self.store.settings(&project.id)?;
-                    let skip = p.message.to_ascii_lowercase().contains("[skip preview]");
+                    let skip = [Some(p.message.as_str()), pull_title.as_deref()].into_iter().flatten().any(|t| t.to_ascii_lowercase().contains("[skip preview]"));
                     if !s.enabled || skip || !crate::glob::any(&s.branches, &p.branch) {
                         continue;
                     }
-                    let busy = rows.iter().filter(|r| r.desired == Desired::Active && !r.is_baseline() && !matches!(r.state, State::Queued | State::AwaitingApproval)).count();
+                    // A fork's pull request waiting for approval holds a place too: anyone can open
+                    // them, and none may grow the list past `max_previews`.
+                    let busy = rows.iter().filter(|r| r.desired == Desired::Active && !r.is_baseline() && !(r.state == State::Queued || (r.state == State::AwaitingApproval && !fork))).count();
                     if busy >= s.max_previews as usize {
                         continue;
                     }
                     let now = self.store.now_ms()?;
+                    let name = p.url.rsplit('/').next().unwrap_or(&p.service).trim_end_matches(".git");
                     let n = New {
                         project_id: project.id.clone(),
-                        key: p.branch.clone(),
+                        key: match &p.pull {
+                            Some(pl) if pl.fork => format!("pr{}", pl.number),
+                            _ => p.branch.clone(),
+                        },
                         project_name: project.name.clone(),
                         repo: repo.clone(),
                         change_id: None,
                         branch: Some(p.branch.clone()),
                         number: None,
-                        title: format!("{}@{}", p.url.rsplit('/').next().unwrap_or(&p.service).trim_end_matches(".git"), p.branch),
+                        title: pull_title.clone().filter(|t| !t.is_empty()).unwrap_or_else(|| format!("{name}@{}", p.branch)),
                         github_pr: None,
                         head: sha.clone(),
-                        trusted: true,
-                        state: State::Creating,
+                        trusted: !fork,
+                        state: if fork { State::AwaitingApproval } else { State::Creating },
                         expires_at: Some(now + s.ttl_hours as i64 * 3_600_000),
                         created_by: format!("git:{}", p.service),
                     };
-                    self.store.create(&n)?;
+                    let (row, _) = self.store.create(&n)?;
+                    if let Some(pl) = &p.pull {
+                        self.store.set_git_pull(&row.id, pl.number as i64, https_only(&pl.url), pl.fork, sha)?;
+                    }
+                    if fork {
+                        self.store.log(&row.id, &format!("pull request #{} is from a fork: it runs once a writer approves {}", p.pull.as_ref().map_or(0, |pl| pl.number), short(sha)))?;
+                    }
                 }
             }
         }
         self.kick();
         Ok(())
+    }
+
+    /// Whether a preview with no roll code change may run its head: a Git URL service's fork's
+    /// pull request only at the head a writer approved; everything else (trusted) always.
+    pub(super) fn git_head_may_run(&self, r: &Row) -> Result<bool> {
+        if r.trusted {
+            return Ok(true);
+        }
+        Ok(self.store.git_pull(&r.id)?.and_then(|g| g.approved_head).as_deref() == Some(r.head.as_str()))
+    }
+
+    /// `POST …/approve {head}`: a writer lets this head of a fork's pull request run (roll
+    /// code's `approve-run` for a Git URL service's preview). Only the head the preview is at; the
+    /// next push waits again.
+    pub fn approve(&self, id: &str, head: &str, by: &str) -> Result<Preview> {
+        self.store.approve_git_pull(id, head, by)?;
+        self.store.log(id, &format!("{} approved by {by}", short(head)))?;
+        let r = self.store.update(id, |row| {
+            row.next_at = 0;
+            row.attempts = 0;
+        })?;
+        self.kick();
+        self.store.view(r)
     }
 
     /// Delete a preview. A change's preview stays deleted until the change's next push.
@@ -510,6 +569,12 @@ pub fn resume_at(before: &[String], now: &[String]) -> Option<usize> {
     (k..=now.len()).find(|&p| &now[p - k..p] == tail)
 }
 
+/// A pull request's link as the sheet may show it: `https://` only (`""` otherwise), so a link
+/// can't run script.
+fn https_only(url: &str) -> &str {
+    if url.starts_with("https://") && !url.chars().any(char::is_whitespace) { url } else { "" }
+}
+
 #[cfg(test)]
 mod tests {
     /// A followed log that's polled passes each line on once: what's new after the lines it
@@ -524,3 +589,4 @@ mod tests {
         assert_eq!(super::resume_at(&v(&["a"]), &v(&["q", "r"])), None, "moved past everything seen: a gap");
     }
 }
+

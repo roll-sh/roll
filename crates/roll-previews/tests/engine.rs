@@ -1028,6 +1028,7 @@ async fn a_git_url_services_branch_push_makes_its_preview() {
         branch: branch.into(),
         sha: sha.map(Into::into),
         message: message.into(),
+        pull: None,
     };
     let rows = || e.engine.store.rows(Some(&e.project)).unwrap().into_iter().filter(|r| r.repo == "git:svc_shop").collect::<Vec<_>>();
     // The project's services are roll apps': the Git URL one is `git:<id>`.
@@ -1048,8 +1049,47 @@ async fn a_git_url_services_branch_push_makes_its_preview() {
     assert_eq!(e.apps.deployed.lock().get(&(r[0].id.clone(), "shop".to_string())).map(String::as_str), Some("b2"), "and deploys it");
     e.engine.git_push(&push("feat/docs", Some("c3"), "typo [skip preview]")).await.unwrap();
     assert_eq!(rows().len(), 1, "[skip preview] skips one");
+    // Its pull request (same repo) names the branch's preview and links it, still trusted.
+    let pull = roll_previews::ports::GitPull { number: 3, title: "Cart\nbadge".into(), url: "https://github.com/acme/shop/pull/3".into(), fork: false };
+    e.engine.git_push(&roll_previews::ports::GitPush { pull: Some(pull), ..push("feat/cart", Some("b2"), "") }).await.unwrap();
+    let v = e.engine.store.view(e.engine.store.row(&r[0].id).unwrap()).unwrap();
+    assert_eq!((v.title.as_str(), v.pull.as_ref().map(|p| p.number), v.trusted, rows().len()), ("Cart badge", Some(3), true, 1));
     e.engine.git_push(&push("feat/cart", None, "")).await.unwrap();
     assert_eq!(e.engine.store.row(&r[0].id).unwrap().desired, Desired::Deleted, "the branch went: so does its preview");
+}
+
+/// A fork's pull request on a Git URL service (roll apps' `GitPull`, `fork: true`): its
+/// preview (`pull/<n>`, untrusted) runs nothing until a writer approves its head, only that head;
+/// the next push waits again, and closing the pull request deletes it.
+#[tokio::test]
+async fn a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head() {
+    let e = env(json!({ "enabled": true }));
+    e.ws.place(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Service, "svc_shop", 0.0, 0.0).unwrap();
+    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "shop".into(), repo: Some("git:svc_shop".into()), root: String::new(), memory_mb: 256 }]);
+    let push = |sha: Option<&str>| roll_previews::ports::GitPush {
+        service: "svc_shop".into(),
+        url: "https://github.com/acme/shop.git".into(),
+        branch: "pull/7".into(),
+        sha: sha.map(Into::into),
+        message: String::new(),
+        pull: Some(roll_previews::ports::GitPull { number: 7, title: "Faster cart".into(), url: "https://github.com/acme/shop/pull/7".into(), fork: true }),
+    };
+    let deployed = |id: &str| e.apps.deployed.lock().get(&(id.to_string(), "shop".to_string())).cloned();
+    e.engine.git_push(&push(Some("f1"))).await.unwrap();
+    e.engine.pass().await.unwrap();
+    let r = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.repo == "git:svc_shop").unwrap();
+    assert_eq!((r.state, r.trusted, r.title.as_str(), deployed(&r.id)), (State::AwaitingApproval, false, "Faster cart", None), "nothing runs before an approval");
+    assert!(matches!(e.engine.approve(&r.id, "f0", "ada"), Err(roll_previews::Error::Conflict(_))), "only the head it's at");
+    e.engine.approve(&r.id, "f1", "ada").unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(deployed(&r.id).as_deref(), Some("f1"), "the approved head runs");
+    e.engine.git_push(&push(Some("f2"))).await.unwrap();
+    e.engine.pass().await.unwrap();
+    let now = e.engine.store.row(&r.id).unwrap();
+    assert_eq!((now.state, deployed(&r.id).as_deref()), (State::AwaitingApproval, Some("f1")), "a new head waits again, never deployed");
+    assert!(e.apps.slept.lock().iter().any(|(p, s)| *p == r.id && s == "shop"), "and what ran sleeps meanwhile");
+    e.engine.git_push(&push(None)).await.unwrap();
+    assert_eq!(e.engine.store.row(&r.id).unwrap().desired, Desired::Deleted, "a close deletes it");
 }
 
 #[tokio::test]
