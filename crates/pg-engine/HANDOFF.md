@@ -13892,15 +13892,16 @@ Short transactions (`gB-short`, `gD-short`): -3.5% at the median of five pairs u
 foreign load (-7.5% to +12.7%; that pair's base run was 12% below every other base run), the
 other seven pairs flagged (1.3 to 3.7 cores).
 
-Verification train (`TRAIN_NO_CHECKOUT=1`, on `32ce626c0`, these commits rebased onto
-`bf9366246`; a first try during the night failed every step when the disk filled): clippy 0
-(20 warnings, the base's), crash, power-cut, crash-power (sync and async) 0; regress 51,148 of
-51,150, newly differing 0; isolation 1647/1648 (intra-grant-inplace as before); pg_dump 14609
-passed. Release 101: one case, this round's `explain_widths`: two of its setup's ANALYZE
+Verification. A full train (`TRAIN_NO_CHECKOUT=1`, on `32ce626c0`, these commits on
+`bf9366246`): clippy 0 (20 warnings, the base's), crash, power-cut, crash-power (sync and async)
+0; regress 51,148 of 51,150, newly differing 0; isolation 1647/1648; pg_dump 14609 passed.
+Its release step failed on one case, this round's `explain_widths`: two of its setup's ANALYZE
 replies came after the 400 ms quiet the protocol helper waits on a loaded machine and showed up
-in the first step's output; the helper now waits for each setup query's ReadyForQuery
-(`c7adb84dc`). Debug: the machine's build-cleanup timer removed `.test-build/target` (31 GB)
-mid-step (its rule skips a worktree with a process inside it; it removed this one regardless),
-37 of 65 targets ran and passed before the rest's binaries were gone. Both steps ran again on
-`c7adb84dc`: RERUN-RESULTS.
+in the first step's output; the helper now waits for each setup query's ReadyForQuery. Its debug
+step lost its binaries to the machine's build-cleanup timer (37 of 65 targets ran and passed).
+Then, rebased onto `262443ded`, `tools/quick-check.sh` on `bff4d91c1` (profile verify): build,
+clippy (16 warnings, none new in changed files), tests 434 passed in 31 binaries (golden, wire,
+wire_waits and the 28 the diff maps to), crash seeds 1-3 x 2 and power_cut_at_every_point,
+regress 51,148 / 51,150 with 0 newly differing, isolation 1647/1648, pg_dump 14609 passed.
+Handed in as `cand/a240` for the batch train.
 
