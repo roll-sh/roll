@@ -646,7 +646,14 @@ pub async fn start(
     };
     let apps = Apps::new(cfg, store, deps);
     if let Some(c) = code {
-        apps.set_github_app(Arc::new(CodeGitHub(c)));
+        apps.set_github_app(Arc::new(CodeGitHub(c.clone())));
+        // The App's verified pushes and pull requests reach the services connected to them
+        // (queued here, run on each service's owner).
+        let a = apps.clone();
+        c.on_github_event(Arc::new(move |event: &str, body: &[u8]| {
+            let (a, event, body) = (a.clone(), event.to_string(), body.to_vec());
+            tokio::spawn(async move { a.github_event(&event, &body).await });
+        }));
     }
     apps.start();
     if on_docker && !apps_control::runtime::docker::available().await {

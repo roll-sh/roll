@@ -988,6 +988,7 @@ async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, 
     let d = match apps.run_hook(&id, &env, &token, q.image, payload).await? {
         crate::hooks::HookOutcome::Deployed(d) => *d,
         crate::hooks::HookOutcome::Ignored(why) => return ok(json!({ "ignored": why })),
+        crate::hooks::HookOutcome::Plain => unreachable!("run_hook deploys a plain call"),
     };
     // The gate never saw it: who called is in the service's activity.
     let address = ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_string());

@@ -4078,18 +4078,40 @@ async fn a_git_url_service_connects_to_rolls_github_app() {
     assert_eq!(st, StatusCode::ACCEPTED, "{d}");
     let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     assert_eq!((d["status"].as_str(), d["revision"].as_str()), (Some("active"), Some(first.as_str())), "{d}");
-    let posted = gh.statuses.lock().clone();
-    assert!(posted.iter().any(|(i, r, c, s)| (*i, r.as_str(), c.as_str(), s.as_str()) == (42, "acme/site", "roll/apps/site/production", "success")), "{posted:?}");
-    // And a GitHub Deployment of production: in progress, then live at its URL.
-    assert_eq!(*gh.deployments.lock(), vec![(1, "production".to_string(), true)]);
-    for _ in 0..100 {
-        if gh.deployment_states.lock().len() >= 2 {
+    // Reported just after it goes live: waited for.
+    let success = |p: &[(u64, String, String, String)]| p.iter().any(|(i, r, c, s)| (*i, r.as_str(), c.as_str(), s.as_str()) == (42, "acme/site", "roll/apps/site/production", "success"));
+    for _ in 0..250 {
+        if success(&gh.statuses.lock()) && gh.deployment_states.lock().len() >= 2 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    let posted = gh.statuses.lock().clone();
+    assert!(success(&posted), "{posted:?}");
+    // And a GitHub Deployment of production: in progress, then live at its URL.
+    assert_eq!(*gh.deployments.lock(), vec![(1, "production".to_string(), true)]);
     let states: Vec<_> = gh.deployment_states.lock().iter().map(|(id, s, u)| (*id, s.clone(), u.is_some())).collect();
     assert_eq!(states, vec![(1, "in_progress".to_string(), false), (1, "success".to_string(), true)]);
+    // The App's own (verified) push reaches it with no hook set: run on its owner, it deploys the
+    // pushed head; another installation's, or another repository's, doesn't.
+    let second = git.commit_saying(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v2")], "via the App");
+    let push = |installation: u64, repo: &str| json!({ "ref": "refs/heads/main", "after": second, "head_commit": { "message": "via the App" }, "repository": { "full_name": repo }, "installation": { "id": installation } }).to_string();
+    w.apps.github_event("push", push(7, "acme/site").as_bytes()).await;
+    w.apps.github_event("push", push(42, "acme/elsewhere").as_bytes()).await;
+    w.apps.github_event("push", push(42, "ACME/site").as_bytes()).await;
+    let mut via = Value::Null;
+    for _ in 0..200 {
+        let (_, list) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys"), None).await;
+        if let Some(d) = list.as_array().into_iter().flatten().find(|d| d["revision"] == second.as_str()) {
+            via = d.clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!((via["message"].as_str(), via["trigger"].as_str(), via["actor"].as_str()), (Some("via the App"), Some("push"), Some("github app")), "{via}");
+    settled(&w, &id, "production", via["id"].as_str().unwrap()).await;
+    let (_, list) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys"), None).await;
+    assert_eq!(list.as_array().unwrap().iter().filter(|d| d["revision"] == second.as_str()).count(), 1, "one deploy: {list}");
     // Disconnected: no token, so the private repository can't be read.
     call(&w.api, "DELETE", &format!("/v1/apps/services/{id}/github"), None).await;
     let (st, v) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), Some(json!({}))).await;

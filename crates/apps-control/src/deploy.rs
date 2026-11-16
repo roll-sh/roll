@@ -1703,6 +1703,14 @@ impl Apps {
                     self.judge_alerts(&l).await;
                 }
             }
+            // roll's GitHub App's events for the services here, every second.
+            if self.github.get().is_some() && !self.github_running.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    this.run_github_events().await;
+                    this.github_running.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
+            }
             if n.is_multiple_of(10) && !self.scaling.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 let this = self.clone();
                 tokio::spawn(async move {

@@ -66,6 +66,13 @@ CREATE TABLE IF NOT EXISTS registry_auth (
     username TEXT NOT NULL,
     sealed TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS github_events (
+    id TEXT PRIMARY KEY,
+    service TEXT NOT NULL,
+    event TEXT NOT NULL,
+    body TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS github_deployments (
     deployment TEXT PRIMARY KEY,
     github INTEGER NOT NULL
@@ -773,7 +780,7 @@ impl Store {
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1825,6 +1832,28 @@ impl Store {
 
     pub fn github_deployment(&self, deployment: &str) -> Result<Option<u64>> {
         Ok(self.db.query_row("SELECT github FROM github_deployments WHERE deployment = ?", [deployment], |r| r.get::<_, i64>(0)).optional()?.map(|g| g as u64))
+    }
+
+    /// The services connected to `repo` (`owner/name`, any case) through `installation`.
+    pub fn connected_to(&self, installation: u64, repo: &str) -> Result<Vec<String>> {
+        let rows: Vec<(String, String)> = self.db.query("SELECT service, repo FROM git_github WHERE installation = ?", [installation as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.into_iter().filter(|(_, r)| r.eq_ignore_ascii_case(repo)).map(|(s, _)| s).collect())
+    }
+
+    /// An App event queued for a service's owner (`github_events`).
+    pub fn queue_github_event(&self, service: &str, event: &str, body: &str) -> Result<()> {
+        self.db.execute("INSERT INTO github_events (id, service, event, body, created_at) VALUES (?, ?, ?, ?, ?)", params![random(16), service, event, body, self.now()?])?;
+        Ok(())
+    }
+
+    /// The queued App events, oldest first (at most 100).
+    pub fn github_events(&self) -> Result<Vec<(String, String, String, String)>> {
+        Ok(self.db.query("SELECT id, service, event, body FROM github_events ORDER BY created_at, id LIMIT 100", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?)
+    }
+
+    /// Claim a queued App event: whether this call took it (the row goes in the same statement).
+    pub fn take_github_event(&self, id: &str) -> Result<bool> {
+        Ok(self.db.execute("DELETE FROM github_events WHERE id = ?", [id])? == 1)
     }
 
     pub fn git_github(&self, service: &str) -> Result<Option<GitHubLink>> {
