@@ -438,7 +438,7 @@ type ProjectImport = {
   databases: { [name: string]: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" } };
 };
 
-type PlanRequest = { repo: string; revision?: string; root?: string } | { files: Record<string, string> };
+type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string /* a public Git URL, fetched at its branch's head as its deploy would be */; branch?: string; root?: string } | { files: Record<string, string> };
 
 type Plan = {
   provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "static";

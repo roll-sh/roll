@@ -115,23 +115,25 @@ export function NewServiceSheet({
     setName(base);
   }, [from, repo, gitUrl, image, named]);
 
-  // rolld's plan for the repo and root, looked up when they settle.
-  const planKey = `${repo}\n${root.trim()}`;
+  // rolld's plan for the repo (or the Git URL, at its branch) and root, looked up when they settle.
+  const git = gitUrl.trim();
+  const planKey = `${git || repo}\n${gitBranch.trim()}\n${root.trim()}`;
   useEffect(() => {
-    if (from !== "repo" || !repo || gitUrl.trim()) return;
+    if (from !== "repo" || (!git && !repo) || (git && !/^https?:\/\/[^/@\s]+\/\S+$/.test(git))) return;
     let live = true;
+    const at = root.trim() ? { root: root.trim() } : {};
     const t = setTimeout(() => {
       setPlan({ key: planKey });
-      appsApi.plan({ repo, ...(root.trim() ? { root: root.trim() } : {}) }).then(
+      appsApi.plan(git ? { git, ...(gitBranch.trim() ? { branch: gitBranch.trim() } : {}), ...at } : { repo, ...at }).then(
         (p) => live && setPlan({ key: planKey, plan: p }),
         (e) => live && setPlan({ key: planKey, error: message(e) }),
       );
-    }, 350);
+    }, git ? 800 : 350);
     return () => {
       live = false;
       clearTimeout(t);
     };
-  }, [from, repo, gitUrl, root, planKey]);
+  }, [from, repo, git, gitBranch, root, planKey]);
 
   // What the code uses, ticked until the user picks: the project's one database of that kind,
   // else a new one (with two or more, they choose).

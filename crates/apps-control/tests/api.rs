@@ -3746,6 +3746,9 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let url = format!("http://{}/git/acme/site", listener.local_addr().unwrap());
     let app = code_git::router(git.clone(), code_git::ServerConfig::default());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    // What it would build as, before anything is made.
+    let (st, plan) = call(&w.api, "POST", "/v1/apps/plan", Some(json!({ "git": url }))).await;
+    assert_eq!((st, plan["provider"].as_str()), (StatusCode::OK, Some("node")), "{plan}");
     let body = |branch: Option<&str>| json!({ "project": w.project, "name": "site", "source": {"kind": "git", "url": url}, "branch": branch, "variables": {"FAKE_ECHO": "ROLL_GIT_COMMIT,ROLL_GIT_BRANCH"} });
     let (st, v) = call(&w.api, "POST", "/v1/apps/services", Some(body(Some("nope")))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");

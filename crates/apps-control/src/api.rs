@@ -252,17 +252,39 @@ async fn plan(State(apps): S, b: Bytes) -> R {
         let p = apps_build::plan(&apps_build::MapTree(map), &o).map_err(|e| Error::BadRequest(e.to_string()))?;
         return ok(p);
     }
-    let repo = v.get("repo").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("repo or files is required".into()))?.to_string();
-    let sources = apps.deps.sources.clone().ok_or_else(|| Error::BadRequest("roll code isn't on this node".into()))?;
-    let rev = match v.get("revision").and_then(Value::as_str) {
-        Some(r) => sources.revision(&repo, r).await,
-        None => sources.resolve(&repo, None).await,
+    // A roll code repo at a revision, or a public Git URL at its branch's head (fetched as its
+    // deploy would fetch it), before anything is made.
+    enum From {
+        Repo(Arc<dyn crate::integrations::Sources>, String, String),
+        Git(code_git::Client, String, String),
     }
-    .map_err(|e| Error::BadRequest(format!("{repo}: {e}")))?;
+    let from = match (v.get("repo").and_then(Value::as_str), v.get("git").and_then(Value::as_str)) {
+        (Some(repo), None) => {
+            let sources = apps.deps.sources.clone().ok_or_else(|| Error::BadRequest("roll code isn't on this node".into()))?;
+            let rev = match v.get("revision").and_then(Value::as_str) {
+                Some(r) => sources.revision(repo, r).await,
+                None => sources.resolve(repo, None).await,
+            }
+            .map_err(|e| Error::BadRequest(format!("{repo}: {e}")))?;
+            From::Repo(sources, repo.to_string(), rev.sha)
+        }
+        (None, Some(url)) => {
+            crate::git_source::check_url(url, apps.cfg.allow_private).map_err(Error::BadRequest)?;
+            let client = crate::git_source::client(apps.cfg.allow_private);
+            let (sha, _) = crate::git_source::head(&client, url, v.get("branch").and_then(Value::as_str)).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
+            From::Git(client, url.to_string(), sha)
+        }
+        _ => return Err(Error::BadRequest("one of repo, git or files is required".into())),
+    };
     let dir = apps.cfg.home.join("apps").join("plans").join(crate::model::random(12));
     tokio::fs::create_dir_all(&dir).await.map_err(anyhow::Error::from)?;
     let result = async {
-        sources.materialize(&repo, &rev.sha, &dir).await?;
+        match &from {
+            From::Repo(sources, repo, sha) => sources.materialize(repo, sha, &dir).await?,
+            From::Git(client, url, sha) => {
+                crate::git_source::materialize(client, url, sha, &dir).await?;
+            }
+        }
         let root = match v.get("root").and_then(Value::as_str) {
             Some(r) => crate::model::in_tree(&dir, "root", r, true)?,
             None => dir.clone(),

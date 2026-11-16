@@ -2123,9 +2123,9 @@ put items 1–11 first. A review on 2026-11-16 (the product against the same six
 2. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
    on main, `watch_secrets` holds one `SecretSource::wait_digest` long poll per watched
    environment instead of polling every minute.
-3. **Monorepo detection and a plan for Git URLs** (Railway's monorepo import, Vercel's root
-   picker): the folders that build in a tree, offered as roots, and `POST /v1/apps/plan` for a
-   Git URL before its first build.
+3. **Monorepo detection** (Railway's monorepo import, Vercel's root picker): the folders that build
+   in a tree, offered as roots in New service (a Git URL's plan before its first build is done:
+   `POST /v1/apps/plan {git}`).
 4. **Deploy an image built on your machine** (Fly's `--local-only`, Heroku's `container:push`):
    an image upload loaded through the Engine API on Docker (pushed to ECR on the fleet).
 5. **Metrics past seven days** (Cloud Run's six weeks): hourly rollups kept 30–90 days, and longer

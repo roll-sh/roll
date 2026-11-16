@@ -507,7 +507,7 @@ export interface Plan {
   uses?: ("postgres" | "redis")[];
 }
 
-export type PlanRequest = { repo: string; revision?: string; root?: string } | { files: Record<string, string> };
+export type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string; branch?: string; root?: string } | { files: Record<string, string> };
 
 export interface Deployment {
   id: string;
