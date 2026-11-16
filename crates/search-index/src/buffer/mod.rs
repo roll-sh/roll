@@ -372,6 +372,13 @@ impl Buffer {
         self.stored.doc(doc, out)
     }
 
+    /// The vector `doc` holds in field `number`, when it has one.
+    pub fn vector(&self, number: u32, doc: u32) -> Option<&[u8]> {
+        let p = &self.field(number)?.vectors;
+        let i = p.docs.binary_search(&doc).ok()?;
+        p.bytes.get(i * p.width..(i + 1) * p.width)
+    }
+
     pub(crate) fn field(&self, number: u32) -> Option<&FieldBuf> {
         self.fields.get(number as usize).and_then(|f| f.as_deref())
     }

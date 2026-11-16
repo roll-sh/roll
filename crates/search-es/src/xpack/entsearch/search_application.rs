@@ -496,7 +496,7 @@ async fn ensure_events_template(ctx: &Ctx<'_>) -> EsResult<()> {
             },
         },
     };
-    internal::call(ctx.cluster, "PUT", &format!("/_index_template/{EVENTS_TEMPLATE}"), Some(&t)).await.map(|_| ())
+    internal::call_system(ctx.cluster, "PUT", &format!("/_index_template/{EVENTS_TEMPLATE}"), Some(&t)).await.map(|_| ())
 }
 
 pub async fn put_analytics(ctx: &Ctx<'_>) -> EsResult<Reply> {
@@ -505,7 +505,7 @@ pub async fn put_analytics(ctx: &Ctx<'_>) -> EsResult<Reply> {
         return Err(EsError::resource_already_exists(format!("analytics collection [{name}] already exists")));
     }
     ensure_events_template(ctx).await?;
-    internal::call(ctx.cluster, "PUT", &format!("/_data_stream/{}", enc(&events_stream(&name))), None).await?;
+    internal::call_system(ctx.cluster, "PUT", &format!("/_data_stream/{}", enc(&events_stream(&name))), None).await?;
     Ok(Reply::Body(201, obj! { "acknowledged" => true, "name" => name }))
 }
 
@@ -532,7 +532,7 @@ pub async fn delete_analytics(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if !ctx.state().metadata.data_streams.contains_key(&events_stream(&name)) {
         return Err(EsError::resource_not_found(format!("analytics collection [{name}] does not exists")));
     }
-    internal::call(ctx.cluster, "DELETE", &format!("/_data_stream/{}", enc(&events_stream(&name))), None).await?;
+    internal::call_system(ctx.cluster, "DELETE", &format!("/_data_stream/{}", enc(&events_stream(&name))), None).await?;
     Reply::acknowledged()
 }
 
@@ -627,7 +627,7 @@ pub async fn post_event(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let ev = Value::Obj(ev);
     // Event data streams require routing: events are routed by session.
     let session_id = ev.pointer(&["session", "id"]).map(Value::to_es_string).unwrap_or_default();
-    internal::call(ctx.cluster, "POST", &format!("/{}/_doc?op_type=create&routing={}", enc(&events_stream(&name)), enc(&session_id)), Some(&ev)).await?;
+    internal::call_system(ctx.cluster, "POST", &format!("/{}/_doc?op_type=create&routing={}", enc(&events_stream(&name)), enc(&session_id)), Some(&ev)).await?;
     let mut out = Map::new();
     out.insert("accepted".into(), true.into());
     if debug {
