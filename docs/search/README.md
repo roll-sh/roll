@@ -90,11 +90,37 @@ own host), `Authorization: ApiKey base64(<name>:<password>)` or
 `{"error": "..."}` with 400, 404, 409, 413 (a console request over the cluster's body limit) or
 500.
 
+**Who reaches it** (docs/accounts.md, "Phase 2"). rolld's gate lets in the operator's token,
+admins and every signed-in person (`Access::User`, `crates/rolld/src/auth.rs`), and search scopes
+them (`api::Caller`):
+
+- A cluster has an `owner`: the signed-in person (`usr_…`) who made it. The operator's and
+  admins' clusters, and every cluster made before owners, have none (`null`). A branch keeps its
+  parent's owner, whoever cuts it.
+- The operator and admins see and manage every cluster.
+- Anyone else lists only their own clusters, creates and branches clusters that are theirs, and
+  gets 404 (`no search cluster <id>`, as for one that doesn't exist) from every
+  `/v1/search/clusters/{id}/…` route about another's, and from a create whose `parent` is
+  another's. The check reads the owner from the catalog after resolving the cluster, before a
+  fleet forwards the call to the cluster's owner node and again there (behind its own gate).
+- `GET /v1/search` gives a person versions, endpoint, defaults, history window and pricing, but
+  not where the node keeps its data (`storage`) or its node-wide figures (`loaded`, `cache`).
+- A person's own token (docs/permissions.md, "Users' own tokens") acts as them: it reaches search
+  (`search` is in `USER_REACH`) and sees only their clusters, narrowed again by its rules.
+- A person's workspace project stands only for their own clusters (`Workspace::trusts`: rolld's
+  `Owners` reads the owner), so previews, roll secrets' links and roll apps' links take only
+  those.
+- Nothing in the API is node-wide besides `GET /v1/search`'s figures: node settings and the
+  default repository are rolld's flags (`--search-*`), not routes. A cluster's data plane is
+  unchanged: the REST port with the cluster's own credentials, which give what any tenant gets.
+
+`crates/search-control/tests/control.rs` `people_see_only_their_own_clusters` covers it.
+
 | method | path | |
 | ------ | ---- | - |
-| GET | `/v1/search` | version, endpoint, storage, defaults, pricing, loaded clusters |
-| GET | `/v1/search/clusters` | list |
-| POST | `/v1/search/clusters` | create `{name, flavor?, parent?, at?, idle_timeout_s?, max_in_flight?, max_body_mb?, destructive_requires_name?}`; answers with `url`, `username`, `password` (once) and `id` — the shape `search-yaml run --cluster-hook` expects |
+| GET | `/v1/search` | version, endpoint, defaults, pricing; for the operator and admins also `storage`, `loaded` clusters and the `cache` |
+| GET | `/v1/search/clusters` | list (a person: their own) |
+| POST | `/v1/search/clusters` | create `{name, flavor?, parent?, at?, idle_timeout_s?, max_in_flight?, max_body_mb?, destructive_requires_name?}`; answers with `url`, `username`, `password` (once) and `id` — the shape `search-yaml run --cluster-hook` expects; `owner` is the signed-in person who isn't an admin, and a branch's is its parent's |
 | GET | `/v1/search/clusters/{id or name}` | settings, `status` (`loaded` with live index count and requests in flight, and live `docs` once every index is open, or `asleep` with `wakes_at`, unix seconds, when a background job is due to wake it), last metered `indices`/`docs`/`stored_bytes` and `own_bytes` (what a branch references that its parent's latest commit points don't; all of `stored_bytes` for a cluster that isn't a branch), `url`, `branches` |
 | PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`; the idle timeout, body limit and `max_in_flight` apply at once (also to a cluster that is waking up); a new flavor or `destructive_requires_name` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
 | DELETE | `/v1/search/clusters/{id}` | waits for running requests and for a wake in progress (which is locked out and unloaded, never left serving); branches keep working |
@@ -162,8 +188,10 @@ document bodies go out as typed (`1.0` stays a float to dynamic mapping, longs a
 exact, key order is kept), `_source` is cut from the response text, and responses are re-indented
 token by token (`lib/search-docs.ts`: `formatJson`, `hitSources`, `sourceCells`). Index names and mappings are fetched only when a completion needs
 them, so opening the console never wakes a sleeping cluster. The dashboard reaches `/v1/search`
-through rolld's API like every product (`VITE_ROLL_API`, the operator token from sign-in), and
-search clusters appear in workspace projects (the `search` resource kind).
+through rolld's API like every product (`VITE_ROLL_API`, the session from sign-in), and search
+clusters appear in workspace projects (the `search` resource kind). A person who isn't an admin
+sees their own clusters, and the Search page leaves out the storage location and the cache, which
+`GET /v1/search` doesn't give them.
 
 ## Metering and pricing
 
@@ -234,17 +262,14 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-1. **Signed-in people's own clusters** (accounts' phase 2 for search, docs/accounts.md: today a
-   signed-in user who isn't an admin gets 403 on all of `/v1/search`, so search is an admin-only
-   product in the dashboard, unlike Elastic Cloud's deployments that belong to their users). The
-   design, as roll secrets and the workspace already serve users: a cluster gets an `owner` (the
-   signed-in user who created it; the operator's and admins' clusters have none, and a branch
-   inherits its parent's); search's control-plane routes become `User` routes in rolld's gate, and
-   search scopes them by `roll_auth::SignedIn`: the list shows a user their own clusters, every
-   `/v1/search/clusters/{id}/…` route answers 404 for another's, creating one records the owner;
-   rolld's `roll_workspace::Owners` answers for `search` from that column, so a person's canvas
-   stands only for their own clusters (`Workspace::trusts`). The data plane is unchanged (a
-   cluster's own credentials). In progress on feature/search-users.
+1. **A cap on people's clusters: a decision for the user.** Signed-in people's own clusters
+   landed (accounts' phase 2 for search; "Who reaches it" under roll API). Nobody limits how many
+   clusters a person makes. A sleeping cluster costs only its storage, and an empty one costs a
+   catalog row, so a count cap isn't needed for cost. An always-on cluster (`idle_timeout_s: 0`)
+   holds memory on a node all the time, and a person can make as many as they like. Options: a
+   per-person cap on clusters (say 50) and on always-on ones (say 2), set by rolld flags; always-on
+   for admins only; or nothing until billing is per person (docs/accounts.md, "Billing"). Each
+   cap is a count in `create` and in `PATCH` (to `idle_timeout_s: 0`), against `list_owned`.
 2. **The Rally losses left by the full rerun** (Round 9, the tracks #29 sped up, is running: noaa,
    nested, nyc_taxis, geonames; then the ones below that weren't fixed. docs/benchmarks/search.md, Round 8: every Rally
    track against Elasticsearch 9.5.5 and OpenSearch 3.9 at `83fac5982`, three alternating rounds

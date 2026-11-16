@@ -652,12 +652,14 @@ impl Control {
             own_bytes: 0,
             loaded_on: None,
             wake_at: None,
+            owner: None,
         }
     }
 
-    /// A new, empty cluster. Nothing is written to object storage until it is first used.
-    pub async fn create(&self, name: &str, o: ClusterOptions) -> Result<SearchCluster> {
-        let c = Self::apply(self.fresh(name), o);
+    /// A new, empty cluster, `owner`'s (a signed-in person's `usr_…`; `None`: the operator's).
+    /// Nothing is written to object storage until it is first used.
+    pub async fn create(&self, name: &str, o: ClusterOptions, owner: Option<&str>) -> Result<SearchCluster> {
+        let c = Self::apply(SearchCluster { owner: owner.map(str::to_string), ..self.fresh(name) }, o);
         self.check(&c)?;
         self.check_free(name).await?;
         self.insert(&c).await?;
@@ -710,7 +712,8 @@ impl Control {
 
     /// A new cluster with `parent`'s indices, as they are now or as they were at `at` (Unix
     /// seconds, within the history window). Instant: the branch's commit points name the
-    /// parent's segments, nothing is copied. Settings come from the parent unless given. In a
+    /// parent's segments, nothing is copied. Settings and the owner come from the parent (settings
+    /// unless given). In a
     /// fleet, call it on the node holding the parent (the API forwards there): a loaded parent
     /// is committed first, so the branch sees every acknowledged write.
     pub async fn branch(&self, parent: &str, name: &str, at: Option<i64>, o: ClusterOptions) -> Result<SearchCluster> {
@@ -720,7 +723,7 @@ impl Control {
             self.check_window(&p, t, now)?;
         }
         let fresh = self.fresh(name);
-        // Settings and last-known figures from the parent; identity and secret of its own.
+        // Settings, owner and last-known figures from the parent; identity and secret of its own.
         let c = Self::apply(
             SearchCluster {
                 id: fresh.id,
@@ -1621,6 +1624,7 @@ mod tests {
             own_bytes: 0,
             loaded_on: None,
             wake_at: None,
+            owner: None,
         };
         let s = spec_for(&c);
         assert_eq!(s.name, "app");

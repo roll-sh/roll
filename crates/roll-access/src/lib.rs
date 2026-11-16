@@ -530,7 +530,7 @@ pub struct Access {
 
 /// What a user who isn't an admin reaches, and so what their tokens can (docs/accounts.md, "What a
 /// session can reach").
-pub const USER_REACH: [&str; 3] = ["code", "agents", "workspace"];
+pub const USER_REACH: [&str; 4] = ["code", "agents", "workspace", "search"];
 
 impl Access {
     pub fn open(target: &code_sql::Target, pg: code_sql::PgOptions, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
