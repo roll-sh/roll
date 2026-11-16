@@ -1,9 +1,10 @@
 //! MCP Apps (`io.modelcontextprotocol/ui`, SEP-1865; docs/mcp.md, "Apps"): for a host that
 //! declares it, read-only tools that answer rows show them in [`TABLE`], a view the host renders
-//! in a sandboxed iframe. The view gets the tool's result from its host only, has no network
-//! (its resource declares no domains), and writes every value as text. It calls no tools: what
-//! a person decides (an approval) is decided on roll's own pages, never from a view an agent's
-//! token could drive.
+//! in a sandboxed iframe, and `access_wait_approval` shows an approval waiting as a card. The view
+//! gets the tool's result from its host only, has no network (its resource declares no domains),
+//! and writes every value as text. It calls no tools: what a person decides (an approval) is
+//! decided on roll's own pages, which the view only asks the host to open (`ui/open-link`), never
+//! from a view an agent's token could drive.
 
 use serde_json::{Value, json};
 
@@ -23,7 +24,9 @@ pub fn declared(capabilities: &Value) -> bool {
 /// Whether a tool's result is rows a table shows: read-only tools that list, query, read or
 /// report.
 pub fn shows(name: &str, read_only: bool) -> bool {
-    read_only
+    // Waiting for a person: the card with roll's approval page, then what the call answered.
+    name == "access_wait_approval"
+        || read_only
         && ["_list_", "_query", "_logs", "_read", "_peek", "_usage", "_activity", "_metrics", "_events", "_history"]
             .iter()
             .any(|w| name.contains(w) || name.ends_with(w.trim_end_matches('_')))
@@ -61,6 +64,7 @@ mod tests {
     fn tables_go_on_tools_that_read_rows() {
         assert!(shows("postgres_query", true) && shows("apps_list_services", true) && shows("apps_logs", true));
         assert!(!shows("postgres_execute", false) && !shows("postgres_get_project", true));
+        assert!(shows("access_wait_approval", false));
         assert!(declared(&json!({ "extensions": { EXT: { "mimeTypes": [MIME] } } })) && !declared(&json!({})));
     }
 }
