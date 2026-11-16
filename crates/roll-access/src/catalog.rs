@@ -1156,7 +1156,9 @@ static ROWS: &[Row] = &[
     // A signing secret signs calls that mint vendor keys: shown only to who may also reveal.
     row("POST", "/v1/secrets/projects/{project}/rotators", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
     row("DELETE", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),
-    row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")),
+    // Lists only the keys the caller's grant reaches (`Grants::reaches_key`, each key's name as
+    // its index), so a rule limited to some keys sees those.
+    row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")).filters_itself(),
     row("POST", "/v1/secrets/projects/{project}/transit", "secrets", ADMIN, one(&["project"], "project")),
     // Each key's routes name it (`.index("name")`): a rule can grant one key
     // (`{"id": "prj_x", "index": "payments"}`); the list and making a key stay the project's.

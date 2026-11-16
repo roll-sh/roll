@@ -1405,7 +1405,8 @@ async fn a_rule_can_grant_one_encryption_key() {
     };
     assert_eq!(encrypt("payments").await, StatusCode::OK);
     assert_eq!(encrypt("billing").await, StatusCode::FORBIDDEN);
-    assert_eq!(d.call(&pay, Method::GET, "/v1/secrets/projects/prj_a/transit", None).await.0, StatusCode::FORBIDDEN);
+    // The list lets it through: roll secrets shows it only the keys it names (its own test).
+    assert_eq!(d.call(&pay, Method::GET, "/v1/secrets/projects/prj_a/transit", None).await.0, StatusCode::OK);
     // A rule on the whole project still reaches every key.
     let (all, _) = d.token(json!([{ "product": "secrets", "resources": [{ "id": "prj_a" }], "actions": { "write": "allow" } }]), json!({})).await;
     assert_eq!(d.call(&all, Method::POST, "/v1/secrets/projects/prj_a/transit/billing/encrypt", Some(json!({ "plaintext": "aGk=" }))).await.0, StatusCode::OK);

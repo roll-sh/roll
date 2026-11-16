@@ -140,13 +140,17 @@ impl Selector {
         match self {
             Selector::Id { id, index } => {
                 r.id.as_deref() == Some(id.as_str())
-                    && match index {
-                        None => true,
-                        Some(mine) => r.index.as_deref().is_some_and(|asked| match r.product.as_str() {
+                    && match (index, r.index.as_deref()) {
+                        (None, _) => true,
+                        (Some(mine), Some(asked)) => match r.product.as_str() {
                             // A request names one key, literally: a `*` or `,` in a key's name names none.
                             "secrets" => key_name(asked) && keys_cover(mine, asked),
                             _ => index_covers(mine, asked),
-                        }),
+                        },
+                        // A list that answers only what the grant reaches, item by item (it asks
+                        // `Grant::allows` with each one's index): a rule limited to some indices
+                        // matches it too.
+                        (Some(_), None) => r.filters_itself,
                     }
             }
             Selector::Project { project } => r.project.as_deref() == Some(project) || r.also_in.contains(project),
@@ -552,6 +556,11 @@ mod tests {
         let r = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_a" }], "environments": ["staging"], "paths": ["/api"], "actions": { "read": "allow" } }));
         let at = |id: &str, filters_itself: bool| Target::One(Resource { filters_itself, ..Resource::new("secrets", id) });
         assert!(!r.matches(&at("prj_a", false)) && r.matches(&at("prj_a", true)) && !r.matches(&at("prj_b", true)));
+        // A rule limited to one key matches the list too (it shows that key alone), never another
+        // key's request.
+        let one_key = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_a", "index": "payments" }], "actions": { "read": "allow" } }));
+        let key = |name: &str| Target::One(Resource { index: Some(name.into()), ..Resource::new("secrets", "prj_a") });
+        assert!(one_key.matches(&at("prj_a", true)) && !one_key.matches(&at("prj_a", false)) && one_key.matches(&key("payments")) && !one_key.matches(&key("billing")));
     }
 
     /// Resources, environments and paths narrow a rule; the most permissive matching rule wins;

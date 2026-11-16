@@ -314,10 +314,15 @@ impl Secrets {
         Ok(Stored { v, key: URL_SAFE_NO_PAD.encode(sealed), at: self.db.now_ms()?, imported: brought.is_some(), vault: brought.and_then(|b| b.vault) })
     }
 
+    /// The project's keys the caller may read: all of them with read on the project, else those
+    /// its grant names (403 when that's none).
     pub fn transit_keys(&self, project: &str, caller: &Caller) -> Result<Vec<TransitKey>> {
-        caller.need(Action::Read, &Scope::project(project))?;
+        let whole = caller.allows(Action::Read, &Scope::project(project));
+        if !whole && !caller.grants.sees(project) {
+            caller.need(Action::Read, &Scope::project(project))?;
+        }
         self.project(project)?;
-        self.db.read(|c| {
+        let keys: Vec<TransitKey> = self.db.read(|c| {
             Ok(c.query("SELECT id, name, versions, min_decrypt_version, created_at, created_by FROM transit_keys WHERE project_id = ? ORDER BY name", [project], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get(4)?, r.get(5)?))
             })?
@@ -327,7 +332,15 @@ impl Secrets {
                 TransitKey { id, name, latest_version: versions.last().map_or(0, |v| v.version), min_decrypt_version: min as u32, versions, created_at, created_by }
             })
             .collect())
-        })
+        })?;
+        if whole {
+            return Ok(keys);
+        }
+        let keys: Vec<TransitKey> = keys.into_iter().filter(|k| caller.grants.reaches_key(Action::Read, project, &k.name)).collect();
+        if keys.is_empty() {
+            caller.need(Action::Read, &Scope::project(project))?;
+        }
+        Ok(keys)
     }
 
     pub fn add_transit_key(&self, project: &str, name: &str, brought: Option<Brought>, caller: &Caller) -> Result<TransitKey> {
@@ -353,7 +366,7 @@ impl Secrets {
 
     /// A new version that encryptions use from now on.
     pub fn rotate_transit_key(&self, project: &str, name: &str, brought: Option<Brought>, caller: &Caller) -> Result<TransitKey> {
-        caller.need(Action::Admin, &Scope::project(project))?;
+        caller.need_key(Action::Admin, project, name)?;
         let (id, latest, vault) = self.transit_open(project, name).map(|o| (o.id.clone(), o.latest().0, o.vault))?;
         if let Some(n) = brought.as_ref().and_then(|b| b.vault)
             && vault.iter().any(|(vv, _)| *vv == n)
@@ -380,7 +393,7 @@ impl Secrets {
     /// Retire every version older than `min` (it no longer decrypts; ciphertexts under it should
     /// be rewrapped first).
     pub fn set_min_decrypt_version(&self, project: &str, name: &str, min: u32, caller: &Caller) -> Result<TransitKey> {
-        caller.need(Action::Admin, &Scope::project(project))?;
+        caller.need_key(Action::Admin, project, name)?;
         let latest = self.transit_open(project, name)?.latest().0;
         if !(1..=latest).contains(&min) {
             return Err(Error::BadRequest(format!("min_decrypt_version is 1–{latest}")));
@@ -395,7 +408,7 @@ impl Secrets {
 
     /// Delete a key for good: what it encrypted can't be decrypted again. `confirm` repeats its name.
     pub fn delete_transit_key(&self, project: &str, name: &str, confirm: &str, caller: &Caller) -> Result<()> {
-        caller.need(Action::Admin, &Scope::project(project))?;
+        caller.need_key(Action::Admin, project, name)?;
         if confirm != name {
             return Err(Error::BadRequest(format!("deleting {name} makes everything it encrypted unreadable for good: confirm with its name")));
         }
@@ -410,7 +423,7 @@ impl Secrets {
     }
 
     pub fn transit_encrypt(&self, project: &str, name: &str, items: Vec<Plain>, caller: &Caller) -> Result<Vec<String>> {
-        caller.need(Action::Write, &Scope::project(project))?;
+        caller.need_key(Action::Write, project, name)?;
         batch_limits(items.iter().map(|i| i.plaintext.len()))?;
         let key = self.transit_open(project, name)?;
         items
@@ -427,7 +440,7 @@ impl Secrets {
     }
 
     pub fn transit_decrypt(&self, project: &str, name: &str, items: Vec<Cipher>, caller: &Caller) -> Result<Vec<Value>> {
-        caller.need(Action::Reveal, &Scope::project(project))?;
+        caller.need_key(Action::Reveal, project, name)?;
         batch_limits(items.iter().map(|i| i.ciphertext.len()))?;
         let key = self.transit_open(project, name)?;
         let out: Result<Vec<Value>> = items
@@ -449,7 +462,7 @@ impl Secrets {
 
     /// Re-encrypt under the newest version, without the plaintext leaving roll.
     pub fn transit_rewrap(&self, project: &str, name: &str, items: Vec<Cipher>, caller: &Caller) -> Result<Vec<String>> {
-        caller.need(Action::Write, &Scope::project(project))?;
+        caller.need_key(Action::Write, project, name)?;
         batch_limits(items.iter().map(|i| i.ciphertext.len()))?;
         let key = self.transit_open(project, name)?;
         let out: Result<Vec<String>> = items
@@ -469,7 +482,7 @@ impl Secrets {
     /// A fresh 256-bit data key and its ciphertext under this key, for envelope encryption done
     /// locally: keep the ciphertext, decrypt it when the data must be read.
     pub fn transit_datakey(&self, project: &str, name: &str, context: Option<String>, caller: &Caller) -> Result<Json> {
-        caller.need(Action::Reveal, &Scope::project(project))?;
+        caller.need_key(Action::Reveal, project, name)?;
         check_context(context.as_deref())?;
         let key = self.transit_open(project, name)?;
         let mut data = zeroize::Zeroizing::new([0u8; 32]);
@@ -482,28 +495,28 @@ impl Secrets {
 
 impl Secrets {
     pub fn transit_sign(&self, project: &str, name: &str, items: Vec<Input>, caller: &Caller) -> Result<Vec<String>> {
-        caller.need(Action::Write, &Scope::project(project))?;
+        caller.need_key(Action::Write, project, name)?;
         batch_limits(items.iter().map(|i| i.input.len()))?;
         let key = self.transit_open(project, name)?;
         items.iter().map(|i| key.sign(&decode_input(&i.input)?)).collect()
     }
 
     pub fn transit_verify(&self, project: &str, name: &str, items: Vec<Signed>, caller: &Caller) -> Result<Vec<bool>> {
-        caller.need(Action::Read, &Scope::project(project))?;
+        caller.need_key(Action::Read, project, name)?;
         batch_limits(items.iter().map(|i| i.input.len() + i.signature.len()))?;
         let key = self.transit_open(project, name)?;
         items.iter().map(|i| key.verify(&decode_input(&i.input)?, &i.signature)).collect()
     }
 
     pub fn transit_hmac(&self, project: &str, name: &str, items: Vec<Input>, caller: &Caller) -> Result<Vec<String>> {
-        caller.need(Action::Write, &Scope::project(project))?;
+        caller.need_key(Action::Write, project, name)?;
         batch_limits(items.iter().map(|i| i.input.len()))?;
         let key = self.transit_open(project, name)?;
         items.iter().map(|i| Ok(key.hmac(&decode_input(&i.input)?))).collect()
     }
 
     pub fn transit_hmac_verify(&self, project: &str, name: &str, items: Vec<Signed>, caller: &Caller) -> Result<Vec<bool>> {
-        caller.need(Action::Write, &Scope::project(project))?;
+        caller.need_key(Action::Write, project, name)?;
         batch_limits(items.iter().map(|i| i.input.len() + i.signature.len()))?;
         let key = self.transit_open(project, name)?;
         items.iter().map(|i| key.hmac_verify(&decode_input(&i.input)?, &i.signature)).collect()
@@ -512,7 +525,7 @@ impl Secrets {
     /// Every version's public signing key, retired ones too (old signatures may still need
     /// checking elsewhere).
     pub fn transit_public(&self, project: &str, name: &str, caller: &Caller) -> Result<Vec<PublicKey>> {
-        caller.need(Action::Read, &Scope::project(project))?;
+        caller.need_key(Action::Read, project, name)?;
         let key = self.transit_open(project, name)?;
         key.versions
             .iter()

@@ -1856,6 +1856,43 @@ async fn reads_unlike_the_reader_are_alerted() {
     assert_eq!(logged.as_array().map(Vec::len), Some(2), "{logged}");
 }
 
+/// A roll-access rule naming one encryption key (`{id: "prj_…", index: "payments"}`) reaches that
+/// key alone: the list shows it, its operations work, another key's are refused.
+#[tokio::test]
+async fn a_rule_naming_one_encryption_key_reaches_it_alone() {
+    use roll_auth::scope::{Action as A, Effect, Resources, Rule, Scope, Selector};
+    let api = Api::new().await;
+    for name in ["payments", "billing"] {
+        api.ok(Method::POST, "/transit", Some(json!({ "name": name }))).await;
+    }
+    let rule = Rule {
+        product: "secrets".into(),
+        resources: Resources::Some(vec![Selector::Id { id: api.project.clone(), index: Some("payments".into()) }]),
+        environments: None,
+        paths: None,
+        actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Write, Effect::Allow)]),
+    };
+    let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_pay".into(), name: "pay".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
+    let call = |method: Method, path: &str, body: Option<Value>| {
+        let mut req = Request::builder().method(method).uri(format!("/v1/secrets/projects/{}{path}", api.project)).header("content-type", "application/json").body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).unwrap();
+        req.extensions_mut().insert(roll_auth::Operator);
+        req.extensions_mut().insert(grant.clone());
+        let router = api.router.clone();
+        async move {
+            let resp = router.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+        }
+    };
+    let (s, keys) = call(Method::GET, "/transit", None).await;
+    let names: Vec<&str> = keys.as_array().map(|k| k.iter().filter_map(|k| k["name"].as_str()).collect()).unwrap_or_default();
+    assert_eq!((s, names), (StatusCode::OK, vec!["payments"]), "{keys}");
+    let plain = json!({ "plaintext": "aGk=" });
+    assert_eq!(call(Method::POST, "/transit/payments/encrypt", Some(plain.clone())).await.0, StatusCode::OK);
+    assert_eq!(call(Method::POST, "/transit/billing/encrypt", Some(plain)).await.0, StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
     use roll_auth::scope::{Action as A, Effect, Resources, Rule, Scope, Selector};

@@ -87,6 +87,12 @@ pub trait Grants: Send + Sync + std::fmt::Debug {
     fn everything(&self) -> bool {
         false
     }
+    /// Whether the caller may `action` encryption key `name` of `project` (roll-access's rules
+    /// can name one key: `{id: "prj_…", index: "<name>"}`). Others answer for the whole project.
+    fn reaches_key(&self, action: Action, project: &str, name: &str) -> bool {
+        let _ = name;
+        self.allows(action, &Scope::project(project))
+    }
 }
 
 /// A signed-in person who isn't an admin (docs/accounts.md): everything on the projects they own,
@@ -250,6 +256,17 @@ impl Grants for TokenScope {
     }
 }
 
+fn scope_action(action: Action) -> roll_auth::scope::Action {
+    use roll_auth::scope;
+    match action {
+        Action::Read => scope::Action::Read,
+        Action::Reveal => scope::Action::Reveal,
+        Action::Write => scope::Action::Write,
+        Action::Delete => scope::Action::Delete,
+        Action::Admin => scope::Action::Admin,
+    }
+}
+
 /// A roll-access grant (`rlt_…` tokens and OAuth connections, docs/permissions.md): rolld's gate
 /// classified the request already; this answers the second resources the product checks itself.
 #[derive(Debug)]
@@ -258,16 +275,17 @@ pub struct GrantGrants(pub roll_auth::Grant);
 impl Grants for GrantGrants {
     fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
         use roll_auth::scope;
-        let action = match action {
-            Action::Read => scope::Action::Read,
-            Action::Reveal => scope::Action::Reveal,
-            Action::Write => scope::Action::Write,
-            Action::Delete => scope::Action::Delete,
-            Action::Admin => scope::Action::Admin,
-        };
+        let action = scope_action(action);
         let r = scope::Resource { product: "secrets".into(), project: Some(at.project.into()), environment: at.env.map(Into::into), path: at.path.map(Into::into), ..Default::default() };
         // `ask` pauses a whole request at the gate; inside the product it's a no.
         self.0.allows(&r, action) == scope::Outcome::Allow
+    }
+
+    /// One key, as rolld's gate judges a request naming it (the project's id, the key as its index).
+    fn reaches_key(&self, action: Action, project: &str, name: &str) -> bool {
+        use roll_auth::scope;
+        let r = scope::Resource { product: "secrets".into(), id: Some(project.into()), project: Some(project.into()), index: Some(name.into()), ..Default::default() };
+        self.allows(action, &Scope::project(project)) || self.0.allows(&r, scope_action(action)) == scope::Outcome::Allow
     }
 
     /// Code read on the repository, as it sits on `project`'s canvas.
@@ -339,6 +357,15 @@ impl Caller {
 
     pub fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
         self.grants.allows(action, at)
+    }
+
+    /// As [`Caller::need`], for encryption key `name` of `project`: a grant limited to that key
+    /// reaches it too.
+    pub fn need_key(&self, action: Action, project: &str, name: &str) -> crate::Result<()> {
+        if self.grants.reaches_key(action, project, name) {
+            return Ok(());
+        }
+        self.need(action, &Scope::project(project))
     }
 
     pub fn need(&self, action: Action, at: &Scope<'_>) -> crate::Result<()> {
