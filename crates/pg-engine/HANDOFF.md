@@ -13789,3 +13789,118 @@ debug builds.
   read) is rare and the placement per load epoch needs the turn's page order rebuilt for
   several epochs at once; measure a modelled-insert run (`bulk` lane C) before and after the
   push if it is built.
+
+## Behaviour gaps closed by agent 240 (2026-11-15)
+
+Recorded against a private PostgreSQL 18.6 (the reference image `postgres@sha256:77f58511...`).
+The kept cases are six new ones in the wire test `protocol_cases` (`copy_csv_quote_lines`,
+`loc_routines`, `plf_cte_unread`, `explain_widths`, `info_schema_rows`, `stat_counts`;
+`tests/data/protocol_cases.out` recorded again with `PROTOCOL_RECORD`, the 207 old cases
+unchanged). The exploratory probes are in `~/.cache/a240/probe`: 233's sets (774 cases) plus
+new ones, `all.sh <port> <label>` runs them all (raw protocol `run.py`, several connections
+`mc.py`, psql 18's backslash commands `psqld.sh`), `cmp.py` / `showdiff.py` compare.
+
+- **233's 25 differing cases: 23 closed.** Error locations two PostgreSQL routines share
+  (`Error::routine_at` at the raise site, files in `error_location::ROUTINE_FILES`):
+  RollbackToSavepoint / ReleaseSavepoint, checkInsertTargets, transformUpdateTargetList,
+  ATExecDropColumn, ComputeIndexAttrs (key / "named in key"), LookupFuncWithArgs (by kind and
+  message), PerformPortalClose, find_option (SHOW, current_setting), RangeVarGetRelidExtended
+  (GRANT's lookup, qualified or not), transformTypeCast, every array_in "malformed array
+  literal" site (ReadArrayDimensions, ReadArrayStr, ReadArrayToken, array_in, by the parser's
+  state, not the detail: two details have two sites each), date_pli / date_mii,
+  datetime_timestamp, timestamp_pl_interval and timestamptz_pl_interval_internal (each stage's
+  line), interval_um_internal, interval_pl / interval_mi and finite_interval_pl / _mi;
+  parse_and_validate_value's range error (a KNOWN suffix ending in a quote now matches inside
+  the message). An unterminated CSV quote's line, and every CSV line number after a quoted end
+  of line: CopyReadLineText adds the quoted ends of lines to cur_lineno, of the end-of-line
+  type the first record ended with, only once that is known (so none in the first record)
+  (`CopyInParsed::csv_eol`, `csv_quoted_lines`). An unread CTE (a SELECT no RangeVar names)
+  is bound without running its PL/pgSQL calls (SS_process_ctes never plans it). Left: the
+  output of a view or sub-select nothing reads still runs its calls (`plf` `view`), and
+  `select * from t0, fset(0)` with an empty t0 (PostgreSQL's plan runs the function scan
+  first).
+- **pg_stat_activity per transaction**: already PostgreSQL's (15 probe cases, `sa.py`: cache,
+  none and snapshot modes, pg_stat_clear_snapshot, a SET of stats_fetch_consistency in the
+  transaction, savepoints, an aborted transaction, an implicit block, the backend's own row,
+  pg_stat_get_backend_* functions); nothing changed.
+- **Probed and matching already**: psql 18's `\d` family, 58 commands over tables, views,
+  matviews, sequences, indexes, partitions, functions, types, domains, roles, privileges,
+  extensions, statistics objects, publications (`psqld.sh`); pg_get_indexdef /
+  constraintdef / viewdef (pretty, wrapped) / functiondef / function_arguments / triggerdef /
+  ruledef / expr / partkeydef / statisticsobjdef, pg_sequence_parameters (`cat1.py`);
+  information_schema's 29 views but two; DDL dependency errors' DETAIL lists and their order,
+  CASCADE NOTICEs (`dep.py`: texts all matched, only locations differed, now matched);
+  pg_settings' 380 rows but three.
+- **Fixed in those areas**: information_schema.columns lists no materialized view's
+  columns (relkind r, v, f, p), table_constraints.nulls_distinct is NULL but for UNIQUE;
+  views' updatability analysis (information_schema.views, columns) no longer runs a view's
+  PL/pgSQL calls (`view_updatability` binds with `skip_procs`); gucs.tsv's last row had a
+  literal `\n` in zero_damaged_pages' source; pg_settings' tcp_keepalives_* go through their
+  show hooks as SHOW does (the socket's values on TCP); dependency errors' and NOTICEs'
+  locations (reportDependentObjects' 1156 / 1165 / 1176, findDependentObjects 787 or
+  reportDependentObjects 1014 for "requires it", `depend::Required::at`; DropRole).
+- **EXPLAIN** (52 + 78 + 20 shapes, `ex1`..`ex5`): a CTE's (and work table's) columns are sized
+  by type (set_rel_width finds no attr_widths for an RTE_CTE: get_typavgwidth, `cte_col_width`);
+  a window's PARTITION BY / ORDER BY keys the select list lacks count in the WindowAgg's
+  width; INSERT ... SELECT of a plain select pulls the constant up, so its coercion folds
+  (`'0'::numeric`, no operator cost); WITH ORDINALITY's bigint in the Function Scan width; a
+  Bitmap Heap Scan nothing above reads has an empty target list (use_physical_tlist refuses
+  an empty BitmapHeapPath) and orders its target as a scan (a joined relation's ctid
+  first); an inheritance Append's width is its members' average by rows; MERGE's join type
+  counts only actions other than DO NOTHING (transform_MERGE_to_join).
+  Still differing: a base relation proven empty by its own false qual (PostgreSQL: width 0,
+  the dummy rel's size never set; the engine its columns' widths), `select 1 where false`
+  (rows 1), a UNION ALL arm proven empty stays in the Append, an Append's width under
+  count(*); plan choices: windows and count(DISTINCT) over a presorted index scan, MergeAppend
+  of index-only scans for UNION ... ORDER BY LIMIT, grouping sets' estimate; a CTE scan's
+  filter estimate (199 vs 200), a Recursive Union's cost in the last digit.
+- **pg_locks**: another backend's transaction keeps its virtualxid row once it has an xid
+  (the engine's one lock entry for both showed only the transactionid); CREATE TABLE and
+  CREATE INDEX hold AccessExclusiveLock on the new relation (its TOAST table and index, its
+  constraints' indexes: `lock_new_relation`). Still differing: the object locks PostgreSQL
+  18 takes on pg_type / pg_namespace entries at CREATE / DROP TABLE, and the xid a waiting
+  ALTER TABLE already has.
+- **pg_stat_***: an index build scans the table (seq_scan) at CREATE TABLE and TRUNCATE too,
+  one per index (it counted only CREATE INDEX's); ON CONFLICT's arbiter check is an index
+  scan of each arbiter (idx_scan), the conflicting row read and fetched through it. Still
+  differing: pg_statio heap / index block counts of inserts (the engine counts none),
+  idx_tup_read of a dead index entry an update left (PostgreSQL reads 2, the engine 1);
+  COPY FROM PROGRAM is refused (by design).
+- **Not done**: 233's other items: a catalog change replans every named statement
+  (PostgreSQL invalidates by dependency; doing it needs each plan's relation, function and
+  type dependencies and the objects each catalog version changed, a stale plan being a wrong
+  answer, so not attempted in this round), index expressions' immutable calls once per
+  relcache load (the engine runs them per row), and the scroll cursor after page splits
+  (233's design stands: not built).
+
+Measured (lane A, plain dist builds: base `7c1493375`, new = these commits on it, `199a6e066`;
+8 clients, alternating pairs, user instructions per operation; `~/.cache/a240/runs`,
+`pairs.py <tag> [a b]`). Point reads, on a quiet lane (`gD-point`, six pairs, 0.13 to 0.27
+cores of foreign load): **+0.16%** at the median (-0.27% to +1.72%), cycles +2.2%, CPU per
+read +0.3%. An A/A control on the same lane and hour (`gC-aa`, the base binary against a copy
+of itself, five clean pairs): -0.26% (-1.75% to +0.12%), cycles +0.2%. An earlier round on a
+busy lane (`gB-point`, other sessions' unpinned builds at 75-100% on the lane's CPUs) had a
+median of +1.38% over eight pairs under a core of foreign load (-1.63% to +3.69%); its
+instructions:u profiles (`prC`: base, new, base again, each under 0.25 cores) put base-to-new
+at +3.5% and base-to-base at +3.1%, the difference spread over code this round doesn't touch
+(sst Block::read / seek, run_query, WireSink::row_stored, log_sent) and no symbol of it: noise
+of the run order and the machine, not this change. Nothing on the point-read or short-write
+path runs any changed code (the new error sites are `#[cold]` constructors on the error side,
+the rest is DDL, COPY, EXPLAIN, catalog views and ON CONFLICT); the cycles' +2.2% with equal
+instructions is code placement (the JCC layout effect, `ai-server` Cascade Lake), not work.
+Short transactions (`gB-short`, `gD-short`): -3.5% at the median of five pairs under a core of
+foreign load (-7.5% to +12.7%; that pair's base run was 12% below every other base run), the
+other seven pairs flagged (1.3 to 3.7 cores).
+
+Verification train (`TRAIN_NO_CHECKOUT=1`, on `32ce626c0`, these commits rebased onto
+`bf9366246`; a first try during the night failed every step when the disk filled): clippy 0
+(20 warnings, the base's), crash, power-cut, crash-power (sync and async) 0; regress 51,148 of
+51,150, newly differing 0; isolation 1647/1648 (intra-grant-inplace as before); pg_dump 14609
+passed. Release 101: one case, this round's `explain_widths`: two of its setup's ANALYZE
+replies came after the 400 ms quiet the protocol helper waits on a loaded machine and showed up
+in the first step's output; the helper now waits for each setup query's ReadyForQuery
+(`c7adb84dc`). Debug: the machine's build-cleanup timer removed `.test-build/target` (31 GB)
+mid-step (its rule skips a worktree with a process inside it; it removed this one regardless),
+37 of 65 targets ran and passed before the rest's binaries were gone. Both steps ran again on
+`c7adb84dc`: RERUN-RESULTS.
+
