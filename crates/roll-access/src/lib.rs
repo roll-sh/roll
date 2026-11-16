@@ -18,6 +18,8 @@ pub mod leaks;
 pub mod oauth;
 pub mod rate;
 pub mod sinks;
+pub mod client_credentials;
+mod clients_api;
 pub mod redact;
 pub mod store;
 pub mod tighten;
@@ -99,10 +101,10 @@ fn checksum(body: &str) -> String {
     (0..6).rev().map(|i| ALPHABET[((c >> (i * 5)) & 31) as usize] as char).collect()
 }
 
-/// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`) and other
-/// products' made the same way ([`new_secret`]): apps' deploy hooks (`rlk_`). (`rlh_` is roll code's
-/// automations' inbound webhook secrets: another shape, not ours.)
-pub const SECRET_PREFIXES: [&str; 4] = ["rlt_", "rlo_", "rlf_", "rlk_"];
+/// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`), machine
+/// clients' (`rlc_`), and other products' made the same way ([`new_secret`]): apps' deploy hooks
+/// (`rlk_`). (`rlh_` is roll code's automations' inbound webhook secrets: another shape, not ours.)
+pub const SECRET_PREFIXES: [&str; 5] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_"];
 
 /// Whether `s` is shaped like a roll secret ([`SECRET_PREFIXES`]) whose checksum holds: what
 /// scanners look for. Secrets made before checksums don't pass, but still work.

@@ -78,6 +78,11 @@ pub enum Token {
     Whoami,
     /// The products, actions and presets the builder offers.
     Presets,
+    /// Machine clients: automation with no person (CI, a scheduled agent) that trades a JWT it
+    /// signed with its key, or a secret, for an hour's token its rules bound (OAuth client
+    /// credentials). The operator's, or, signed in, a person's own acting as them.
+    #[command(subcommand)]
+    Client(MachineCmd),
     /// roll's rules for every token: `--max-days 90`, `--require-expiry`, `--no-limit`,
     /// `--max-idle-days 60` (`0` for no idle limit); nothing to show them.
     Policy {
@@ -114,6 +119,152 @@ pub struct Create {
     /// What the rules don't allow asks you instead of being refused.
     #[arg(long)]
     ask_otherwise: bool,
+}
+
+#[derive(Subcommand)]
+pub enum MachineCmd {
+    /// Make a machine client with rules, as a token has. With --public-key it proves itself with
+    /// JWTs its private key signs (nothing secret is kept); without, roll makes a secret, shown once.
+    ///
+    /// Examples:
+    ///   roll token client create nightly --preset read-only --public-key ci.pub.pem
+    ///   roll token client create deploy --product apps --allow read,deploy --expires 90d
+    Create(Box<ClientCreate>),
+    /// List machine clients, newest first.
+    #[command(alias = "ls")]
+    List,
+    /// Revoke a machine client: its tokens stop working at once, and it gets no more.
+    Revoke { id: String },
+    /// A new credential for a machine client, keeping its id and rules: a new key with
+    /// --public-key, else a new secret (shown once). The old one stops now, with the tokens it
+    /// got, unless --keep-old keeps it working while the automation moves over.
+    ///
+    /// Examples:
+    ///   roll token client rotate mcl_… --keep-old 1h
+    ///   roll token client rotate mcl_… --public-key ci-2026.pub.pem
+    Rotate {
+        id: String,
+        /// Its new public key: a PEM file (Ed25519 or P-256) or a JWK.
+        #[arg(long)]
+        public_key: Option<std::path::PathBuf>,
+        /// The old credential keeps working this long (1h, 2d; at most 7d).
+        #[arg(long)]
+        keep_old: Option<String>,
+    },
+}
+
+#[derive(Args)]
+pub struct ClientCreate {
+    /// A name you'll recognise it by ("nightly report", "deploy from CI").
+    name: String,
+    #[command(flatten)]
+    rules: RuleArgs,
+    /// Lifetime: 30d, 12h, 90m, or never (default 30d).
+    #[arg(long, default_value = "30d")]
+    expires: String,
+    /// Its public key: a PEM file (Ed25519 or P-256) or a JWK (Ed25519, P-256 or RSA).
+    #[arg(long)]
+    public_key: Option<std::path::PathBuf>,
+    /// Addresses its tokens may be used from (CIDRs), repeatable.
+    #[arg(long = "ip", value_delimiter = ',')]
+    ip_allow: Vec<String>,
+    /// Requests a minute its tokens may make (per node).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    rate: Option<u32>,
+}
+
+/// A public key file as a JWK: a JWK as is, or a PEM `PUBLIC KEY` (SubjectPublicKeyInfo) for
+/// Ed25519 or P-256, whose encodings are fixed: a known prefix, then the key's bytes.
+fn public_jwk(text: &str) -> anyhow::Result<Value> {
+    use base64::Engine;
+    let text = text.trim();
+    if text.starts_with('{') {
+        return serde_json::from_str(text).context("a JWK is a JSON object");
+    }
+    if text.contains("PRIVATE KEY") {
+        bail!("that's a private key: give roll only the public one (openssl pkey -in key.pem -pubout)");
+    }
+    let body: String = text.lines().filter(|l| !l.starts_with("-----")).collect();
+    let der = base64::engine::general_purpose::STANDARD.decode(body.trim()).context("not a PEM public key")?;
+    let url = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    const ED25519: &[u8] = &[0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+    const P256: &[u8] = &[0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04];
+    if let Some(x) = der.strip_prefix(ED25519).filter(|x| x.len() == 32) {
+        return Ok(json!({ "kty": "OKP", "crv": "Ed25519", "x": url(x) }));
+    }
+    if let Some(xy) = der.strip_prefix(P256).filter(|xy| xy.len() == 64) {
+        return Ok(json!({ "kty": "EC", "crv": "P-256", "x": url(&xy[..32]), "y": url(&xy[32..]) }));
+    }
+    bail!("an Ed25519 or P-256 PEM public key (for RSA, give its JWK)")
+}
+
+async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<()> {
+    match cmd {
+        MachineCmd::Create(c) => {
+            let jwk = match &c.public_key {
+                Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
+                None => None,
+            };
+            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow, "rate_per_minute": c.rate, "public_jwk": jwk });
+            let made = api.post("/v1/access/clients", body).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&made)?);
+                return Ok(());
+            }
+            print_grant(&made["grant"]);
+            println!("client_id:      {}\ntoken endpoint: {}", s(&made["client_id"]), s(&made["token_endpoint"]));
+            if let Some(secret) = made["client_secret"].as_str() {
+                println!("\n{secret}\n");
+                eprintln!("Copy the secret now: it isn't shown again. Trade it for a token with grant_type=client_credentials (client_secret_basic or client_secret_post).");
+            } else {
+                eprintln!("Sign a JWT with its private key (iss and sub the client_id, aud the token endpoint, a new jti, at most 5 minutes to live) and send it as client_assertion with grant_type=client_credentials.");
+            }
+        }
+        MachineCmd::List => {
+            let list = api.get("/v1/access/clients").await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&list)?);
+                return Ok(());
+            }
+            let list = list.as_array().cloned().unwrap_or_default();
+            if list.is_empty() {
+                println!("no machine clients yet: roll token client create <name> --preset read-only --public-key key.pub.pem");
+            }
+            for c in &list {
+                println!("{}  {}", s(&c["client_id"]), if c["signs_with_key"] == true { "signs with a key" } else { "a secret" });
+                print_grant(&c["grant"]);
+            }
+        }
+        MachineCmd::Rotate { id, public_key, keep_old } => {
+            let jwk = match &public_key {
+                Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
+                None => None,
+            };
+            let keep = keep_old.as_deref().map(|k| span(k, "--keep-old")).transpose()?.flatten().map(|ms| ms / 1000);
+            let made = api.post(&format!("/v1/access/clients/{}/rotate", urlencoding::encode(&id)), json!({ "public_jwk": jwk, "keep_old_for_s": keep })).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&made)?);
+                return Ok(());
+            }
+            let old = if keep.is_some_and(|s| s > 0) { "The old one keeps working for now." } else { "The old one stopped working, with the tokens it got." };
+            match made["client_secret"].as_str() {
+                Some(secret) => {
+                    println!("{secret}");
+                    eprintln!("{old} Copy the new secret now: it isn't shown again.");
+                }
+                None => eprintln!("{id} signs with the new key now. {old}"),
+            }
+        }
+        MachineCmd::Revoke { id } => {
+            let r = api.call(reqwest::Method::DELETE, &format!("/v1/access/clients/{}", urlencoding::encode(&id)), None).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            } else {
+                println!("revoked {id}: its tokens stopped working");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What a token may do, as flags (`create` and `edit`).
@@ -688,6 +839,7 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
                 println!("tokens live {days}{must}{idle}");
             }
         }
+        Token::Client(cmd) => machine(api, json_out, cmd).await?,
         Token::Presets => {
             let c = api.get("/v1/access/catalog").await?;
             if json_out {
