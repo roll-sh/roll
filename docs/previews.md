@@ -1571,7 +1571,9 @@ Ranked by what a person notices first. Done so far:
 5. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
-   name (fixed); if it comes back, log both starts' container ids.
+   name (fixed), and a preview's services starting at once each made its egress proxy under the
+   one name (fixed 2026-11-16: one make at a time per preview); if it comes back, log both
+   starts' container ids.
 
 
 Looked at and kept: previews' copy of a preview's variables in its roll apps environment, next
