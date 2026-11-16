@@ -11,6 +11,7 @@ import { ErrorNote, field, sized, ghost, primary, useLoad } from "./ui";
 /** Link kinds that aren't canvas resources: roll secrets' own registries. */
 const OWN_KINDS: Record<string, { icon: LucideIcon; label: string }> = {
   rotator: { icon: RotateCw, label: "Rotator" },
+  saas: { icon: RotateCw, label: "SaaS rotator" },
   aws: { icon: Cloud, label: "AWS role" },
   aws_iam_user: { icon: KeyRound, label: "IAM user" },
   outside_database: { icon: Database, label: "Database outside roll" },

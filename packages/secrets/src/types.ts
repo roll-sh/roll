@@ -290,6 +290,11 @@ export type NewCloudAccount = { name: string } & ({ cloud: "gcp"; audience: stri
 /** A Postgres, MySQL, Redis or MongoDB server outside roll: two login roles that take turns (managed), a group dynamic logins join, or both; the admin URL stays sealed. */
 export type OutsideDatabase = { id: string; name: string; host: string; roles: string[]; group?: string; ca?: string; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
+/** A vendor roll issues and revokes keys at itself (`saas` links): its account, never the credential. */
+export type SaasVendor = "sendgrid" | "twilio" | "okta" | "entra" | "auth0";
+export type SaasRotator = { id: string; name: string; vendor: SaasVendor; target: Record<string, unknown>; created_at: number; created_by: string };
+/** `credential` is sealed at once and never answered. */
+export type NewSaasRotator = { name: string; vendor: SaasVendor; target: Record<string, unknown>; credential: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 
 /** A `roll-seal-v1` box (base64url fields): X25519 to the recipient, HKDF-SHA256, AES-256-GCM. */

@@ -335,6 +335,10 @@ pub enum Secrets {
     /// list, add, remove.
     #[command(subcommand)]
     Databases(DatabasesCmd),
+    /// Vendor credentials roll issues and revokes keys with (SendGrid, Twilio, Okta, Entra,
+    /// Auth0): list, add (the credential on stdin), remove.
+    #[command(subcommand)]
+    Saas(SaasCmd),
     /// AWS roles for dynamic AWS credentials: list, add (roll assumes it to check), remove.
     #[command(subcommand, name = "aws-roles")]
     AwsRoles(AwsRolesCmd),
@@ -623,6 +627,44 @@ pub enum DatabasesCmd {
         /// The server's CA certificates (PEM file), when the system's don't cover it (Amazon RDS).
         #[arg(long)]
         ca: Option<std::path::PathBuf>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
+pub enum SaasCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register a vendor credential, read from stdin (never an argument). Each vendor takes its
+    /// own flags: sendgrid `--scope`…; twilio `--account-sid`; okta `--domain --app-id`; entra
+    /// `--tenant --client-id --object-id`; auth0 `--domain --client-id --app-client-id`.
+    Add {
+        name: String,
+        /// sendgrid, twilio, okta, entra or auth0.
+        #[arg(long)]
+        vendor: String,
+        /// A scope each SendGrid key gets (none: full access).
+        #[arg(long = "scope", num_args = 1)]
+        scopes: Vec<String>,
+        #[arg(long)]
+        account_sid: Option<String>,
+        /// Okta's org host (acme.okta.com) or Auth0's tenant domain (acme.us.auth0.com).
+        #[arg(long)]
+        domain: Option<String>,
+        #[arg(long)]
+        app_id: Option<String>,
+        #[arg(long)]
+        tenant: Option<String>,
+        /// The app roll signs in as (Entra, Auth0).
+        #[arg(long)]
+        client_id: Option<String>,
+        /// The Entra application whose secret rotates (its object id).
+        #[arg(long)]
+        object_id: Option<String>,
+        /// The Auth0 app whose secret rotates.
+        #[arg(long)]
+        app_client_id: Option<String>,
     },
     Rm { id: String },
 }
@@ -1708,6 +1750,45 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             DatabasesCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/outside-databases/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::Saas(a) => match a {
+            SaasCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/saas", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for r in v.as_array().into_iter().flatten() {
+                    let target: Vec<String> = r["target"].as_object().into_iter().flatten().map(|(k, v)| format!("{k}={}", v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))).collect();
+                    println!("{}  {:<16} {:<9} {}", s(&r["id"]), s(&r["name"]), s(&r["vendor"]), target.join(" "));
+                }
+            }
+            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id } => {
+                let mut target = serde_json::Map::new();
+                if !scopes.is_empty() {
+                    target.insert("scopes".into(), json!(scopes));
+                }
+                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id)] {
+                    if let Some(v) = v {
+                        target.insert(k.into(), json!(v));
+                    }
+                }
+                // The vendor credential mints keys: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("The {vendor} credential roll issues keys with, then Enter and Ctrl-D: ");
+                }
+                let mut credential = zeroize::Zeroizing::new(String::new());
+                std::io::stdin().read_to_string(&mut credential).context("reading the credential from stdin")?;
+                let body = json!({ "name": name, "vendor": vendor, "target": target, "credential": credential.trim() });
+                let v = c.call(Method::POST, &format!("{}/saas", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link a key to its secret (and id), managed, to have roll issue and rotate it.", s(&v["name"]), s(&v["id"]));
+            }
+            SaasCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/saas/{}", c.base(), enc(&id)), None).await?;
                 println!("Removed {id}");
             }
         },

@@ -1156,6 +1156,11 @@ static ROWS: &[Row] = &[
     // A signing secret signs calls that mint vendor keys: shown only to who may also reveal.
     row("POST", "/v1/secrets/projects/{project}/rotators", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
     row("DELETE", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // SaaS rotators: vendor credentials roll issues and revokes keys with. Listing shows vendors
+    // and targets; the credential is never answered, so adding one reveals nothing.
+    row("GET", "/v1/secrets/projects/{project}/saas", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/saas", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/saas/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/transit", "secrets", ADMIN, one(&["project"], "project")),
     // Each key's routes name it (`.index("name")`): a rule can grant one key

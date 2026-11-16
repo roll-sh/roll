@@ -282,6 +282,7 @@ const FORM_TYPE: &str = "application/x-www-form-urlencoded";
 
 /// One request to `vendor`: the 2xx answer, or (with `gone_ok`) `None` for a 404 (revoking what's
 /// already gone). Any other status is an error naming the vendor, the step and the status only.
+#[allow(clippy::too_many_arguments)]
 fn send(d: &dyn Deliver, vendor: &Vendor, step: &str, method: &str, url: &str, headers: &[(&str, &Value)], body: Option<(&str, &Value)>, gone_ok: bool) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
     let v = vendor.name();
     let accept = Value::new(JSON_TYPE);
