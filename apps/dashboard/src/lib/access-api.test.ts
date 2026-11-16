@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, presetFor, presetRules, publicJwk, rulesOf, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
+import { approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -140,6 +140,22 @@ describe("the checkup", () => {
 });
 
 describe("machine clients", () => {
+  it("trusts one repository's GitHub Actions, on a ref or in an environment, and says so in words", () => {
+    const on = (r: ReturnType<typeof githubIdentity>) => ("identity" in r ? r.identity.subject : r.problem);
+    expect(on(githubIdentity("acme/web", "refs/heads/main"))).toBe("repo:acme/web:ref:refs/heads/main");
+    expect(on(githubIdentity("acme/web", "refs/heads/main", "production"))).toBe("repo:acme/web:environment:production");
+    expect(on(githubIdentity("acme/web"))).toBe("repo:acme/web:*");
+    expect(on(githubIdentity("acme"))).toBe("The repository is owner/name");
+    expect(on(githubIdentity("acme/*"))).toBe("The repository is owner/name");
+    const gh = (subject: string) => trustedLabel({ issuer: "https://token.actions.githubusercontent.com", subject });
+    expect(gh("repo:acme/web:ref:refs/heads/main")).toBe("GitHub Actions in acme/web on refs/heads/main");
+    expect(gh("repo:acme/web:environment:production")).toBe("GitHub Actions in acme/web (production)");
+    const step = githubStep("mcl_1", "https://api.roll.example/v1/access/oauth/token");
+    expect(step).toContain("audience=https://api.roll.example\"");
+    expect(step).toContain("client_id=mcl_1");
+    expect(step).toContain("::add-mask::");
+  });
+
   it("turns openssl's PEM public keys into the JWKs the API takes, and refuses a private key", () => {
     const ed = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA5rj3iN7HTU2KOZ5TXM2Zyw8+3iISgidPeqHONeMvZQM=\n-----END PUBLIC KEY-----\n";
     expect(publicJwk(ed)).toEqual({ jwk: { kty: "OKP", crv: "Ed25519", x: "5rj3iN7HTU2KOZ5TXM2Zyw8-3iISgidPeqHONeMvZQM" } });

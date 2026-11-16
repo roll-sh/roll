@@ -368,12 +368,61 @@ export interface ChatTarget {
 export interface MachineClient {
   client_id: string;
   signs_with_key: boolean;
+  /** The identity it trusts (CI's own OIDC tokens), when that's its credential. */
+  trusts?: TrustedIdentity | null;
   grant: Grant;
 }
 
+/** OIDC tokens a machine client trusts: from `issuer`, for `audience`, `sub` matching `subject`. */
+export interface TrustedIdentity {
+  issuer: string;
+  audience?: string;
+  subject: string;
+  claims?: Record<string, string>;
+  /** How many keys it pins (an issuer roll can't reach), in a listing. */
+  pinned_keys?: number | null;
+}
+
+export const GITHUB_ISSUER = "https://token.actions.githubusercontent.com";
+
+/**
+ * GitHub Actions as a trusted identity: a repository's jobs, on one ref or in one environment
+ * (GitHub's `sub`: `repo:<owner>/<repo>:ref:<ref>`, `…:environment:<name>`), or any of its jobs.
+ */
+export function githubIdentity(repo: string, ref = "", environment = ""): { identity: TrustedIdentity } | { problem: string } {
+  const m = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(repo.trim());
+  if (!m) return { problem: "The repository is owner/name" };
+  const base = `repo:${m[1]}/${m[2]}`;
+  const subject = environment.trim() ? `${base}:environment:${environment.trim()}` : ref.trim() ? `${base}:ref:${ref.trim()}` : `${base}:*`;
+  return { identity: { issuer: GITHUB_ISSUER, subject } };
+}
+
+/** What a trusted identity is, in words: GitHub's repository and ref or environment, or its issuer. */
+export function trustedLabel(t: TrustedIdentity): string {
+  const gh = t.issuer === GITHUB_ISSUER && /^repo:([^:]+)(?::(ref|environment):(.+)|:\*)?$/.exec(t.subject);
+  if (gh) return `GitHub Actions in ${gh[1]}${gh[2] === "ref" ? ` on ${gh[3]}` : gh[2] === "environment" ? ` (${gh[3]})` : ""}`;
+  return `${t.issuer.replace(/^https:\/\//, "")}: ${t.subject}`;
+}
+
+/** The workflow step that trades a job's OIDC token for a roll token, masked, as `ROLL_TOKEN`. */
+export function githubStep(clientId: string, tokenEndpoint: string): string {
+  const audience = tokenEndpoint.replace(/\/v1\/access\/oauth\/token$/, "");
+  return [
+    "# the job needs: permissions: { id-token: write }",
+    "- name: Sign in to roll",
+    "  run: |",
+    `    oidc=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=${audience}" | jq -r .value)`,
+    `    token=$(curl -sSf ${tokenEndpoint} -d grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer -d client_id=${clientId} --data-urlencode "assertion=$oidc" | jq -r .access_token)`,
+    '    echo "::add-mask::$token"',
+    '    echo "ROLL_TOKEN=$token" >> "$GITHUB_ENV"',
+  ].join("\n");
+}
+
 export interface NewMachineClient extends Omit<NewGrant, "not_before" | "ask_otherwise"> {
-  /** Its public key: none, and roll makes a secret (shown once). */
+  /** Its public key: none (and no identity), and roll makes a secret (shown once). */
   public_jwk?: Record<string, string> | null;
+  /** The identity it trusts instead (CI's own OIDC tokens). */
+  oidc?: TrustedIdentity | null;
 }
 
 /** A new machine client: its secret is in the answer this once, when it has no key. */
@@ -382,6 +431,8 @@ export interface MadeMachineClient {
   grant: Grant;
   token_endpoint: string;
   client_secret?: string;
+  /** Set here, not by the API: it trusts GitHub Actions, so the panel shows the workflow step. */
+  github?: boolean;
 }
 
 /**
