@@ -43,7 +43,10 @@ impl Apps {
     /// service's hook is also its repository's push webhook (GitHub's or GitLab's `push` event
     /// as `payload`): a push to the environment's branch deploys that commit at once, keyed by
     /// it as the five-minute watch's deploy is (a redelivery, or the watch, makes no second one);
-    /// another branch, a deleted branch, a `[skip ci]` commit or a ping is `Ignored`.
+    /// another branch, a deleted branch, a `[skip ci]` commit or a ping is `Ignored`. A branch no
+    /// environment follows goes to roll previews once the repository agrees ([`GitPush`]).
+    ///
+    /// [`GitPush`]: crate::integrations::GitPush
     pub async fn run_hook(self: &Arc<Self>, service: &str, env: &str, token: &str, image: Option<String>, payload: Option<Webhook>) -> Result<HookOutcome> {
         let none = || Error::NotFound("no such hook".into());
         let (sid, e) = (service.to_string(), env.to_string());
@@ -59,17 +62,40 @@ impl Apps {
                 Push::Ping => return Ok(HookOutcome::Ignored("pong".into())),
                 Push::Plain => {}
                 Push::Ignored(why) => return Ok(HookOutcome::Ignored(why)),
-                Push::Branch { branch, sha, message } => {
-                    // Only the environment's own branch: one that follows none deploys by hand.
-                    let Some(follows) = row.branch.as_deref() else {
-                        return Ok(HookOutcome::Ignored(format!("{env} follows no branch: set its branch to deploy on push")));
-                    };
-                    if branch != follows {
-                        return Ok(HookOutcome::Ignored(format!("a push to {branch}; {env} follows {follows}")));
+                Push::Branches(moved) => {
+                    let Source::Git { url, .. } = &svc.source else { unreachable!("matched above") };
+                    let sid = service.to_string();
+                    let envs = self.db(move |s| s.environments(&sid)).await?;
+                    // Each branch the push moved (Bitbucket's can move several): one no
+                    // environment follows is roll previews' (when it's on this node); this
+                    // environment's own deploys; the rest are another environment's hook's.
+                    let (mut said, mut mine) = (Vec::new(), None);
+                    for p in moved {
+                        let followed = envs.iter().any(|e| e.branch.as_deref() == Some(p.branch.as_str()));
+                        if let (false, Some(pushes)) = (followed, self.pushes.get()) {
+                            said.push(self.hand_to_previews(pushes.clone(), service, url, p).await);
+                        } else if row.branch.as_deref() == Some(p.branch.as_str()) {
+                            mine = Some(p);
+                        } else {
+                            said.push(match row.branch.as_deref() {
+                                Some(follows) => format!("a push to {}; {env} follows {follows}", p.branch),
+                                None => format!("{env} follows no branch: set its branch to deploy on push"),
+                            });
+                        }
                     }
+                    let Some(BranchPush { branch, sha, message }) = mine else { return Ok(HookOutcome::Ignored(said.join("; "))) };
                     let Some(sha) = sha else { return Ok(HookOutcome::Ignored(format!("{branch} was deleted"))) };
-                    if let Some(tag) = crate::deploy::skip_tag(&message) {
-                        return Ok(HookOutcome::Ignored(format!("its message says {tag}")));
+                    // Only where the branch is now deploys: the body alone never names a commit
+                    // (a leaked hook URL can't put an old commit, or a fork's, live). A push
+                    // overtaken by a newer one is that one's to deploy.
+                    let client = crate::git_source::client(self.cfg.allow_private);
+                    match crate::git_source::head(&client, url, Some(&branch)).await {
+                        Ok((now, _)) if now == sha => {}
+                        Ok((now, _)) => return Ok(HookOutcome::Ignored(format!("the repository has {branch} at {}, not {}: only its head deploys", &now[..12], &sha[..12]))),
+                        Err(e) => return Ok(HookOutcome::Ignored(format!("{branch} couldn't be checked against the repository ({e:#}): not deployed"))),
+                    }
+                    if let Some(why) = self.git_push_skip(&svc, &row, &sha, &message).await {
+                        return Ok(HookOutcome::Ignored(why));
                     }
                     let first = message.lines().next().unwrap_or("").chars().take(500).collect::<String>();
                     body = json!({ "revision": sha, "message": if first.is_empty() { format!("push to {branch}") } else { first } });
@@ -112,10 +138,37 @@ pub struct Webhook {
 /// A webhook's call as a push: GitHub's (`ref`, `after`, `head_commit.message`; `zen` on its
 /// ping), GitLab's (`ref`, `checkout_sha`, the last of `commits`) or Bitbucket's
 /// (`push.changes[].new`: a branch, its target's hash and message).
+impl Apps {
+    /// A push to a branch apps doesn't follow, checked against the repository's refs and handed
+    /// to roll previews. What the hook answers (`{ ignored }`).
+    async fn hand_to_previews(&self, pushes: Arc<dyn crate::integrations::GitPushes>, service: &str, url: &str, push: BranchPush) -> String {
+        let BranchPush { branch, sha, message } = push;
+        let client = crate::git_source::client(self.cfg.allow_private);
+        let refs = match client.ls_refs(url, None).await {
+            Ok(r) => r,
+            Err(e) => return format!("a push to {branch}: the repository didn't answer ({e:#})"),
+        };
+        let now = refs.get(&format!("refs/heads/{branch}")).map(|r| r.oid.to_string());
+        if now != sha {
+            return format!("a push to {branch}, but the repository has it {}", now.map_or("deleted".to_string(), |s| format!("at {}", &s[..12.min(s.len())])));
+        }
+        let what = if sha.is_some() { "for its preview" } else { "deleted: its preview goes" };
+        pushes.pushed(crate::integrations::GitPush { service: service.to_string(), url: url.to_string(), branch: branch.clone(), sha, message }).await;
+        format!("a push to {branch}, handed to roll previews {what}")
+    }
+}
+
+/// A branch a push moved to `sha` (none: it was deleted).
+struct BranchPush {
+    branch: String,
+    sha: Option<String>,
+    message: String,
+}
+
 enum Push {
     Ping,
-    /// A branch moved to `sha` (none: it was deleted).
-    Branch { branch: String, sha: Option<String>, message: String },
+    /// The branches it moved (one, but for Bitbucket's that move several).
+    Branches(Vec<BranchPush>),
     /// An empty body (CI's POST): a plain deploy.
     Plain,
     /// Another event, a tag, or a body that isn't a push: nothing deploys.
@@ -131,16 +184,22 @@ fn push_of(w: &Webhook) -> Push {
         return Push::Ignored(format!("a {e} event isn't a push"));
     }
     let hex = |s: &str| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()) && s.bytes().any(|b| b != b'0');
-    // Bitbucket's: the last change of the push.
-    if let Some(c) = p["push"]["changes"].as_array().and_then(|c| c.last()) {
-        let (new, old) = (&c["new"], &c["old"]);
-        let kind = new["type"].as_str().or(old["type"].as_str()).unwrap_or("");
-        if kind != "branch" {
-            return Push::Ignored(format!("a push of a {kind}, not a branch"));
+    // Bitbucket's: every change of the push that moved a branch (at most 100 read).
+    if let Some(changes) = p["push"]["changes"].as_array().filter(|c| !c.is_empty()) {
+        let mut moved = Vec::new();
+        let mut kinds = Vec::new();
+        for c in changes.iter().take(100) {
+            let (new, old) = (&c["new"], &c["old"]);
+            let kind = new["type"].as_str().or(old["type"].as_str()).unwrap_or("");
+            if kind != "branch" {
+                kinds.push(kind.to_string());
+                continue;
+            }
+            let branch = new["name"].as_str().or(old["name"].as_str()).unwrap_or("").to_string();
+            let sha = new["target"]["hash"].as_str().filter(|s| hex(s)).map(str::to_ascii_lowercase);
+            moved.push(BranchPush { branch, sha, message: new["target"]["message"].as_str().unwrap_or("").to_string() });
         }
-        let branch = new["name"].as_str().or(old["name"].as_str()).unwrap_or("").to_string();
-        let sha = new["target"]["hash"].as_str().filter(|s| hex(s)).map(str::to_ascii_lowercase);
-        return Push::Branch { branch, sha, message: new["target"]["message"].as_str().unwrap_or("").to_string() };
+        return if moved.is_empty() { Push::Ignored(format!("a push of a {}, not a branch", kinds.join(", "))) } else { Push::Branches(moved) };
     }
     let Some(r) = p["ref"].as_str() else {
         return if p.as_object().is_some_and(|o| o.is_empty()) { Push::Plain } else { Push::Ignored("not a push".into()) };
@@ -148,7 +207,7 @@ fn push_of(w: &Webhook) -> Push {
     let Some(branch) = r.strip_prefix("refs/heads/") else { return Push::Ignored(format!("a push of {r}, not a branch")) };
     let sha = p["after"].as_str().or(p["checkout_sha"].as_str()).filter(|s| hex(s));
     let message = p["head_commit"]["message"].as_str().or_else(|| p["commits"].as_array().and_then(|c| c.last()).and_then(|c| c["message"].as_str())).unwrap_or("");
-    Push::Branch { branch: branch.to_string(), sha: sha.map(str::to_ascii_lowercase), message: message.to_string() }
+    Push::Branches(vec![BranchPush { branch: branch.to_string(), sha: sha.map(str::to_ascii_lowercase), message: message.to_string() }])
 }
 
 /// A hook's token: `rlk_`, 34 random characters of lowercase base32 and 6 of CRC-32, as roll's

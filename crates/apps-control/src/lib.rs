@@ -214,6 +214,8 @@ pub struct Apps {
     capped_refresh: tokio::sync::Mutex<()>,
     /// roll previews' notes for a preview's feedback button ([`Apps::set_feedback_notes`]).
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
+    /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
+    pub(crate) pushes: std::sync::OnceLock<Arc<dyn integrations::GitPushes>>,
     /// Email to projects' owners (`notify`), once rolld has accounts.
     mail: std::sync::OnceLock<Arc<dyn integrations::Mailbox>>,
     /// Log drains whose batch came back (the drainer sends the next).
@@ -369,6 +371,7 @@ impl Apps {
             capped: Mutex::new(Default::default()),
             capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
+            pushes: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
@@ -1243,7 +1246,7 @@ impl Apps {
         }
         // Only a roll code repo's pushes wait for their commit's checks (its statuses are roll's).
         if o.get("wait_for_ci") == Some(&Value::Bool(true)) && !matches!(&svc.source, Source::Repo { .. }) {
-            return Err(Error::BadRequest("wait_for_ci is for a roll code repo's service: a Git URL's checks aren't roll's to read".into()));
+            return Err(Error::BadRequest("wait_for_ci is for a roll code repo's service: a Git URL's checks aren't roll's to read (deploy from the workflow after its tests instead: sdk/apps-github-action, with the environment's branch unset)".into()));
         }
         // A name another environment has is refused before anything is made or changed.
         if let Some(h) = hostname.clone() {
@@ -2313,6 +2316,11 @@ impl Apps {
 
     pub(crate) fn feedback_notes(&self) -> Option<Arc<dyn integrations::FeedbackNotes>> {
         self.notes.get().cloned()
+    }
+
+    /// Where a Git URL service's pushes to branches it doesn't follow go (roll previews). Set once.
+    pub fn set_git_pushes(&self, pushes: Arc<dyn integrations::GitPushes>) {
+        let _ = self.pushes.set(pushes);
     }
 
     /// How email reaches people (roll-accounts' mailer). Set once.
