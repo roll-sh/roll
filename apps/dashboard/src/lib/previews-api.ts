@@ -94,6 +94,8 @@ export interface Preview {
   release?: { head: string; ms: number; before_ms: number | null } | null;
   /** Kept past its TTL until then (epoch ms). */
   kept_until?: number | null;
+  /** The pull request a Git URL service's preview is of (roll apps' push hook). A fork's runs only at `approved_head`. */
+  pull?: { number: number; url: string; fork: boolean; approved_head: string | null; approved_by: string | null };
   /** When it goes (its TTL, or a keep, running out), once that's close (a day ahead). */
   goes_at?: number | null;
   /** How much the page changed since the screenshot at an earlier head (`since`). */
@@ -439,6 +441,8 @@ export const previewsApi = {
   keep: (id: string, hours: number) => call<Preview>("POST", `${one(id)}/keep`, { hours }),
   /** Accept how a change's pages look at its latest screenshot (the `roll/visual` status). */
   /** `head`: the screenshot's that was looked at (`visual_review.head`): refused (409) once a newer one came in. `path`: that page only (`""` the first), else every page. */
+  /** Let one head of a fork's pull request on a Git URL service run (409 once it moved on). */
+  approve: (id: string, head: string) => call<Preview>("POST", `${one(id)}/approve`, { head }),
   acceptVisual: (id: string, head?: string, path?: string) =>
     call<Preview>("POST", `${one(id)}/visual/accept`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}) }),
   /** Its share links (never their tokens). */

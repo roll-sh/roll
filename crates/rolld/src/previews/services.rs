@@ -299,7 +299,7 @@ pub struct GitPushes(pub std::sync::Weak<roll_previews::Engine>);
 impl apps_control::integrations::GitPushes for GitPushes {
     async fn pushed(&self, push: apps_control::integrations::GitPush) {
         let Some(engine) = self.0.upgrade() else { return };
-        let p = roll_previews::ports::GitPush { service: push.service, url: push.url, branch: push.branch, sha: push.sha, message: push.message };
+        let p = roll_previews::ports::GitPush { service: push.service, url: push.url, branch: push.branch, sha: push.sha, message: push.message, pull: None };
         tokio::spawn(async move {
             if let Err(e) = engine.git_push(&p).await {
                 tracing::warn!(service = %p.service, branch = %p.branch, error = %e, "previews: a Git URL service's push");

@@ -66,6 +66,22 @@ impl Engine {
         if problems.is_empty() { Ok(()) } else { Err(crate::Error::BadRequest(problems.join("; "))) }
     }
 
+    /// A head nobody approved yet: nothing of it runs (its services sleep) until a writer does.
+    async fn await_approval(&self, r: &Row) -> anyhow::Result<()> {
+        for svc in self.store.services(&r.id)? {
+            self.apps.sleep(&r.id, &svc.name).await;
+            self.store.set_service(&r.id, &svc.name, ServiceState::Sleeping, None, None)?;
+        }
+        let row = self.store.update(&r.id, |row| {
+            row.state = State::AwaitingApproval;
+            row.next_at = if row.generation == r.generation { SETTLED } else { 0 };
+            row.attempts = 0;
+            row.error = None;
+        })?;
+        self.report(row).await;
+        Ok(())
+    }
+
     /// Bring one active preview to its desired state.
     pub(super) async fn converge(&self, r: &Row) -> anyhow::Result<()> {
         let s = self.store.settings(&r.project_id)?;
@@ -82,19 +98,10 @@ impl Engine {
                 return Ok(());
             }
             if !c.may_run() {
-                for svc in self.store.services(&r.id)? {
-                    self.apps.sleep(&r.id, &svc.name).await;
-                    self.store.set_service(&r.id, &svc.name, ServiceState::Sleeping, None, None)?;
-                }
-                let row = self.store.update(&r.id, |row| {
-                    row.state = State::AwaitingApproval;
-                    row.next_at = if row.generation == r.generation { SETTLED } else { 0 };
-                    row.attempts = 0;
-                    row.error = None;
-                })?;
-                self.report(row).await;
-                return Ok(());
+                return self.await_approval(r).await;
             }
+        } else if !self.git_head_may_run(r)? {
+            return self.await_approval(r).await;
         }
         if r.state == State::Queued {
             self.store.update(&r.id, |row| row.next_at = if row.generation == r.generation { SETTLED } else { 0 })?;
