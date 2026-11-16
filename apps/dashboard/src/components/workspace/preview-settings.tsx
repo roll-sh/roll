@@ -92,6 +92,7 @@ function Form({
   const [branches, setBranches] = useState(saved.branches.join(", "));
   const [paths, setPaths] = useState(saved.paths.join(", "));
   const [ignorePaths, setIgnorePaths] = useState(saved.ignore_paths.join(", "));
+  const [egressHosts, setEgressHosts] = useState((saved.egress_hosts ?? []).join(", "));
   const [pages, setPages] = useState((saved.github.pages ?? []).join(", "));
   const [widths, setWidths] = useState((saved.github.widths ?? []).join(", "));
   const [openapi, setOpenapi] = useState(saved.github.openapi ?? "");
@@ -113,6 +114,7 @@ function Form({
     branches: words(branches),
     paths: words(paths),
     ignore_paths: words(ignorePaths),
+    egress_hosts: s.egress === "roll" ? words(egressHosts) : [],
     github: {
       ...s.github,
       pages: words(pages),
@@ -409,6 +411,11 @@ function Form({
         <Field group label="Reaches" note="What a preview's code may call. Roll only: its services run on a network of their own that reaches roll's products (its branches) and nothing on the internet, so a webhook or a live payment API can't be called from a change.">
           <Choice value={s.egress ?? "open"} options={["open", "roll"]} onChange={(v) => set("egress", v)} labels={{ open: "Anything", roll: "Roll only" }} />
         </Field>
+        {s.egress === "roll" && (
+          <Field group label="Allowed outside hosts" note="With roll only, the hosts outside roll its code may still reach, through a proxy that refuses anything else (api.stripe.com, or *.sentry.io for its subdomains). What it refused is in the preview's activity.">
+            <input value={egressHosts} onChange={(e) => setEgressHosts(e.target.value)} placeholder="api.stripe.com, *.sentry.io" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+          </Field>
+        )}
       </Section>
 
       <Section title="GitHub pull requests">
