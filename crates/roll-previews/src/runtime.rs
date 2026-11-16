@@ -498,6 +498,8 @@ impl Runtime {
             // Package caches shared by every preview of the repo: a second preview installs from
             // what the first downloaded.
             cache: Some(cache_name(&t.repo)),
+            // The project limits what its previews' code reaches: the preview's own network.
+            network: if t.egress == crate::settings::EgressRule::Roll && self.iso.name() == "docker" { Some(preview_network(preview).await?) } else { None },
         };
         self.trees.prepare(&*self.iso, &job, &t.repo, &t.revision).await?;
         let addr = self.iso.start(&name, t.spec.port).await?;
@@ -966,6 +968,10 @@ impl Apps for Runtime {
             // Whichever node started it.
             self.iso.remove(&container_name(&host)).await;
         }
+        // The preview's own network goes with its last container (refused while one's attached).
+        if self.iso.name() == "docker" {
+            let _ = code_preview::docker::docker(&["network", "rm", &network_name(preview)]).await;
+        }
         // The repo's cache goes with its last preview service.
         if let Ok(Some(svc)) = self.store.services(preview).map(|v| v.into_iter().find(|s| s.name == service))
             && !self.store.repo_has_other_services(&svc.repo, preview).unwrap_or(true)
@@ -1317,6 +1323,31 @@ fn note_crops<'a>(asked: &[&str], said: &str, pngs: impl Iterator<Item = &'a str
         }
     }
     out
+}
+
+/// The network a preview whose project limits egress runs on (docs/previews.md, "Egress").
+fn network_name(preview: &str) -> String {
+    format!("roll-previews-net-{}", preview.trim_start_matches("pv_"))
+}
+
+/// The preview's own network, made `--internal` (no route out) if it isn't there yet, with its
+/// gateway (where its containers reach roll's products).
+async fn preview_network(preview: &str) -> anyhow::Result<code_preview::isolation::Network> {
+    let name = network_name(preview);
+    let gateway = |name: String| async move { code_preview::docker::docker(&["network", "inspect", "-f", "{{range .IPAM.Config}}{{.Gateway}} {{end}}", &name]).await.ok().and_then(|g| g.split_whitespace().next().map(str::to_string)) };
+    if let Some(g) = gateway(name.clone()).await {
+        return Ok(code_preview::isolation::Network { name, gateway: g });
+    }
+    let mut args: Vec<String> = vec!["network".into(), "create".into(), "--internal".into(), "--label".into(), format!("{}=preview", code_preview::docker::LABEL)];
+    if let Some(l) = code_preview::docker::home_label() {
+        args.extend(["--label".into(), l]);
+    }
+    args.push(name.clone());
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    // Two starts at once may both make it: the second's "already exists" is fine.
+    let _ = code_preview::docker::docker(&argv).await;
+    let g = gateway(name.clone()).await.ok_or_else(|| anyhow::anyhow!("couldn't make the preview's network {name}"))?;
+    Ok(code_preview::isolation::Network { name, gateway: g })
 }
 
 /// The other pages a screenshot run took: what it said about each (`[{path, errors}]`, in order)

@@ -397,6 +397,12 @@ impl roll_previews::ports::Apps for Services {
     fn status(&self, preview: &str, service: &str) -> Option<roll_previews::ServiceState> {
         self.runtime.status(preview, service)
     }
+
+    // Frozen is the runtime's: without it a frozen service's dynamic credentials were revoked
+    // while its process kept them (the engine's tend reads it).
+    fn warm(&self, preview: &str, service: &str) -> bool {
+        self.runtime.warm(preview, service)
+    }
 }
 
 /// What a deploy of `key` finds of the one previews last started (`last`: its id and key).

@@ -11,6 +11,8 @@ describe("access", () => {
   it("connects clients with OAuth unless a token is given, and never puts a token in an OAuth config", () => {
     const url = "https://api.roll.sh/v1/mcp";
     expect(mcpConfig("claude-code", url).text).toBe(`claude mcp add --transport http roll ${url}`);
+    // A URL with a mode is one shell word: `&` would end the command and run it in the background.
+    expect(mcpConfig("claude-code", `${url}?tools=search&lockdown=1`).text).toBe(`claude mcp add --transport http roll '${url}?tools=search&lockdown=1'`);
     expect(mcpConfig("cursor", url).text).not.toContain("Authorization");
     expect(mcpConfig("claude-code", url, "rlt_x").text).toContain('--header "Authorization: Bearer rlt_x"');
     expect(JSON.parse(mcpConfig("vscode", url, "rlt_x").text).servers.roll).toEqual({ type: "http", url, headers: { Authorization: "Bearer rlt_x" } });

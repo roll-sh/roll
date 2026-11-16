@@ -109,6 +109,7 @@ impl EnvSource for Engine {
             bypass_sha256: None,
             // The runtime's proxy adds the button per request (`runtime::Tagger`).
             feedback: false,
+            egress: s.egress,
         };
         Ok((t, env))
     }
