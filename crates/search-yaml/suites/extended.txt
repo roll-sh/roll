@@ -19,6 +19,8 @@
 #   plugins         plain, plus the official plugins of plugins/* installed
 # options (repeatable):
 #   setting=<key>=<value>   a node setting (also given to search-dev as -E)
+#   roll=<key>=<value>      a node setting only search-dev gets (what roll needs to behave like
+#                           the test cluster, which Elasticsearch has no setting for)
 #   jvm=<-Dkey=value>       a JVM system property (Elasticsearch only)
 #   users=<u:p:roles>,...   file-realm users (roles `|`-separated); search-dev gets them as
 #                           roll.security.file_users
@@ -36,9 +38,7 @@
 #
 # Suites that share a profile and options run on the same clusters in one runner invocation.
 #
-# Not run: repository-azure / -gcs / -s3 (cloud fixtures), x-pack inference (its tests are in
-# platinum/inference; the inference-service-test plugin isn't in the release), gpu (a GPU),
-# stateless (serverless modules), multi-node and mixed-cluster qa projects, the qa projects that
+# Not run: repository-azure / -gcs / -s3 (cloud fixtures), gpu (a GPU), stateless (serverless modules), multi-node and mixed-cluster qa projects, the qa projects that
 # only rerun platinum directories with other users (graph, ml, text-structure with security),
 # enrich (no tests of its own), discovery-* and store-smb plugins, x-pack/qa (multi-cluster,
 # third-party services).
@@ -97,7 +97,7 @@ slm                      security  x-pack/plugin/slm  users=test_admin:x-pack-te
 snapshot-repo-test-kit   basic     x-pack/plugin/snapshot-repo-test-kit/qa/rest
 stack                    security  x-pack/plugin/stack  users=test_admin:x-pack-test-password:_es_test_root  login=test_admin:x-pack-test-password
 transform                security  x-pack/plugin/transform
-watcher                  plain     x-pack/plugin/watcher:mustache,painless,watcher  setting=xpack.ml.enabled=false
+watcher                  plain     x-pack/plugin/watcher:mustache,painless,watcher  setting=xpack.ml.enabled=false  roll=roll.watcher.allow_private_hosts=true
 watcher-security         security  x-pack/plugin/watcher:security  roles=x-pack/plugin/watcher/src/yamlRestTest/resources/roles.yml  users=test_admin:x-pack-test-password:superuser,watcher_manager:x-pack-test-password:watcher_manager,x_pack_rest_user:x-pack-test-password:watcher_manager  login=watcher_manager:x-pack-test-password  admin=test_admin:x-pack-test-password  setting=xpack.ml.enabled=false  setting=xpack.notification.email.account._email.smtp.host=host.domain  setting=xpack.notification.email.account._email.smtp.port=587  setting=xpack.notification.email.account._email.smtp.user=_user
 wildcard                 plain     x-pack/plugin/wildcard
 
@@ -105,6 +105,11 @@ wildcard                 plain     x-pack/plugin/wildcard
 # directories it bundles, which run above with their own clusters). platinum runs on
 # XPackRestIT's cluster (ml/single-node-tests' is the same), esql on the ES|QL single-node one.
 platinum                 security  zip:test/platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher  setting=xpack.ml.enabled=true  setting=xpack.watcher.enabled=false  setting=xpack.security.audit.enabled=true  setting=xpack.searchable.snapshot.shared_cache.size=16MB  setting=xpack.searchable.snapshot.shared_cache.region_size=256KB  setting=node.name=yamlRestTest-0  config=service_tokens:suites/es-config/service_tokens  memory=4g  heap=1g
+# x-pack inference: platinum/inference's tests on a cluster with Elasticsearch's
+# inference-service-test plugin, which the release lacks, so there is no Elasticsearch baseline:
+# search-dev's YAML test clusters have the plugin's services (crates/search-es xpack/inference
+# services/test.rs) and the pass count is roll's alone (minimum in docs/search/compatibility.md).
+inference                plain     x-pack/plugin/inference
 esql                     plain     zip:test/platinum:esql  runner=--esql-not-partial  setting=esql.federation.enabled=true  config=ingest-geoip/GeoLite2-City.mmdb:test/fixtures/geoip-fixture/src/main/resources/geoip-fixture/GeoLite2-City.mmdb  config=ingest-geoip/GeoLite2-Country.mmdb:test/fixtures/geoip-fixture/src/main/resources/geoip-fixture/GeoLite2-Country.mmdb  config=ingest-geoip/GeoLite2-ASN.mmdb:test/fixtures/geoip-fixture/src/main/resources/geoip-fixture/GeoLite2-ASN.mmdb
 
 # plugins/* (installed into the image for the plugins profile)

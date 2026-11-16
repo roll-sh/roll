@@ -118,6 +118,12 @@ pub trait SecretSource: Send + Sync {
     async fn digest(&self, _project: &str, _env: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
+    /// The project's `env` made in the store if it's missing (an apps environment named
+    /// something roll secrets doesn't start with, `qa`), so its secrets have somewhere to go.
+    /// Idempotent; never called for a preview's (previews make those, with their base).
+    async fn ensure(&self, _project: &str, _env: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// What's been said about a preview's page (roll previews' notes: docs/previews.md, "Feedback on

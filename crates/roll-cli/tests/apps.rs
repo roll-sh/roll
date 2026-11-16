@@ -107,6 +107,11 @@ async fn variables_and_an_environment_through_the_cli() {
     let pending = t.ok(&["pending", "-s", "web", "-p", "acme"]).await;
     assert!(pending.contains("+ API_KEY") && pending.contains("+ PEM") && !pending.contains("sk-live"), "{pending}");
     assert!(t.ok(&["open", "--print", "-s", "web", "-p", "acme"]).await.trim().starts_with("http"));
+    // A new name that reads as a secret is sealed without being asked; --plain keeps one revealable.
+    t.ok(&["vars", "-s", "web", "-p", "acme", "GITHUB_TOKEN=ghp_x", "WEBHOOK_SECRET=w", "--plain", "WEBHOOK_SECRET"]).await;
+    let listed = t.ok(&["vars", "-s", "web", "-p", "acme"]).await;
+    let line = |n: &str| listed.lines().find(|l| l.starts_with(n)).unwrap_or_default().to_string();
+    assert!(line("GITHUB_TOKEN").ends_with("sealed") && !line("WEBHOOK_SECRET").ends_with("sealed"), "{listed}");
     // Set and put live in one go (Heroku's config:set).
     let dep = t.json(&["vars", "-s", "web", "-p", "acme", "MODE=live", "--deploy"]).await;
     assert_eq!(dep["trigger"], "settings", "{dep}");

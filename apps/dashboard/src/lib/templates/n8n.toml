@@ -1,0 +1,17 @@
+# n8n: workflow automation (n8n.io). Its workflows and credentials live on the volume (SQLite);
+# the encryption key is made once, here, and seals the credentials it stores. Scheduled
+# workflows run only while it's up, so it stays up (min_instances = 1).
+[apps.n8n]
+image = "n8nio/n8n:1"
+port = 5678
+[apps.n8n.run]
+volume = { mount = "/home/node/.n8n", size_gb = 1 }
+health_path = "/healthz"
+min_instances = 1
+memory_mb = 1024
+[apps.n8n.variables]
+N8N_ENCRYPTION_KEY = { generate = "secret" }
+N8N_PROXY_HOPS = "1"
+WEBHOOK_URL = "${{ ROLL_PUBLIC_URL }}"
+N8N_EDITOR_BASE_URL = "${{ ROLL_PUBLIC_URL }}"
+GENERIC_TIMEZONE = { ask = "Your time zone (schedules run in it)", default = "UTC" }

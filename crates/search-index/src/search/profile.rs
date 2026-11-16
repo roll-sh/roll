@@ -350,6 +350,9 @@ impl LeafCollector for ProfileLeaf<'_> {
         self.nanos.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         r
     }
+    fn set_scorer(&mut self, scorer: &mut dyn Scorable) {
+        self.inner.set_scorer(scorer);
+    }
     fn finish(&mut self) -> Result<()> {
         self.inner.finish()
     }
