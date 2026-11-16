@@ -196,8 +196,9 @@ Three ways, as the best products offer:
 - **Pull (`sdk/kubernetes-operator`)**: a `RollSecret` names an environment and a folder (and a
   project or an identity, when not the operator's own), and the operator keeps a Secret beside it
   in step. It logs in with its own service account token through a workload identity, so roll
-  holds no credential for the cluster. It checks the digest every 30 s and reads values only when
-  it moved; it writes only Secrets it made (labelled, owned by their RollSecret, so they go with
+  holds no credential for the cluster. It long-polls each RollSecret's digest
+  (`…/digest?since=&wait=`), so a change reaches the Secret within seconds, and checks every 30 s
+  anyway; it reads values only when the digest moved; it writes only Secrets it made (labelled, owned by their RollSecret, so they go with
   it) and leaves a same-named Secret someone else made alone; values that don't resolve leave the
   Secret as it was. Its status says what happened. Outside the operator's own namespaces a
   RollSecret logs in as a service account of its own namespace (`spec.serviceAccountName`, a

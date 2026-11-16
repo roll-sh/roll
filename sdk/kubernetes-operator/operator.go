@@ -46,6 +46,127 @@ type operator struct {
 
 	mu      sync.Mutex
 	clients map[string]*secrets.Client // by login (namespace/service account, identity)
+
+	// Push: each RollSecret's digest is long-polled between passes, and a change wakes the loop.
+	every   time.Duration
+	wake    chan struct{}
+	seen    map[string]watchTarget // what the last pass reconciled, by namespace/name
+	watches map[string]*watchState
+}
+
+// What a RollSecret's watch long-polls: its environment and folder, as its login reads them,
+// from the digest its Secret holds.
+type watchTarget struct {
+	c         *secrets.Client
+	env, path string
+	digest    string
+}
+
+type watchState struct {
+	target watchTarget
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// observe records what a reconcile left a RollSecret at, for its watch.
+func (o *operator) observe(rs *rollSecret, t watchTarget) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.seen != nil {
+		o.seen[rs.Metadata.Namespace+"/"+rs.Metadata.Name] = t
+	}
+}
+
+// rearm keeps one watch per RollSecret the last pass reconciled: a new one where its client,
+// folder or digest changed or the old one ended, none for RollSecrets that are gone.
+func (o *operator) rearm(ctx context.Context) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.watches == nil {
+		o.watches = map[string]*watchState{}
+	}
+	if o.wake == nil {
+		o.wake = make(chan struct{}, 1)
+	}
+	for key, w := range o.watches {
+		t, ok := o.seen[key]
+		ended := false
+		select {
+		case <-w.done:
+			ended = true
+		default:
+		}
+		if !ok || ended || t != w.target {
+			w.cancel()
+			delete(o.watches, key)
+		}
+	}
+	for key, t := range o.seen {
+		if _, ok := o.watches[key]; ok {
+			continue
+		}
+		wctx, cancel := context.WithCancel(ctx)
+		w := &watchState{target: t, cancel: cancel, done: make(chan struct{})}
+		o.watches[key] = w
+		go o.watchOne(wctx, w)
+	}
+}
+
+// watchOne long-polls one RollSecret's digest until it moves (then wakes the loop) or the watch
+// is cancelled. An error, or an answer that came back at once unchanged (roll holds at most 32
+// polls per login), waits a full interval: never a busy loop.
+func (o *operator) watchOne(ctx context.Context, w *watchState) {
+	defer close(w.done)
+	every := o.every
+	if every <= 0 {
+		every = 30 * time.Second
+	}
+	for ctx.Err() == nil {
+		asked := time.Now()
+		d, err := w.target.c.DigestSince(ctx, w.target.env, w.target.path, w.target.digest, 25*time.Second)
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil && d != w.target.digest {
+			select {
+			case o.wake <- struct{}{}:
+			default:
+			}
+			return
+		}
+		if err != nil || time.Since(asked) < time.Second {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(every):
+			}
+		}
+	}
+}
+
+// run reconciles every RollSecret, then again after the interval or as soon as a watch saw a
+// change, until ctx ends.
+func (o *operator) run(ctx context.Context) {
+	o.mu.Lock()
+	if o.wake == nil {
+		o.wake = make(chan struct{}, 1)
+	}
+	o.mu.Unlock()
+	every := o.every
+	if every <= 0 {
+		every = 30 * time.Second
+	}
+	for {
+		if err := o.pass(ctx); err != nil {
+			log.Printf("listing RollSecrets: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		case <-o.wake:
+		}
+	}
 }
 
 // login is how a RollSecret logs in: as a service account of its namespace, or as the operator.
@@ -171,6 +292,7 @@ func (o *operator) reconcile(ctx context.Context, rs *rollSecret) rollStatus {
 	if existing != nil && !ownedBy(existing, rs) {
 		return fail(fmt.Errorf("Secret %s/%s exists and isn't this RollSecret's: it isn't touched", ns, name))
 	}
+	o.observe(rs, watchTarget{c: c, env: rs.Spec.Environment, path: rs.Spec.Path, digest: digest})
 	if existing != nil && digest == rs.Status.Digest && rs.Status.Error == "" {
 		return st
 	}
@@ -220,6 +342,10 @@ func (o *operator) pass(ctx context.Context) error {
 	if err := o.kube.call(ctx, http.MethodGet, "/apis/"+group+"/"+version+"/rollsecrets", "", nil, &list); err != nil {
 		return err
 	}
+	o.mu.Lock()
+	o.seen = map[string]watchTarget{}
+	o.mu.Unlock()
+	defer o.rearm(ctx)
 	for i := range list.Items {
 		rs := &list.Items[i]
 		st := o.reconcile(ctx, rs)
@@ -263,6 +389,9 @@ func main() {
 		now:        time.Now,
 		clients:    map[string]*secrets.Client{},
 		namespaces: namespaces,
+		every:      every,
+		wake:       make(chan struct{}, 1),
+		watches:    map[string]*watchState{},
 		oidc: func() (string, error) {
 			b, err := os.ReadFile(env("ROLL_OIDC_TOKEN_FILE"))
 			return strings.TrimSpace(string(b)), err
@@ -273,15 +402,6 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
-	log.Printf("roll secrets operator: every %s", every)
-	for {
-		if err := o.pass(ctx); err != nil {
-			log.Printf("listing RollSecrets: %v", err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(every):
-		}
-	}
+	log.Printf("roll secrets operator: every %s, and within seconds of a change (each RollSecret's digest is long-polled)", every)
+	o.run(ctx)
 }

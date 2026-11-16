@@ -116,6 +116,14 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.URL.Path {
 	case "/v1/secrets/projects/prj_a/environments/production/digest":
+		// A long poll answers once the digest moves (held here at most 3 s, not 25).
+		if since := r.URL.Query().Get("since"); since != "" && r.URL.Query().Get("wait") != "" {
+			for until := time.Now().Add(3 * time.Second); f.digest == since && time.Now().Before(until); {
+				f.mu.Unlock()
+				time.Sleep(20 * time.Millisecond)
+				f.mu.Lock()
+			}
+		}
 		write(200, map[string]string{"digest": f.digest})
 	case "/v1/secrets/projects/prj_a/environments/production/values":
 		write(200, map[string]any{"values": map[string]string{"DB_URL": f.value}, "problems": []any{}})
@@ -174,6 +182,49 @@ func TestTheOperatorKeepsItsSecretsInStepAndTouchesNoOtherSecret(t *testing.T) {
 	if got := string(kubeAPI.secrets["apps/web"].Data["DB_URL"]); got != "postgres://db/two" || rolld.logins != 2 {
 		t.Fatalf("after the change: %q, %d logins", got, rolld.logins)
 	}
+}
+
+// A change reaches the Secret within seconds, without waiting for the interval: each RollSecret's
+// digest is long-polled between passes.
+func TestAChangeReachesTheSecretWithoutWaitingForTheInterval(t *testing.T) {
+	kubeAPI := &fakeKube{secrets: map[string]*secretObj{}, status: map[string]rollStatus{}}
+	var rs rollSecret
+	rs.Metadata = meta{Name: "web", Namespace: "apps", UID: "uid-web", Generation: 1}
+	rs.Spec.Environment = "production"
+	kubeAPI.rs = append(kubeAPI.rs, rs)
+	rolld := &fakeRolld{digest: "d1", value: "postgres://db/one"}
+	k8s, roll := httptest.NewServer(kubeAPI), httptest.NewServer(rolld)
+	defer k8s.Close()
+	defer roll.Close()
+	o := &operator{
+		kube: &kube{api: k8s.URL, token: "sa", http: http.DefaultClient}, api: roll.URL, identity: "idn_cluster",
+		oidc: func() (string, error) { return "projected-sa-token", nil }, now: time.Now, clients: map[string]*secrets.Client{},
+		namespaces: map[string]bool{"apps": true}, every: time.Hour,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go o.run(ctx)
+	value := func() string {
+		kubeAPI.mu.Lock()
+		defer kubeAPI.mu.Unlock()
+		if s := kubeAPI.secrets["apps/web"]; s != nil {
+			return string(s.Data["DB_URL"])
+		}
+		return ""
+	}
+	waitFor := func(want string) {
+		for until := time.Now().Add(5 * time.Second); value() != want; time.Sleep(20 * time.Millisecond) {
+			if time.Now().After(until) {
+				t.Fatalf("the Secret holds %q, not %q", value(), want)
+			}
+		}
+	}
+	waitFor("postgres://db/one")
+	time.Sleep(100 * time.Millisecond) // the watch is held
+	rolld.mu.Lock()
+	rolld.digest, rolld.value = "d2", "postgres://db/two"
+	rolld.mu.Unlock()
+	waitFor("postgres://db/two") // an hour's interval: only the watch could have
 }
 
 // Outside the operator's own namespaces a RollSecret logs in as a service account of its own
