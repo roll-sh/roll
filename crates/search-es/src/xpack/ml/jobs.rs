@@ -1195,7 +1195,7 @@ fn params_indices_options(ctx: &Ctx) -> Option<Value> {
         return None;
     }
     if ctx.param("ignore_throttled").is_some() {
-        ctx.warn("[ignore_throttled] parameter is deprecated because frozen indices have been deprecated. Consider cold or frozen tiers in place of frozen indices.");
+        ctx.warn(crate::rest::params::IGNORE_THROTTLED_DEPRECATED);
     }
     let mut m = Map::new();
     for k in KEYS {

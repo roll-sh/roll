@@ -376,6 +376,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
   const envName = env?.name ?? envParam ?? mainEnvironment(service)?.name ?? PRODUCTION;
   const st = env?.state ?? "none";
   const asleep = st === "stopped" || st === "suspended";
+  const awake = env?.instances.filter((i) => i.state === "running" || i.state === "waking" || i.state === "deploying").length ?? 0;
   const localUrl = env?.port && typeof window !== "undefined" ? `http://${window.location.hostname}:${env.port}` : null;
   const deploy = (body: NewDeploy = {}) => runner.run("deploy", () => appsApi.deploy(service.id, envName, body));
 
@@ -416,7 +417,12 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           <SureButton className={`${btn} shrink-0`} disabled={busy || !env?.active} sure="Sure? Restart" onSure={() => runner.run("restart", () => appsApi.restart(service.id, envName))} title="Replace the instances with fresh ones">
             <RotateCw className="size-3.5" /> Restart
           </SureButton>
-          {upload ? (
+          {upload && !env?.active ? (
+            // Nothing to redeploy yet: its first deploy is a folder (or `roll up`).
+            <button className={`${primary} !py-1 !text-[12px]`} disabled={busy} onClick={() => go({ tab: "deployments" })} title="Drop a folder on Deployments, or run roll up in its directory">
+              <Rocket className="size-3.5" /> Deploy a folder
+            </button>
+          ) : upload ? (
             <button className={`${primary} !py-1 !text-[12px]`} disabled={busy || !env?.active} onClick={redeploy} title="Run the live image again with the current variables and settings (new code: roll up)">
               <Rocket className="size-3.5" /> Redeploy
             </button>
@@ -438,11 +444,12 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           <h1 className="truncate text-2xl font-semibold tracking-[-0.04em]">{service.name}</h1>
           <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-muted">
             <StateBadge state={st} />
-            {env && env.instances.length > 0 && (
+            {/* What's up now: a sleeping or frozen instance isn't one serving. */}
+            {awake > 0 && (
               <>
                 <span className="text-subtle">·</span>
                 <span className="font-mono text-[12px]">
-                  {env.instances.length} {env.instances.length === 1 ? "instance" : "instances"}
+                  {awake} {awake === 1 ? "instance" : "instances"}
                 </span>
               </>
             )}
@@ -493,7 +500,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           className="rise mt-3 flex flex-wrap items-end gap-3 rounded-xl border border-line bg-panel px-4 py-3"
           onSubmit={async (e) => {
             e.preventDefault();
-            const built = service.source.kind === "repo";
+            const built = service.source.kind === "repo" || service.source.kind === "git";
             const body: NewDeploy = {
               ...(built && rev.trim() ? { revision: rev.trim() } : {}),
               ...(!built && image.trim() ? { image: image.trim() } : {}),
@@ -509,7 +516,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
             }
           }}
         >
-          {service.source.kind === "repo" && (
+          {(service.source.kind === "repo" || service.source.kind === "git") && (
             <label className="flex flex-col gap-1 text-[12px] text-muted">
               Revision
               <input value={rev} onChange={(e) => setRev(e.target.value)} placeholder="the branch's head" spellCheck={false} className={`${input} w-56 font-mono text-[12px]`} />
@@ -529,7 +536,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
             <input type="checkbox" checked={noTraffic} onChange={(e) => setNoTraffic(e.target.checked)} />
             No traffic (try it first)
           </label>
-          {service.source.kind === "repo" && (
+          {(service.source.kind === "repo" || service.source.kind === "git") && (
             <label className="inline-flex items-center gap-1.5 pb-2 text-[12px] text-muted" title="No cached layer; base images pulled again">
               <input type="checkbox" checked={noCache} onChange={(e) => setNoCache(e.target.checked)} />
               Without the cache
@@ -545,7 +552,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
       )}
       {adding && (
         <NewEnvironment
-          repo={service.source.kind === "repo"}
+          repo={service.source.kind === "repo" || service.source.kind === "git"}
           envs={service.environments.map((e) => e.name)}
           busy={busy}
           onCancel={() => setAdding(false)}
@@ -636,15 +643,15 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
             )}
           </p>
         ) : tab === "deployments" ? (
-          <Deployments service={service.id} env={env!} deploys={data.deploys} runner={runner} own={service.run.type === "web" && !service.run.volume} upload={service.source.kind === "upload"} />
+          <Deployments service={service.id} name={service.name} env={env!} deploys={data.deploys} runner={runner} own={service.run.type === "web" && !service.run.volume} upload={service.source.kind === "upload"} />
         ) : tab === "logs" ? (
           <RuntimeLogs service={service.id} env={envName} />
         ) : tab === "metrics" ? (
-          <MetricsTab service={service.id} env={envName} memoryMb={service.run.memory_mb} />
+          <MetricsTab service={service.id} env={envName} memoryMb={service.run.memory_mb} maxInstances={service.run.max_instances} />
         ) : tab === "variables" ? (
           <VariablesTab service={service.id} project={service.project} env={env!} envs={service.environments.map((e) => e.name).filter((n) => n !== env!.name)} runner={runner} onRedeploy={redeploy} />
         ) : tab === "jobs" ? (
-          <JobsTab service={service.id} env={envName} runner={runner} cron={service.run.type === "cron"} schedules={service.run.schedules ?? []} />
+          <JobsTab service={service.id} env={envName} runner={runner} cron={service.run.type === "cron"} schedules={service.run.schedules ?? []} states={env?.schedules} />
         ) : tab === "shell" ? (
           <ShellTab service={service.id} env={envName} instances={env?.instances} />
         ) : tab === "domains" ? (

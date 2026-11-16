@@ -556,6 +556,7 @@ fn finish_create(
         primary_terms: vec![1; shards],
         system: names::is_system_index(name),
         recovery_source: None,
+        rollover_info: Default::default(),
         dialect: st.dialect,
     };
     st.metadata.indices.insert(name.to_string(), Arc::new(idx));
@@ -1451,7 +1452,10 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
                 let mut vs = crate::engine::VectorStats::default();
                 if file_sizes && let Some(Value::Obj(seg)) = bm.get_mut("segments") {
                     let mut files = FileSizes::default();
-                    for s in &e.shards {
+                    // A partially mounted (frozen) index's segments aren't loaded: their files
+                    // count only with `include_unloaded_segments`.
+                    let unloaded_frozen = idx.settings.get("index.store.snapshot.partial") == Some("true") && !ctx.bool_param("include_unloaded_segments", false).unwrap_or(false);
+                    for s in e.shards.iter().filter(|_| !unloaded_frozen) {
                         files.add_shard(&s.shard);
                     }
                     seg.insert("file_sizes".into(), files.to_value());
@@ -1626,9 +1630,9 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
 /// filters `bfi`, completion `cmp`, and the segment and field infos `si`), counted once per
 /// segment that has it.
 #[derive(Default)]
-struct FileSizes {
+pub(crate) struct FileSizes {
     /// Extension → (total, min, max, files).
-    by_ext: std::collections::BTreeMap<&'static str, (u64, u64, u64, u64)>,
+    pub(crate) by_ext: std::collections::BTreeMap<&'static str, (u64, u64, u64, u64)>,
 }
 
 impl FileSizes {
@@ -1640,7 +1644,7 @@ impl FileSizes {
         e.3 += 1;
     }
 
-    fn add_shard(&mut self, shard: &search_index::Shard) {
+    pub(crate) fn add_shard(&mut self, shard: &search_index::Shard) {
         use search_codec::container::SectionKind as K;
         for seg in shard.searcher().segments() {
             let mut per: std::collections::BTreeMap<&'static str, u64> = std::collections::BTreeMap::new();
@@ -1678,7 +1682,7 @@ impl FileSizes {
         }
     }
 
-    fn merge(&mut self, o: &FileSizes) {
+    pub(crate) fn merge(&mut self, o: &FileSizes) {
         for (ext, &(sum, min, max, n)) in &o.by_ext {
             let e = self.by_ext.entry(ext).or_insert((0, u64::MAX, 0, 0));
             e.0 += sum;
@@ -1871,9 +1875,11 @@ pub fn resolve_index(ctx: &Ctx) -> EsResult<Reply> {
     };
     let mode_of = |idx: &IndexMeta| idx.settings.get("index.mode").map(str::to_ascii_lowercase).unwrap_or_else(|| "standard".into());
     let selected = |idx: &IndexMeta| modes.as_ref().is_none_or(|ms| ms.contains(&mode_of(idx)));
+    // Only what the principal may see (Elasticsearch expands the wildcards to authorized names).
+    let visible = crate::xpack::security::authorized_names(ctx);
     let names = resolve::resolve(&st, &exprs, &IndicesOptions { allow_aliases: false, ignore_unavailable: true, include_data_streams: false, ..opts }, ctx.now_ms)?;
     let mut indices = Vec::new();
-    for n in &names {
+    for n in names.iter().filter(|n| visible(n)) {
         let idx = &st.metadata.indices[n];
         if !selected(idx) {
             continue;
@@ -1904,7 +1910,7 @@ pub fn resolve_index(ctx: &Ctx) -> EsResult<Reply> {
     for (alias, members) in st.aliases() {
         let matched = exprs.is_empty() || exprs.iter().any(|e| e == "_all" || glob_match(e, alias));
         let hidden = members.iter().any(|(_, a)| a.is_hidden == Some(true));
-        if matched && (!hidden || opts.expand_hidden) {
+        if matched && (!hidden || opts.expand_hidden) && visible(alias) {
             let mut list: Vec<String> = members.iter().filter(|(i, _)| selected(i)).map(|(i, _)| i.name.clone()).collect();
             if list.is_empty() {
                 continue;
@@ -1915,7 +1921,7 @@ pub fn resolve_index(ctx: &Ctx) -> EsResult<Reply> {
     }
     // Data stream aliases, then data streams.
     for (alias, a) in &st.metadata.data_stream_aliases {
-        if exprs.is_empty() || exprs.iter().any(|e| e == "_all" || glob_match(e, alias)) {
+        if (exprs.is_empty() || exprs.iter().any(|e| e == "_all" || glob_match(e, alias))) && visible(alias) {
             aliases.push(obj! { "name" => alias.clone(), "indices" => a.data_streams.clone() });
         }
     }
@@ -1923,7 +1929,7 @@ pub fn resolve_index(ctx: &Ctx) -> EsResult<Reply> {
     let ds_opts = IndicesOptions { ignore_unavailable: true, ..opts };
     let ds_names = super::data_streams::resolve_data_streams(&st, &exprs, &ds_opts).unwrap_or_default();
     let mut data_streams = Vec::new();
-    for n in ds_names {
+    for n in ds_names.into_iter().filter(|n| visible(n)) {
         let ds = &st.metadata.data_streams[&n];
         let mut m = Map::new();
         m.insert("name".into(), Value::from(n.clone()));

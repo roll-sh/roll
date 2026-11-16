@@ -57,6 +57,14 @@ impl FetchSource {
                     match k.as_str() {
                         "includes" | "include" => fs.includes = list(x)?,
                         "excludes" | "exclude" => fs.excludes = list(x)?,
+                        // `top_hits` and `inner_hits` take it as the search's `_source` does.
+                        "exclude_vectors" => {
+                            fs.exclude_vectors = Some(match x {
+                                Value::Bool(b) => *b,
+                                Value::Str(s) if s == "true" || s == "false" => s == "true",
+                                _ => return Err(EsError::parse(format!("Unknown key for a VALUE_STRING in [{k}]."))),
+                            })
+                        }
                         _ => return Err(EsError::parse(format!("Unknown key for a VALUE_STRING in [{k}]."))),
                     }
                 }
@@ -149,7 +157,8 @@ pub struct SourceView<'a> {
     pub table: &'a FieldTable,
     pub force_synthetic: bool,
     /// The search fetch phase, whose forced synthetic `_source` keeps every vector
-    /// (`get` leaves them out of it as from any other source).
+    /// (`get` leaves them out of it as from any other source), and whose hits print their
+    /// vectors before the view applies (`search::hits`: the view only keeps or drops them).
     pub search: bool,
 }
 
@@ -165,6 +174,14 @@ impl SourceView<'_> {
     pub fn apply_parsed(&self, v: Value, fs: &FetchSource, parsed: bool) -> Value {
         use crate::engine::synthetic;
         let mut v = v;
+        // `semantic_text` embeddings (`_inference_fields`) are vectors too: shown only with
+        // `exclude_vectors: false` or when the includes name them.
+        if let Value::Obj(m) = &mut v
+            && fs.exclude_vectors != Some(false)
+            && !fs.includes.iter().any(|i| i.starts_with("_inference_fields"))
+        {
+            m.retain(|k, _| !crate::xpack::inference::semantic::is_inference_key(k));
+        }
         // A forced synthetic `_source` of a stored-source index is built whole from the
         // document. A search shows its vectors; `get` leaves them out as from a synthetic
         // source (all of them unless the request filters it).
@@ -184,9 +201,9 @@ impl SourceView<'_> {
             let synthetic = self.force_synthetic || synthetic::source_mode(self.idx) == synthetic::SourceMode::Synthetic;
             let filtered = !fs.includes.is_empty() || !fs.excludes.is_empty();
             let kept = if fs.exclude_vectors == Some(false) || (synthetic && filtered && fs.exclude_vectors.is_none()) {
-                synthetic::vectors_keeping(self.table, "", m, None)
+                synthetic::vectors_keeping(self.table, "", m, None, !self.search)
             } else {
-                synthetic::vectors_keeping(self.table, "", m, Some(&crate::engine::source::Globs::new(&fs.includes)))
+                synthetic::vectors_keeping(self.table, "", m, Some(&crate::engine::source::Globs::new(&fs.includes)), !self.search)
             };
             // Patching vectors back in turns the source into a map, which Elasticsearch
             // filters with map semantics (`*` spans dots) rather than over the bytes.
@@ -235,10 +252,8 @@ pub fn stored_value(f: &FieldInfo, v: &OwnedStoredValue) -> Value {
             None => Value::from(*ms),
         },
         (Kind::Ip, OwnedStoredValue::Bytes(b)) if b.len() == 16 => Value::Str(search_index::query::range::inet_to_string(b)),
-        (Kind::UnsignedLong, OwnedStoredValue::Long(l)) => {
-            let u = (*l as u64) ^ (1 << 63);
-            if u <= i64::MAX as u64 { Value::from(u as i64) } else { Value::Num(Number::UInt(u)) }
-        }
+        // Elasticsearch stores the unsigned value's text (`Long.toUnsignedString`).
+        (Kind::UnsignedLong, OwnedStoredValue::Long(l)) => Value::Str(((*l as u64) ^ (1 << 63)).to_string()),
         (Kind::Binary, OwnedStoredValue::Bytes(b)) => {
             use base64::Engine as _;
             Value::Str(base64::engine::general_purpose::STANDARD.encode(b))

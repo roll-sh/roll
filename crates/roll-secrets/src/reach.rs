@@ -182,7 +182,7 @@ impl Secrets {
             for p in projects {
                 let wanted: std::collections::HashSet<(&str, &str)> = all.iter().filter(|s| s.0 == p).map(|s| (s.1.as_str(), s.2.as_str())).collect();
                 let rows: Vec<(String, String, String, i64, String)> = c.query(
-                    "SELECT env, path, actor, at, keys FROM audit WHERE project_id = ? AND at >= ? AND action IN ('secrets.reveal', 'secrets.export', 'secrets.resolve', 'sync.push') ORDER BY id DESC LIMIT ?",
+                    "SELECT env, path, actor, at, keys FROM audit WHERE project_id = ? AND at >= ? AND action IN ('secrets.reveal', 'secrets.export', 'secrets.resolve', 'secrets.revalidate', 'sync.push') ORDER BY id DESC LIMIT ?",
                     params![p, now - READ_DAYS * 86_400_000, READS_MAX],
                     |r| Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get::<_, Option<String>>(1)?.unwrap_or_default(), r.get(2)?, r.get(3)?, r.get(4)?)),
                 )?;

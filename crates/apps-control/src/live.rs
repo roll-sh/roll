@@ -676,7 +676,10 @@ impl EnvLive {
             })
             .filter(|(i, _)| over || i.in_flight() < concurrency)
             .min_by_key(|(i, _)| i.in_flight())?;
-        best.0.in_flight.fetch_add(1, Ordering::SeqCst);
+        // Even the least busy is full: every instance is busy at max_instances (saturation).
+        if best.0.in_flight.fetch_add(1, Ordering::SeqCst) >= concurrency {
+            self.meter.lock().over_capacity(code_sql::now_ms());
+        }
         Some(Lease { addr: best.1, inst: best.0.clone(), waited: Duration::ZERO, cold: false, h2c: false, timeout: None, affinity: false })
     }
 

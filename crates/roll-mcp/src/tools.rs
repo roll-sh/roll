@@ -778,7 +778,7 @@ static TOOLS: &[Tool] = &[
     t(
         "apps_create_service",
         "Create a service",
-        "A new service in a workspace project, from a roll code repo ({kind: \"repo\", repo: \"owner/name\", root?}), an image ({kind: \"image\", image}) or an upload ({kind: \"upload\"}, deployed with roll up). A repo or image service deploys to production at once (a \"deploy\" action).",
+        "A new service in a workspace project, from a roll code repo ({kind: \"repo\", repo: \"owner/name\", root?}), a public Git URL ({kind: \"git\", url: \"https://github.com/owner/name\", root?}, with branch? to follow), an image ({kind: \"image\", image}) or an upload ({kind: \"upload\"}, deployed with roll up). A repo, Git or image service deploys to production at once (a \"deploy\" action).",
         "apps",
         "POST",
         "/v1/apps/projects/{project}/services",
@@ -804,6 +804,7 @@ static TOOLS: &[Tool] = &[
         b("paused", Ty::Bool, "Pause it (no deploys on push, nothing running) or resume it"),
         // A rollback holds deploys (apps #26): false lets pushes and hooks deploy again.
         b("held", Ty::Bool, "false: resume deploys a rollback held (held_after shows since when)"),
+        b("hostname", Ty::Str, "Its new name on the roll domain (<hostname>.<domain>); the old one stops answering"),
     ]),
     t("apps_update_service", "Update a service", "Change a service's name, source, build or run settings (fields given are changed; run takes alerts {memory_pct, error_pct, p95_ms} for metric alerts).", "apps", "PATCH", "/v1/apps/services/{service}", &[
         SERVICE,

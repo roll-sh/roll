@@ -226,6 +226,8 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 CREATE INDEX IF NOT EXISTS audit_project ON audit (project_id, id);
 CREATE INDEX IF NOT EXISTS audit_at ON audit (at);
+-- A conditional read's once-a-day row (read.rs, `unchanged`) is looked up on every 304.
+CREATE INDEX IF NOT EXISTS audit_revalidate ON audit (project_id, actor, env, path, at) WHERE action = 'secrets.revalidate';
 CREATE TABLE IF NOT EXISTS required (
     project_id TEXT NOT NULL,
     path TEXT NOT NULL,

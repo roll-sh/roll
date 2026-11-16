@@ -82,6 +82,10 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    const env = secrets.open(await secrets.resolve("production", { consumer: "app:web", sealTo: keys.publicKey }), keys.secretKey);
    const stop = secrets.watch("staging", { onChange: (v) => reconfigure(v.values) });
 
+   // A process that reads values per request keeps them a while: within the TTL from memory,
+   // then a conditional read that costs a 304 (nothing read, issued or audited) while unchanged.
+   const cached = createClient({ api: process.env.ROLL_API_URL!, token: process.env.ROLL_TOKEN!, cacheTtlMs: 30_000 });
+
    // An encryption key (below, "Encryption keys"): the key stays in roll.
    const cards = secrets.transit("cards");
    const ct = await cards.encrypt(cardNumber, `order:${id}`);
@@ -2315,7 +2319,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
-| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
+| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`); with `digest=1` or `If-None-Match` an `ETag` (the digest), and `If-None-Match` with the digest still current is a 304 that decrypts and issues nothing, and writes one `secrets.revalidate` row a day per caller and folder (so health and insights still see the folder read) (never for a folder holding a dynamic credential unless `dynamic=false`: a lease ends without moving the digest; never for one that reads a live link: its product can change the credential without roll knowing) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, projects it's shared with, folders that import it, readers in 30 days |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |

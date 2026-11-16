@@ -15,6 +15,7 @@ pub mod cat;
 mod cat_columns;
 mod cat_columns_os;
 pub mod cluster;
+pub mod data_stream_lifecycle;
 pub mod data_streams;
 pub mod desired_nodes;
 pub mod disk_usage;
@@ -57,7 +58,13 @@ pub fn extra_params(api: Api) -> &'static [&'static str] {
         Api::Update => &["version", "version_type"],
         // Read only to be rejected (`RestSubmitAsyncSearchAction` parses it like `_search`).
         Api::AsyncSearchSubmit => &["scroll"],
+        // `RestGetSourceAction` reads it though the spec leaves it out.
+        Api::GetSource | Api::ExistsSource => &["_source_exclude_vectors"],
         Api::CatTasks => &["ts", "pri", "size", "detailed"],
+        // `RestIndicesAction` and `RestCatRecoveryAction` read `IndicesOptions.fromRequest`
+        // though the spec leaves its parameters out (`local` only on indices).
+        Api::CatIndices => &["ts", "pri", "size", "ignore_unavailable", "allow_no_indices", "ignore_throttled", "local"],
+        Api::CatRecovery => &["ts", "pri", "size", "ignore_unavailable", "allow_no_indices", "ignore_throttled", "expand_wildcards"],
         a if a.name().starts_with("cat.") => &["ts", "pri", "size"],
         _ => &[],
     }
@@ -159,6 +166,9 @@ handlers! { ctx;
     TasksList => tasks::list(ctx).await,
     TasksGet => tasks::get(ctx).await,
     TasksCancel => tasks::cancel(ctx),
+    ReindexGet => tasks::reindex_get(ctx).await,
+    ReindexList => tasks::reindex_list(ctx).await,
+    ReindexCancel => tasks::reindex_cancel(ctx).await,
 
     IndicesGetAlias => aliases::get_alias(ctx),
     IndicesExistsAlias => aliases::get_alias(ctx),
@@ -287,11 +297,12 @@ handlers! { ctx;
     SnapshotCreateRepository => snapshots::put_repository(ctx).await,
     SnapshotGetRepository => snapshots::get_repository(ctx),
     SnapshotDeleteRepository => snapshots::delete_repository(ctx).await,
-    SnapshotVerifyRepository => snapshots::verify_repository(ctx),
+    SnapshotVerifyRepository => snapshots::verify_repository(ctx).await,
     SnapshotRepositoryAnalyze => snapshots::analyze_repository(ctx),
-    SnapshotCleanupRepository => snapshots::cleanup_repository(ctx),
+    SnapshotRepositoryVerifyIntegrity => snapshots::verify_integrity(ctx).await,
+    SnapshotCleanupRepository => snapshots::cleanup_repository(ctx).await,
     SnapshotCreate => snapshots::create(ctx).await,
-    SnapshotGet => snapshots::get(ctx),
+    SnapshotGet => snapshots::get(ctx).await,
     SnapshotDelete => snapshots::delete(ctx).await,
     SnapshotStatus => snapshots::status(ctx),
     SnapshotClone => snapshots::clone(ctx).await,

@@ -8,7 +8,7 @@ use crate::write::{Batch, Op, Promote, Rollback, SecretType};
 use crate::{Error, Secrets, dotenv};
 use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -493,7 +493,14 @@ async fn rotate(State(s): S, Who(c): Who, Path((project, env, key)): Path<(Strin
     Ok(ok(blocking(s, move |s| s.rotate(&project, &env, &path_of(&q), &key, &c)).await?))
 }
 
-async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
+/// The entity tag a conditional read sent (`If-None-Match: "<digest>"`, weak or strong).
+fn if_none_match(headers: &HeaderMap) -> Option<String> {
+    let v = headers.get(header::IF_NONE_MATCH)?.to_str().ok()?.trim();
+    let v = v.strip_prefix("W/").unwrap_or(v).trim_matches('"');
+    (!v.is_empty() && v.len() <= 64 && v.bytes().all(|b| b.is_ascii_hexdigit())).then(|| v.to_string())
+}
+
+async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q, headers: HeaderMap) -> crate::Result<Response> {
     let resolve = flag(&q, "resolve", true);
     let format = match q.get("format") {
         Some(f) => Some(dotenv::Format::parse(f).ok_or_else(|| Error::BadRequest("format is dotenv, shell, json, yaml, docker or kubernetes".into()))?),
@@ -516,8 +523,17 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
     } else {
         // With `digest=1` (a watch): the folder's digest (`…/digest`), taken just before the read,
         // so a write landing after it is a change. Asked for, since it costs about a read.
-        let want = flag(&q, "digest", false);
+        // A conditional read (`If-None-Match`, a cache revalidating): unchanged is a 304 that
+        // decrypts nothing, issues nothing and writes no audit row.
+        let etag = if_none_match(&headers);
+        let want = flag(&q, "digest", false) || etag.is_some();
         let dynamic = flag(&q, "dynamic", true);
+        if let Some(tag) = etag.clone() {
+            let (s, c, project, env, path) = (s.clone(), c.clone(), project.clone(), env.clone(), path_of(&q));
+            if let Some(d) = blocking(s, move |s| s.unchanged(&project, &env, &path, &tag, dynamic, &c)).await? {
+                return Ok(secret_response((StatusCode::NOT_MODIFIED, [(header::ETAG, format!("\"{d}\""))]).into_response()));
+            }
+        }
         blocking(s, move |s| {
             let path = path_of(&q);
             let digest = if want { s.digest(&project, &env, &path, &c).ok() } else { None };
@@ -544,7 +560,7 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
         }
         None => {
             let mut j = serde_json::to_value(&v).expect("JSON");
-            if let Some(d) = digest {
+            if let Some(d) = &digest {
                 j["digest"] = json!(d);
             }
             ok(j)
@@ -554,6 +570,13 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
             ([(header::CONTENT_TYPE, f.content_type())], text.to_string()).into_response()
         }
     };
+    // The digest it was read against: what a cache sends back as `If-None-Match`.
+    let mut r = r;
+    if let Some(d) = digest.filter(|_| as_of.is_none())
+        && let Ok(v) = HeaderValue::from_str(&format!("\"{d}\""))
+    {
+        r.headers_mut().insert(header::ETAG, v);
+    }
     Ok(secret_response(r))
 }
 

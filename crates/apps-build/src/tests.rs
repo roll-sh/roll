@@ -753,3 +753,21 @@ fn system_packages_go_in_a_generated_dockerfile_and_are_said() {
     let own = plan(&tree(&[("Dockerfile", "FROM alpine\n")]), &o).unwrap();
     assert!(!own.dockerfile.contains("ffmpeg"), "the tree's own Dockerfile is its own");
 }
+
+/// A monorepo's folders that build on their own are offered as roots; a library package, docs
+/// and dependencies aren't.
+#[test]
+fn a_monorepos_apps_are_its_candidate_roots() {
+    let t = tree(&[
+        ("package.json", r#"{"name":"mono","private":true,"workspaces":["apps/*","packages/*"]}"#),
+        ("apps/web/package.json", r#"{"name":"web","scripts":{"build":"next build","start":"next start"},"dependencies":{"next":"15.0.0"}}"#),
+        ("apps/api/go.mod", "module api\n\ngo 1.23\n"),
+        ("apps/api/main.go", "package main\nfunc main() {}\n"),
+        ("apps/worker/Dockerfile", "FROM busybox\nCMD [\"sleep\", \"1\"]\n"),
+        ("packages/ui/package.json", r#"{"name":"ui","main":"index.js"}"#),
+        ("docs/index.html", "<h1>docs</h1>"),
+        ("node_modules/x/package.json", r#"{"name":"x","scripts":{"start":"node x"}}"#),
+    ]);
+    let roots: Vec<String> = candidates(&t).into_iter().map(|c| c.root).collect();
+    assert_eq!(roots, ["apps/api", "apps/web", "apps/worker"]);
+}
