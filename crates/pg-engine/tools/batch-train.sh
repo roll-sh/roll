@@ -174,11 +174,14 @@ if [ -n "$FINAL" ]; then
   [ -s "$TD/clippy-warnings.txt" ] && cp "$TD/clippy-warnings.txt" "$H/clippy/$HEAD.txt"
   if [ -n "${BT_DRY:-}" ]; then
     res "dry run: would push $HEAD"
-  elif (cd "$WT" && crates/pg-engine/tools/push.sh) >>"$RUN/log" 2>&1; then
+  elif (cd "$WT" && crates/pg-engine/tools/push.sh) >"$RUN/push.log" 2>&1; then
     PUSHED=$HEAD
   else
-    res "push failed (origin moved? see $RUN/log)"
+    # Origin moved (run the batch again), or push.sh's guard refused lines a candidate takes
+    # back: push $HEAD from the worktree by hand with PUSH_REMOVAL_REVIEW (push.sh's header).
+    res "push failed for $HEAD: $(grep -v '^ *$' "$RUN/push.log" | head -3 | paste -sd' ' -)"
   fi
+  cat "$RUN/push.log" >>"$RUN/log"
   for c in $FINAL; do res "candidate $c $([ -n "$PUSHED" ] && echo landed || echo green-not-pushed)"; done
 fi
 res "pushed ${PUSHED:-nothing}"

@@ -204,8 +204,10 @@ build $ARGS | artifacts "" >>"$D/bins"
 [ -n "$(bin wire)" ] && ! grep -q '^error' "$D/build.log" || fail build "$t" "$(grep -m1 -E '^error' "$D/build.log")"
 if [ $CRASH = 1 ]; then
   build --test crash_random | artifacts "" >>"$D/bins"
-  build --features powerloss --test crash_random | artifacts @power >>"$D/bins"
-  [ -n "$(bin crash_random@power)" ] || fail build "$t" "$(grep -m1 -E '^error' "$D/build.log")"
+  # The power cut build compiles the engine again (a feature): alongside the tests.
+  setsid cargo test --profile "$PROF" -p pg-engine --no-run --message-format=json-render-diagnostics \
+    --features powerloss --test crash_random >"$D/build-power.json" 2>"$D/build-power.log" &
+  POWERB=$!; KILLGRPS="$KILLGRPS $POWERB"
 fi
 line build ok "$t" "profile $PROF, $(wc -l <"$D/bins") test binaries"
 
@@ -247,17 +249,28 @@ PY
 fi
 
 # --- crate tests and the crash stage -------------------------------------------------------
+# A reference suite that failed meanwhile stops the run at once.
+ref_failed() {
+  [ $REF = 1 ] || return 0
+  set -- $(grep -m1 '^[a-z]* FAIL ' "$D/ref.status")
+  [ $# -gt 0 ] || return 0
+  step=$1 secs=$3; shift 3
+  echo "qc $step FAIL ${secs}s $* (log: $D/$step.log)"; cleanup; exit 1
+}
 t=$(now); : >"$D/tests.log"
 for s in $SEL; do
   echo "=== $s" >>"$D/tests.log"
   run "$s" >>"$D/tests.log" 2>&1 ||
     fail tests "$t" "$s: $(sed -n "/^=== $s\$/,\$p" "$D/tests.log" | grep -E '^test .* FAILED$' | head -3 | tr '\n' ' ')"
+  ref_failed
 done
 line tests ok "$t" "$(grep -o '[0-9]* passed' "$D/tests.log" | awk '{s += $1} END {print s}') passed in $(echo $SEL | wc -w) binaries"
 if [ $CRASH = 1 ]; then
   t=$(now)
   CRASH_SEEDS=1,2,3 CRASH_ROUNDS=2 run crash_random >"$D/crash.log" 2>&1 ||
     fail crash "$t" "seeds 1-3 x 2: $(grep -m1 'panicked' "$D/crash.log")"
+  wait "$POWERB"; artifacts @power <"$D/build-power.json" >>"$D/bins"
+  [ -n "$(bin crash_random@power)" ] || fail crash "$t" "powerloss build: $(grep -m1 -E '^error' "$D/build-power.log")"
   run crash_random@power --exact power_cut_at_every_point >>"$D/crash.log" 2>&1 ||
     fail crash "$t" "power_cut_at_every_point: $(grep 'panicked' "$D/crash.log" | tail -1)"
   line crash ok "$t" "seeds 1-3 x 2 rounds, power_cut_at_every_point"
