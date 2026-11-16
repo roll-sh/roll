@@ -18,6 +18,9 @@ key = roll_secrets.generate_key()               # sealed to a key only this proc
 v = c.resolve_sealed("production", "app:web", key)
 
 c.watch("production", lambda v: reload(v.values))   # until `stop` (a threading.Event) is set
+
+# Read per request? Keep answers 30 s, then revalidate (a 304 while unchanged).
+c = roll_secrets.Client(api, token, cache_ttl=30)
 ```
 
 Tests: `PYTHONPATH=src python -m unittest discover -s tests` (CI's `sdk` job).
