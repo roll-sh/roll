@@ -411,13 +411,17 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
 10. **Integration with the stacked branches**: previews (search brancher: branch, find, reset,
    delete, `own_bytes`, `ELASTICSEARCH_URL`) and apps are on this branch; `scripts/preview-cost.sh`
    now branches a search cluster too (the branch reads the parent's document, its writes stay
-   in it, the service gets its `ELASTICSEARCH_URL`, landing deletes it). Apps' links to search:
-   search's side is `Control::mint_link` / `revoke_link` (an API key with a data-only role,
-   `ELASTICSEARCH_URL` + `ELASTICSEARCH_API_KEY`; on an OpenSearch-flavor cluster an internal
-   user of OpenSearch Security with a data-only role of its own, `OPENSEARCH_URL` with
-   `<user>@<cluster>:<password>@`; never the cluster's password or security);
-   rolld's `RollResources` glue goes on apps' `Resources::link` / `unlink` with whichever of #29
-   and #26 reaches main second. Secrets' link provider (#20) asks for `access: "data"` keys; on
+   in it, the service gets its `ELASTICSEARCH_URL`, landing deletes it). Apps' links to search
+   (after #29 and apps' #78): apps' `LinkKind::Search` goes through roll secrets' search provider
+   like buckets and streams (rolld's `secrets::link_provider("search")`, search's keys route with
+   `access: "data"`): an API key with a data-only role, `ELASTICSEARCH_URL` +
+   `ELASTICSEARCH_API_KEY`, or on an OpenSearch-flavor cluster an internal user with a data-only
+   role of its own, `OPENSEARCH_URL`, `OPENSEARCH_USERNAME` and `OPENSEARCH_PASSWORD`; never the
+   cluster's password or security (checked live 2026-11-16: relinking keeps the credential,
+   unlinking revokes it, a prefix applies). On a fleet the
+   keys route runs on the cluster's owner, and `Control::call` sends the control plane's own
+   in-process requests there too (`cluster::to_owner`; search's `Control::mint_link` /
+   `revoke_link` use it). Secrets' link provider (#20) asks for `access: "data"` keys; on
    OpenSearch-flavor clusters the keys route mints an internal user (`{username, password}`
    instead of `api_key`; secrets' side is #51, checked live once both are in one rolld). A
    flavor switch doesn't carry keys across (an API key isn't an OpenSearch user): links made
