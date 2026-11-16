@@ -1241,6 +1241,10 @@ impl Apps {
         if o.get("follow_tag") == Some(&Value::Bool(true)) && !matches!(&svc.source, Source::Image { image } if !image.contains('@')) {
             return Err(Error::BadRequest("follow_tag is for an image service whose image has a tag (not a digest)".into()));
         }
+        // Only a roll code repo's pushes wait for their commit's checks (its statuses are roll's).
+        if o.get("wait_for_ci") == Some(&Value::Bool(true)) && !matches!(&svc.source, Source::Repo { .. }) {
+            return Err(Error::BadRequest("wait_for_ci is for a roll code repo's service: a Git URL's checks aren't roll's to read".into()));
+        }
         // A name another environment has is refused before anything is made or changed.
         if let Some(h) = hostname.clone() {
             let (sid, e) = (service.to_string(), env.to_string());

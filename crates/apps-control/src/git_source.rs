@@ -29,7 +29,8 @@ impl crate::Apps {
             let sid = svc.id.clone();
             let Ok((envs, pending)) = self.db(move |s| Ok((s.environments(&sid)?, s.pending_deployments(&sid)?))).await else { continue };
             for env in envs.into_iter().filter(|e| !e.ephemeral && !e.paused && e.held_by.is_none()) {
-                let (Some(branch), Some(active)) = (env.branch.clone(), env.active.clone()) else { continue };
+                // One whose first deploy failed is followed too: the fix pushed next deploys.
+                let Some(branch) = env.branch.clone() else { continue };
                 if pending.iter().any(|d| d.environment == env.name) {
                     continue;
                 }
@@ -44,12 +45,19 @@ impl crate::Apps {
                 if env.tag_seen.as_deref() == Some(sha.as_str()) {
                     continue;
                 }
-                let (sid, e, n, a) = (svc.id.clone(), env.name.clone(), sha.clone(), active.clone());
-                let Ok(live) = self.db(move |s| s.set_tag_seen(&sid, &e, &n).and_then(|_| s.deployment(&a))).await else { continue };
-                if live.revision.as_deref() == Some(sha.as_str()) {
+                let (sid, e, n, a) = (svc.id.clone(), env.name.clone(), sha.clone(), env.active.clone());
+                let Ok(live) = self.db(move |s| s.set_tag_seen(&sid, &e, &n).and_then(|_| a.map(|a| s.deployment(&a)).transpose())).await else { continue };
+                if live.is_some_and(|l| l.revision.as_deref() == Some(sha.as_str())) {
                     continue;
                 }
-                let body = serde_json::json!({ "revision": sha, "message": format!("new commit on {branch}: {}", &sha[..12]) });
+                // Its message, as a push's hook reads it: `[skip ci]` skips it, its subject names it.
+                let message = commit_message(&client, url, &sha).await.unwrap_or_default();
+                if let Some(tag) = crate::deploy::skip_tag(&message) {
+                    sink().line(format!("{} on {branch} not deployed: its message says {tag}", &sha[..12]));
+                    continue;
+                }
+                let subject = message.lines().next().unwrap_or("").chars().take(500).collect::<String>();
+                let body = serde_json::json!({ "revision": sha, "message": if subject.is_empty() { format!("new commit on {branch}: {}", &sha[..12]) } else { subject } });
                 let by = crate::model::By { trigger: crate::model::Trigger::Push, actor: Some("git watch".into()) };
                 // Keyed by the commit: two nodes' watches (a takeover mid-pass) make one deploy.
                 match self.deploy(&svc.id, &env.name, body, by, None, Some(&format!("git:{}:{sha}", env.name))).await {
@@ -109,6 +117,16 @@ pub async fn materialize(client: &Client, url: &str, sha: &str, dir: &Path) -> a
     let objects: HashMap<ObjectId, Object> = fetched.objects.into_iter().map(|o| (o.id, o)).collect();
     let dir = dir.to_path_buf();
     tokio::task::spawn_blocking(move || write_commit(&objects, oid, &dir)).await?
+}
+
+/// A commit's message: one shallow fetch of the commit alone (no tree, no blob).
+pub async fn commit_message(client: &Client, url: &str, sha: &str) -> anyhow::Result<String> {
+    let oid: ObjectId = sha.parse().map_err(|_| anyhow::anyhow!("{sha} isn't a commit id"))?;
+    let args = FetchArgs { wants: vec![oid], haves: Vec::new(), depth: Some(1), filter: Some(code_git::Filter::TreeNone) };
+    let fetched = client.fetch(url, None, &args).await?;
+    let c = fetched.objects.into_iter().find(|o| o.id == oid && o.kind == Kind::Commit).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring commit {oid}"))?;
+    let text = String::from_utf8_lossy(&c.data).into_owned();
+    Ok(text.split_once("\n\n").map(|(_, m)| m.to_string()).unwrap_or_default())
 }
 
 /// The file `name` at the root of the tree at `sha` (a "deploy to roll" link's `roll.toml`), at
