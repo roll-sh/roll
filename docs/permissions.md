@@ -191,8 +191,10 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
 - **In the checkup:** a client that signs in with a secret is `secret_client`, with the fix to
   rotate to a key or to CI's own identity, as GitHub nudges secrets toward OIDC. Its sign-ins count
   as use, so one that only holds its token for later steps isn't `unused`.
-- **Rotating one:** `POST /v1/access/clients/{id}/rotate {public_jwk?, keep_old_for_s?}` (or
-  `roll token client rotate <id> [--public-key f] [--keep-old 1h]`) gives it a new key, or a new
+- **Rotating one:** `POST /v1/access/clients/{id}/rotate {public_jwk? | oidc?, keep_old_for_s?}` (or
+  `roll token client rotate <id> [--public-key f | --github owner/repo … | --gitlab … |
+  --issuer …] [--keep-old 1h]`, which moves a client on a secret to CI's own identity, the
+  checkup's fix) gives it a new key, or a new
   secret shown once, keeping its id and rules. The old credential stops at once, and so do the
   tokens it got, unless `keep_old_for_s` (at most a week) keeps it working while the automation
   moves over. A leaked old secret still revokes the client while it works.

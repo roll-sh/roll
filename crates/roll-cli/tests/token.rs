@@ -150,6 +150,13 @@ async fn a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its
     let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
     assert_eq!((list[0]["trusts"]["subject"].as_str(), list[0]["trusts"]["claims"]["build_branch"].as_str()), (Some("organization:acme:pipeline:deploy:*"), Some("main")));
     assert!(!roll(&api, "", &["token", "client", "create", "x", "--preset", "read-only", "--issuer", "https://agent.buildkite.com", "--subject", "*"]).status.success(), "a shared issuer names one tenant");
+    // A client on a secret moves to CI's own identity, keeping its id (the checkup's fix).
+    let moving = json_of(&roll(&api, "", &["--json", "token", "client", "create", "moving", "--preset", "read-only"]));
+    let mid = moving["client_id"].as_str().unwrap();
+    assert!(roll(&api, "", &["token", "client", "rotate", mid, "--github", "acme/api", "--environment", "production"]).status.success());
+    let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
+    let moved = list.as_array().unwrap().iter().find(|c| c["client_id"] == mid).unwrap();
+    assert_eq!((moved["trusts"]["subject"].as_str(), moved["signs_with_key"].as_bool()), (Some("repo:acme/api:environment:production"), Some(false)), "{moved}");
 }
 
 /// `roll login` signs a person's CLI in through the browser: it registers itself, the consent

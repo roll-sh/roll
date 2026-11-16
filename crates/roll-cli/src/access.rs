@@ -136,35 +136,21 @@ pub enum MachineCmd {
     /// Revoke a machine client: its tokens stop working at once, and it gets no more.
     Revoke { id: String },
     /// A new credential for a machine client, keeping its id and rules: a new key with
-    /// --public-key, else a new secret (shown once). The old one stops now, with the tokens it
+    /// --public-key, CI's own identity with --github, --gitlab or --issuer, else a new secret
+    /// (shown once). The old one stops now, with the tokens it
     /// got, unless --keep-old keeps it working while the automation moves over.
     ///
     /// Examples:
     ///   roll token client rotate mcl_… --keep-old 1h
     ///   roll token client rotate mcl_… --public-key ci-2026.pub.pem
-    Rotate {
-        id: String,
-        /// Its new public key: a PEM file (Ed25519 or P-256) or a JWK.
-        #[arg(long)]
-        public_key: Option<std::path::PathBuf>,
-        /// The old credential keeps working this long (1h, 2d; at most 7d).
-        #[arg(long)]
-        keep_old: Option<String>,
-    },
+    ///   roll token client rotate mcl_… --github acme/web --ref refs/heads/main   (CI's own identity)
+    Rotate(Box<ClientRotate>),
 }
 
+/// CI's own identity as a machine client's credential (`create` and `rotate`): GitHub Actions,
+/// GitLab CI, or any issuer.
 #[derive(Args)]
-pub struct ClientCreate {
-    /// A name you'll recognise it by ("nightly report", "deploy from CI").
-    name: String,
-    #[command(flatten)]
-    rules: RuleArgs,
-    /// Lifetime: 30d, 12h, 90m, or never (default 30d).
-    #[arg(long, default_value = "30d")]
-    expires: String,
-    /// Its public key: a PEM file (Ed25519 or P-256) or a JWK (Ed25519, P-256 or RSA).
-    #[arg(long, conflicts_with_all = ["github", "gitlab", "issuer"])]
-    public_key: Option<std::path::PathBuf>,
+pub struct IdentityArgs {
     /// Trust this repository's GitHub Actions instead: its jobs sign in with their own OIDC token
     /// (`permissions: id-token: write`), so nothing is stored in GitHub (owner/repo).
     #[arg(long, conflicts_with_all = ["gitlab", "issuer"])]
@@ -199,6 +185,62 @@ pub struct ClientCreate {
     /// With --github or --gitlab: only jobs in this environment (production).
     #[arg(long)]
     environment: Option<String>,
+}
+
+impl IdentityArgs {
+    /// The identity these flags describe, if any.
+    fn identity(&self) -> anyhow::Result<Option<Value>> {
+        if (self.r#ref.is_some() || self.environment.is_some()) && self.github.is_none() && self.gitlab.is_none() {
+            bail!("--ref and --environment narrow --github or --gitlab");
+        }
+        Ok(match (&self.github, &self.gitlab, &self.issuer) {
+            (Some(repo), ..) => Some(github_identity(repo, self.r#ref.as_deref(), self.environment.as_deref())?),
+            (None, Some(project), _) => Some(gitlab_identity(project, self.r#ref.as_deref(), self.environment.as_deref())?),
+            (None, None, Some(issuer)) => {
+                let mut claims = serde_json::Map::new();
+                for kv in &self.claims {
+                    let (k, v) = kv.split_once('=').filter(|(k, v)| !k.is_empty() && !v.is_empty()).with_context(|| format!("--claim {kv}: name=value"))?;
+                    claims.insert(k.to_string(), json!(v));
+                }
+                let jwks = match &self.jwks {
+                    Some(path) => Some(std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?),
+                    None => None,
+                };
+                Some(json!({ "issuer": issuer, "subject": self.subject, "claims": claims, "audience": self.audience, "jwks": jwks }))
+            }
+            _ => None,
+        })
+    }
+}
+
+#[derive(Args)]
+pub struct ClientRotate {
+    id: String,
+    /// Its new public key: a PEM file (Ed25519 or P-256) or a JWK.
+    #[arg(long, conflicts_with_all = ["github", "gitlab", "issuer"])]
+    public_key: Option<std::path::PathBuf>,
+    /// Or trust CI's own identity from now on (nothing stored in CI).
+    #[command(flatten)]
+    identity: IdentityArgs,
+    /// The old credential keeps working this long (1h, 2d; at most 7d).
+    #[arg(long)]
+    keep_old: Option<String>,
+}
+
+#[derive(Args)]
+pub struct ClientCreate {
+    /// A name you'll recognise it by ("nightly report", "deploy from CI").
+    name: String,
+    #[command(flatten)]
+    rules: RuleArgs,
+    /// Lifetime: 30d, 12h, 90m, or never (default 30d).
+    #[arg(long, default_value = "30d")]
+    expires: String,
+    /// Its public key: a PEM file (Ed25519 or P-256) or a JWK (Ed25519, P-256 or RSA).
+    #[arg(long, conflicts_with_all = ["github", "gitlab", "issuer"])]
+    public_key: Option<std::path::PathBuf>,
+    #[command(flatten)]
+    identity: IdentityArgs,
     /// Addresses its tokens may be used from (CIDRs), repeatable.
     #[arg(long = "ip", value_delimiter = ',')]
     ip_allow: Vec<String>,
@@ -296,26 +338,7 @@ async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<(
                 Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
                 None => None,
             };
-            if (c.r#ref.is_some() || c.environment.is_some()) && c.github.is_none() && c.gitlab.is_none() {
-                bail!("--ref and --environment narrow --github or --gitlab");
-            }
-            let oidc = match (&c.github, &c.gitlab, &c.issuer) {
-                (Some(repo), ..) => Some(github_identity(repo, c.r#ref.as_deref(), c.environment.as_deref())?),
-                (None, Some(project), _) => Some(gitlab_identity(project, c.r#ref.as_deref(), c.environment.as_deref())?),
-                (None, None, Some(issuer)) => {
-                    let mut claims = serde_json::Map::new();
-                    for kv in &c.claims {
-                        let (k, v) = kv.split_once('=').filter(|(k, v)| !k.is_empty() && !v.is_empty()).with_context(|| format!("--claim {kv}: name=value"))?;
-                        claims.insert(k.to_string(), json!(v));
-                    }
-                    let jwks = match &c.jwks {
-                        Some(path) => Some(std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?),
-                        None => None,
-                    };
-                    Some(json!({ "issuer": issuer, "subject": c.subject, "claims": claims, "audience": c.audience, "jwks": jwks }))
-                }
-                _ => None,
-            };
+            let oidc = c.identity.identity()?;
             let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow, "rate_per_minute": c.rate, "public_jwk": jwk, "oidc": oidc });
             let made = api.post("/v1/access/clients", body).await?;
             if json_out {
@@ -326,17 +349,17 @@ async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<(
             println!("client_id:      {}\ntoken endpoint: {}", s(&made["client_id"]), s(&made["token_endpoint"]));
             let endpoint = s(&made["token_endpoint"]);
             let audience = endpoint.trim_end_matches("/v1/access/oauth/token");
-            if c.github.is_some() {
+            if c.identity.github.is_some() {
                 eprintln!("Nothing to store in GitHub. In the workflow, give the job `permissions: id-token: write`, then:\n");
                 println!("{}", github_step(&s(&made["client_id"]), &endpoint, audience));
-            } else if c.gitlab.is_some() {
+            } else if c.identity.gitlab.is_some() {
                 eprintln!("Nothing to store in GitLab. In .gitlab-ci.yml, add to the job:\n");
                 println!("{}", gitlab_step(&s(&made["client_id"]), &endpoint, audience));
-            } else if c.issuer.is_some() {
+            } else if c.identity.issuer.is_some() {
                 println!("client_id:      {}\ntoken endpoint: {}", s(&made["client_id"]), endpoint);
                 eprintln!(
                     "Nothing to store in CI. Get the job's OIDC token for audience {}, then trade it:\n  curl -sSf {endpoint} -d grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer -d client_id={} --data-urlencode \"assertion=$OIDC_TOKEN\"",
-                    c.audience.as_deref().unwrap_or(audience),
+                    c.identity.audience.as_deref().unwrap_or(audience),
                     s(&made["client_id"])
                 );
             } else if let Some(secret) = made["client_secret"].as_str() {
@@ -367,13 +390,15 @@ async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<(
                 print_grant(&c["grant"]);
             }
         }
-        MachineCmd::Rotate { id, public_key, keep_old } => {
+        MachineCmd::Rotate(r) => {
+            let ClientRotate { id, public_key, identity, keep_old } = *r;
+            let oidc = identity.identity()?;
             let jwk = match &public_key {
                 Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
                 None => None,
             };
             let keep = keep_old.as_deref().map(|k| span(k, "--keep-old")).transpose()?.flatten().map(|ms| ms / 1000);
-            let made = api.post(&format!("/v1/access/clients/{}/rotate", urlencoding::encode(&id)), json!({ "public_jwk": jwk, "keep_old_for_s": keep })).await?;
+            let made = api.post(&format!("/v1/access/clients/{}/rotate", urlencoding::encode(&id)), json!({ "public_jwk": jwk, "oidc": oidc, "keep_old_for_s": keep })).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&made)?);
                 return Ok(());
@@ -384,6 +409,7 @@ async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<(
                     println!("{secret}");
                     eprintln!("{old} Copy the new secret now: it isn't shown again.");
                 }
+                None if oidc.is_some() => eprintln!("{id} trusts CI's own identity now: nothing to store in CI. {old}"),
                 None => eprintln!("{id} signs with the new key now. {old}"),
             }
         }
