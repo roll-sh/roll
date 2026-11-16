@@ -629,7 +629,7 @@ impl Secrets {
 
     /// What this project may link, sink to or sync to, as (kind, ref): its canvas's resources and
     /// its own registrations (rotators, databases outside roll, AWS roles and IAM users, cloud
-    /// accounts, CAs and SSH CAs), checked on every write, read, issue, rotation and delivery (a
+    /// accounts, Kubernetes clusters, CAs and SSH CAs), checked on every write, read, issue, rotation and delivery (a
     /// resource can move to another project).
     ///
     /// A person's project (docs/accounts.md) has only what the workspace trusts it for
@@ -645,6 +645,7 @@ impl Secrets {
         out.extend(self.aws_role_refs(project)?.into_iter().map(|(id, _)| (crate::aws::KIND.to_string(), id)));
         out.extend(self.aws_user_refs(project)?.into_iter().map(|(id, _)| (crate::iam::KIND.to_string(), id)));
         out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, _)| (crate::outside::KIND.to_string(), id)));
+        out.extend(self.kubernetes_refs(project)?.into_iter().map(|(id, _)| (crate::kubernetes::KIND.to_string(), id)));
         Ok(out)
     }
 

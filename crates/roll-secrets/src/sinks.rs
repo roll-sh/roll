@@ -48,6 +48,14 @@ pub trait Deliver: Send + Sync {
     fn check(&self, url: &str) -> Result<()>;
     /// POST `body` to `url`, signed with `secret`, `X-Roll-Sink: <id>`.
     fn post(&self, url: &str, id: &str, secret: &Value, body: &Json) -> Result<()>;
+    /// [`Deliver::request`], trusting only `ca` (PEM certificates) for this one call when given: a
+    /// Kubernetes cluster's own CA (kubernetes.rs), never anyone else's calls.
+    fn request_trusting(&self, ca: Option<&str>, method: &str, url: &str, headers: &[(&str, &Value)], body: Option<(&str, &Value)>, limit: usize) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        match ca {
+            None => self.request(method, url, headers, body, limit),
+            Some(_) => Err(crate::Error::Link("trusting a cluster's own CA isn't on this server".into())),
+        }
+    }
     /// GET `url` (https, public, no redirects), at most `limit` bytes: an OIDC issuer's discovery
     /// document and keys (identities.rs).
     fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>> {
@@ -58,6 +66,14 @@ pub trait Deliver: Send + Sync {
     /// most `limit` bytes): a rotator's (rotators.rs). The answer may hold a value.
     fn call(&self, url: &str, id: &str, secret: &Value, body: &Json, limit: usize) -> Result<zeroize::Zeroizing<Vec<u8>>> {
         let _ = (url, id, secret, body, limit);
+        Err(crate::Error::Link("calling out isn't on this server".into()))
+    }
+    /// One request to a vendor's API (saas.rs): `url` HTTPS to a public address, no redirects, a
+    /// timeout, and the answer's status with at most `limit` bytes of it, whatever the status.
+    /// Headers and the body may hold a credential and the answer a value: never logged, never in
+    /// an error.
+    fn request(&self, method: &str, url: &str, headers: &[(&str, &Value)], body: Option<(&str, &Value)>, limit: usize) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        let _ = (method, url, headers, body, limit);
         Err(crate::Error::Link("calling out isn't on this server".into()))
     }
 }

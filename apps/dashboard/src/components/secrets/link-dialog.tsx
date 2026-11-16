@@ -1,4 +1,4 @@
-import { Cloud, Database, KeyRound, Link2, RotateCw, ShieldCheck, Terminal, type LucideIcon } from "lucide-react";
+import { Cloud, Database, KeyRound, Link2, RotateCw, ShieldCheck, Ship, Terminal, type LucideIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { SECRET_KEY, type Batch, type Environment, type LinkField, type LinkMode, type LinkTarget, type Op } from "@/lib/secrets-api";
 import type { ResourceKind } from "@/lib/workspace-api";
@@ -18,7 +18,13 @@ const OWN_KINDS: Record<string, { icon: LucideIcon; label: string }> = {
   ssh: { icon: Terminal, label: "SSH CA" },
   gcp: { icon: Cloud, label: "GCP account" },
   azure: { icon: Cloud, label: "Azure account" },
+  kubernetes: { icon: Ship, label: "Kubernetes cluster" },
 };
+
+/** A Kubernetes name: namespaces are DNS labels, service accounts DNS subdomains. */
+const K8S_LABEL = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
+/** A Kubernetes token can't be revoked: its lease is a day at most. */
+const K8S_TTL_MAX = 24 * 60;
 
 /** A link target's kind: a canvas resource's icon, roll secrets' own, or a plain link for one this dashboard doesn't know yet. */
 function kindOf(kind: string): { icon: LucideIcon; label: string } {
@@ -68,6 +74,9 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const [certNames, setCertNames] = useState("");
   const [principals, setPrincipals] = useState("");
   const [rotateDays, setRotateDays] = useState("30");
+  const [namespace, setNamespace] = useState("");
+  const [serviceAccount, setServiceAccount] = useState("");
+  const [audiences, setAudiences] = useState("");
   const [busy, setBusy] = useState(false);
 
   const pickOf = (t: LinkTarget, f: LinkField): Pick => picks[`${t.kind}:${t.ref}:${f.field}`] ?? { on: false, key: f.suggest, mode: f.modes[0] };
@@ -97,6 +106,11 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const needsRotation = chosen.some((c) => c.t.kind === "pki" && c.p.mode === "managed");
   const rotate = Number(rotateDays);
   const rotateOk = !needsRotation || (Number.isInteger(rotate) && rotate >= 1 && rotate <= 198);
+  // A Kubernetes token is a service account's, in a namespace, for audiences (the API server's own by default).
+  const needsAccount = chosen.some((c) => c.t.kind === "kubernetes");
+  const auds = audiences.split(",").map((a) => a.trim()).filter(Boolean);
+  const accountOk = !needsAccount || (K8S_LABEL.test(namespace) && serviceAccount.length <= 253 && serviceAccount.split(".").every((p) => K8S_LABEL.test(p)) && auds.length <= 10);
+  const k8sTtlOk = !needsAccount || ttlMinutes <= K8S_TTL_MAX;
 
   const submit = async () => {
     const ops: Op[] = chosen.map((c) => ({
@@ -112,6 +126,7 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
             ...(c.p.mode === "dynamic" && { ttl_minutes: ttlMinutes }),
             ...(c.t.kind === "pki" && { names, ...(c.p.mode === "managed" && { rotate_days: rotate }) }),
             ...(c.t.kind === "ssh" && { principals: logins }),
+            ...(c.t.kind === "kubernetes" && { namespace, service_account: serviceAccount, ...(auds.length > 0 && { audiences: auds }) }),
           },
         }),
       },
@@ -191,6 +206,22 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
             <input value={principals} onChange={(e) => setPrincipals(e.target.value)} placeholder="deploy" spellCheck={false} className={`${sized} h-7 w-40 font-mono`} aria-label="SSH principals" />
           </label>
         )}
+        {needsAccount && (
+          <>
+            <label className="flex items-center gap-1.5 text-[12px] text-muted">
+              Namespace
+              <input value={namespace} onChange={(e) => setNamespace(e.target.value)} placeholder="ci" spellCheck={false} className={`${sized} h-7 w-28 font-mono`} aria-label="Namespace" />
+            </label>
+            <label className="flex items-center gap-1.5 text-[12px] text-muted">
+              Service account
+              <input value={serviceAccount} onChange={(e) => setServiceAccount(e.target.value)} placeholder="deployer" spellCheck={false} className={`${sized} h-7 w-32 font-mono`} aria-label="Service account" />
+            </label>
+            <label className="flex items-center gap-1.5 text-[12px] text-muted">
+              Audiences
+              <input value={audiences} onChange={(e) => setAudiences(e.target.value)} placeholder="the API server's" spellCheck={false} className={`${sized} h-7 w-36 font-mono`} aria-label="Token audiences" />
+            </label>
+          </>
+        )}
         {needsRotation && (
           <label className="flex items-center gap-1.5 text-[12px] text-muted">
             Rotate every
@@ -206,13 +237,13 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
           </label>
         )}
         <span className="text-[11.5px] text-danger">
-          {badKey ? `${badKey.p.key || "A key"} isn't a valid key` : dupKey ? `${dupKey.p.key} is picked twice` : !ttlOk ? "A lease is 1 minute to 7 days" : !namesOk ? "A certificate names what it's for" : !rotateOk ? "Rotate every 1 to 198 days" : !principalsOk ? "An SSH certificate names its logins" : ""}
+          {badKey ? `${badKey.p.key || "A key"} isn't a valid key` : dupKey ? `${dupKey.p.key} is picked twice` : !ttlOk ? "A lease is 1 minute to 7 days" : !namesOk ? "A certificate names what it's for" : !rotateOk ? "Rotate every 1 to 198 days" : !principalsOk ? "An SSH certificate names its logins" : !accountOk ? "A Kubernetes token names its namespace and service account" : !k8sTtlOk ? "A Kubernetes token can't be revoked: a lease is a day at most" : ""}
         </span>
         <span className="ml-auto" />
         <button className={ghost} onClick={onClose}>
           Cancel
         </button>
-        <button className={primary} disabled={!chosen.length || !!badKey || !!dupKey || !ttlOk || !namesOk || !rotateOk || !principalsOk || busy} onClick={submit}>
+        <button className={primary} disabled={!chosen.length || !!badKey || !!dupKey || !ttlOk || !namesOk || !rotateOk || !principalsOk || !accountOk || !k8sTtlOk || busy} onClick={submit}>
           {busy ? "Linking…" : `Link ${chosen.length || ""}`.trim()}
         </button>
       </div>

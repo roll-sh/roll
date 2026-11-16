@@ -38,6 +38,7 @@ pub mod pki;
 pub mod ssh;
 pub mod clouds;
 pub mod issuer;
+pub mod kubernetes;
 mod oidc;
 mod read;
 pub mod reach;
@@ -460,8 +461,10 @@ impl Secrets {
                 links.register(Arc::new(clouds::Provider { kind, db: db.clone(), keys: keys.clone(), clouds: c.clone() }));
             }
         }
+        db.ensure_schema(kubernetes::SCHEMA)?;
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone() }));
+            links.register(Arc::new(kubernetes::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone() }));
         }
         // A project's CAs are roll secrets' own: nothing to reach outside.
         let public_api: Arc<std::sync::OnceLock<String>> = Default::default();
@@ -616,7 +619,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "aws_users", "aws_roles", "cloud_accounts", "cas", "ca_certs", "ssh_cas"];
+const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "aws_users", "aws_roles", "cloud_accounts", "kubernetes_clusters", "cas", "ca_certs", "ssh_cas"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked, and no
 /// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,

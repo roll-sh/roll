@@ -335,6 +335,11 @@ pub enum Secrets {
     /// list, add, remove.
     #[command(subcommand)]
     Databases(DatabasesCmd),
+    /// Kubernetes clusters that issue short-lived service account tokens per lease (link kind
+    /// `kubernetes`): list, add (the admin token on stdin), remove. Not `kubernetes`, which pulls
+    /// an environment into a cluster.
+    #[command(subcommand, name = "kubernetes-clusters")]
+    KubernetesClusters(KubernetesClustersCmd),
     /// AWS roles for dynamic AWS credentials: list, add (roll assumes it to check), remove.
     #[command(subcommand, name = "aws-roles")]
     AwsRoles(AwsRolesCmd),
@@ -621,6 +626,23 @@ pub enum DatabasesCmd {
         #[arg(long)]
         group: Option<String>,
         /// The server's CA certificates (PEM file), when the system's don't cover it (Amazon RDS).
+        #[arg(long)]
+        ca: Option<std::path::PathBuf>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum KubernetesClustersCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register a cluster: its API server's https:// URL, and on stdin a service account token
+    /// that may create tokens (`create` on `serviceaccounts/token`).
+    Add {
+        name: String,
+        api_url: String,
+        /// The cluster's CA certificates (PEM file), when its API server's certificate isn't
+        /// publicly trusted: then only it is trusted, for this cluster's calls.
         #[arg(long)]
         ca: Option<std::path::PathBuf>,
     },
@@ -1708,6 +1730,36 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             DatabasesCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/outside-databases/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::KubernetesClusters(k) => match k {
+            KubernetesClustersCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/kubernetes", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for k in v.as_array().into_iter().flatten() {
+                    let ca = if k["has_ca"].as_bool() == Some(true) { "  its own CA" } else { "" };
+                    println!("{}  {:<16} {}{ca}", s(&k["id"]), s(&k["name"]), s(&k["api_url"]));
+                }
+            }
+            KubernetesClustersCmd::Add { name, api_url, ca } => {
+                // The admin token is a credential: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("Service account token roll manages the cluster with, then Enter and Ctrl-D: ");
+                }
+                let mut token = zeroize::Zeroizing::new(String::new());
+                std::io::stdin().read_to_string(&mut token).context("reading the admin token from stdin")?;
+                let ca = ca.map(|p| std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))).transpose()?;
+                let v = c.call(Method::POST, &format!("{}/kubernetes", c.base()), Some(json!({ "name": name, "api_url": api_url, "ca_pem": ca, "token": token.trim() }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link KUBE_TOKEN to it, dynamic, with options namespace and service_account (KUBE_API_URL and KUBE_CA for a kubeconfig).", s(&v["name"]), s(&v["id"]));
+            }
+            KubernetesClustersCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/kubernetes/{}", c.base(), enc(&id)), None).await?;
                 println!("Removed {id}");
             }
         },

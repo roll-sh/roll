@@ -192,9 +192,14 @@ impl Secrets {
         let l = self.lease(project, id)?;
         let env = l.environment;
         caller.need(Action::Delete, &Scope::at(project, &env, &l.path))?;
+        // A credential the product can't end early (a bound Kubernetes token) keeps working.
+        let note = match &l.link {
+            Some(link) if self.links.get(&link.kind).is_ok_and(|p| !p.revocable()) => format!(" (a {} credential can't be ended early: it works until it expires)", link.kind),
+            _ => String::new(),
+        };
         match self.revoke_one(id)? {
             true => {
-                self.audit_now(project, caller, "lease.revoke", Some(&env), None, &[], &format!("revoked {id}"));
+                self.audit_now(project, caller, "lease.revoke", Some(&env), None, &[], &format!("revoked {id}{note}"));
                 Ok(())
             }
             false => Err(Error::Conflict("conflict", format!("{id} is already revoked"))),

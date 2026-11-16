@@ -6,6 +6,7 @@ import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field
 import { Cas } from "./cas";
 import { SshCas } from "./ssh-cas";
 import { CloudAccounts } from "./cloud-accounts";
+import { KubernetesClusters } from "./kubernetes-clusters";
 import { OutsideDatabases } from "./outside-databases";
 import { AwsRoles } from "./aws-roles";
 import { Rotators } from "./rotators";
@@ -77,6 +78,7 @@ export function SyncsView() {
       <Cas />
       <SshCas />
       <CloudAccounts />
+      <KubernetesClusters />
       <AwsRoles />
     </div>
   );

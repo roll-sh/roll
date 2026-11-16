@@ -326,12 +326,59 @@ impl roll_secrets::Deliver for AuditDeliver {
         self.0.post_signed(&u, ("x-roll-sink", id), &delivery, secret, body)
     }
 
+    /// A Kubernetes API server (roll_secrets::kubernetes): with its own CA, [`Self::request`]
+    /// through a client of its own that trusts only that CA, with the same guards (HTTPS, public,
+    /// no redirects, the timeout, a bounded answer). Nothing else's calls trust it.
+    fn request_trusting(&self, ca: Option<&str>, method: &str, url: &str, headers: &[(&str, &Value)], body: Option<(&str, &Value)>, limit: usize) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        use roll_secrets::Deliver as _;
+        let Some(pem) = ca else { return self.request(method, url, headers, body, limit) };
+        let host = self.0.url(url)?.host_str().unwrap_or_default().to_string();
+        let roots = reqwest::Certificate::from_pem_bundle(pem.as_bytes()).ok().filter(|c| !c.is_empty()).ok_or_else(|| bad(format!("the CA for {host} isn't PEM certificates")))?;
+        let mut b = reqwest::Client::builder().timeout(Duration::from_secs(15)).redirect(reqwest::redirect::Policy::none()).user_agent("roll-secrets-sync").tls_certs_only(roots);
+        if !self.0.allow_private {
+            b = b.dns_resolver(roll_net::PublicOnly).no_proxy();
+        }
+        let client = b.build().map_err(|_| bad(format!("the CA for {host} isn't one roll can use")))?;
+        AuditDeliver(Hooks { client, allow_private: self.0.allow_private }, self.1.clone()).request(method, url, headers, body, limit)
+    }
+
     /// A rotator's call: the same guards and signature, and its answer. Each call is its own
     /// delivery: issuing twice makes two values.
     fn call(&self, url: &str, id: &str, secret: &Value, body: &Json, limit: usize) -> Result<zeroize::Zeroizing<Vec<u8>>> {
         let u = self.0.url(url)?;
         let delivery = roll_secrets::names::new_id("dlv", 16);
         self.0.send_signed(&u, ("x-roll-rotator", id), &delivery, secret, body, Some(limit))
+    }
+
+    /// A vendor's API (roll_secrets::saas): the same guards (HTTPS, public, no redirects, the
+    /// timeout), any status, at most `limit` bytes of answer. Headers, body and answer may hold
+    /// credentials: an error names the host and what failed, never them.
+    fn request(&self, method: &str, url: &str, headers: &[(&str, &Value)], body: Option<(&str, &Value)>, limit: usize) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        let u = self.0.url(url)?;
+        let host = u.host_str().unwrap_or_default().to_string();
+        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| Error::Internal(format!("{method} isn't an HTTP method")))?;
+        let mut req = self.0.client.request(method, u);
+        for (name, value) in headers {
+            let mut v = reqwest::header::HeaderValue::from_str(value.expose()).map_err(|_| bad(format!("a {name} header roll can't send to {host}")))?;
+            v.set_sensitive(true);
+            req = req.header(*name, v);
+        }
+        req = match body {
+            Some((content_type, b)) => req.header("content-type", content_type).body(b.expose().as_bytes().to_vec()),
+            None => req.header("content-length", "0"),
+        };
+        block_on(async {
+            let mut resp = req.send().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))?;
+            let status = resp.status().as_u16();
+            let mut out = zeroize::Zeroizing::new(Vec::new());
+            while let Some(c) = resp.chunk().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))? {
+                if out.len() + c.len() > limit {
+                    return Err(Error::Link(format!("{host}: an answer over {limit} bytes")));
+                }
+                out.extend_from_slice(&c);
+            }
+            Ok((status, out))
+        })
     }
 
     /// An OIDC issuer's documents: the same guards, a 2xx only, at most `limit` bytes.
