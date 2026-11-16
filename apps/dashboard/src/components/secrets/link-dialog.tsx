@@ -218,7 +218,7 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
             </label>
             <label className="flex items-center gap-1.5 text-[12px] text-muted">
               Audiences
-              <input value={audiences} onChange={(e) => setAudiences(e.target.value)} placeholder="the API server's" spellCheck={false} className={`${sized} h-7 w-36 font-mono`} aria-label="Token audiences" />
+              <input value={audiences} onChange={(e) => setAudiences(e.target.value)} placeholder="default" title="Comma-separated audiences; none: the API server's own" spellCheck={false} className={`${sized} h-7 w-36 font-mono`} aria-label="Token audiences" />
             </label>
           </>
         )}
