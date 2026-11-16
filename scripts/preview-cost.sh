@@ -714,7 +714,9 @@ echo "$BODY2" | grep -q "preview of change 1" || { echo "the thawed service shou
 
 say "egress: roll puts the preview's services on a network of their own, with no route out"
 REACH='import socket; socket.create_connection(("1.1.1.1", 443), 3); print("out")'
-OUT_BEFORE=$(docker exec "$CONT2" python -c "$REACH" 2>&1 | tail -1)
+# Awake first (an idle service is frozen, and a frozen container takes no exec).
+curl -sS -o /dev/null -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60 || true
+OUT_BEFORE=$(docker exec "$CONT2" python -c "$REACH" 2>&1 || true); OUT_BEFORE=$(echo "$OUT_BEFORE" | tail -1)
 # The premise: by default a preview's service reaches the internet.
 [ "$OUT_BEFORE" = out ] || { echo "a preview's service should reach the internet by default (egress open): $OUT_BEFORE"; exit 1; }
 api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"roll"}' >/dev/null
@@ -728,7 +730,7 @@ done
 case "$NETS" in *roll-previews-net-*) ;; *) echo "with egress roll the service should run on the preview's own network: $NETS"; exit 1;; esac
 BODY3=$(curl -sS -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60)
 echo "$BODY3" | grep -q "preview of change 1" || { echo "the service on its own network should still be served through roll: $BODY3"; exit 1; }
-OUT_AFTER=$(docker exec "$CONT2" python -c "$REACH" 2>&1 | tail -1)
+OUT_AFTER=$(docker exec "$CONT2" python -c "$REACH" 2>&1 || true); OUT_AFTER=$(echo "$OUT_AFTER" | tail -1)
 case "$OUT_AFTER" in *unreachable*|*Errno*|*timed*) ;; *) echo "with egress roll the service shouldn't reach the internet: $OUT_AFTER"; exit 1;; esac
 api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"open"}' >/dev/null
 
