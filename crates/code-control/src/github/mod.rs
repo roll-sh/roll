@@ -175,6 +175,29 @@ impl Code {
         Ok((c.username, c.password))
     }
 
+    /// A pull request's comment through `installation`, edited in place: `existing` is patched,
+    /// or, when it's gone (404) or none was given, a new one is made. Its id. A body over
+    /// GitHub's 65,536 characters is cut (at a character boundary) with a note.
+    pub async fn github_comment(&self, installation: u64, owner: &str, repo: &str, number: u64, body: &str, existing: Option<u64>) -> Result<u64> {
+        let hub = self.github_hub().ok_or_else(|| Error::Invalid("roll's GitHub App isn't configured".into()))?;
+        const MAX: usize = 65_536;
+        let body = if body.chars().count() > MAX {
+            let note = "\n\n…(cut: longer than GitHub takes)";
+            format!("{}{note}", body.chars().take(MAX - note.chars().count()).collect::<String>())
+        } else {
+            body.to_string()
+        };
+        if let Some(id) = existing {
+            match hub.client.update_comment(installation, owner, repo, id, &body).await {
+                Ok(c) => return Ok(c.id),
+                Err(code_github::Error::Status { status: 404, .. }) => {}
+                Err(e) => return Err(Error::Internal(e.into())),
+            }
+        }
+        let c = hub.client.create_comment(installation, owner, repo, number, &body).await.map_err(|e| Error::Internal(e.into()))?;
+        Ok(c.id)
+    }
+
     /// A commit status on `owner/repo` at `sha` through `installation`.
     #[allow(clippy::too_many_arguments)]
     pub async fn github_commit_status(&self, installation: u64, owner: &str, repo: &str, sha: &str, state: &str, context: &str, description: &str, target_url: Option<&str>) -> Result<()> {
