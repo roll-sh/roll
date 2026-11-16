@@ -131,7 +131,8 @@ jobs:
           pip install -q cryptography
           PYTHONPATH=src python -m unittest discover -s tests
 
-  # roll secrets' Java client (sdk/java/secrets), in its own job so the sdk one stays quick.
+  # roll secrets' Java client (sdk/java/secrets) and its Spring Boot integration
+  # (sdk/java/secrets-spring), in their own job so the sdk one stays quick.
   java:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -145,8 +146,11 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: maven
-          cache-dependency-path: sdk/java/secrets/pom.xml
+          cache-dependency-path: sdk/java/*/pom.xml
+      # Tests the client and installs it for the Spring module, which depends on it.
+      - run: mvn -B -q install
       - run: mvn -B -q test
+        working-directory: sdk/java/secrets-spring
 
   # The roll Terraform provider (sdk/terraform-provider-roll): Terraform drives it against a fake
   # rolld in memory.

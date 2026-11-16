@@ -116,6 +116,13 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    RollSecrets c = RollSecrets.builder().build(); // ROLL_API_URL, ROLL_TOKEN or ROLL_IDENTITY, ROLL_PROJECT
    Watch w = c.watch("production", WatchOptions.of(v -> reload(v.values())));
    ```
+
+   A Spring Boot app imports a folder into its `Environment` with `sdk/java/secrets-spring`
+   (`sh.roll:roll-secrets-spring`, Spring Boot 3): `spring.config.import=roll-secrets:production/api`
+   in `application.properties` (`optional:roll-secrets:…` starts without it when roll can't answer
+   or refuses), the `roll.secrets.*` settings or the variables above, dynamic keys left out unless
+   `roll.secrets.include-dynamic`, and with `roll.secrets.refresh=true` the watch swaps new values
+   in and publishes a `RollSecretsRefreshedEvent`.
 8. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
@@ -2792,7 +2799,9 @@ rotating a database's admin password and editing registrations in place (#75), s
 9. **.NET client, a Pulumi provider, a Lambda extension and an Ansible lookup** (`IConfiguration`;
    AWS's Parameters and Secrets extension; Vault's and 1Password's Ansible). Java is built
    (`sdk/java/secrets`, `feature/roll-secrets-java`: values, sealed resolves, long-polled watches,
-   the cache); its Spring `PropertySource` adapter is next.
+   the cache), and so is its Spring integration (`sdk/java/secrets-spring`,
+   `feature/roll-secrets-spring`: `spring.config.import=roll-secrets:…`, optional imports,
+   refreshing through the watch).
 10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
    CAs**.
 11. *The user's call:* land the stack (#62, then #63–#73; roll search before #62).
