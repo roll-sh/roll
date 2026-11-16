@@ -257,6 +257,26 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     `ttlMs: 60000` and `cacheScope: "private"`: a token's tools are its own, and its rules can
     change.
   - Approvals are Multi Round-Trip Requests (see Approvals).
+  - **Tasks** (`roll_mcp::tasks`, the `io.modelcontextprotocol/tasks` extension, SEP-2663):
+    - **When:** a client that declares the extension on its request gets a task handle
+      (`resultType: "task"`) for a call still running after 3 s, or one waiting for a person's
+      approval. Everyone else waits for the answer, as before. `server/discover` lists the
+      extension only where tasks can be made.
+    - **Running:** the call goes on in the background on the node that made the task, as the same
+      gated request with the caller's own headers, so the token is looked up again when it runs.
+      One waiting for approval shows the approval page: `input_required` with a URL elicitation
+      under a new key each time, or a status message. Once a person decides, it runs.
+    - **Polling:** `tasks/get` answers from any node, with the result inline once `completed` (a
+      tool's `isError` is still `completed`) or the JSON-RPC error once `failed`. `tasks/update`
+      is acknowledged: the approval itself is decided on roll's page. `tasks/cancel` stops it.
+    - **Who sees it:** a task is its owner's (the grant, or the operator), looked up on every
+      request. Anyone else's poll, or an unknown or expired id, is `-32602`. A request that didn't
+      declare the extension is `-32021`. `Mcp-Name` carries the task id.
+    - **Storage:** the id is the caller's secret (only its hash is stored). Results are sealed at
+      rest, as audit sinks' secrets are (a reveal's answer is a credential), so tasks need
+      `ROLL_SECRET_KEY`.
+    - **Limits:** a task lives an hour, a token runs at most 16 at once, and a working task its
+      node stopped touching for a minute reads as `failed`. Results are cut past 4 MiB.
 - **Stateless:** every node of a cluster answers every request, and nothing is lost on a restart.
   `initialize` answers an `Mcp-Session-Id` that holds no state: its prefix says whether the client
   declared URL elicitation (`roll-url-1.` or `roll-1.`, then a random part, so ids are unique), so
@@ -672,14 +692,10 @@ waits on a sibling PR reaching main is last.
    automations that pick up issues and chat messages (the agents thread's call; tell it), and
    chat messages that reach an agent marked `outside` (an install's non-members can't drive
    roll, so mostly members' text).
-4. **MCP tasks, as the 2026-07-28 extension** (`io.modelcontextprotocol/tasks`, SEP-2663: the
-   server answers a task handle when a call will take long, `tasks/get` polls with the result in
-   it, `tasks/update` carries input, no `tasks/result` or `tasks/list`; 2025-11-25's experimental
-   tasks are retired, and no client in the extensions matrix supports either yet): for calls that
-   wait for a person, `input_required` with the approval page. It needs a durable task store on
-   the system database (a fleet's poll lands on another node), results sealed with
-   `ROLL_SECRET_KEY` (a reveal's answer is a credential), each task bound to its grant and looked
-   up on every call, caps per caller, and audit rows; and a client people use that sends it. Waits on clients.
+4. **MCP tasks, live:** check them with apify's `mcpc` (it declares the extension and follows a
+   task to its result) against a rolld with `ROLL_SECRET_KEY`, and with the TypeScript SDK's
+   `client/ext/tasks` once it ships. Then the tools that wait by design (`tasks_wait_run`, deploys,
+   backups) can wait longer than a request when they're a task.
 5. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25; agreed conflicts resolved by `known-conflicts.py`), and
@@ -703,7 +719,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: `roll_find_tools` ranks by how much of a name the query covers, and a test holds 30 everyday queries to their tool (titles now say what a tool acts on: "Roll back a deployment", "Upload an object to a bucket"); search mode for clients that can't take the list (the connect panel and `roll mcp config` turn it on for VS Code and Cursor; `claude mcp add` lines quote a URL with a mode); credentials read tokens could see are hidden (a project's preview variables, tasks' forwarded headers, agents' share links); `tests/admin_only.rs` (every "needs the admin token" refusal is admin in the catalogue); apps' notifications and log drains and secrets' key workflows as tools; write and deploy tokens no longer pass roll code's admin-only checks (connecting a GitHub repository, landing with `bypass`), shorten a stream's retention (now `delete`), mint agents machine tokens (`admin`) or share threads (`reveal`); a rule can grant one transit key (`{"id": "prj_x", "index": "payments"}`: the per-key rows name it); loosening a NoSQL database's masking policy or read-only flag is `admin` (it was `write`, so a token that could read and write could drop the masking and read raw values); postgres, Redis, storage, queues, streams and tasks tools for their everyday routes; lockdown (`?lockdown=1`: work items from GitHub issues, reviews and review comments whose author can't push, and changes from forks, are `outside`, and their text is withheld from the model); search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
+Done lately: MCP tasks (2026-07-28's extension: a long call, or one waiting for approval, is a task its owner polls from any node; sealed results, an hour's TTL, 16 per token); `roll_find_tools` ranks by how much of a name the query covers, and a test holds 30 everyday queries to their tool (titles now say what a tool acts on: "Roll back a deployment", "Upload an object to a bucket"); search mode for clients that can't take the list (the connect panel and `roll mcp config` turn it on for VS Code and Cursor; `claude mcp add` lines quote a URL with a mode); credentials read tokens could see are hidden (a project's preview variables, tasks' forwarded headers, agents' share links); `tests/admin_only.rs` (every "needs the admin token" refusal is admin in the catalogue); apps' notifications and log drains and secrets' key workflows as tools; write and deploy tokens no longer pass roll code's admin-only checks (connecting a GitHub repository, landing with `bypass`), shorten a stream's retention (now `delete`), mint agents machine tokens (`admin`) or share threads (`reveal`); a rule can grant one transit key (`{"id": "prj_x", "index": "payments"}`: the per-key rows name it); loosening a NoSQL database's masking policy or read-only flag is `admin` (it was `write`, so a token that could read and write could drop the masking and read raw values); postgres, Redis, storage, queues, streams and tasks tools for their everyday routes; lockdown (`?lockdown=1`: work items from GitHub issues, reviews and review comments whose author can't push, and changes from forks, are `outside`, and their text is withheld from the model); search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
 revocations were counted as asks: "1 asked" on a token that never made a request; seen in the review
 pack) (#25); ended OAuth connections and their kept clients are forgotten after the audit log's days
 (each `roll login` made one of each, kept forever) (#25); `roll login` checked live against a rolld

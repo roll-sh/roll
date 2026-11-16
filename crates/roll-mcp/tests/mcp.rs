@@ -312,6 +312,83 @@ async fn lockdown_withholds_what_outsiders_wrote() {
     assert_eq!(s, StatusCode::BAD_REQUEST, "a typo never turns lockdown off");
 }
 
+/// Seals as rolld's does in shape: bound to the task, opened only with the same binding.
+struct TestSealer;
+
+impl roll_access::sinks::SinkTransport for TestSealer {
+    fn check(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn seal(&self, id: &str, secret: &str) -> Result<String, String> {
+        Ok(format!("{id}|{}", secret.chars().rev().collect::<String>()))
+    }
+    fn open(&self, id: &str, sealed: &str) -> Result<String, String> {
+        let rest = sealed.strip_prefix(&format!("{id}|")).ok_or("sealed for another task")?;
+        Ok(rest.chars().rev().collect())
+    }
+    fn post(&self, _: String, _: Vec<(String, String)>, _: Vec<u8>) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// MCP tasks (2026-07-28's extension): a call that waits for a person answers at once with a task
+/// its client polls; nobody else's poll finds it, a client that didn't declare the extension
+/// can't ask, and once approved the call runs and the task completes with its result.
+#[tokio::test]
+async fn a_call_waiting_for_approval_is_a_task_polled_to_its_result() {
+    let d = Daemon::new();
+    let _ = d.access.sinks.set(Arc::new(TestSealer));
+    let asker = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow", "delete": "ask" } }])).await;
+    let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
+    let send = |token: String, method: &'static str, params: Value, tasks: bool| {
+        let d = &d;
+        async move {
+            let mut caps = json!({ "elicitation": { "url": {} } });
+            if tasks {
+                caps["extensions"] = json!({ "io.modelcontextprotocol/tasks": {} });
+            }
+            let mut params = params;
+            params["_meta"] = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "tasks", "version": "1" }, "io.modelcontextprotocol/clientCapabilities": caps });
+            let name = params.get("name").or_else(|| params.get("taskId")).and_then(Value::as_str).map(str::to_string);
+            let mut h = vec![("mcp-protocol-version", "2026-07-28".to_string()), ("mcp-method", method.to_string())];
+            if let Some(n) = name {
+                h.push(("mcp-name", n));
+            }
+            let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            d.http_with(&token, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })), &h).await.2
+        }
+    };
+    let made = send(asker.clone(), "tools/call", json!({ "name": "postgres_delete_project", "arguments": { "project": "pa" } }), true).await;
+    let task = &made["result"];
+    assert_eq!(task["resultType"], "task", "{made}");
+    let id = task["taskId"].as_str().unwrap().to_string();
+    // It shows where a person decides.
+    let mut got = json!(null);
+    for _ in 0..50 {
+        got = send(asker.clone(), "tasks/get", json!({ "taskId": id }), true).await;
+        if got["result"]["status"] == "input_required" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(got["result"]["inputRequests"]["approval-1"]["params"]["mode"], "url", "{got}");
+    // Nobody else's poll finds it, and a client that didn't declare the extension can't ask.
+    assert_eq!(send(reader.clone(), "tasks/get", json!({ "taskId": id }), true).await["error"]["code"], -32602);
+    assert_eq!(send(asker.clone(), "tasks/get", json!({ "taskId": id }), false).await["error"]["code"], -32021);
+    // Approved: the call runs, and the task completes with its result.
+    let (_, _, pending) = d.http(OPERATOR, Method::GET, "/v1/access/approvals", None).await;
+    let approval = pending.as_array().unwrap().iter().find(|a| a["state"] == "pending").unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(d.http(OPERATOR, Method::POST, &format!("/v1/access/approvals/{approval}/approve"), None).await.0, StatusCode::OK);
+    for _ in 0..100 {
+        got = send(asker.clone(), "tasks/get", json!({ "taskId": id }), true).await;
+        if got["result"]["status"] == "completed" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!((got["result"]["status"].as_str(), got["result"]["result"]["isError"].as_bool()), (Some("completed"), Some(false)), "{got}");
+}
+
 /// A 2026-07-28 client (the stateless core) is served with no `initialize`: each request names its
 /// version and what the client offers in `_meta`, its headers must say what its body says, its
 /// answers say they're complete (lists may be kept a minute, for this caller only), no session is
