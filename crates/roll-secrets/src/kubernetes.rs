@@ -318,7 +318,12 @@ impl Secrets {
         // Discovery answers any valid token: the address, the TLS trust and the token, proven.
         let (status, _) = probe.call(deliver.as_ref(), "GET", "/api", None).map_err(|e| Error::BadRequest(format!("roll couldn't reach {}: {e}", probe.name)))?;
         if status != 200 {
-            return Err(Error::BadRequest(format!("{host} answered {status} to the admin token{}", hint(status))));
+            let why = match status {
+                401 => hint(401),
+                404 => ": is api_url the API server?",
+                _ => "",
+            };
+            return Err(Error::BadRequest(format!("{host} answered {status} to the admin token{why}")));
         }
         let dek = self.project(project)?;
         let id = names::new_id("kube", 16);

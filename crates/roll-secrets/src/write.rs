@@ -670,7 +670,7 @@ impl Secrets {
     pub(crate) fn not_linkable(&self, project: &str, kind: &str, r#ref: &str) -> String {
         let personal = self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty() && p.resources.iter().any(|r| r.kind.as_str() == kind && r.r#ref == r#ref));
         if personal {
-            format!("{kind} {ref} is on this project's canvas, but roll can't tell it's yours: links, sinks and syncs reach roll's products only from the operator's projects and an admin's for now (the project's own registrations work anywhere: rotators, databases outside roll, AWS roles and IAM users, cloud accounts, CAs and SSH CAs)", ref = r#ref)
+            format!("{kind} {ref} is on this project's canvas, but roll can't tell it's yours: links, sinks and syncs reach roll's products only from the operator's projects and an admin's for now (the project's own registrations work anywhere: rotators, databases outside roll, AWS roles and IAM users, cloud accounts, Kubernetes clusters, CAs and SSH CAs)", ref = r#ref)
         } else {
             format!("{kind} {ref} isn't in this project", ref = r#ref)
         }

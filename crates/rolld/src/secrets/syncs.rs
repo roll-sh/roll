@@ -330,7 +330,6 @@ impl roll_secrets::Deliver for AuditDeliver {
     /// through a client of its own that trusts only that CA, with the same guards (HTTPS, public,
     /// no redirects, the timeout, a bounded answer). Nothing else's calls trust it.
     fn request_trusting(&self, ca: Option<&str>, method: &str, url: &str, headers: &[(&str, &Value)], body: Option<(&str, &Value)>, limit: usize) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
-        use roll_secrets::Deliver as _;
         let Some(pem) = ca else { return self.request(method, url, headers, body, limit) };
         let host = self.0.url(url)?.host_str().unwrap_or_default().to_string();
         let roots = reqwest::Certificate::from_pem_bundle(pem.as_bytes()).ok().filter(|c| !c.is_empty()).ok_or_else(|| bad(format!("the CA for {host} isn't PEM certificates")))?;
