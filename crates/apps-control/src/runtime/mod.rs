@@ -354,6 +354,11 @@ pub trait Builder: Send + Sync {
     async fn build(&self, job: &BuildJob, log: &LogSink, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String>;
     /// Remove an image no deployment needs any more.
     async fn remove_image(&self, image: &str);
+    /// An image built elsewhere, its archive's names already taken out
+    /// ([`crate::image_upload::untagged`]), loaded and tagged `tag`: the image reference.
+    async fn load(&self, _archive: &std::path::Path, _tag: &str, _log: &LogSink) -> anyhow::Result<String> {
+        anyhow::bail!("this node's builder can't take an uploaded image yet: push it to a registry and deploy it by name")
+    }
     /// Whether its builds share one BuildKit, cache mounts and all (one node's Docker): then
     /// each service's mounts are namespaced (`apps_build::isolate_caches`).
     fn shares_caches(&self) -> bool {

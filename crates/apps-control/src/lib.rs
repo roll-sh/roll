@@ -30,6 +30,7 @@ pub mod deploy;
 pub mod drains;
 pub mod export;
 pub mod git_source;
+pub mod image_upload;
 pub mod integrations;
 pub mod jobs;
 pub mod live;

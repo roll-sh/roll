@@ -954,3 +954,43 @@ async fn a_linked_database_on_loopback_is_reached_from_the_container() {
     assert!(docker(&["inspect", &relay]).await.is_err(), "the relay went with the network");
     *LOOPBACK_DB.lock().unwrap() = None;
 }
+
+/// An image built elsewhere deploys from its `docker save` archive, and the names inside the
+/// archive are never applied on the host: one can't retag a base image or another service's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_uploaded_image_runs_and_names_nothing_on_the_host() {
+    let Some(w) = docker_world().await else { return };
+    use apps_control::runtime::docker::docker;
+    // A tag only this test makes, saved into the archive, then removed here: if the load
+    // applied the archive's names it would exist again afterwards.
+    let tag = format!("roll-apps-test-upload-{}:1", w.project[4..].to_ascii_lowercase());
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Dockerfile"), "FROM busybox:1.37\nRUN mkdir -p /www && echo uploaded > /www/index.html\n").unwrap();
+    let out = std::process::Command::new("docker").args(["build", "-q", "-t", &tag, &dir.path().to_string_lossy()]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let saved = std::process::Command::new("docker").args(["save", &tag]).output().unwrap();
+    assert!(saved.status.success());
+    docker(&["image", "rm", &tag]).await.unwrap();
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "uploaded", "source": {"kind": "upload"}, "run": {"port": 8080, "start": "httpd -f -p $PORT -h /www", "memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let (st, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), None, "application/x-docker-image", Some(saved.stdout)).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    let dep = d["id"].as_str().unwrap().to_string();
+    let mut d = Value::Null;
+    for _ in 0..1200 {
+        let (_, x) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None, "application/json", None).await;
+        if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
+            d = x;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(d["status"], "active", "{d}");
+    let host = svc["environments"][0]["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
+    let resp = w.public.clone().oneshot(Request::get("/").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(String::from_utf8_lossy(&body).trim(), "uploaded");
+    assert!(docker(&["image", "inspect", &tag]).await.is_err(), "the archive's name was applied on the host");
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+}

@@ -62,6 +62,13 @@ pub struct Deploy {
     /// Deploy this public image instead of the service's source.
     #[arg(long)]
     pub image: Option<String>,
+    /// Deploy an image built on this machine, with no registry (Fly's `--local-only`):
+    /// `docker save` runs here and its archive is uploaded.
+    #[arg(long, conflicts_with_all = ["image", "revision", "image_file"])]
+    pub local_image: Option<String>,
+    /// Or an archive `docker save` wrote (`.tar`, gzipped or not).
+    #[arg(long, conflicts_with_all = ["image", "revision"])]
+    pub image_file: Option<PathBuf>,
     /// Build and health-check it without putting it live: it answers on its own URL
     /// (`<id>--<host>`), and `roll apps rollback <id>` puts it live.
     #[arg(long)]
@@ -1985,13 +1992,43 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
 
 pub async fn deploy(api: &Api, json_out: bool, d: Deploy) -> anyhow::Result<()> {
     let svc = service(api, &d.target).await?;
-    let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true), "no_cache": d.no_cache.then_some(true) });
-    let dep = api.post(&format!("{}/deploys", env_path(&svc, &d.target.env)), body).await?;
+    let dep = if d.local_image.is_some() || d.image_file.is_some() {
+        upload_image(api, &svc, &d).await?
+    } else {
+        let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true), "no_cache": d.no_cache.then_some(true) });
+        api.post(&format!("{}/deploys", env_path(&svc, &d.target.env)), body).await?
+    };
     if json_out || d.detach {
         println!("{}", serde_json::to_string_pretty(&dep)?);
         return Ok(());
     }
     watch(api, &svc, &d.target.env, &dep).await
+}
+
+/// An image from this machine as a deploy: `docker save`'s archive (or the file given), sent
+/// as it is; rolld takes its names out before loading it.
+async fn upload_image(api: &Api, svc: &Value, d: &Deploy) -> anyhow::Result<Value> {
+    const MAX: usize = 512 << 20;
+    let bytes = match (&d.local_image, &d.image_file) {
+        (Some(image), _) => {
+            eprintln!("saving {image}…");
+            let out = tokio::process::Command::new("docker").args(["save", image]).output().await.context("can't run docker here")?;
+            anyhow::ensure!(out.status.success(), "docker save {image} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+            out.stdout
+        }
+        (None, Some(path)) => std::fs::read(path).with_context(|| format!("can't read {}", path.display()))?,
+        (None, None) => unreachable!("an image to upload"),
+    };
+    anyhow::ensure!(bytes.len() <= MAX, "the image is {} MiB: at most {} MiB goes up this way (push it to a registry and deploy it with --image)", bytes.len() >> 20, MAX >> 20);
+    eprintln!("uploading {} MiB…", bytes.len() >> 20);
+    let mut req = api.http.post(format!("{}{}/deploys", api.base, env_path(svc, &d.target.env))).header("content-type", "application/x-docker-image").body(bytes);
+    if let Some(k) = &api.key {
+        req = req.bearer_auth(k);
+    }
+    let res = req.send().await.with_context(|| format!("can't reach {}", api.base))?;
+    let (ok, v) = (res.status().is_success(), res.json::<Value>().await.unwrap_or(Value::Null));
+    anyhow::ensure!(ok, "{}", v["error"].as_str().unwrap_or("the upload failed"));
+    Ok(v)
 }
 
 pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {

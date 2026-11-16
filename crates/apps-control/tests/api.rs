@@ -4058,3 +4058,35 @@ async fn metrics_past_a_week_come_from_hourly_rollups() {
     let (_, wk) = call(&w.api, "GET", &format!("{base}?minutes={}", 7 * 24 * 60), None).await;
     assert_eq!((wk["step"].as_i64(), wk["requests"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).sum::<i64>()), (Some(1), 5));
 }
+
+/// An image built elsewhere (`docker save`'s archive) deploys without a build: loaded with its
+/// own names taken out (it can't retag anything on the host), tagged as a build's would be.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_uploaded_image_deploys_without_its_names() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let mut b = tar::Builder::new(Vec::new());
+    for (name, body) in [("manifest.json", r#"[{"Config":"blobs/sha256/c","RepoTags":["nginx:latest"],"Layers":["blobs/sha256/l"]}]"#), ("blobs/sha256/l", "layer")] {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(body.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, name, body.as_bytes()).unwrap();
+    }
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/apps/services/{id}/environments/production/deploys"))
+        .header("content-type", "application/x-docker-image")
+        .header("x-roll-message", "built on my laptop")
+        .body(Body::from(b.into_inner().unwrap()))
+        .unwrap();
+    let resp = w.api.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let d: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    assert_eq!((d["status"].as_str(), d["trigger"].as_str(), d["message"].as_str()), (Some("active"), Some("upload"), Some("built on my laptop")), "{d}");
+    assert!(d["image"].as_str().unwrap().starts_with("roll-apps-"), "{d}");
+    let loaded = w.fake.loaded.lock().last().cloned().unwrap();
+    assert!(!loaded.contains("nginx") && loaded.contains("blobs/sha256/l"), "{loaded}");
+}

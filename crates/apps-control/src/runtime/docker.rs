@@ -1141,6 +1141,17 @@ impl Builder for DockerBuilder {
             let _ = docker(&["image", "rm", image]).await;
         }
     }
+
+    async fn load(&self, archive: &std::path::Path, tag: &str, log: &LogSink) -> anyhow::Result<String> {
+        anyhow::ensure!(tag.starts_with(super::PREFIX), "{tag} isn't a roll apps image name");
+        let a = archive.to_string_lossy().to_string();
+        let out = docker_within(&["load", "-q", "-i", &a], Some(Duration::from_secs(600))).await.map_err(|e| anyhow::anyhow!("loading the image failed: {e}"))?;
+        // Its names were taken out: what's loaded is an image id.
+        let id = out.lines().filter_map(|l| l.trim().strip_prefix("Loaded image ID: ")).next_back().map(str::to_string).ok_or_else(|| anyhow::anyhow!("docker loaded no image by id: {}", out.trim()))?;
+        docker(&["tag", &id, tag]).await?;
+        log.line(format!("loaded {} as {tag}", id.chars().take(19).collect::<String>()));
+        Ok(tag.to_string())
+    }
 }
 
 #[cfg(test)]

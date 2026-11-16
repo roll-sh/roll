@@ -1290,6 +1290,19 @@ so a redelivery or the watch makes no second deploy. Another branch, a deleted b
 `[skip ci]` commit and GitHub's ping are 200 `{ ignored }`. The URL's token is the secret
 (GitHub's webhook signature isn't needed on top), and the environment panel says where to add it.
 
+## An image built on your machine
+
+`roll apps deploy --local-image web:dev` (Fly's `--local-only`, Heroku's `container:push`) runs
+`docker save` here and uploads the archive (`--image-file` takes one already saved, gzipped or
+not); the API takes it as `application/x-docker-image`, up to the upload limit. Loading an
+archive applies the names inside it on the host, so before it's loaded `image_upload.rs` takes
+them out: `manifest.json`'s `RepoTags` emptied, `repositories` left out, the OCI index's name
+annotations removed, and entries that climb out or aren't files refused. The image is then
+tagged `roll-apps-<service>:<deployment>` as a build's is, and the deploy goes on as any other
+(health-checked, a rollout, rollbacks run it again). `docker.rs::an_uploaded_image_runs_and_names_nothing_on_the_host`
+uploads an archive whose tag it deleted first and checks the tag never comes back. The fleet's
+builder (CodeBuild) refuses one for now; pushing it to ECR is in `## Next`.
+
 ## Static sites
 
 A build whose plan serves files (busybox httpd on `/site`: a plain `index.html`, Vite, CRA,
@@ -2140,8 +2153,8 @@ put items 1–11 first. A review on 2026-11-16 (the product against the same six
 1. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
    on main, `watch_secrets` holds one `SecretSource::wait_digest` long poll per watched
    environment instead of polling every minute.
-2. **Deploy an image built on your machine** (Fly's `--local-only`, Heroku's `container:push`):
-   an image upload loaded through the Engine API on Docker (pushed to ECR on the fleet).
+2. **An uploaded image on the fleet**: `roll apps deploy --local-image` works on one node's Docker; on the fleet the
+   archive would be pushed to the fleet's ECR (and tested against the fake AWS).
 3. **Terraform resources for apps** (Render's, Heroku's, Vercel's providers): services,
    environments, variables and domains in `sdk/terraform-provider-roll`, on its fake-rolld harness.
 4. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they

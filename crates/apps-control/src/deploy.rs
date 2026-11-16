@@ -55,7 +55,7 @@ impl Apps {
         self.refuse_paused(service, env).await?;
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["revision", "image", "message", "no_traffic", "no_cache"].contains(&k.as_str()) {
+            if !["revision", "image", "message", "no_traffic", "no_cache", "image_upload"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -154,7 +154,12 @@ impl Apps {
         {
             return Err(Error::TooLarge(format!("an upload is at most {} MiB", self.cfg.upload_max >> 20)));
         }
-        let upload_key = upload.as_ref().map(|_| format!("apps/uploads/{}.tgz", random(16)));
+        // An upload is a tree (`roll up`) or an image built elsewhere (`--image-file`).
+        let image_upload = o.get("image_upload") == Some(&Value::Bool(true));
+        if image_upload && upload.is_none() {
+            return Err(Error::BadRequest("image_upload is an uploaded image archive's".into()));
+        }
+        let upload_key = upload.as_ref().map(|_| format!("apps/uploads/{}.{}", random(16), if image_upload { "image.tar" } else { "tgz" }));
         if let (Some(key), Some(bytes)) = (&upload_key, upload) {
             match &self.deps.objects {
                 Some(o) => o.put(key, bytes).await.map_err(|e| Error::Internal(format!("storing the upload: {e}")))?,
@@ -980,6 +985,25 @@ impl Apps {
     }
 
     async fn build_in(self: &Arc<Self>, svc: &ServiceRow, d: &Deployment, log: &LogSink, cancel: CancellationToken, dir: &Path) -> anyhow::Result<(String, Run)> {
+        // An image built elsewhere: its names taken out, loaded, and tagged as a build's would be.
+        if d.trigger == Trigger::Upload {
+            let id = d.id.clone();
+            if let Some(key) = self.db(move |s| s.deployment_upload(&id)).await?.filter(|k| k.ends_with(".image.tar")) {
+                let bytes = match &self.deps.objects {
+                    Some(o) => o.get(&key).await?.ok_or_else(|| anyhow::anyhow!("the upload is gone"))?,
+                    None => Bytes::from(tokio::fs::read(self.cfg.home.join(&key)).await?),
+                };
+                log.line(format!("loading the uploaded image ({} MiB)", bytes.len() >> 20));
+                let archive = dir.join("image.tar");
+                let a = archive.clone();
+                tokio::task::spawn_blocking(move || crate::image_upload::untagged(&bytes, &a)).await??;
+                let tag = format!("roll-apps-{}:{}", svc.id.strip_prefix("svc_").unwrap_or(&svc.id), d.id.strip_prefix("dep_").unwrap_or(&d.id));
+                let image = self.deps.builder.load(&archive, &tag, log).await?;
+                let (id, img, r) = (d.id.clone(), image.clone(), svc.run.clone());
+                self.db(move |s| s.set_built(&id, &img, None, Some(&r))).await?;
+                return Ok((image, svc.run.clone()));
+            }
+        }
         let tree = dir.join("tree");
         tokio::fs::create_dir_all(&tree).await?;
         let root = match (&svc.source, d.trigger) {
