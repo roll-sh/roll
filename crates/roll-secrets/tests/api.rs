@@ -2047,8 +2047,18 @@ async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
     let grant = roll_auth::Grant { scope: Arc::new(Scope(vec![by_id])), ..grant.clone() };
     let mut req = Request::builder().uri(format!("/v1/secrets/projects/{}/environments/development/values", api.project)).body(Body::empty()).unwrap();
     req.extensions_mut().insert(roll_auth::Operator);
-    req.extensions_mut().insert(grant);
+    req.extensions_mut().insert(grant.clone());
     assert_eq!(api.router.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+    // A request an approval let through (the gate puts `Approved` beside the grant): its audit row
+    // names the approval and who decided it, and the export has them as columns.
+    let mut req = Request::builder().uri(format!("/v1/secrets/projects/{}/environments/development/values", api.project)).body(Body::empty()).unwrap();
+    req.extensions_mut().insert(roll_auth::Operator);
+    req.extensions_mut().insert(grant);
+    req.extensions_mut().insert(roll_auth::Approved { id: "apr_fake1".into(), by: vec!["operator".into()], until: Some(4_102_444_800_000) });
+    assert_eq!(api.router.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+    let audit = api.ok(Method::GET, "/audit?actor=token:tok_ci", None).await;
+    assert_eq!(audit[0]["approval"], json!({ "id": "apr_fake1", "by": ["operator"], "until": 4_102_444_800_000i64 }));
+    assert!(audit[1].get("approval").is_none(), "a request no approval let through names none");
 }
 
 #[tokio::test]

@@ -55,7 +55,7 @@ mod caller;
 pub mod kms;
 mod write;
 
-pub use access::{Action, Caller, Minted, People, Person, Scope, Workloads};
+pub use access::{Action, Approval, Caller, Minted, People, Person, Scope, Workloads};
 pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter};
@@ -395,6 +395,7 @@ impl Secrets {
         db.add_column("environments", "notify_host", "TEXT")?;
         db.add_column("syncs", "checked_at", "INTEGER")?;
         db.add_column("leases", "path", "TEXT")?;
+        db.add_column("audit", "approval", "TEXT")?;
         // Workload identities (identities.rs); their logins' tokens are roll-access's.
         db.ensure_schema(identities::SCHEMA)?;
         // Secrets' own `rlst_` tokens are gone (roll-access's grants instead); never on main.

@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import type { AuditEntry, AuditFilter, AuditFormat, Sink } from "@/lib/secrets-api";
 import { Select } from "../agents/ui/select";
 import { useSecrets } from "./secrets-page";
-import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, sized, ghost, primary, saveText, Section, stamp, Teach, useLoad } from "./ui";
+import { ActorMark, ApprovalMark, ago, button, card, dangerButton, ErrorNote, errorText, field, sized, ghost, primary, saveText, Section, stamp, Teach, useLoad } from "./ui";
 
 const PAGE = 100;
 const ALL = "*";
@@ -126,6 +126,7 @@ export function AuditView() {
                     </td>
                     <td className="max-w-40 py-1.5 pr-3 text-soft">
                       <ActorMark who={r.actor} />
+                      {r.approval && <span className="block"><ApprovalMark approval={r.approval} /></span>}
                     </td>
                     <td className="py-1.5 pr-3 font-mono text-[11.5px] whitespace-nowrap">{r.action}</td>
                     <td className="py-1.5 pr-3 font-mono text-[11px] whitespace-nowrap text-muted">
