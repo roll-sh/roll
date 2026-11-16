@@ -599,26 +599,32 @@ impl Drop for Held {
     }
 }
 
-/// The folder's digest. With `since` (the digest a watcher has) and `wait` (seconds, at most 25:
-/// under a load balancer's idle timeout, and as long as a revoked token keeps a held answer), a
-/// long poll: it answers as soon as the digest differs from `since`, or with the same digest when
-/// `wait` runs out. Meanwhile it reads the project's change counter each second (cheap) and works
-/// the digest out again only when that moved, or every 10 s (what the counter can't see: a live
-/// link's value, a folder another project shares). At most 32 held per principal and 4096 per
-/// node; past that it answers at once.
+/// `GET …/digest[?since=&wait=]`: the folder's digest, long-polled with `since` (`wait_digest`).
 async fn digest(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
-    let path = path_of(&q);
-    let wait = q.get("wait").and_then(|w| w.parse::<u64>().ok()).unwrap_or(0).min(25);
-    let since = q.get("since").cloned();
+    let wait = q.get("wait").and_then(|w| w.parse::<u64>().ok()).unwrap_or(0);
+    let d = wait_digest(s, project, env, path_of(&q), q.get("since").cloned(), wait, c).await?;
+    Ok(ok(json!({ "digest": d })))
+}
+
+/// A folder's digest, long-polled: with `since` (the digest the caller has) and `wait` (seconds,
+/// at most 25: under a load balancer's idle timeout, and as long as a revoked token keeps a held
+/// answer), it answers as soon as the digest differs from `since`, or with the same digest
+/// when `wait` runs out (`GET …/digest?since=&wait=`, and roll apps' redeploys in process). It
+/// reads the project's change counter each second (cheap) and works the digest out again only
+/// when that moved, or every 10 s (what the counter can't see: a live link's value, a folder
+/// another project shares). At most 32 held per principal and 4096 per node; past that it answers
+/// at once.
+pub async fn wait_digest(s: Arc<Secrets>, project: String, env: String, path: String, since: Option<String>, wait: u64, c: Caller) -> crate::Result<String> {
+    let wait = wait.min(25);
     let read = |s: Arc<Secrets>| {
         let (project, env, path, c) = (project.clone(), env.clone(), path.clone(), c.clone());
         blocking(s, move |s| s.digest(&project, &env, &path, &c))
     };
     let mut d = read(s.clone()).await?;
     if wait == 0 || since.as_deref() != Some(d.as_str()) {
-        return Ok(ok(json!({ "digest": d })));
+        return Ok(d);
     }
-    let Some(_held) = Held::take(&c.principal) else { return Ok(ok(json!({ "digest": d }))) };
+    let Some(_held) = Held::take(&c.principal) else { return Ok(d) };
     let marker = |s: Arc<Secrets>| {
         let project = project.clone();
         blocking(s, move |s| s.change_marker(&project))
@@ -638,7 +644,7 @@ async fn digest(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
             }
         }
     }
-    Ok(ok(json!({ "digest": d })))
+    Ok(d)
 }
 
 #[derive(Deserialize)]
