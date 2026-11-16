@@ -3924,18 +3924,48 @@ fn startup_names_cut_to_namedatalen() {
 
 /// A big value goes out at the speed of a copy: a custom plan's cost doesn't print its
 /// constants (a parameter's value), and byteaout writes the whole value at once. 64 MB took
-/// 30 s (binary) and longer as text in a debug build; now well under one.
+/// 30 s (binary) and longer as text in a debug build; now well under one. The check is on
+/// work, not on the wall clock (a 20 s bound failed at 21 s in a loaded train, 14-15 s alone):
+/// a child process runs the round trip at 16 MB and at 64 MB and reports the CPU time it took,
+/// and four times the bytes may take at most eight times the CPU (the quadratic copy took 15x).
 #[test]
 fn big_bytea_values_go_out_in_linear_time() {
+    if let Ok(mb) = std::env::var("BIG_BYTEA_MB") {
+        println!("big_bytea cpu_us={}", big_bytea_round_trip_cpu(mb.parse().unwrap()));
+        return;
+    }
+    let cpu = |mb: usize| -> u64 {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["big_bytea_values_go_out_in_linear_time", "--exact", "--nocapture", "--test-threads=1"])
+            .env("BIG_BYTEA_MB", mb.to_string())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{text}{}", String::from_utf8_lossy(&out.stderr));
+        text.lines().find_map(|l| l.strip_prefix("big_bytea cpu_us=")).unwrap().parse().unwrap()
+    };
+    let (small, big) = (cpu(16), cpu(64));
+    assert!(big < small.max(1000) * 8, "16 MB: {small} us, 64 MB: {big} us of CPU");
+}
+
+/// This process's CPU time (all threads: the server is in-process) for one round trip of an
+/// `mb` MB bytea, binary and as text.
+fn big_bytea_round_trip_cpu(mb: usize) -> u64 {
+    fn cpu_us() -> u64 {
+        let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) }, 0);
+        let us = |t: libc::timeval| t.tv_sec as u64 * 1_000_000 + t.tv_usec as u64;
+        us(u.ru_utime) + us(u.ru_stime)
+    }
     let s = server(AuthMethod::Trust);
-    runtime().block_on(async {
+    let used = runtime().block_on(async {
         let c = s.connect("postgres").await;
-        let big: Vec<u8> = (0..64usize << 20).map(|i| (i % 251) as u8).collect();
-        let started = Instant::now();
+        let big: Vec<u8> = (0..mb << 20).map(|i| (i % 251) as u8).collect();
         let st = c.prepare_typed("SELECT $1::bytea", &[tokio_postgres::types::Type::BYTEA]).await.unwrap();
+        let started = cpu_us();
         let back: Vec<u8> = c.query_one(&st, &[&big]).await.unwrap().get(0);
         assert!(back == big);
-        let text = c.simple_query("SELECT decode(repeat('ff01', 8 << 20), 'hex')").await.unwrap();
+        let text = c.simple_query(&format!("SELECT decode(repeat('ff01', {}), 'hex')", mb << 17)).await.unwrap();
         let hex = text
             .iter()
             .find_map(|m| match m {
@@ -3943,10 +3973,11 @@ fn big_bytea_values_go_out_in_linear_time() {
                 _ => None,
             })
             .unwrap();
-        assert_eq!((hex.len(), &hex[..8]), (2 + (32 << 20), "\\xff01ff"));
-        assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
+        assert_eq!((hex.len(), &hex[..8]), (2 + (mb << 19), "\\xff01ff"));
+        cpu_us() - started
     });
     s.engine.shutdown();
+    used
 }
 
 /// port and listen_addresses are where the server listens (as `postgres -h -p` sets them), and
@@ -4196,14 +4227,21 @@ fn parallel_workers_seen_by_others() {
              FROM pg_stat_activity WHERE application_name = 'leader' ORDER BY backend_type, pid"
         );
         let q = "SELECT count(*) FROM pw WHERE pg_sleep(0.001) IS NOT NULL";
-        assert_eq!(
-            lines(&o, &rows).await.unwrap(),
-            [
-                format!("client backend|NULL|leader|active|PgSleep|{q}|{}", lines(&o, &format!("SELECT client_port FROM pg_stat_activity WHERE pid = {leader}")).await.unwrap()[0]),
-                format!("parallel worker|t|leader|active|PgSleep|{q}|NULL"),
-                format!("parallel worker|t|leader|active|PgSleep|{q}|NULL"),
-            ]
-        );
+        let want = [
+            format!("client backend|NULL|leader|active|PgSleep|{q}|{}", lines(&o, &format!("SELECT client_port FROM pg_stat_activity WHERE pid = {leader}")).await.unwrap()[0]),
+            format!("parallel worker|t|leader|active|PgSleep|{q}|NULL"),
+            format!("parallel worker|t|leader|active|PgSleep|{q}|NULL"),
+        ];
+        // The wait event is sampled: under load a process is often between its sleeps (wait_event
+        // NULL), so sample until all three are in one (as long as the query runs).
+        let mut got = Vec::new();
+        for _ in 0..200 {
+            got = lines(&o, &rows).await.unwrap();
+            if got == want {
+                break;
+            }
+        }
+        assert_eq!(got, want);
         let locks = "SELECT l.locktype, l.relation::regclass, l.mode, l.fastpath, l.virtualtransaction = coalesce(l.virtualxid, l.virtualtransaction) \
              FROM pg_locks l JOIN pg_stat_activity a USING (pid) WHERE a.backend_type = 'parallel worker' ORDER BY 1, 2";
         assert_eq!(
