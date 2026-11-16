@@ -2774,7 +2774,7 @@ Doppler, Infisical, Vault and 1Password (clients, IaC, CI, Kubernetes, BYOK). Th
 is Vault's signature: dynamic credentials for clouds and databases roll doesn't run. CI stays
 under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
-Ranked (twenty-fourth review, 2026-11-16 evening, against Doppler, Infisical, Vault, AWS Secrets
+Ranked (twenty-fifth review, 2026-11-16 evening, against Doppler, Infisical, Vault, AWS Secrets
 Manager, 1Password and Akeyless, and the other threads' branches): first what can be built now,
 then what waits on a merge or another thread.
 
@@ -2791,16 +2791,15 @@ extension that logs in with the function's role) and #117 (an Ansible collection
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
-2. **The TypeScript client's `fromEnv` and OIDC token from the environment**, as Go's and Python's
-   (the last place the three clients' surfaces differ), on #117. (Kubernetes generated roles are
-   #124; the clients' public reads and identity login are on #117, which now uses no private
-   helper.)
-3. **The Java client's Spring `PropertySource`**, on #105.
+2. **The Java client's Spring `PropertySource`** (building, on #105). (The TypeScript client's
+   `fromEnv` and `oidcTokenFromEnv` are on #117, so the three clients' surfaces match.)
+3. **LDAP and Active Directory passwords**: a directory registered with a bind account; managed
+   links rotate a service account's password, and dynamic links make a short-lived user (Vault's
+   LDAP secrets engine, Infisical's).
 4. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
    backup schedules, rotation windows): the resources once their routes are on main, the tools
    with roll MCP.
-5. **A Pulumi provider** (bridged from the Terraform provider).
-6. **More dynamic credentials**: Snowflake, LDAP and Active Directory passwords (Vault, Infisical).
+5. **Snowflake credentials and a Pulumi provider** (bridged from the Terraform provider).
 7. **Access requests**: a time-boxed `reveal` on a protected environment that an approver grants
    (Infisical's and 1Password's), once projects have members.
 8. **A gateway into private networks** (Infisical's and Akeyless'); **ACME on project CAs**.
