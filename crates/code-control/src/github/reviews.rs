@@ -59,10 +59,7 @@ fn revision_of(code: &Code, r: &RepoRow, c: &Change, commit: Option<&str>) -> Re
     Ok((rev.map(|r| r as u64).unwrap_or(0), Some(id)))
 }
 
-/// Does GitHub's `author_association` mean the reviewer can push to the repo? Missing: no.
-fn can_push(association: Option<&str>) -> bool {
-    matches!(association.map(str::to_ascii_uppercase).as_deref(), Some("OWNER" | "MEMBER" | "COLLABORATOR"))
-}
+use code_github::mapping::can_push;
 
 fn verdict(state: &str) -> Option<Verdict> {
     match state.to_ascii_lowercase().as_str() {
@@ -116,6 +113,7 @@ pub(crate) async fn review_event(code: &Code, hub: &Hub, r: &RepoRow, e: &PullRe
                 source: SOURCE,
                 external_id: Some(&ext),
                 url: e.review.html_url.as_deref(),
+                outside: !can_push(e.review.author_association.as_deref()),
             })?;
             // Inline comments that arrived before their review get linked to it.
             code.db.sql().execute(
@@ -167,7 +165,8 @@ pub(crate) async fn comment_event(code: &Code, hub: &Hub, r: &RepoRow, e: &PullR
     let th = if let Some(root) = cm.in_reply_to_id
         && let Some(th) = code.db.thread_by_external(&r.id, SOURCE, &root.to_string())?
     {
-        code.reply(r, &c, &th, &author, &cm.body, &Origin { source: SOURCE, external_id: Some(&ext), validate: false })?
+        let outside = !can_push(cm.author_association.as_deref());
+        code.reply(r, &c, &th, &author, &cm.body, &Origin { source: SOURCE, external_id: Some(&ext), outside, validate: false })?
     } else {
         let th = open_thread(code, r, &c, &author, cm).await?;
         code.emit(&r.id, "thread", serde_json::to_value(&th).unwrap_or_default());
@@ -215,7 +214,7 @@ async fn open_thread(code: &Code, r: &RepoRow, c: &Change, author: &Reviewer, cm
         // Outdated on GitHub already.
         code.db.move_thread(&id, None, revision, at.as_deref().unwrap_or(&c.head))?;
     }
-    code.db.insert_comment(&new_id("cm"), &id, &r.id, author, &cm.body, SOURCE, Some(&ext))?;
+    code.db.insert_comment(&new_id("cm"), &id, &r.id, author, &cm.body, SOURCE, Some(&ext), !can_push(cm.author_association.as_deref()))?;
     code.db.thread(&id)?.ok_or_else(|| Error::NotFound(format!("thread {id}")))
 }
 

@@ -192,6 +192,18 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   category (`ACL`, `CONFIG`, `MONITOR` and `SYNC`, which stream everyone's commands and data,
   `CLIENT`, `SLOWLOG`, `BGSAVE`, `CLUSTER`, `RESTORE` and the like), are `admin`; the rest `write`.
 - NoSQL CQL: `SELECT` is `read`, `DROP` and `TRUNCATE` are `delete`, the rest `write`.
+- roll code: creating a repo is `write`, but connecting a GitHub repository (`source: {github}`)
+  is `admin` (GitHub installations span tenants, so listing them is admin too). Landing is
+  `deploy`; `bypass: true` (over the required reviews, the merge queue and a secret-leak
+  blocker) is `admin`.
+- Streams: changing a stream's `retention_ms`, or a topic's `retention.*`, `cleanup.policy` or
+  `delete.retention.ms`, is `delete` (a shorter retention drops records at once); other settings
+  are `write`.
+- Agents: adding a machine mints its machine token (`admin`, as approving a login is); sharing a
+  thread makes an anonymous link to a copy of it (`reveal`, as other shares are).
+- NoSQL settings (`PATCH /v1/nosql/databases/{id}`): changing the masking policy (applied at read
+  time for every role, so dropping it shows a reader raw values) or turning `read_only` off is
+  `admin`, as roll previews' project settings are; its other settings are `write`.
 - Storage IAM: `Get…`, `List…`, `Simulate…` are `read`, the rest `admin`.
 - git pushes (`POST /git/{owner}/{repo}/git-receive-pack`): from the ref updates at the start
   of the body (read without buffering the pack). Each update is one action: moving the repo's
@@ -902,8 +914,17 @@ the list below. It also fails on a method decided only by a prefix row (`/v1/pre
 method: no row of the route's own names that method; rolld logs each route's methods) that isn't
 in `crates/roll-access/src/prefix-reviewed.txt` as `METHOD route`: such a route takes the prefix's
 action whatever it answers (a preview's variables, with their values, were a read until they got
-a row of their own), so each new one is either given its own row or looked at and listed. The
-operator's routes (public routes, which anyone may call without a token, aren't a grant's to
+a row of their own), so each new one is either given its own row or looked at and listed.
+
+A scoped token reaches a product as its operator (roll code's `Caller::Admin`), because the gate
+has decided already. So a product's own admin-only check passes for whatever the catalogue lets
+through. An admin-only refusal says "needs the admin token", and
+`crates/roll-access/tests/admin_only.rs` finds every such message in the products' sources. It
+fails unless `crates/roll-access/src/admin-only.txt` lists a request that reaches the message
+and the catalogue classifies that request `admin`. Connecting a GitHub repository and landing
+with `bypass` were write and deploy before this test existed.
+
+The operator's routes (public routes, which anyone may call without a token, aren't a grant's to
 classify, so the check skips them):
 
 | routes | why |
