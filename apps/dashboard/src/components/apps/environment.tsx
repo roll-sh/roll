@@ -247,7 +247,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           )}
           {closed && !!env.egress_refused?.length && (
             <p className="text-[12px] text-muted">
-              Refused lately: <span className="font-mono">{env.egress_refused.join(", ")}</span>
+              Refused lately: <span className="font-mono">{env.egress_refused.map((r) => (r.private ? `${r.host} (private address)` : r.host)).join(", ")}</span>
             </p>
           )}
         </div>

@@ -865,7 +865,7 @@ impl Runtime for Docker {
         Ok(super::egress::proxy_url(hosts))
     }
 
-    fn egress_refused(&self, hosts: &[String]) -> Vec<String> {
+    fn egress_refused(&self, hosts: &[String]) -> Vec<super::egress::Refused> {
         self.egress.as_ref().map(|p| p.refused(hosts)).unwrap_or_default()
     }
 

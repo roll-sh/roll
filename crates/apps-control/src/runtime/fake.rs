@@ -65,7 +65,7 @@ pub struct Fake {
     closed: Mutex<Vec<String>>,
     pub proxies: Mutex<Vec<(String, Vec<String>)>>,
     /// What the egress proxies say they refused ([`Fake::refuse`]).
-    refused: Mutex<Vec<String>>,
+    refused: Mutex<Vec<super::egress::Refused>>,
     /// Tars written into instances (`copy_to`), by instance and directory, read back as they were.
     copied: Mutex<HashMap<(String, String), Vec<u8>>>,
     /// What a volume reports it takes, over its contents' length ([`Fake::set_volume_used`]).
@@ -207,8 +207,8 @@ impl Fake {
     }
 
     /// An egress proxy refused `host` (as one would, an instance having tried it).
-    pub fn refuse(&self, host: &str) {
-        self.refused.lock().push(host.to_string());
+    pub fn refuse(&self, host: &str, private: bool) {
+        self.refused.lock().push(super::egress::Refused { host: host.to_string(), private });
     }
 
     pub fn count(c: &AtomicU64) -> u64 {
@@ -585,7 +585,7 @@ impl Runtime for Fake {
         Ok(super::egress::proxy_url(hosts))
     }
 
-    fn egress_refused(&self, _hosts: &[String]) -> Vec<String> {
+    fn egress_refused(&self, _hosts: &[String]) -> Vec<super::egress::Refused> {
         self.refused.lock().clone()
     }
 

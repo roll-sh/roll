@@ -27,9 +27,10 @@ pub struct Links {
 }
 
 impl Links {
-    /// Sockets under `dir`; a previous process's are gone (its listeners are).
+    /// Sockets under `dir`. A previous process's directories stay: a relay still running mounts
+    /// one (a bind mount holds the directory itself, so one made again would be another the
+    /// relay never sees), and [`Links::reach`] binds the socket in it again.
     pub fn new(dir: PathBuf) -> Links {
-        let _ = std::fs::remove_dir_all(&dir);
         Links { dir, serving: Mutex::new(HashMap::new()) }
     }
 

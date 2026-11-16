@@ -1037,7 +1037,7 @@ pub struct Environment {
     pub egress: Egress,
     /// Hosts its egress proxy refused lately (its code tried them; they aren't listed).
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub egress_refused: Vec<String>,
+    pub egress_refused: Vec<crate::runtime::egress::Refused>,
     /// A worker that follows its work: the backlog it last read (null before the first read)
     /// and the instances that wants.
     pub scaling: Option<Scaling>,

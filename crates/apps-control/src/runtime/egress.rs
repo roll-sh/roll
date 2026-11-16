@@ -66,18 +66,26 @@ pub fn allowed(hosts: &[String], ports: &[u16], host: &str, port: u16) -> bool {
         })
 }
 
+/// A host the proxy refused: not listed, or listed but resolving only to private addresses.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct Refused {
+    pub host: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub private: bool,
+}
+
 struct Proxy {
     hosts: Vec<String>,
     ports: Vec<u16>,
-    refused: Mutex<VecDeque<String>>,
+    refused: Mutex<VecDeque<Refused>>,
 }
 
 impl Proxy {
-    fn refuse(&self, host: &str) {
-        let h: String = host.chars().take(253).map(|c| if c.is_ascii_alphanumeric() || ".-*".contains(c) { c.to_ascii_lowercase() } else { '?' }).collect();
+    fn refuse(&self, host: &str, private: bool) {
+        let host: String = host.chars().take(253).map(|c| if c.is_ascii_alphanumeric() || ".-*".contains(c) { c.to_ascii_lowercase() } else { '?' }).collect();
         let mut r = self.refused.lock();
-        r.retain(|x| x != &h);
-        r.push_back(h);
+        r.retain(|x| x.host != host);
+        r.push_back(Refused { host, private });
         while r.len() > KEEP_REFUSED {
             r.pop_front();
         }
@@ -92,9 +100,9 @@ pub struct Proxies {
 }
 
 impl Proxies {
-    /// Sockets under `dir`; a previous process's are gone (its listeners are).
+    /// Sockets under `dir`. A previous process's directories stay: a relay still running
+    /// mounts one, and sees the socket made in it again ([`Proxies::serve`] replaces the file).
     pub fn new(dir: PathBuf, allow_private: bool) -> Proxies {
-        let _ = std::fs::remove_dir_all(&dir);
         Proxies { dir, allow_private, serving: Mutex::new(HashMap::new()) }
     }
 
@@ -139,7 +147,7 @@ impl Proxies {
     }
 
     /// The hosts the proxy for `hosts` refused lately, oldest first (none: it isn't running).
-    pub fn refused(&self, hosts: &[String]) -> Vec<String> {
+    pub fn refused(&self, hosts: &[String]) -> Vec<Refused> {
         self.serving.lock().get(&digest(hosts)).map(|p| p.refused.lock().iter().cloned().collect()).unwrap_or_default()
     }
 }
@@ -202,8 +210,8 @@ async fn handle<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(mut cal
     };
     let up = match connect_to(&proxy.hosts, &proxy.ports, &host, port, allow_private).await {
         Ok(up) => up,
-        Err(Refusal::Policy(why)) => {
-            proxy.refuse(&host);
+        Err(Refusal::Policy(why, private)) => {
+            proxy.refuse(&host, private);
             let _ = caller.write_all(answer("403 Forbidden", why).as_bytes()).await;
             return None;
         }
@@ -228,9 +236,10 @@ async fn handle<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(mut cal
     Some(Joined { caller, up })
 }
 
-/// Why a caller wasn't connected: the rules (kept, a 403) or the host (a 502).
+/// Why a caller wasn't connected: the rules (kept, a 403; `true`: for resolving only to
+/// private addresses) or the host (a 502).
 enum Refusal {
-    Policy(&'static str),
+    Policy(&'static str, bool),
     Unreachable(&'static str),
 }
 
@@ -238,7 +247,7 @@ enum Refusal {
 /// with `allow_private`): a listed name that resolves privately is refused like an unlisted one.
 async fn connect_to(hosts: &[String], ports: &[u16], host: &str, port: u16, allow_private: bool) -> Result<tokio::net::TcpStream, Refusal> {
     if !allowed(hosts, ports, host, port) {
-        return Err(Refusal::Policy("this host isn't in the environment's egress hosts"));
+        return Err(Refusal::Policy("this host isn't in the environment's egress hosts", false));
     }
     let addrs: Vec<SocketAddr> = match tokio::time::timeout(Duration::from_secs(5), tokio::net::lookup_host((host, port))).await {
         Ok(Ok(a)) => a.collect(),
@@ -246,7 +255,7 @@ async fn connect_to(hosts: &[String], ports: &[u16], host: &str, port: u16, allo
     };
     let public: Vec<SocketAddr> = addrs.into_iter().filter(|a| allow_private || !crate::model::private_ip(a.ip())).collect();
     if public.is_empty() {
-        return Err(Refusal::Policy("this host resolves to a private address"));
+        return Err(Refusal::Policy("this host resolves to a private address", true));
     }
     for a in public {
         if let Ok(Ok(s)) = tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(a)).await {
@@ -279,7 +288,7 @@ mod tests {
 
     /// What the proxy answers a caller's `req` with, and what it kept as refused: `hosts` on
     /// `port` (a test server's, standing in for 443 and 80).
-    async fn through(hosts: &[&str], port: u16, allow_private: bool, req: String) -> (String, Vec<String>) {
+    async fn through(hosts: &[&str], port: u16, allow_private: bool, req: String) -> (String, Vec<Refused>) {
         let proxy = Proxy { hosts: hosts.iter().map(|h| h.to_string()).collect(), ports: vec![port], refused: Mutex::new(VecDeque::new()) };
         let (mut a, b) = tokio::io::duplex(1 << 16);
         a.write_all(req.as_bytes()).await.unwrap();
@@ -318,13 +327,13 @@ mod tests {
         // Unlisted, or listed on another port: refused, and kept.
         let (out, refused) = through(&["api.example.com"], port, true, connect("other.example.com", port)).await;
         assert!(out.starts_with("HTTP/1.1 403"), "{out}");
-        assert_eq!(refused, ["other.example.com"]);
+        assert_eq!(refused, [Refused { host: "other.example.com".into(), private: false }]);
         let (out, _) = through(&["localhost"], port, true, connect("localhost", 22)).await;
         assert!(out.starts_with("HTTP/1.1 403"), "{out}");
         // A listed name that resolves to a private address: refused, unless private is allowed.
         let (out, refused) = through(&["localhost"], port, false, connect("localhost", port)).await;
         assert!(out.starts_with("HTTP/1.1 403") && out.contains("private address"), "{out}");
-        assert_eq!(refused, ["localhost"]);
+        assert_eq!(refused, [Refused { host: "localhost".into(), private: true }]);
         // An https:// URL without CONNECT isn't a request a proxy forwards.
         let (out, _) = through(&["localhost"], port, true, "GET https://localhost/ HTTP/1.1\r\n\r\n".into()).await;
         assert!(out.starts_with("HTTP/1.1 400"), "{out}");

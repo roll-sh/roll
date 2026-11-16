@@ -1032,7 +1032,7 @@ async fn a_closed_environment_reaches_nothing_but_its_listed_hosts() {
     let body = String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
     assert_eq!(body.split_whitespace().collect::<Vec<_>>(), ["out:closed", "proxy:403"], "{body}");
     let (_, e) = call(&w.api, "GET", &env, None, "application/json", None).await;
-    assert_eq!(e["egress_refused"], json!(["unlisted.example.com"]), "{e}");
+    assert_eq!(e["egress_refused"], json!([{"host": "unlisted.example.com"}]), "{e}");
     let closed = apps_control::closed_network_name(&w.project, "production");
     assert_eq!(docker(&["network", "inspect", "-f", "{{.Internal}}", &closed]).await.unwrap(), "true");
     call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;

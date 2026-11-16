@@ -472,8 +472,8 @@ export interface Environment extends EnvironmentSummary {
   traces?: boolean;
   /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
   egress?: Egress;
-  /** Hosts its egress proxy refused lately (tried, not listed). */
-  egress_refused?: string[];
+  /** Hosts its egress proxy refused lately: not listed, or (`private`) resolving only to private addresses. */
+  egress_refused?: { host: string; private?: true }[];
   /** A push deploys only once its commit's checks pass. */
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */

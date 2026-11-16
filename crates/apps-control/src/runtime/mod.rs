@@ -218,7 +218,7 @@ pub trait Runtime: Send + Sync {
         anyhow::bail!("this runtime has no egress proxy")
     }
     /// The hosts the egress proxy for `hosts` refused lately (none: it hasn't, or isn't here).
-    fn egress_refused(&self, _hosts: &[String]) -> Vec<String> {
+    fn egress_refused(&self, _hosts: &[String]) -> Vec<egress::Refused> {
         Vec::new()
     }
     /// A project environment's network nothing uses any more (its last service there went):

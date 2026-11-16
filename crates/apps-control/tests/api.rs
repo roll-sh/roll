@@ -391,8 +391,9 @@ async fn closed_egress_runs_on_its_own_network_with_a_proxy() {
     assert_eq!(var("HTTPS_PROXY"), Some(apps_control::runtime::egress::proxy_url(&hosts)));
     assert!(var("NO_PROXY").is_some_and(|n| n.split(',').any(|h| h == "api")), "the project's services are reached directly: {:?}", var("NO_PROXY"));
     assert_eq!(w.fake.proxies.lock().last().map(|(n, h)| (n.clone(), h.clone())), Some((closed.clone(), hosts)));
-    w.fake.refuse("evil.example.com");
-    assert_eq!(call(&w.api, "GET", &env, None).await.1["egress_refused"], json!(["evil.example.com"]));
+    w.fake.refuse("evil.example.com", false);
+    w.fake.refuse("internal.example.com", true);
+    assert_eq!(call(&w.api, "GET", &env, None).await.1["egress_refused"], json!([{"host": "evil.example.com"}, {"host": "internal.example.com", "private": true}]));
     // Opened: the next deploy is back on the project's network, with no proxy.
     let (_, e) = call(&w.api, "PUT", &env, Some(json!({"egress": null}))).await;
     assert_eq!(e["egress"], json!({"mode": "open", "hosts": []}), "{e}");
