@@ -643,7 +643,10 @@ pub async fn execute_watch(ctx: &Ctx<'_>) -> EsResult<Reply> {
         throttle_ms: watch.get("throttle_period_in_millis").and_then(Value::as_i64).unwrap_or(DEFAULT_THROTTLE_MS),
     };
     let ignore = body.get("ignore_condition").and_then(Value::as_bool).unwrap_or(false);
-    let out = internal::as_principal(owner, run.execute(&watch, status, body.get("alternative_input").cloned(), ignore)).await;
+    let out = match internal::principal_refusal(ctx.cluster, owner.as_ref()) {
+        Some(e) => exec::Outcome::refused(status, &e),
+        None => internal::as_principal(owner, run.execute(&watch, status, body.get("alternative_input").cloned(), ignore)).await,
+    };
     let timestamp = if triggered.is_some() { fmt_ms(triggered_ms) } else { crate::time::java_instant_string_nanos(execution) };
     let rec = record(&run, &out, RecordOf {
         watch: &watch,
@@ -793,7 +796,11 @@ async fn trigger(cluster: &Cluster, id: &str, scheduled_ms: i64) {
         modes: Map::new(),
         throttle_ms: watch.get("throttle_period_in_millis").and_then(Value::as_i64).unwrap_or(DEFAULT_THROTTLE_MS),
     };
-    let out = internal::as_principal(owner, run.execute(&watch, stored_status(&w), None, false)).await;
+    // Unless that user or API key can no longer act: the execution fails without running.
+    let out = match internal::principal_refusal(cluster, owner.as_ref()) {
+        Some(e) => exec::Outcome::refused(stored_status(&w), &e),
+        None => internal::as_principal(owner, run.execute(&watch, stored_status(&w), None, false)).await,
+    };
     let rec = record(&run, &out, RecordOf {
         watch: &watch,
         status_version: version.map_or(Value::from(1), Value::from),

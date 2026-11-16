@@ -264,7 +264,12 @@ async fn execute(cluster: &Cluster, id: &str, now: i64, scheduled: bool) -> Opti
             metadata.insert(POLICY_FIELD.into(), Value::from(id));
             body.insert("metadata".into(), Value::Obj(metadata));
             let uri = format!("/_snapshot/{}/{}?wait_for_completion=true", enc(&repo), enc(&name));
-            match internal::as_principal(owner, internal::call(cluster, "PUT", &uri, Some(&Value::Obj(body)))).await {
+            // Unless that user or API key can no longer act: the run fails without a snapshot.
+            let taken = match internal::principal_refusal(cluster, owner.as_ref()) {
+                Some(e) => Err(e),
+                None => internal::as_principal(owner, internal::call(cluster, "PUT", &uri, Some(&Value::Obj(body)))).await,
+            };
+            match taken {
                 Ok(v) => {
                     let s = v.get("snapshot").cloned().unwrap_or(Value::Null);
                     let (failed, total) = (s.pointer(&["shards", "failed"]).and_then(Value::as_i64).unwrap_or(0), s.pointer(&["shards", "total"]).and_then(Value::as_i64).unwrap_or(0));

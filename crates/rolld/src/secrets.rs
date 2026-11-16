@@ -867,6 +867,7 @@ impl roll_secrets::health::CodeRefs for CodeRefs {
 pub struct People {
     pub accounts: Arc<roll_accounts::Accounts>,
     pub code: Option<Arc<code_control::Code>>,
+    pub search: Option<Arc<search_control::Control>>,
 }
 
 impl roll_secrets::People for People {
@@ -886,11 +887,17 @@ impl roll_secrets::People for People {
 }
 
 /// What of a person's canvas is theirs: everything for an admin; a repo under their roll code
-/// owner; nothing else until each product says who owns its resources. A failed lookup is a no.
+/// owner; a search cluster they own; nothing else until each product says who owns its resources.
+/// A failed lookup is a no.
 impl roll_workspace::Owners for People {
     fn trusts(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
         let Ok(Some(p)) = roll_secrets::People::person(self, user) else { return false };
-        p.admin || (kind == roll_workspace::Kind::Repo && roll_secrets::access::OwnProjects::owns_repo(p.code_owner.as_deref(), r#ref))
+        p.admin
+            || match kind {
+                roll_workspace::Kind::Repo => roll_secrets::access::OwnProjects::owns_repo(p.code_owner.as_deref(), r#ref),
+                roll_workspace::Kind::Search => self.search.as_ref().is_some_and(|s| matches!(s.store.owner_of(r#ref), Ok(Some(Some(o))) if o == user)),
+                _ => false,
+            }
     }
 }
 
