@@ -1320,14 +1320,26 @@ deploy. A failed build's lines stay in roll unless `show-logs` is on, because a 
 log is public. A fork's pull request gets no secrets from GitHub, so it has no token and is told why.
 Tests: `node --test sdk/apps-github-action` (a fake rolld and GitHub API, a real `git archive`).
 
+It's how a Git URL service waits for CI: its environment's branch unset (so neither a push nor
+the five-minute watch deploys), and the action in a job after the tests (`needs: test`). Reading
+GitHub's checks on the hook instead doesn't work without an app: a repository webhook gets one
+`check_suite` per app or workflow, with nothing saying which is the last, and asking GitHub for
+the rest of a public repository's checks is unauthenticated and rate-limited per address.
+
 ## Terraform
 
 `sdk/terraform-provider-roll` (roll secrets' provider) has roll apps' resources too
 (Render's, Heroku's and Vercel's providers): `roll_app_service` (a name, an image, a roll code
 repo or a Git URL, its root and branch, its type, port, start command and size; importable by
 id), `roll_app_variable` (sensitive, `sealed` replaces it, never read back) and `roll_app_domain`
-(its `target` to point a CNAME at; importable as `svc_…/<env>/<host>`). `TestAppsAsCode` drives
-Terraform against a fake API: create, change in place, import, destroy.
+(its `target` to point a CNAME at; importable as `svc_…/<env>/<host>`), `roll_app_environment`
+(another environment: its branch, wait for CI, variables copied from another when it's made;
+`svc_…/<name>`), `roll_app_link` (a resource's connection variables; the prefix changes in place
+and keeps the credential; `svc_…/<kind>/<ref>`), `roll_app_notification` (a webhook, Slack,
+Discord or email target and its filters; the URL is never read back, a webhook's secret is kept from
+when it's made; `prj_…/<id>`), and the data source `roll_app_service` (by id, or by name in a
+project: its URLs). `TestAppsAsCode` drives Terraform against a fake API: create, change in
+place, import, destroy.
 
 ## An image built on your machine
 
@@ -2197,47 +2209,46 @@ put items 1–11 first. A second review that day (after #78, against the same si
    against the repository's refs (`GitPush`); previews builds the environments (its side is the
    previews thread's). Then same-repo pull requests (`refs/pull/N/head`), and fork pull requests
    only once a writer approves their head (`approve-run`).
-2. **Wait for CI on Git URL services** (Railway's, Render's): GitHub's `check_suite`/`status` and
-   GitLab's `pipeline` events on the same hook decide when a pushed commit deploys.
-3. **More Terraform** (Render's and Railway's providers): environments, links and notification
-   targets as resources, and data sources for services.
-4. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
+2. **Search links in roll.toml**: once roll search's #100 is on main, `[databases]` takes
+   `kind = "search"` (apps-build's `DB_KINDS`), so a project file declares a search link and
+   `roll apps export` writes it instead of naming it in its notes.
+3. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
    on main, `watch_secrets` holds one `SecretSource::wait_digest` long poll per watched
    environment instead of polling every minute.
-5. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+4. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-6. **Region**: the region shown on the overview and each environment, defaulting to the project's
+5. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-7. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+6. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-8. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+7. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-9. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
+8. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
    digests mark "needs deploy", roll secrets' reveal rules, linked and sensitive keys, dynamic
    credentials refused, new environments ensured); what's left is service variables kept in roll
    secrets at `/services/<name>` (one store for both), and links as per-environment secrets
    links.
-10. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+9. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-11. *Waiting on a queue link provider in roll secrets.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); a queue needs a provider that issues its own user first.
-12. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+10. *Waiting on a queue link provider in roll secrets.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); a queue needs a provider that issues its own user first.
+11. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-13. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+12. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-14. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+13. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-15. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+14. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-16. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+15. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

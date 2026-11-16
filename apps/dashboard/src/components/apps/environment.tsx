@@ -157,6 +157,16 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </div>
         )}
 
+        {service.source.kind === "git" && (
+          <div className="px-5 py-4">
+            <p className="text-[13px] font-medium">Wait for CI</p>
+            <p className="mt-1 text-[12px] text-muted">
+              To deploy only after your tests pass, deploy from the workflow with roll's GitHub Action (<span className="font-mono">sdk/apps-github-action</span>, after the test job), and
+              clear this environment's branch so a push doesn't deploy first.
+            </p>
+          </div>
+        )}
+
         {service.source.kind === "image" && !service.source.image.includes("@") && (
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
             <div>

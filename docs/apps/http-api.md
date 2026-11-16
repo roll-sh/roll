@@ -299,7 +299,9 @@ type EnvironmentPut = {
   /** Creating it: start with this environment's variables, except its sealed ones (ignored when it exists). */
   variables_from?: string;
   /** A push deploys only once its commit's checks pass (statuses other than roll apps' own):
-   *  pending waits (up to an hour; `Environment.waiting_for_ci` names it), a failure skips it. */
+   *  pending waits (up to an hour; `Environment.waiting_for_ci` names it), a failure skips it.
+   *  A roll code repo's service only (400 otherwise): a Git URL service deploys from its
+   *  workflow after its tests (sdk/apps-github-action) with the environment's branch unset. */
   wait_for_ci?: boolean;
   /** An image service whose image has a tag: deploy when the tag points at a new digest
    *  (checked every 5 minutes on the owner; actor `tag watch`). 400 otherwise. */
