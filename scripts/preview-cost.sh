@@ -732,7 +732,32 @@ BODY3=$(curl -sS -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60)
 echo "$BODY3" | grep -q "preview of change 1" || { echo "the service on its own network should still be served through roll: $BODY3"; exit 1; }
 OUT_AFTER=$(docker exec "$CONT2" python -c "$REACH" 2>&1 || true); OUT_AFTER=$(echo "$OUT_AFTER" | tail -1)
 case "$OUT_AFTER" in *unreachable*|*Errno*|*timed*) ;; *) echo "with egress roll the service shouldn't reach the internet: $OUT_AFTER"; exit 1;; esac
-api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"open"}' >/dev/null
+# A host the project allows: reached through the preview's egress proxy, anything else refused
+# and said in the activity.
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"roll","egress_hosts":["github.com"]}' >/dev/null
+FETCH='import sys, urllib.request
+try:
+    print(urllib.request.urlopen(sys.argv[1], timeout=15).status)
+except Exception as e:
+    print(type(e).__name__, str(e)[:80])'
+ALLOWED=""
+for _ in $(seq 1 120); do
+  curl -sS -o /dev/null -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60 || true
+  ALLOWED=$(docker exec "$CONT2" python -c "$FETCH" https://github.com/ 2>&1 || true); ALLOWED=$(echo "$ALLOWED" | tail -1)
+  [ "$ALLOWED" = 200 ] && break
+  sleep 1
+done
+[ "$ALLOWED" = 200 ] || { echo "an allowed host should be reached through the egress proxy: $ALLOWED"; exit 1; }
+REFUSED=$(docker exec "$CONT2" python -c "$FETCH" https://example.com/ 2>&1 || true); REFUSED=$(echo "$REFUSED" | tail -1)
+case "$REFUSED" in *403*|*Tunnel*) ;; *) echo "a host not in egress_hosts should be refused: $REFUSED"; exit 1;; esac
+TOLD=""
+for _ in $(seq 1 60); do
+  TOLD=$(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d if 'egress_hosts' in a.get('message','')][:1]")
+  case "$TOLD" in *example.com*) break;; esac
+  sleep 1
+done
+case "$TOLD" in *example.com*) ;; *) echo "the activity should say what the proxy refused: $TOLD"; exit 1;; esac
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"open","egress_hosts":[]}' >/dev/null
 
 if [ -n "${STOP_BEFORE_LAND:-}" ]; then
   echo "stopped before landing: project $PRJ, preview $PV (run with --keep to leave the daemon up)"
@@ -760,6 +785,7 @@ cat <<EOF
 | What | Measured |
 | --- | --- |
 | egress: roll: the service's network / 1.1.1.1:443 from it before and after | ${NETS% } / $OUT_BEFORE, then: ${OUT_AFTER:0:60} |
+| egress_hosts ["github.com"]: github.com / example.com, through the preview's egress proxy | $ALLOWED / ${REFUSED:0:60} |
 | A note's element, cropped by the next head's screenshot run (a PNG) | $CROP_NOTE |
 | A visit to a service frozen after sleep_after (it read as sleeping), instead of a cold start | $((T7 - T6)) ms, the same container |
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |

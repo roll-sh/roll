@@ -311,6 +311,9 @@ pub struct Target {
     /// What the service's code may reach (the project's `egress`): with `roll`, the runtime runs
     /// it on the preview's own network with no route out.
     pub egress: crate::settings::EgressRule,
+    /// With `egress` `roll`: the hosts outside roll it may still reach, through the preview's
+    /// egress proxy.
+    pub egress_hosts: Vec<String>,
 }
 
 /// A deploy the backend accepted that hasn't finished (a build, a rollout): the converge leaves
@@ -425,6 +428,11 @@ pub trait Apps: Send + Sync {
     /// credentials it holds, come back on the next request.
     fn warm(&self, _preview: &str, _service: &str) -> bool {
         false
+    }
+    /// The hosts the preview's egress proxy refused lately (its project's `egress_hosts` don't
+    /// list them), each once.
+    async fn egress_refused(&self, _preview: &str) -> Vec<String> {
+        Vec::new()
     }
 }
 
