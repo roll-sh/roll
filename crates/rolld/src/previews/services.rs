@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(super::link_value("OPENSEARCH_PASSWORD", &es).as_deref(), Some("p@ss"));
         assert_eq!(super::link_value("ELASTICSEARCH_API_KEY", &es).as_deref(), Some("YnItMTpwQHNz"), "base64(br-1:p@ss)");
         assert_eq!(super::link_value("ELASTICSEARCH_API_KEY", &v(&[("ELASTICSEARCH_URL", "https://u%40br-1:p@search.test")])), None, "a user@cluster login has no key form");
-        assert_eq!(super::link_value("REDIS_REST_TOKEN", &v(&[("REDIS_URL", "redis://x")])), None, "nothing for it: blank, not production's");
+        assert_eq!(super::link_value("CASSANDRA_KEYSPACE", &v(&[("CASSANDRA_USERNAME", "pv")])), None, "nothing for it: blank, not production's");
     }
 
     use super::*;

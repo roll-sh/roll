@@ -261,7 +261,8 @@ behind the `Apps` trait:
     names (a stream's `KAFKA_BROKERS`/`KAFKA_USERNAME`/`KAFKA_PASSWORD`, a bucket's
     `AWS_ENDPOINT_URL`, a search cluster's `ELASTICSEARCH_API_KEY` or `OPENSEARCH_URL`/
     `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD`, from the branch's login), or is set blank when
-    the branch has nothing for it. Never production's: until 2026-11-16 a name that differed
+    the branch has nothing for it (a Redis branch gives its `REDIS_REST_URL`/`REDIS_REST_TOKEN`
+    too). Never production's: until 2026-11-16 a name that differed
     from the branch's kept production's value, so a stream's or an OpenSearch cluster's preview
     reached production's data. `a_links_variables_come_from_the_branch_or_are_blank`.
   - It is deployed at the change's git commit (or its image, for an image service), with an
