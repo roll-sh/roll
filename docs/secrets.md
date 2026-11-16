@@ -2791,14 +2791,15 @@ extension that logs in with the function's role) and #117 (an Ansible collection
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
-2. **The Java client's Spring `PropertySource`** (building, on #105). (The TypeScript client's
+2. **Landing the stacks together where it saves a lock cycle** (#128 on #105, #124 on #102, #95 on
+   #79, #117 on #121), and the Spring integration's first CI run (#128). (The TypeScript client's
    `fromEnv` and `oidcTokenFromEnv` are on #117, so the three clients' surfaces match.)
 3. **LDAP and Active Directory passwords**: a directory registered with a bind account; managed
    links rotate a service account's password, and dynamic links make a short-lived user (Vault's
    LDAP secrets engine, Infisical's).
 4. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
-   backup schedules, rotation windows): the resources once their routes are on main, the tools
-   with roll MCP.
+   backup schedules, rotation windows): the resources once their routes are on main (each kind's
+   PR predates main's provider changes, so a resource now would conflict), the tools with roll MCP.
 5. **Snowflake credentials and a Pulumi provider** (bridged from the Terraform provider).
 6. **Access requests**: a time-boxed `reveal` on a protected environment that an approver grants
    (Infisical's and 1Password's), once projects have members.
