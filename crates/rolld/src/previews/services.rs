@@ -107,7 +107,13 @@ impl roll_previews::ports::Apps for RollApps {
                 .filter(|x| x["source"]["kind"] != "upload")
                 .map(|x| roll_previews::ports::CatalogService {
                     name: s(&x["name"]).unwrap_or_default(),
-                    repo: (x["source"]["kind"] == "repo").then(|| s(&x["source"]["repo"])).flatten(),
+                    // A Git URL service is `git:<its id>`: its branch previews are made by roll apps'
+                    // pushes (`Engine::git_push`), at the pushed commit.
+                    repo: match x["source"]["kind"].as_str() {
+                        Some("repo") => s(&x["source"]["repo"]),
+                        Some("git") => s(&x["id"]).map(|id| format!("git:{id}")),
+                        _ => None,
+                    },
                     root: s(&x["source"]["root"]).unwrap_or_default(),
                     memory_mb: x["run"]["memory_mb"].as_u64().unwrap_or(512) as u32,
                 })

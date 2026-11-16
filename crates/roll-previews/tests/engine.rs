@@ -1030,12 +1030,22 @@ async fn a_git_url_services_branch_push_makes_its_preview() {
         message: message.into(),
     };
     let rows = || e.engine.store.rows(Some(&e.project)).unwrap().into_iter().filter(|r| r.repo == "git:svc_shop").collect::<Vec<_>>();
+    // The project's services are roll apps': the Git URL one is `git:<id>`.
+    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "shop".into(), repo: Some("git:svc_shop".into()), root: String::new(), memory_mb: 256 }]);
     e.engine.git_push(&push("feat/cart", Some("a1"), "cart")).await.unwrap();
     e.engine.git_push(&push("feat/cart", Some("a1"), "cart")).await.unwrap();
     let r = rows();
     assert_eq!(r.iter().map(|x| (x.branch.clone(), x.head.clone(), x.trusted)).collect::<Vec<_>>(), [(Some("feat/cart".to_string()), "a1".to_string(), true)], "made once");
+    // A pass deploys the service at the pushed commit, and discovery (roll code's branches)
+    // leaves it alone.
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row(&r[0].id).unwrap().desired, Desired::Active, "not roll code's branch to delete");
+    assert_eq!(e.apps.deployed.lock().get(&(r[0].id.clone(), "shop".to_string())).map(String::as_str), Some("a1"));
     e.engine.git_push(&push("feat/cart", Some("b2"), "more")).await.unwrap();
     assert_eq!(rows()[0].head, "b2", "a new push moves it");
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.deployed.lock().get(&(r[0].id.clone(), "shop".to_string())).map(String::as_str), Some("b2"), "and deploys it");
     e.engine.git_push(&push("feat/docs", Some("c3"), "typo [skip preview]")).await.unwrap();
     assert_eq!(rows().len(), 1, "[skip preview] skips one");
     e.engine.git_push(&push("feat/cart", None, "")).await.unwrap();

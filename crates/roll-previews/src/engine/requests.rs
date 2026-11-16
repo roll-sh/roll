@@ -166,9 +166,14 @@ impl Engine {
                 (None, None) => {}
                 (Some(sha), Some(r)) => {
                     if r.head != *sha {
+                        let now = self.store.now_ms()?;
                         self.store.update(&r.id, |x| {
                             x.head = sha.clone();
+                            x.last_active_at = now;
                             x.next_at = 0;
+                            if matches!(x.state, State::Ready | State::Sleeping | State::Failed) {
+                                x.state = State::Updating;
+                            }
                         })?;
                         self.store.log(&r.id, &format!("{} pushed: {}", p.branch, short(sha)))?;
                     }
