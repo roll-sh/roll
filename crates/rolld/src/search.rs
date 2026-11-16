@@ -86,6 +86,10 @@ pub struct SearchArgs {
     /// Let `s3` snapshot repositories reach private addresses (local development with MinIO).
     #[arg(long = "search-repository-allow-private", env = "ROLL_SEARCH_REPOSITORY_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_repository_allow_private: bool,
+    /// Let inference endpoints reach private addresses (local development with a model server
+    /// on this machine, tests).
+    #[arg(long = "search-inference-allow-private", env = "ROLL_SEARCH_INFERENCE_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    pub search_inference_allow_private: bool,
     /// Publish Elasticsearch's test cluster features (to run the YAML REST suites against
     /// clusters created through the API). Test deployments only.
     #[arg(long = "search-test-features", env = "ROLL_SEARCH_TEST_FEATURES", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
@@ -140,6 +144,9 @@ impl Search {
         cfg.default_repository = Some(args.search_default_repository.trim().to_string()).filter(|n| !n.is_empty());
         if args.search_repository_allow_private {
             cfg.node_settings.push((search_control::S3_ALLOW_PRIVATE.to_string(), "true".to_string()));
+        }
+        if args.search_inference_allow_private {
+            cfg.node_settings.push((search_control::INFERENCE_ALLOW_PRIVATE.to_string(), "true".to_string()));
         }
         // Watch passwords, connector and Fleet secrets are sealed in cluster state under the
         // deployment's key; without one they're stored as given (as on Elasticsearch).

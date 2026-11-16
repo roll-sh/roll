@@ -578,6 +578,10 @@ async fn run() -> anyhow::Result<()> {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }
     router = router.merge(roll_secrets::router(secrets.clone()));
+    // roll search's inference endpoints keyed by a project's secret (a sync rotations follow).
+    if search.is_some() {
+        router = router.merge(secrets::search_inference(secrets.clone(), workspace.clone(), products_api.clone()));
+    }
     products_api.set(router.clone());
     // A product's own credential changes (a password reset, a restore) move live links' digests
     // at once. Layered after the copy above: roll secrets' own rotations say so themselves.

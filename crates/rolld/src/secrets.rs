@@ -24,6 +24,9 @@ mod clouds;
 mod outside;
 mod syncs;
 
+/// roll search's inference endpoints keyed by a project's secret (`syncs::search`).
+pub use syncs::search::router as search_inference;
+
 /// The router of every product's routes (no gate), set once rolld has built it.
 #[derive(Clone, Default)]
 pub struct Api(Arc<OnceLock<axum::Router>>);
@@ -339,7 +342,9 @@ fn issuer_url(args: &crate::Args) -> String {
 
 fn sweeper(s: Arc<Secrets>, what: &'static str, pass: fn(&Secrets) -> roll_secrets::Result<roll_secrets::Swept>) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        // Every 30 s (`ROLL_SECRETS_SWEEP_SECONDS`: tests that wait for a sync).
+        let every = std::env::var("ROLL_SECRETS_SWEEP_SECONDS").ok().and_then(|s| s.parse::<u64>().ok()).filter(|s| *s > 0).unwrap_or(30);
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(every));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;

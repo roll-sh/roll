@@ -1091,6 +1091,10 @@ static ROWS: &[Row] = &[
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
+    // Inference endpoints keyed by a project's secret: making one changes the cluster as the
+    // console does; roll secrets checks `reveal` on the secret itself, as the caller.
+    row("GET", "/v1/search/clusters/{id}/inference/secrets", "search", R, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/inference/secrets", "search", ADMIN, one(PG, "cluster")),
     row("*", "/v1/search/clusters/{id}/", "search", M, one(PG, "cluster")),
     // An index's routes are about those indices (`{index}`: a name, or on reads an expression),
     // so a rule can grant some of a cluster's indices. The console (`request`) and the index list

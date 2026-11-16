@@ -1353,6 +1353,34 @@ unresolved reference or a dynamic credential fails the deploy, saying which. It 
   data `roll-secrets:<project>:<env>:<consumer>`), so the values are never in the clear outside the
   process that holds the private key. Without `seal_to` it is plain JSON over the internal API.
 
+### roll search's inference endpoints
+
+A roll search cluster's inference endpoint (the model a `semantic_text` field embeds with, a
+reranker, a completion) can take its provider key from a key of the project whose canvas holds the
+cluster, instead of a key pasted into it: the Inference tab's "A roll secret", or
+`roll search inference create … --secret OPENAI_API_KEY` (`--environment`, or a
+`roll://ENV[/folder]/KEY` reference). Rotating the key then updates every endpoint keyed by it.
+
+- `POST /v1/search/clusters/{id}/inference/secrets` `{inference_id, task_type?, config, secret:
+  {project?, environment, path?, key}}` (`config`: the `_inference` body without
+  `service_settings.api_key`; `project` only when the cluster is on several canvases) reads the key
+  as the caller (`reveal`, audited `secrets.reveal`; a protected environment's rules apply, a
+  sensitive key is refused, and so is a dynamic credential, which ends with its lease), creates the
+  endpoint with it through the cluster's own `_inference` API (which seals it, as any key), and
+  makes a `search-inference` sync as the caller. The route needs `admin` on the cluster (it changes
+  the cluster as the console does) and the project must stand for the cluster
+  (`Workspace::trusts`). `GET` on the same route lists the endpoints that follow a secret and the
+  projects whose secrets may key one.
+- The sync pushes the key whenever its value changes (the sweeper; `POST …/syncs/{id}/run` pushes
+  it now, the tab's refresh), as its maker. It pins the endpoint's service and URL: when either
+  changed since the key was bound, the push refuses, so someone who may change the cluster but not
+  reveal the key can't point the endpoint elsewhere and wait for the next rotation. Its errors name
+  the endpoint and Elasticsearch's error type, never the provider's message (it can quote part of
+  a key).
+- Deleting the endpoint from the tab deletes its sync; one deleted another way leaves the sync,
+  whose next push says the endpoint is gone. Deleting the key leaves the endpoint its last value.
+  The Elasticsearch `_inference` API is unchanged: clients there send keys.
+
 ### Checks, sandboxes and previews
 
 - **Checks**: `secrets = "development"` (or `"staging:/api"`) on a `[checks.<name>]` table in
@@ -1721,6 +1749,11 @@ last_synced_at, error}`:
   `DB_URL: ${staging.X} doesn't exist`. A failed push keeps the previous `last_digest` and is tried
   again after 5 minutes. Deleting a sync leaves what it pushed at the target. Deleting its
   environment or project deletes the sync.
+- **A product's own kinds** (`SyncTarget::internal`: `search-inference`) are made by that
+  product's route (`Secrets::create_product_sync`), never `POST …/syncs` (400), and aren't offered
+  in `GET …/syncs`'s `kinds`; they're listed, run and deleted like any sync. The product checks its
+  own side (roll search: who may change the cluster), and `reveal` on the folder is enough to make,
+  run or delete one, as reading the value and pasting it there would be.
 - **Who.** Creating, deleting and running a sync need `admin` on its environment: it sends values
   out of roll. Listing needs `read` and shows the syncs of environments the caller can read.
 
@@ -1735,6 +1768,7 @@ last_synced_at, error}`:
 | `google-secret-manager` | `{project, prefix?, service_account_key}` | one Secret Manager secret per key, `<prefix><KEY>`, each change a new version |
 | `azure-key-vault` | `{vault, tenant_id, client_id, client_secret_key}` | one Key Vault secret per key (`_` becomes `-`) |
 | `aws-secrets-manager` | `{region, secret_name: "shop/production", access_key_id_key, secret_access_key_key, kms_key_id?}` | one Secrets Manager secret: the environment's values as a JSON object |
+| `search-inference` | `{cluster, endpoint, service, url?}` (made by roll search, see "roll search's inference endpoints") | one key: a roll search inference endpoint's `api_key` (`PUT _inference/{task}/{endpoint}/_update`) |
 
 ### `github`
 

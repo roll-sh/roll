@@ -27,3 +27,5 @@ pub use pricing::{Cost, Pricing};
 pub use search_es::seal::Sealer;
 /// Node setting that lets `s3` snapshot repositories reach private addresses (local development).
 pub use search_es::api::snapshots::S3_ALLOW_PRIVATE;
+/// Node setting that lets inference endpoints reach private addresses (local development, tests).
+pub use search_es::xpack::inference::http::ALLOW_PRIVATE as INFERENCE_ALLOW_PRIVATE;

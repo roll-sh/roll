@@ -39,9 +39,11 @@ pub enum Inference {
     /// The cluster's endpoints (wakes it).
     #[command(alias = "ls")]
     List { cluster: String },
-    /// A new endpoint. The provider's API key is read from the environment (`--api-key-env`,
-    /// by default OPENAI_API_KEY, COHERE_API_KEY or ANTHROPIC_API_KEY) or from stdin with
-    /// `--api-key-stdin`, never from the command line; the cluster seals it.
+    /// A new endpoint. The provider's API key comes from a roll secret of the project the
+    /// cluster is on (`--secret`: rotating the secret updates the endpoint), or is read from the
+    /// environment (`--api-key-env`, by default OPENAI_API_KEY, COHERE_API_KEY or
+    /// ANTHROPIC_API_KEY) or from stdin with `--api-key-stdin`, never from the command line; the
+    /// cluster seals it.
     Create {
         cluster: String,
         id: String,
@@ -69,6 +71,14 @@ pub enum Inference {
         /// Read the API key from stdin instead.
         #[arg(long, conflicts_with = "api_key_env")]
         api_key_stdin: bool,
+        /// The key from a roll secret: its name (in --environment, at the folder's root) or a
+        /// reference, `roll://ENV[/folder]/KEY` (`roll://PROJECT@ENV/KEY` when the cluster is on
+        /// several projects' canvases). You need reveal on it; the endpoint follows its rotations.
+        #[arg(long, conflicts_with_all = ["api_key_env", "api_key_stdin"])]
+        secret: Option<String>,
+        /// The environment of --secret's name.
+        #[arg(long, default_value = "production", requires = "secret")]
+        environment: String,
     },
     /// Run an endpoint on some text (a rerank endpoint ranks the --doc texts against it).
     Test {
@@ -449,7 +459,33 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 }
                 Value::Array(list)
             }
-            Inference::Create { cluster, id, service, task, model, url, dimensions, max_tokens, api_key_env, api_key_stdin } => {
+            Inference::Create { cluster, id, service, task, model, url, dimensions, max_tokens, api_key_env, api_key_stdin, secret, environment } => {
+                let mut settings = json!({ "model_id": model });
+                if let Some(u) = url {
+                    settings["url"] = json!(u);
+                }
+                if let Some(d) = dimensions {
+                    settings["dimensions"] = json!(d);
+                }
+                let mut body = json!({ "service": service, "service_settings": settings });
+                if let Some(m) = max_tokens {
+                    body["task_settings"] = json!({ "max_tokens": m });
+                }
+                let c = find(api, &cluster).await?;
+                if let Some(name) = secret {
+                    let r = match crate::secret_refs::Ref::parse(&name)? {
+                        Some(r) => r,
+                        None => crate::secret_refs::Ref { project: None, env: environment, path: "/".into(), key: name },
+                    };
+                    let req = json!({ "inference_id": id, "task_type": task, "config": body, "secret": { "project": r.project, "environment": r.env, "path": r.path, "key": r.key } });
+                    let v = api.post(&format!("/v1/search/clusters/{}/inference/secrets", s(&c["id"])), req).await?;
+                    if !as_json {
+                        println!("inference endpoint {id} ({task}, {service}) on {}; its key is {} and follows it", s(&c["name"]), r.text());
+                        return Ok(());
+                    }
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                    return Ok(());
+                }
                 let key = if api_key_stdin {
                     let mut k = String::new();
                     std::io::Read::read_to_string(&mut std::io::stdin(), &mut k)?;
@@ -461,18 +497,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 if key.is_empty() {
                     bail!("the API key is empty");
                 }
-                let c = find(api, &cluster).await?;
-                let mut settings = json!({ "api_key": key, "model_id": model });
-                if let Some(u) = url {
-                    settings["url"] = json!(u);
-                }
-                if let Some(d) = dimensions {
-                    settings["dimensions"] = json!(d);
-                }
-                let mut body = json!({ "service": service, "service_settings": settings });
-                if let Some(m) = max_tokens {
-                    body["task_settings"] = json!({ "max_tokens": m });
-                }
+                body["service_settings"]["api_key"] = json!(key);
                 let v = es_request(api, &c, "PUT", &format!("/_inference/{}/{}", urlencoding::encode(&task), urlencoding::encode(&id)), Some(body)).await?;
                 if !as_json {
                     println!("inference endpoint {id} ({task}, {service}) on {}; the key is sealed in the cluster", s(&c["name"]));

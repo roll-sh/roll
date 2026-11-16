@@ -153,3 +153,121 @@ async fn json_access_lines_have_the_route_and_no_secrets() {
     assert!(a["duration_ms"].is_number() && a["ttfb_ms"].is_number() && a["bytes"].is_u64(), "{a}");
     assert_eq!(a["_aws"]["CloudWatchMetrics"][0]["Namespace"], "RollCloud");
 }
+
+/// A mock OpenAI embeddings server on a free loopback port: every request's `Authorization`.
+async fn mock_openai() -> (String, Arc<Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let log = log.clone();
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 8192]);
+                let head = loop {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break String::from_utf8_lossy(&buf[..i]).to_string();
+                    }
+                };
+                let len = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
+                while buf.len() < head.len() + 4 + len {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                let auth = head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("authorization")).map(|(_, v)| v.trim().to_string()));
+                log.lock().unwrap().push(auth.unwrap_or_default());
+                let out = r#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.6,0.8]}],"model":"m"}"#;
+                let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}", out.len());
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), seen)
+}
+
+/// An inference endpoint keyed by a roll secret of the cluster's project: created with the
+/// secret's value, and once the secret is rotated, roll secrets pushes the new value and the
+/// endpoint calls the provider with it. The value is never in an answer or a log line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_inference_endpoint_keyed_by_a_secret_follows_its_rotation() {
+    let home = tempfile::tempdir().unwrap();
+    let (mock, seen) = mock_openai().await;
+    let env = [
+        ("ROLL_PRODUCTS", "search"),
+        ("ROLL_SECRET_KEY", "node-test-secret-key-0123456789abcdef"),
+        ("ROLL_SEARCH_INFERENCE_ALLOW_PRIVATE", "true"),
+        ("ROLL_SECRETS_SWEEP_SECONDS", "1"),
+    ];
+    let (mut rolld, _) = start(home.path(), &env);
+    let http = reqwest::Client::new();
+    rolld.info(&http).await;
+    let api = rolld.api.clone();
+    let send = |m: reqwest::Method, path: &str, body: Value| {
+        let r = http.request(m, format!("{api}{path}")).json(&body);
+        async move {
+            let r = r.send().await.unwrap();
+            let status = r.status().as_u16();
+            (status, r.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    use reqwest::Method;
+    use serde_json::json;
+    let (s, cluster) = send(Method::POST, "/v1/search/clusters", json!({ "name": "emb" })).await;
+    assert!(s < 300, "{cluster}");
+    let cluster = cluster["id"].as_str().unwrap().to_string();
+    let (s, project) = send(Method::POST, "/v1/workspace/projects", json!({ "name": "shop" })).await;
+    assert!(s < 300, "{project}");
+    let project = project["id"].as_str().unwrap().to_string();
+    let (s, b) = send(Method::PUT, &format!("/v1/workspace/projects/{project}/resources/search/{cluster}"), json!({ "x": 0, "y": 0 })).await;
+    assert!(s < 300, "{b}");
+    let key = format!("/v1/secrets/projects/{project}/environments/production/secrets/OPENAI_API_KEY");
+    let (s, b) = send(Method::PUT, &key, json!({ "value": "sk-first-value" })).await;
+    assert!(s < 300, "{b}");
+
+    let made = json!({
+        "inference_id": "emb",
+        "task_type": "text_embedding",
+        "config": { "service": "openai", "service_settings": { "model_id": "m", "url": format!("{mock}/v1/embeddings") } },
+        "secret": { "environment": "production", "key": "OPENAI_API_KEY" },
+    });
+    let (s, b) = send(Method::POST, &format!("/v1/search/clusters/{cluster}/inference/secrets"), made).await;
+    assert_eq!(s, 201, "{b}");
+    assert!(!b.to_string().contains("sk-first"), "{b}");
+    assert_eq!(seen.lock().unwrap().last().map(String::as_str), Some("Bearer sk-first-value"), "created with the secret's value");
+
+    // Rotated: the sweeper pushes the new value, which the endpoint then uses. The provider sees it
+    // when `_update` validates it, before the endpoint stores it: wait for the push to finish.
+    let rotated_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let (s, b) = send(Method::PUT, &key, json!({ "value": "sk-second-value" })).await;
+    assert!(s < 300, "{b}");
+    let started = Instant::now();
+    loop {
+        let (_, b) = send(Method::GET, &format!("/v1/search/clusters/{cluster}/inference/secrets"), Value::Null).await;
+        let pushed = b["bindings"][0]["status"] == "ok" && b["bindings"][0]["last_synced_at"].as_u64().is_some_and(|t| t > rotated_at);
+        if pushed && seen.lock().unwrap().iter().any(|a| a == "Bearer sk-second-value") {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(30), "the new value never reached the endpoint: {b}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let infer = json!({ "method": "POST", "path": "/_inference/text_embedding/emb", "body": { "input": "hello" } });
+    let (s, b) = send(Method::POST, &format!("/v1/search/clusters/{cluster}/request"), infer).await;
+    assert_eq!((s, b["status"].as_u64()), (200, Some(200)), "{b}");
+    let calls = seen.lock().unwrap().clone();
+    let (_, b) = send(Method::GET, &format!("/v1/search/clusters/{cluster}/inference/secrets"), Value::Null).await;
+    assert_eq!(calls.last().map(String::as_str), Some("Bearer sk-second-value"), "{calls:?} {b}");
+    assert_eq!((b["bindings"][0]["key"].as_str(), b["bindings"][0]["status"].as_str()), (Some("OPENAI_API_KEY"), Some("ok")), "{b}");
+    let (_, b) = send(Method::POST, &format!("/v1/search/clusters/{cluster}/request"), json!({ "method": "GET", "path": "/_inference/emb" })).await;
+    assert!(!b.to_string().contains("sk-"), "{b}");
+    assert!(!rolld.stdout.lock().unwrap().iter().any(|l| l.contains("sk-first") || l.contains("sk-second")), "a value in rolld's log");
+}

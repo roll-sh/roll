@@ -82,6 +82,7 @@ s3-store.workspace = true
 search-control.workspace = true
 search-server.workspace = true
 search-store.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 stream-broker.workspace = true
 tasks = { workspace = true, features = ["fleet"] }
