@@ -1,13 +1,14 @@
 """A client for roll secrets (docs/secrets.md, "Consumption"), with the same surface as
 @roll/secrets and sdk/go/secrets: an environment's values, the runtime resolve (sealed to a key only
 this process holds, if asked), the digest that moves when the values would, a watch that follows
-it and renews dynamic leases, and one key's writes.
+it and renews dynamic leases, one key's record and stored value, and one key's writes.
 
 The standard library only, but for sealed resolves, which need ``cryptography`` (the ``seal``
 extra).
 
 A client holds a roll token (``rlt_…``, roll-access's) with a rule on one project, the operator
-token, or the short-lived token a workload identity's login gives (``login``, ``from_env``).
+token, or the short-lived token a workload identity's login gives (``login``,
+``login_with_identity``, ``from_env``).
 """
 
 from __future__ import annotations
@@ -24,7 +25,21 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-__all__ = ["Client", "Values", "Problem", "SecretsError", "login", "from_env", "generate_key", "public_key", "open_sealed"]
+__all__ = [
+    "Client",
+    "Values",
+    "Problem",
+    "SecretInfo",
+    "Source",
+    "SecretsError",
+    "login",
+    "login_with_identity",
+    "oidc_token_from_env",
+    "from_env",
+    "generate_key",
+    "public_key",
+    "open_sealed",
+]
 
 
 class SecretsError(Exception):
@@ -61,6 +76,53 @@ class Values:
             leases=list(d.get("leases") or []),
             dynamic=list(d.get("dynamic") or []),
             linked=list(d.get("linked") or []),
+        )
+
+
+@dataclass
+class Source:
+    """Where a key's record comes from: ``own`` (set in the folder itself), ``base`` (the
+    environment's base: its ``environment``) or ``import`` (an imported folder: its
+    ``environment`` and ``path``, and ``project`` when another project shares it)."""
+
+    kind: str
+    environment: Optional[str] = None
+    path: Optional[str] = None
+    project: Optional[str] = None
+
+
+@dataclass
+class SecretInfo:
+    """One key's record as a folder sees it, never its value. ``link_kind`` is the kind of the link
+    the value comes from (``postgres``, ``github``…), None for a value stored in roll."""
+
+    key: str
+    path: str
+    type: str
+    version: int
+    comment: str
+    tags: List[str]
+    link_kind: Optional[str]
+    source: Source
+    updated_at: int
+    updated_by: str
+    expires_at: Optional[int] = None
+
+    @staticmethod
+    def _of(d: Dict[str, Any]) -> "SecretInfo":
+        src, link = d.get("source") or {}, d.get("link") or None
+        return SecretInfo(
+            key=d.get("key") or "",
+            path=d.get("path") or "/",
+            type=d.get("type") or "shared",
+            version=int(d.get("version") or 0),
+            comment=d.get("comment") or "",
+            tags=list(d.get("tags") or []),
+            link_kind=link.get("kind") if link else None,
+            source=Source(src.get("kind") or "own", src.get("environment"), src.get("path"), src.get("project")),
+            updated_at=int(d.get("updated_at") or 0),
+            updated_by=d.get("updated_by") or "",
+            expires_at=d.get("expires_at"),
         )
 
 
@@ -161,6 +223,32 @@ class Client:
 
     def _secret(self, env: str, key: str, path: str) -> str:
         return self._env(env) + "/secrets/" + urllib.parse.quote(key, safe="") + _q(path)
+
+    def secret(self, env: str, key: str, path: str = "") -> Optional[SecretInfo]:
+        """``key``'s record as ``path``'s folder (the root by default) sees it, without its value:
+        its version, comment, link kind and where it's set (``source``: its own, a base's or an
+        import's). None when the folder has no such key."""
+        try:
+            return SecretInfo._of(self._call("GET", self._secret(env, key, path)) or {})
+        except SecretsError as e:
+            if e.status != 404:
+                raise
+            return None
+
+    def stored_value(self, env: str, key: str, path: str = "") -> str:
+        """``key``'s value as stored, references left as written (``resolve=false``). A reveal: the
+        token needs ``reveal``, the read is audited, and it's never kept by ``cache_ttl``. A linked
+        key's value still comes from its link. A key that doesn't read (sensitive, a link that
+        failed) is a ``SecretsError`` with the code ``unresolved``; errors never hold the value."""
+        url = self._env(env) + "/secrets/" + urllib.parse.quote(key, safe="") + "/value" + (_q(path) or "?")
+        r = self._call("GET", url + ("" if url.endswith("?") else "&") + "resolve=false") or {}
+        problems = r.get("problems") or []
+        if problems:
+            raise SecretsError(f"{key} doesn't read: {problems[0].get('problem')}", 409, "unresolved")
+        value = r.get("value")
+        if not isinstance(value, str):
+            raise SecretsError(f"the answer for {key} has no value", 502)
+        return value
 
     def set(self, env: str, key: str, value: str, path: str = "", comment: Optional[str] = None, message: Optional[str] = None) -> Dict[str, Any]:
         """Sets ``key`` to ``value`` in ``path``'s folder (the root by default), replacing a link the
@@ -301,15 +389,24 @@ def login(api: str, identity: str, oidc_token: str) -> Client:
     """Exchanges a workload's own OIDC token for a short-lived roll token through workload identity
     (docs/secrets.md, "Workload identities"): nothing long-lived in the workload's settings. The
     client logs in again with the same OIDC token before its roll token ends (``from_env`` reads a
-    fresh OIDC token each time)."""
-    return _logged_in(api, identity, lambda: oidc_token)
+    fresh OIDC token each time; ``login_with_identity`` takes where to get one)."""
+    return login_with_identity(api, identity, lambda: oidc_token)
 
 
-def _logged_in(api: str, identity: str, source: Callable[[], str]) -> Client:
-    c = Client(api, "")
-    c._login = _Relogin(identity, source)
+def login_with_identity(api: str, identity: str, token_source: Callable[[], str], project: Optional[str] = None, timeout: float = 30.0, cache_ttl: float = 0.0) -> Client:
+    """A client logged in as the workload identity ``identity``, as ``from_env`` makes one:
+    ``token_source`` is called for a fresh OIDC token at each login (this first one, then before the
+    roll token ends and when the server refuses it), so a token file that's replaced on disk keeps
+    working. ``oidc_token_from_env`` is the source ``from_env`` uses. Raises ``SecretsError`` when
+    the first login fails."""
+    c = Client(api, "", project=project, timeout=timeout, cache_ttl=cache_ttl)
+    c._login = _Relogin(identity, token_source)
     c._login.token(c, stale="")
     return c
+
+
+# The names the Ansible collection used before these were public.
+_logged_in = login_with_identity
 
 
 class _Relogin:
@@ -357,7 +454,7 @@ def from_env() -> Client:
         c = Client(api, env("ROLL_TOKEN"))
     elif env("ROLL_IDENTITY"):
         # The OIDC token is read again for each login (a projected token is replaced on disk).
-        c = _logged_in(api, env("ROLL_IDENTITY"), lambda: _oidc_token(api, env))
+        c = login_with_identity(api, env("ROLL_IDENTITY"), lambda: oidc_token_from_env(api, env))
     else:
         raise SecretsError("set ROLL_TOKEN, or ROLL_IDENTITY for a workload identity", 400, "config")
     if env("ROLL_PROJECT"):
@@ -365,7 +462,12 @@ def from_env() -> Client:
     return c
 
 
-def _oidc_token(api: str, env: Callable[[str], str]) -> str:
+def oidc_token_from_env(api: str, getenv: Optional[Callable[[str], str]] = None) -> str:
+    """The workload's OIDC token as ``from_env`` finds it: ROLL_OIDC_TOKEN, the file
+    ROLL_OIDC_TOKEN_FILE names (read now), or GitHub Actions' for the audience ROLL_OIDC_AUDIENCE
+    (default ``api``). ``getenv`` reads a setting (the process's environment, stripped, by
+    default). Raises ``SecretsError`` with the code ``config`` when there's none."""
+    env = getenv or (lambda k: (os.environ.get(k) or "").strip())
     if env("ROLL_OIDC_TOKEN"):
         return env("ROLL_OIDC_TOKEN")
     if env("ROLL_OIDC_TOKEN_FILE"):
@@ -386,6 +488,9 @@ def _oidc_token(api: str, env: Callable[[str], str]) -> str:
     if not value:
         raise SecretsError("GitHub Actions didn't give its OIDC token (does the job have `permissions: id-token: write`?)", 502, "oidc")
     return value
+
+
+_oidc_token = oidc_token_from_env
 
 
 # roll-seal-v1 boxes, as crates/roll-secrets/src/crypto.rs makes them: X25519 between a fresh key
