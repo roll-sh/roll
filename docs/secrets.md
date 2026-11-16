@@ -2774,12 +2774,15 @@ Doppler, Infisical, Vault and 1Password (clients, IaC, CI, Kubernetes, BYOK). Th
 is Vault's signature: dynamic credentials for clouds and databases roll doesn't run. CI stays
 under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
-Ranked (twenty-seventh review, 2026-11-16 late night, against Vault, Infisical, Doppler, AWS
-Secrets Manager, 1Password, Akeyless and step-ca, and the other threads' branches): first what can
-be built now, then what waits on a merge or another thread. Since the twenty-sixth: LDAP and Active
-Directory opened as #132 (checked against OpenLDAP), Snowflake as #136 on it; roll search's #134
-(inference keys from a secret, an internal sync kind) was reviewed here and is getting the
-destination pinned whole; roll MCP's `roll_machine_client` Terraform resource was agreed.
+Ranked (twenty-eighth review, 2026-11-17 night, against Vault, Infisical, Doppler, AWS Secrets
+Manager, 1Password, Akeyless and step-ca, and the other threads' branches): first what can be built
+now, then what waits on a merge or another thread. Since the twenty-seventh: Active Directory checked
+against Samba AD (#132, the old password's hour closed), ACME (#144), Pulumi (#145), and approvals in
+the audit (#147, on roll MCP's #114); the gateway is building. Reading roll previews' #123 (a roll
+apps link's variables in a preview come from the branch) found the same hole in roll secrets: a
+preview inherits its base's links, so a field the branch doesn't set by the same name (`PGPASSWORD`
+next to the branch's `DATABASE_URL`) is the parent's, and a preview's code, a fork's included, reaches
+staging's database. It's first below.
 
 On main: #20, #62, #63 (the CSI provider), #65 (conditional reads and client caches), #85
 (roll-access's tokens), #74 (live links' digests) and #66 (Terraform without values in state).
@@ -2790,8 +2793,15 @@ windows), #87 (encryption keys by name), #88 (password policies), #92 (SaaS rota
 credential checked at registration), #97 (search keys say `access: data`), #102 (Kubernetes
 service-account tokens), #105 (Java), #110 (.NET with `IConfiguration`), #113 (an AWS Lambda
 extension that logs in with the function's role), #117 (an Ansible collection), #132 (LDAP and
-Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (Pulumi) and #147 (approvals in the audit, on #114).
+Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (Pulumi) and #147
+(approvals in the audit, on #114).
 
+0. **Previews follow their branches** (building: `feature/roll-secrets-preview-branches`): an
+   ephemeral environment knows what its preview branched (`branches: [{kind, parent, branch}]` on
+   ensure, from roll previews, checked with the product), and an inherited link to a branched parent
+   resolves against the branch through the product's provider, never the parent; a link that can't
+   follow is dropped with a problem, never the parent's value. roll previews passes the list (asked
+   of them, with their brancher's credential choice per kind).
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
