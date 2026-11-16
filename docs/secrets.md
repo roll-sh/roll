@@ -2774,7 +2774,7 @@ Doppler, Infisical, Vault and 1Password (clients, IaC, CI, Kubernetes, BYOK). Th
 is Vault's signature: dynamic credentials for clouds and databases roll doesn't run. CI stays
 under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
-Ranked (twenty-fifth review, 2026-11-16 evening, against Doppler, Infisical, Vault, AWS Secrets
+Ranked (twenty-sixth review, 2026-11-16 night, against Doppler, Infisical, Vault, AWS Secrets
 Manager, 1Password and Akeyless, and the other threads' branches): first what can be built now,
 then what waits on a merge or another thread.
 
@@ -2794,9 +2794,11 @@ extension that logs in with the function's role) and #117 (an Ansible collection
 2. **Landing the stacks together where it saves a lock cycle** (#128 on #105, #124 on #102, #95 on
    #79, #117 on #121), and the Spring integration's first CI run (#128). (The TypeScript client's
    `fromEnv` and `oidcTokenFromEnv` are on #117, so the three clients' surfaces match.)
-3. **LDAP and Active Directory passwords**: a directory registered with a bind account; managed
-   links rotate a service account's password, and dynamic links make a short-lived user (Vault's
-   LDAP secrets engine, Infisical's).
+3. **LDAP and Active Directory passwords** (building: `feature/roll-secrets-ldap`): a directory
+   registered with a bind account; managed links rotate a service account's password, and dynamic
+   links make a short-lived user (Vault's LDAP secrets engine, Infisical's).
+   Since roll search's #100, roll apps' search links use roll secrets' search provider, so #97's
+   data-only check covers them too.
 4. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
    backup schedules, rotation windows): the resources once their routes are on main (each kind's
    PR predates main's provider changes, so a resource now would conflict), the tools with roll MCP.
