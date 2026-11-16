@@ -696,6 +696,15 @@ pub enum AppsCmd {
         target: Target,
         paths: Vec<String>,
     },
+    /// Visitors and page views from the access log (no script, no cookie): totals, top pages,
+    /// referring sites and countries.
+    Analytics {
+        #[command(flatten)]
+        target: Target,
+        /// How far back, in minutes (60–10080; default a day).
+        #[arg(long, default_value_t = 1440)]
+        minutes: i64,
+    },
     /// Replace the instances with fresh ones (the same deployment).
     Restart {
         #[command(flatten)]
@@ -3132,6 +3141,25 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 let user = username.ok_or_else(|| anyhow::anyhow!("--username, with the password or token on stdin (or --remove)"))?;
                 api.call(reqwest::Method::PUT, &path, Some(json!({ "username": user, "password": secret_from_stdin("the password or token")? }))).await?
             }
+        }
+        AppsCmd::Analytics { target, minutes } => {
+            let svc = service(api, &target).await?;
+            let a = api.get(&format!("{}/analytics?minutes={minutes}", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                println!("{} visitors, {} page views over {} minutes{}", a["visitors"], a["page_views"], a["minutes"], if a["cut"] == true { " (the newest requests read)" } else { "" });
+                for (title, list, key) in [("pages", &a["pages"], "path"), ("referrers", &a["referrers"], "host"), ("countries", &a["countries"], "country")] {
+                    let rows = list.as_array().cloned().unwrap_or_default();
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    println!("\n{title}");
+                    for r in rows.iter().take(10) {
+                        println!("  {:>7}  {}", r["views"], s(&r[key]));
+                    }
+                }
+                return Ok(());
+            }
+            a
         }
         AppsCmd::Purge { target, paths } => {
             let svc = service(api, &target).await?;
