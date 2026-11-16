@@ -200,17 +200,21 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
-    /// Make a service from a repo (`--repo owner/name`), a public Git URL (`--git
-    /// https://github.com/owner/name`) or an image (`--image`).
+    /// Make a service from a repo (`--repo owner/name`), a Git URL (`--git
+    /// https://github.com/owner/name`; a private one with `--git-username` and its token on stdin)
+    /// or an image (`--image`).
     Create {
         name: String,
         #[arg(long, short = 'p')]
         project: String,
         #[arg(long, conflicts_with_all = ["image", "git"])]
         repo: Option<String>,
-        /// A public Git repository's URL: each new commit on its branch deploys.
+        /// A Git repository's URL: each new commit on its branch deploys.
         #[arg(long, conflicts_with = "image")]
         git: Option<String>,
+        /// A private Git repository's login: this username, its token on stdin.
+        #[arg(long, requires = "git")]
+        git_username: Option<String>,
         /// The branch production follows (the repo's default when not given).
         #[arg(long)]
         branch: Option<String>,
@@ -554,8 +558,8 @@ pub enum AppsCmd {
     },
     /// Run a command here, on this machine, with an environment's variables (Railway's
     /// `railway run`): `roll apps exec -- npm run dev`. `PORT` and `ROLL_*` are left out (they're
-    /// the platform's), sealed variables can't be (they're never shown again), and `*.internal`
-    /// names only resolve inside roll (`roll apps proxy` reaches a private service from here).
+    /// the platform's), sealed variables can't be (they're never shown again), and a linked
+    /// service's `*.internal` URL points at a local tunnel to it while the command runs.
     /// Exits with the command's exit code.
     Exec {
         #[command(flatten)]
@@ -650,6 +654,16 @@ pub enum AppsCmd {
     /// An image service's private registry login: `--username` with the password or token on
     /// stdin, or `--remove`. Sealed, sent only to that image's registry, never shown again.
     Registry {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, conflicts_with = "remove")]
+        username: Option<String>,
+        #[arg(long)]
+        remove: bool,
+    },
+    /// A Git URL service's private repository login: `--username` with the token or app password
+    /// on stdin, or `--remove`. Sealed, sent only to the URL's host, never shown again.
+    GitLogin {
         #[command(flatten)]
         target: Target,
         #[arg(long, conflicts_with = "remove")]
@@ -1087,20 +1101,30 @@ fn secret_env_file(name: &str) -> bool {
 
 /// `…/tunnel` for each connection to `127.0.0.1:local`: its bytes copied both ways.
 async fn proxy(api: &Api, env: &str, what: &str, port: u16, local: u16) -> anyhow::Result<()> {
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let l = tokio::net::TcpListener::bind(("127.0.0.1", local)).await.map_err(|e| anyhow::anyhow!("127.0.0.1:{local} is taken ({e}): pick another with --local-port"))?;
+    eprintln!("127.0.0.1:{local} → {what}:{port} (Ctrl-C ends it)");
+    let (url, headers) = tunnel_to(api, env);
+    tokio::select! {
+        r = tunnels(url, headers, l) => r,
+        _ = tokio::signal::ctrl_c() => Ok(()),
+    }
+}
+
+/// Environment `env`'s tunnel URL and the headers that open it.
+fn tunnel_to(api: &Api, env: &str) -> (String, Vec<(String, String)>) {
     let base = api.base.strip_prefix("http").map(|rest| format!("ws{rest}")).unwrap_or_else(|| api.base.clone());
-    let url = format!("{base}{env}/tunnel");
     let mut headers: Vec<(String, String)> = api.headers.clone();
     if let Some(k) = &api.key {
         headers.push(("authorization".into(), format!("Bearer {k}")));
     }
-    eprintln!("127.0.0.1:{local} → {what}:{port} (Ctrl-C ends it)");
+    (format!("{base}{env}/tunnel"), headers)
+}
+
+/// Every connection to `l` carried through a tunnel of its own (`tunnel_to`).
+async fn tunnels(url: String, headers: Vec<(String, String)>, l: tokio::net::TcpListener) -> anyhow::Result<()> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     loop {
-        let (conn, _) = tokio::select! {
-            a = l.accept() => a?,
-            _ = tokio::signal::ctrl_c() => return Ok(()),
-        };
+        let (conn, _) = l.accept().await?;
         let mut req = url.as_str().into_client_request()?;
         for (k, v) in &headers {
             req.headers_mut().insert(reqwest::header::HeaderName::from_bytes(k.as_bytes())?, v.parse()?);
@@ -2257,7 +2281,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             svc
         }
-        AppsCmd::Create { name, project, repo, git, branch, root, image, kind, port, schedule, timezone } => {
+        AppsCmd::Create { name, project, repo, git, git_username, branch, root, image, kind, port, schedule, timezone } => {
             let source = match (repo, git, image) {
                 (Some(r), None, None) => json!({ "kind": "repo", "repo": r, "root": root }),
                 (None, Some(u), None) => json!({ "kind": "git", "url": u, "root": root }),
@@ -2280,6 +2304,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             let project = project_id(api, &project).await?;
             let mut body = json!({ "project": project, "name": name, "source": source, "run": run });
+            if let Some(user) = git_username {
+                body["git_login"] = json!({ "username": user, "password": secret_from_stdin("the token")? });
+            }
             if let Some(b) = branch {
                 body["branch"] = json!(b);
             }
@@ -2545,6 +2572,47 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             if !sealed.is_empty() {
                 eprintln!("not set here (sealed, never shown again): {}", sealed.join(", "));
             }
+            // A linked service's private URL (`http://<name>.<env>.internal:<port>`) pointed at a
+            // local tunnel to it, as `roll apps proxy` makes one, for as long as the command runs.
+            let mut vars = vars;
+            let mut tunneled = Vec::new();
+            // Only when something names one: the links (and each linked service) are read then, and
+            // one that can't be read is said, not fatal.
+            let links = if vars.iter().any(|(_, v)| v.contains(".internal")) {
+                api.get(&format!("/v1/apps/services/{}/links", enc(&s(&svc["id"])))).await.unwrap_or_else(|e| {
+                    eprintln!("its links couldn't be read ({e:#}): no tunnels");
+                    Value::Null
+                })
+            } else {
+                Value::Null
+            };
+            for l in links.as_array().into_iter().flatten().filter(|l| l["kind"] == "service") {
+                let other = match api.get(&format!("/v1/apps/services/{}", enc(&s(&l["ref"])))).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        eprintln!("the linked service {} couldn't be read ({e:#}): no tunnel to it", s(&l["ref"]));
+                        continue;
+                    }
+                };
+                let host = format!("{}.{}.internal", s(&other["name"]), target.env);
+                if !vars.iter().any(|(_, v)| internal_rewritten(v, &host, "").is_some()) {
+                    continue;
+                }
+                let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+                let local = listener.local_addr()?.to_string();
+                for (_, v) in vars.iter_mut() {
+                    if let Some(new) = internal_rewritten(v, &host, &local) {
+                        *v = new;
+                    }
+                }
+                eprintln!("{local} → {} ({}), for {}'s link", s(&other["name"]), target.env, s(&svc["name"]));
+                let (url, headers) = tunnel_to(api, &env_path(&other, &target.env));
+                tunneled.push(tokio::spawn(async move {
+                    if let Err(e) = tunnels(url, headers, listener).await {
+                        eprintln!("a tunnel ended: {e:#}");
+                    }
+                }));
+            }
             let internal: Vec<&str> = vars.iter().filter(|(_, v)| v.contains(".internal")).map(|(k, _)| k.as_str()).collect();
             if !internal.is_empty() {
                 eprintln!("{} name a private address (*.internal) that only resolves inside roll: `roll apps proxy` reaches one from here", internal.join(", "));
@@ -2555,6 +2623,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 .status()
                 .await
                 .with_context(|| format!("couldn't run {}", command[0]))?;
+            for t in tunneled {
+                t.abort();
+            }
             match status.code() {
                 Some(0) => return Ok(()),
                 Some(code) => std::process::exit(code),
@@ -3044,11 +3115,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 api.call(reqwest::Method::DELETE, &path, None).await?
             } else {
                 let user = username.ok_or_else(|| anyhow::anyhow!("--username, with the password or token on stdin (or --remove)"))?;
-                let mut password = String::new();
-                std::io::Read::read_to_string(&mut std::io::stdin(), &mut password)?;
-                let password = password.trim_end_matches(['\r', '\n']).to_string();
-                anyhow::ensure!(!password.is_empty(), "the password or token goes on stdin (never argv)");
-                api.call(reqwest::Method::PUT, &path, Some(json!({ "username": user, "password": password }))).await?
+                api.call(reqwest::Method::PUT, &path, Some(json!({ "username": user, "password": secret_from_stdin("the password or token")? }))).await?
+            }
+        }
+        AppsCmd::GitLogin { target, username, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/services/{}/git-login", enc(&s(&svc["id"])));
+            if remove {
+                api.call(reqwest::Method::DELETE, &path, None).await?
+            } else {
+                let user = username.ok_or_else(|| anyhow::anyhow!("--username, with the token on stdin (or --remove)"))?;
+                api.call(reqwest::Method::PUT, &path, Some(json!({ "username": user, "password": secret_from_stdin("the token")? }))).await?
             }
         }
         AppsCmd::Sleep { target } => {
@@ -3661,8 +3738,51 @@ fn header_rules(lines: &[String]) -> anyhow::Result<Value> {
     ))
 }
 
+/// A secret read from stdin, never argv: one line, its line ending trimmed.
+fn secret_from_stdin(what: &str) -> anyhow::Result<String> {
+    let mut v = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut v)?;
+    let v = v.trim_end_matches(['\r', '\n']).to_string();
+    anyhow::ensure!(!v.is_empty(), "{what} goes on stdin (never argv)");
+    Ok(v)
+}
+
+/// `v` with every URL whose host is exactly `host` (after `//` or `@`, before a port, a path,
+/// a query or the end) pointed at `local` instead, its port too; None when there's none.
+fn internal_rewritten(v: &str, host: &str, local: &str) -> Option<String> {
+    let (mut out, mut rest, mut hit) = (String::new(), v, false);
+    while let Some(i) = rest.find(host) {
+        let (before, after) = (&rest[..i], &rest[i + host.len()..]);
+        let starts = before.ends_with("//") || before.ends_with('@');
+        let ends = after.is_empty() || after.starts_with([':', '/', '?', '#']);
+        if !(starts && ends) {
+            out.push_str(&rest[..i + host.len()]);
+            rest = after;
+            continue;
+        }
+        hit = true;
+        out.push_str(before);
+        out.push_str(local);
+        // The port it named goes too: the tunnel reaches whichever port the service listens on.
+        rest = match after.strip_prefix(':') {
+            Some(p) => &p[p.find(|c: char| !c.is_ascii_digit()).unwrap_or(p.len())..],
+            None => after,
+        };
+    }
+    out.push_str(rest);
+    hit.then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_linked_hosts_urls_are_pointed_at_its_tunnel() {
+        let r = |v: &str| super::internal_rewritten(v, "api.production.internal", "127.0.0.1:4000");
+        assert_eq!(r("http://api.production.internal:3000/v1").as_deref(), Some("http://127.0.0.1:4000/v1"));
+        assert_eq!(r("http://u:p@api.production.internal").as_deref(), Some("http://u:p@127.0.0.1:4000"));
+        assert_eq!(r("http://admin-api.production.internal:8080"), None);
+        assert_eq!(r("http://api.production.internal.evil:80"), None);
+    }
     use super::*;
 
     #[test]
@@ -3769,3 +3889,4 @@ mod tests {
         out
     }
 }
+
