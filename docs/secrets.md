@@ -2786,8 +2786,8 @@ In pull requests to main, each green: #67 (transit in the Go and Python clients,
 windows), #87 (encryption keys by name), #88 (password policies), #92 (SaaS rotators, the
 credential checked at registration), #97 (search keys say `access: data`), #102 (Kubernetes
 service-account tokens), #105 (Java), #110 (.NET with `IConfiguration`), #113 (an AWS Lambda
-extension that logs in with the function's role), #117 (an Ansible collection) and #132 (LDAP and
-Active Directory).
+extension that logs in with the function's role), #117 (an Ansible collection), #132 (LDAP and
+Active Directory) and #136 (Snowflake, on #132).
 
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
@@ -2805,17 +2805,20 @@ Active Directory).
 4. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
    backup schedules, rotation windows): the resources once their routes are on main (each kind's
    PR predates main's provider changes, so a resource now would conflict), the tools with roll MCP.
-5. **Snowflake credentials** (building: `feature/roll-secrets-snowflake`, on #132): key pairs
-   rotated through a user's two key slots without downtime, passwords, and short-lived users (Vault's
-   Snowflake plugin); then **a Pulumi provider** (bridged from the Terraform provider).
+5. **Snowflake credentials** (#136, on #132): key pairs rotated through a user's two key slots
+   without downtime, passwords, and short-lived users (Vault's Snowflake plugin); to check against a
+   real account, the user's call. Then **a Pulumi provider** (bridged from the Terraform provider).
 6. **Access requests**: a time-boxed `reveal` on a protected environment that an approver grants
    (Infisical's and 1Password's), once projects have members.
 7. **A gateway into private networks** (Infisical's and Akeyless'); **ACME on project CAs**.
 8. *To check against the real services:* #113's STS login (`GetWebIdentityToken`) in an AWS account,
    and Entra's answer for removing a secret that's already gone (#92). Both need accounts: the
    user's call.
-9. *Waits on roll MCP:* #114 (`roll-oidc`, approved here) and the GitHub Action's `client-id`
-   mode (their diff, reviewed here).
+9. *Waits on roll MCP:* #114 (`roll-oidc`, approved here), the GitHub Action's `client-id`
+   mode (their diff, reviewed here), and their `roll_machine_client` resource in the Terraform
+   provider (agreed; their diff comes here first).
+   *Waits on roll search:* #134 (inference endpoints keyed by a secret, an internal sync kind):
+   approved once its pin covers the endpoint's whole destination.
 10. *Waits on roll apps:* their redeploys holding `wait_digest` once #79 lands.
 11. *Waits on other threads:* a live check of OpenSearch links, roll redis and nosql keeping a
    rotated password a while, splitting the CLI's `secrets.rs` once the queue has landed.
