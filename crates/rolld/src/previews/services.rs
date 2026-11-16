@@ -253,6 +253,15 @@ impl roll_previews::ports::Apps for RollApps {
     fn status(&self, _preview: &str, _service: &str) -> Option<roll_previews::ServiceState> {
         None
     }
+
+    // roll apps' instances don't freeze and have no egress proxy.
+    fn warm(&self, _preview: &str, _service: &str) -> bool {
+        false
+    }
+
+    async fn egress_refused(&self, _preview: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// A roll apps link's variable `name` (its prefix taken off) as a preview's branch gives it:
@@ -435,6 +444,10 @@ impl roll_previews::ports::Apps for Services {
     // while its process kept them (the engine's tend reads it).
     fn warm(&self, preview: &str, service: &str) -> bool {
         self.runtime.warm(preview, service)
+    }
+
+    async fn egress_refused(&self, preview: &str) -> Vec<String> {
+        self.runtime.egress_refused(preview).await
     }
 }
 

@@ -900,6 +900,41 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     let renewed = api.ok(Method::POST, &format!("/leases/{lease}/renew"), Some(json!({ "ttl_minutes": 120 }))).await;
     assert!(renewed["expires_at"].as_i64().unwrap() > before + 60 * 60_000);
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
+    // A reader ends its own lease (Terraform's ephemeral reads close theirs with a read token), but
+    // not another's: that would drop a running service's credential.
+    // A roll-access token reading staging, as rolld's gate passes its requests on.
+    let reader = {
+        use roll_auth::scope::{Action as A, Effect, Resources, Rule, Scope, Selector};
+        let rule = Rule {
+            product: "secrets".into(),
+            resources: Resources::Some(vec![Selector::Project { project: api.project.clone() }]),
+            environments: Some(vec!["staging".into()]),
+            paths: None,
+            actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]),
+        };
+        roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_tf".into(), name: "tf".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) }
+    };
+    let as_reader = |method: Method, path: String, body: Option<Value>| {
+        let mut req = Request::builder().method(method).uri(format!("/v1/secrets/projects/{}{path}", api.project)).header("content-type", "application/json").body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).unwrap();
+        req.extensions_mut().insert(roll_auth::Operator);
+        req.extensions_mut().insert(reader.clone());
+        let router = api.router.clone();
+        async move {
+            let resp = router.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+        }
+    };
+    let mine = as_reader(Method::POST, "/environments/staging/resolve".into(), Some(json!({ "consumer": "app:web" }))).await.1;
+    let other = b["leases"][0].as_str().unwrap();
+    assert_eq!(as_reader(Method::DELETE, format!("/leases/{other}"), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(as_reader(Method::POST, format!("/leases/{other}/renew"), None).await.0, StatusCode::FORBIDDEN, "nor keep it alive");
+    assert_eq!(as_reader(Method::DELETE, format!("/leases/{}", mine["leases"][0].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
+    // Whoever may delete there ends any.
+    api.ok(Method::DELETE, &format!("/leases/{other}"), None).await;
+    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 2);
     // A reader that can't renew (External Secrets Operator) asks for none: the key is left out
     // (named in `dynamic`), no lease. With `strict`, a key that doesn't resolve fails the whole
     // read, so the reader keeps what it had instead of writing an empty value.
@@ -907,7 +942,7 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     api.ok(Method::PUT, "/required", Some(json!([{ "key": "TEMP_KEY" }]))).await;
     let pulled = api.ok(Method::GET, "/environments/staging/values?dynamic=false&strict=1", None).await;
     assert!(pulled["values"].get("TEMP_KEY").is_none() && pulled["dynamic"] == json!(["TEMP_KEY"]), "{pulled}");
-    assert_eq!((pulled["leases"].as_array().map(Vec::len), api.fake.live_keys.lock().unwrap().len()), (Some(0), 3));
+    assert_eq!((pulled["leases"].as_array().map(Vec::len), api.fake.live_keys.lock().unwrap().len()), (Some(0), 2));
     // So does a service's resolve that can't renew (a preview's): no credential, no lease.
     let preview = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "preview:pr-7", "dynamic": false }))).await;
     assert!(preview["values"].get("TEMP_KEY").is_none() && preview["dynamic"] == json!(["TEMP_KEY"]) && preview["leases"] == json!([]), "{preview}");
@@ -918,21 +953,21 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     api.ok(Method::POST, "/environments", Some(json!({ "slug": "pr-dyn", "base": "staging" }))).await;
     let revealed = api.ok(Method::GET, "/environments/pr-dyn/secrets/TEMP_KEY/value", None).await;
     assert!(revealed["value"] == "" && revealed["problems"].to_string().contains("dynamic"), "a preview's reveal issues no dynamic credential: {revealed}");
-    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
+    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 2);
     api.set("staging", "BROKEN", "${NOPE}").await;
     let (s, e) = api.call(Method::GET, "/environments/staging/values?dynamic=false&strict=1", None).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("unresolved")), "{e}");
     // Dynamic keys asked for, and the read refused: what it issued is revoked, nothing outlives it.
     let (s, _) = api.call(Method::GET, "/environments/staging/values?strict=1", None).await;
-    assert_eq!((s, api.fake.live_keys.lock().unwrap().len()), (StatusCode::CONFLICT, 3));
+    assert_eq!((s, api.fake.live_keys.lock().unwrap().len()), (StatusCode::CONFLICT, 2));
     api.ok(Method::DELETE, "/environments/staging/secrets/BROKEN", None).await;
 
     // An environment that goes takes its managed credentials with it.
     api.ok(Method::POST, "/environments", Some(json!({ "slug": "tmp" }))).await;
     api.ok(Method::PUT, "/environments/tmp/secrets/KEY_ID", Some(json!({ "link": link("access_key_id", "managed") }))).await;
-    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 4);
-    api.ok(Method::DELETE, "/environments/tmp", None).await;
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
+    api.ok(Method::DELETE, "/environments/tmp", None).await;
+    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 2);
 
     // A cache revalidates with the digest: unchanged is a 304 that decrypts and issues nothing; a
     // change reads again; and a folder with a dynamic key always reads again (a
