@@ -448,7 +448,11 @@ It's measured on ai-server: a container on such a network gets "network unreacha
 outside address, and the host reaches its server at its address. Containers there can't reach
 the host either way (the host's firewall), so the products' reach is the same as on the default
 bridge. On the fleet, where products listen on every interface, the network's gateway reaches
-them. It's reversible: `"open"` is the default, and the setting only adds a network.
+them. It's reversible: `"open"` is the default, and the setting only adds a network. It covers
+services roll's runtime runs; a service hosted on roll apps follows roll apps' own networking.
+Changing it restarts the services (it's part of what they're deployed with). Live in
+`scripts/preview-cost.sh`: the service reached 1.1.1.1 with `open`, then ran on
+`roll-previews-net-<id>`, was still served through roll, and got "network unreachable".
 
 Next: a list of allowed hosts (`egress: ["api.stripe.com"]`) through a forwarding proxy on the
 network's gateway, the only way out, with what it refused said in the activity.
@@ -941,6 +945,7 @@ type Settings = {
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
+  egress: "open" | "roll";            // what its services' code may reach: anything ("open"), or only roll's products on a network with no route out (see "Egress")
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
   env_for: Record<string, Record<string, string>>; // branch glob → variables, over env, under a preview's own ({})
   seed: Job | null;                   // once on fresh data
@@ -1365,6 +1370,8 @@ Ranked by what a person notices first. Done so far:
   themselves; most serious first, each jumping to its section; `lib/preview-verdict.ts`);
 - the page's open notes in the pull request's comment, with a signed picture of each one's
   element for a public preview;
+- egress rules: `egress: "roll"` runs a preview's services on a Docker network of their own with
+  no route out (roll's products and roll's proxy still reach them);
 - only the pages a push can change are taken again (Chromatic's TurboSnap): another service that
   runs what it ran at the push before (its revision, what it's deployed with, the same data)
   keeps its pages, checks and all, without a browser run;
@@ -1513,8 +1520,9 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Egress rules for previews, being built** (see "Egress"): `egress: "roll"` puts a preview on
-   a Docker internal network; then a list of allowed hosts through a forwarding proxy.
+1. **Allowed hosts for previews' egress** (see "Egress"): `egress: "roll"` is built; next a list
+   (`egress: ["api.stripe.com"]`) through a forwarding proxy on the network's gateway, the only
+   way out, with what it refused said in the activity.
 2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an

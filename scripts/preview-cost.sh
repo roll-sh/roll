@@ -712,6 +712,26 @@ echo "$BODY2" | grep -q "preview of change 1" || { echo "the thawed service shou
 [ "$(docker inspect -f '{{.Id}} {{.State.Running}} {{.State.Paused}}' "$CONT2")" = "$ID_FROZEN true false" ] || { echo "the visit should thaw the same container, not start another"; exit 1; }
 [ $((T7 - T6)) -lt 1500 ] || { echo "a thaw should answer within 1.5 s, not $((T7 - T6)) ms"; exit 1; }
 
+say "egress: roll puts the preview's services on a network of their own, with no route out"
+REACH='import socket; socket.create_connection(("1.1.1.1", 443), 3); print("out")'
+OUT_BEFORE=$(docker exec "$CONT2" python -c "$REACH" 2>&1 | tail -1)
+# The premise: by default a preview's service reaches the internet.
+[ "$OUT_BEFORE" = out ] || { echo "a preview's service should reach the internet by default (egress open): $OUT_BEFORE"; exit 1; }
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"roll"}' >/dev/null
+NETS=""
+for _ in $(seq 1 120); do
+  curl -sS -o /dev/null -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60 || true
+  NETS=$(docker inspect -f '{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{end}}' "$CONT2" 2>/dev/null || true)
+  case "$NETS" in *roll-previews-net-*) break;; esac
+  sleep 1
+done
+case "$NETS" in *roll-previews-net-*) ;; *) echo "with egress roll the service should run on the preview's own network: $NETS"; exit 1;; esac
+BODY3=$(curl -sS -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60)
+echo "$BODY3" | grep -q "preview of change 1" || { echo "the service on its own network should still be served through roll: $BODY3"; exit 1; }
+OUT_AFTER=$(docker exec "$CONT2" python -c "$REACH" 2>&1 | tail -1)
+case "$OUT_AFTER" in *unreachable*|*Errno*|*timed*) ;; *) echo "with egress roll the service shouldn't reach the internet: $OUT_AFTER"; exit 1;; esac
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"open"}' >/dev/null
+
 if [ -n "${STOP_BEFORE_LAND:-}" ]; then
   echo "stopped before landing: project $PRJ, preview $PV (run with --keep to leave the daemon up)"
   exit 0
@@ -737,6 +757,7 @@ BRANCHES_LEFT=$(api GET /v1/redis/databases | jq_ "len([x for x in d if x['name'
 cat <<EOF
 | What | Measured |
 | --- | --- |
+| egress: roll: the service's network / 1.1.1.1:443 from it before and after | ${NETS% } / $OUT_BEFORE, then: ${OUT_AFTER:0:60} |
 | A note's element, cropped by the next head's screenshot run (a PNG) | $CROP_NOTE |
 | A visit to a service frozen after sleep_after (it read as sleeping), instead of a cold start | $((T7 - T6)) ms, the same container |
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
