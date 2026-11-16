@@ -152,6 +152,23 @@ jobs:
       - run: go vet ./...
       - run: TF_ACC=1 go test -count=1 ./...
 
+  # roll secrets' .NET client (sdk/dotnet/secrets), in its own job so the sdk one stays quick.
+  dotnet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    defaults:
+      run:
+        working-directory: sdk/dotnet/secrets
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - run: dotnet test -warnaserror
+
   scripts:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -175,7 +192,7 @@ jobs:
           fi
 
   ci:
-    needs: [rust, web, dashboard, sdk, scripts, terraform]
+    needs: [rust, web, dashboard, sdk, dotnet, scripts, terraform]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2
