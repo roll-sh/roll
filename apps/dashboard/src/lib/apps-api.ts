@@ -780,7 +780,7 @@ export const appsApi = {
   /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
   exportProject: (project: string, databases: Record<string, string>) => call<{ roll_toml: string; notes: string[] }>("POST", `/v1/apps/projects/${enc(project)}/export`, { databases }),
   /** A roll.toml or Compose file read as a project (nothing made). */
-  importProject: (file: { roll_toml: string } | { compose: string } | { repo: string; revision?: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
+  importProject: (file: { roll_toml: string } | { compose: string } | { repo: string; revision?: string } | { git: string; branch?: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
 
   services: (project?: string) => call<Service[]>("GET", `/v1/apps/services${qs({ project })}`),
   /** Makes the service and places its card; a repo or an image source deploys to production at once. */

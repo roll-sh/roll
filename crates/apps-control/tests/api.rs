@@ -3991,3 +3991,25 @@ async fn the_openapi_spec_is_the_contract_and_the_router() {
     }
     assert_eq!(std::fs::read_to_string(&file).unwrap_or_default(), text, "docs/apps/openapi.json is stale: ROLL_OPENAPI=write cargo test -p apps-control --test api openapi");
 }
+
+/// A "deploy to roll" link for a public Git repository: its root roll.toml read by URL (no app,
+/// no mirror), its folders made Git URL services at that folder on the branch it was read from.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_public_repos_roll_toml_imports_by_url() {
+    let w = world().await;
+    let git = Arc::new(GitHost::default());
+    git.commit(&[("roll.toml", "[apps.web]\nroot = \"web\"\nlinks = [\"db\"]\n[databases.db]\nkind = \"postgres\"\n"), ("README.md", "a site")]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/git/acme/site", listener.local_addr().unwrap());
+    let app = code_git::router(git.clone(), code_git::ServerConfig::default());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (st, imp) = call(&w.api, "POST", "/v1/apps/import", Some(json!({ "git": url }))).await;
+    assert_eq!(st, StatusCode::OK, "{imp}");
+    assert_eq!(imp["apps"]["web"]["source"], json!({ "kind": "git", "url": url, "root": "web" }), "{imp}");
+    assert_eq!(imp["apps"]["web"]["branch"], "main", "{imp}");
+    assert_eq!(imp["databases"]["db"]["kind"], "postgres", "{imp}");
+    git.commit(&[("README.md", "no file")]);
+    let (st, e) = call(&w.api, "POST", "/v1/apps/import", Some(json!({ "git": url }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("has no roll.toml"), "{e}");
+}

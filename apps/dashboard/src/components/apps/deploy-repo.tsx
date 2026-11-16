@@ -13,18 +13,21 @@ import { ImportPane } from "./import";
  * import as New service's "From a file", read from the repo. `?template=umami` is a starter's
  * file instead, and `&project=<id>` applies it to a project you have rather than a new one.
  */
-export function DeployRepo({ repo, template: templateId, project: into }: { repo?: string; template?: string; project?: string }) {
+export function DeployRepo({ repo, git, template: templateId, project: into }: { repo?: string; git?: string; template?: string; project?: string }) {
   const navigate = useNavigate();
   const ws = useWorkspace();
   const tpl = templateOf(templateId);
-  const [name, setName] = useState(() => ((tpl?.id ?? repo?.split("/")[1]) ?? "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 40));
+  // A public repository by URL (`?git=https://github.com/owner/name`): no app, no mirror.
+  const gitOk = !!git && /^https?:\/\/[^/@\s]+\/\S+$/.test(git);
+  const gitName = gitOk ? git!.replace(/\.git$/, "").replace(/\/+$/, "").split("/").pop() : undefined;
+  const [name, setName] = useState(() => ((tpl?.id ?? repo?.split("/")[1] ?? gitName) ?? "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 40));
   const [made, setMade] = useState<WorkspaceProject | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const project = made ?? (into ? ws.projects.find((p) => p.id === into) ?? null : null);
   const repoOk = !!repo && /^[\w.-]+\/[\w.-]+$/.test(repo);
-  if (!repoOk && !tpl) return <Gallery />;
-  const what = tpl ? tpl.name : repo!;
+  if (!repoOk && !gitOk && !tpl) return <Gallery />;
+  const what = tpl ? tpl.name : repoOk ? repo! : git!.replace(/^https?:\/\//, "");
   return (
     <div className="mx-auto max-w-2xl space-y-5 px-6 py-12">
       <div>
@@ -50,7 +53,7 @@ export function DeployRepo({ repo, template: templateId, project: into }: { repo
                 setBusy(true);
                 setError(null);
                 workspace
-                  .createProject(name.trim(), { description: `Deployed from ${tpl ? `the ${tpl.name} template` : repo}` })
+                  .createProject(name.trim(), { description: `Deployed from ${tpl ? `the ${tpl.name} template` : repoOk ? repo : git}` })
                   .then(setMade, (err: unknown) => setError(err instanceof Error ? err.message : String(err)))
                   .finally(() => setBusy(false));
               }}
@@ -69,7 +72,7 @@ export function DeployRepo({ repo, template: templateId, project: into }: { repo
             <ImportPane
               project={project}
               spot={{ x: 48, y: 48 }}
-              {...(tpl ? { template: tpl } : { repo })}
+              {...(tpl ? { template: tpl } : repoOk ? { repo } : { git })}
               onDone={() => void navigate({ to: "/dashboard/projects/$id", params: { id: project.id } })}
             />
           </div>
@@ -87,7 +90,7 @@ function Gallery() {
       <p className="mt-2 text-[13px] text-muted">Start from a template, each a project with what it needs, made for you.</p>
       <TemplateList className="mt-5 grid grid-cols-1 gap-2 sm:grid-cols-2" />
       <p className="mt-6 text-[12.5px] text-subtle">
-        A deploy link can also name a repo in roll code: <code className="font-mono text-muted">/dashboard/deploy?repo=owner/name</code>. Its roll.toml says what to make.
+        A deploy link can also name a repo in roll code, <code className="font-mono text-muted">/dashboard/deploy?repo=owner/name</code>, or any public Git repository, <code className="font-mono text-muted">/dashboard/deploy?git=https://github.com/owner/name</code>. Its roll.toml says what to make.
       </p>
     </div>
   );

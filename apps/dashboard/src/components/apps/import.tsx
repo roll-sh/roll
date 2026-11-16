@@ -149,10 +149,11 @@ export function sealedFor(app: ProjectImport["apps"][string], variables: Record<
 }
 
 /**
- * `repo`: its own roll.toml (a "deploy to roll" link), or `template`: a starter's; either read at
+ * `repo`: its own roll.toml (a "deploy to roll" link), `git`: a public repository's by URL, or
+ * `template`: a starter's; any of them read at
  * once, with no file to paste.
  */
-export function ImportPane({ project, spot, onDone, repo, template }: { project: WorkspaceProject; spot: { x: number; y: number }; onDone: (made: Service[]) => void; repo?: string; template?: Template }) {
+export function ImportPane({ project, spot, onDone, repo, git, template }: { project: WorkspaceProject; spot: { x: number; y: number }; onDone: (made: Service[]) => void; repo?: string; git?: string; template?: Template }) {
   const [answers, setAnswers] = useState<Record<string, Record<string, string>>>({});
   const [text, setText] = useState("");
   const [filename, setFilename] = useState("");
@@ -169,7 +170,7 @@ export function ImportPane({ project, spot, onDone, repo, template }: { project:
     setBusy("reading");
     setError(null);
     try {
-      const imp = await appsApi.importProject(repo ? { repo } : template ? { roll_toml: template.rollToml } : fileOf(text, filename));
+      const imp = await appsApi.importProject(repo ? { repo } : git ? { git } : template ? { roll_toml: template.rollToml } : fileOf(text, filename));
       const services = new Map<string, { service: Service; links: Link[] }>();
       for (const s of await appsApi.services(project.id)) services.set(s.name, { service: s, links: await appsApi.links(s.id) });
       // Its databases are the ones on its canvas (another project's `db` is never this one's),
@@ -269,7 +270,7 @@ export function ImportPane({ project, spot, onDone, repo, template }: { project:
   };
 
   // A repo's or a template's file is read at once: nothing to paste.
-  const given = repo ?? template?.id;
+  const given = repo ?? git ?? template?.id;
   useEffect(() => {
     if (given) void look();
     // Once per repo or template.
@@ -283,9 +284,9 @@ export function ImportPane({ project, spot, onDone, repo, template }: { project:
 
   return (
     <>
-      {repo ? (
+      {repo || git ? (
         <p className="text-[12px] text-muted">
-          <span className="font-mono text-fg">{repo}</span>'s roll.toml, read by rolld; nothing is made until you apply.
+          <span className="font-mono text-fg">{repo ?? git}</span>'s roll.toml, read by rolld; nothing is made until you apply.
         </p>
       ) : template ? (
         <details className="text-[12px] text-muted">

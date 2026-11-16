@@ -130,7 +130,7 @@
               }
             }
           },
-          "description": "`{ roll_toml }`, `{ compose }` (each at most 1 MiB), or `{ repo, revision? }` (that roll code repo's root roll.toml, at its default branch's head unless a revision is named: a \"deploy to roll\" link)"
+          "description": "`{ roll_toml }`, `{ compose }` (each at most 1 MiB), `{ repo, revision? }` (that roll code repo's root roll.toml, at its default branch's head unless a revision is named: a \"deploy to roll\" link), or `{ git, branch? }` (a public Git repository's root roll.toml by URL, at most 64 KiB, at its branch's head; https, no credentials, a public address). From a repo or a Git URL, an app that names only a `root` becomes that repository's source at that folder (a Git URL's following the branch it was read from), not an upload"
         },
         "responses": {
           "200": {

@@ -1148,7 +1148,13 @@ links, a `generate = "secret"` variable made in the browser once, an `ask` one a
 (its default offered; Apply waits for every answer). A repo's README can carry the link. `roll up
 --all` does the same from a checkout: it makes the secrets and asks the questions on the
 terminal (without one, an asked variable stops it, named). A service already there keeps its
-variables. Reading a repo this way needs read on it, as planning from it does. The secrets made
+variables. Reading a repo this way needs read on it, as planning from it does. `?git=https://github.com/owner/name`
+does the same for any public Git repository with no app and no mirror (Railway's and Render's
+buttons for a GitHub repo): rolld resolves its branch, fetches the head shallowly without any
+blob over 64 KiB (`git_source::read_root_file`), reads its root `roll.toml`, and an app that
+names only a folder becomes a Git URL service at that folder, following that branch
+(`a_public_repos_roll_toml_imports_by_url`). The same holds for a roll code repo's link, whose
+folders are now built from the repo instead of waiting for `roll up`. The secrets made
 for a new service, and any variable whose name reads as a secret (`*_KEY`, `*TOKEN*`,
 `*PASSWORD*`, `*SECRET*`), are sealed from the start (`sealed` in `POST /v1/apps/services`):
 whoever deploys a file never sees them again, and nor does anyone who later reads its settings.

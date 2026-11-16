@@ -173,6 +173,25 @@ async fn import(State(apps): S, b: Bytes) -> R {
             Some(String::from_utf8(bytes).map_err(|_| Error::BadRequest(format!("{repo}'s roll.toml isn't UTF-8")))?)
         }
     };
+    // A public Git repository's (a "deploy to roll" link for GitHub, GitLab…): its branch's head,
+    // or the default one's; the file's folders become services built from the repository.
+    let from_git = match text("git") {
+        None => None,
+        Some(url) => {
+            if from_repo.is_some() {
+                return Err(Error::BadRequest("give one of repo or git".into()));
+            }
+            crate::git_source::check_url(url, apps.cfg.allow_private).map_err(Error::BadRequest)?;
+            let client = crate::git_source::client(apps.cfg.allow_private);
+            let (sha, branch) = crate::git_source::head(&client, url, text("branch")).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
+            let bytes = crate::git_source::read_root_file(&client, url, &sha, "roll.toml").await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
+            let bytes = bytes.ok_or_else(|| Error::BadRequest(format!("{url} has no roll.toml at its root to deploy from")))?;
+            Some((url.to_string(), branch, String::from_utf8(bytes).map_err(|_| Error::BadRequest(format!("{url}'s roll.toml isn't UTF-8")))?))
+        }
+    };
+    let (git_url, git_branch) = from_git.as_ref().map(|(u, b, _)| (Some(u.clone()), Some(b.clone()))).unwrap_or_default();
+    let repo = text("repo").map(str::to_string);
+    let from_repo = from_repo.or(from_git.map(|(_, _, t)| t));
     let (toml_text, notes) = match (from_repo, text("roll_toml"), text("compose")) {
         (Some(t), None, None) => (t, Vec::new()),
         (None, Some(t), None) => (t.to_string(), Vec::new()),
@@ -181,7 +200,7 @@ async fn import(State(apps): S, b: Bytes) -> R {
             let c = c.to_string();
             tokio::task::spawn_blocking(move || compose_to_toml(&c)).await.map_err(|e| Error::Internal(e.to_string()))?.map_err(|e| Error::BadRequest(e.to_string()))?
         }
-        _ => return Err(Error::BadRequest("give one of roll_toml, compose or repo".into())),
+        _ => return Err(Error::BadRequest("give one of roll_toml, compose, repo or git".into())),
     };
     let f = parse_project(&toml_text).map_err(|e| Error::BadRequest(e.to_string()))?;
     let apps: serde_json::Map<String, Value> = f
@@ -192,8 +211,14 @@ async fn import(State(apps): S, b: Bytes) -> R {
                 "repo" => json!({ "kind": "repo", "repo": a.repo, "root": a.root }),
                 "git" => json!({ "kind": "git", "url": a.git, "root": a.root }),
                 "image" => json!({ "kind": "image", "image": a.image }),
+                // A folder of the repository the file came from: built from it, at that folder
+                // (an upload would need `roll up`, and a link has no checkout to run it in).
+                _ if repo.is_some() => json!({ "kind": "repo", "repo": repo, "root": a.root.as_deref().filter(|r| *r != ".") }),
+                _ if git_url.is_some() => json!({ "kind": "git", "url": git_url, "root": a.root.as_deref().filter(|r| *r != ".") }),
                 _ => json!({ "kind": "upload", "root": a.root.as_deref().unwrap_or(".") }),
             };
+            // A folder of a Git URL follows the branch the file was read from.
+            let branch = a.branch.clone().or_else(|| (entry_kind(a) == "upload").then(|| git_branch.clone()).flatten());
             let links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "name": l })).collect();
             // What to set as it is, what to make (a secret, once), and what to ask whoever makes it.
             let mut fixed = serde_json::Map::new();
@@ -207,7 +232,7 @@ async fn import(State(apps): S, b: Bytes) -> R {
                     VarSpec::Ask(q) => ask.push(json!({ "name": k, "ask": q.ask, "default": q.default })),
                 }
             }
-            (n.clone(), json!({ "source": source, "branch": a.branch, "run": entry_run(a), "links": links, "variables": fixed, "generate": generate, "ask": ask }))
+            (n.clone(), json!({ "source": source, "branch": branch, "run": entry_run(a), "links": links, "variables": fixed, "generate": generate, "ask": ask }))
         })
         .collect();
     ok(json!({ "roll_toml": toml_text, "notes": notes, "apps": apps, "databases": f.databases }))

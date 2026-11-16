@@ -111,6 +111,28 @@ pub async fn materialize(client: &Client, url: &str, sha: &str, dir: &Path) -> a
     tokio::task::spawn_blocking(move || write_commit(&objects, oid, &dir)).await?
 }
 
+/// The file `name` at the root of the tree at `sha` (a "deploy to roll" link's `roll.toml`), at
+/// most 64 KiB: one shallow fetch that leaves out every bigger blob. None: no such file.
+pub async fn read_root_file(client: &Client, url: &str, sha: &str, name: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    const MAX: u64 = 64 << 10;
+    let oid: ObjectId = sha.parse().map_err(|_| anyhow::anyhow!("{sha} isn't a commit id"))?;
+    let args = FetchArgs { wants: vec![oid], haves: Vec::new(), depth: Some(1), filter: Some(code_git::Filter::BlobLimit(MAX)) };
+    let objects: HashMap<ObjectId, Object> = client.fetch(url, None, &args).await?.objects.into_iter().map(|o| (o.id, o)).collect();
+    let c = objects.get(&oid).filter(|o| o.kind == Kind::Commit).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring commit {oid}"))?;
+    let tree = parse_commit(&c.data).map_err(|e| anyhow::anyhow!("{e}"))?.tree;
+    let t = objects.get(&tree).filter(|o| o.kind == Kind::Tree).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring tree {tree}"))?;
+    for e in tree_entries(&t.data) {
+        let e = e.map_err(|e| anyhow::anyhow!("{e}"))?;
+        if e.name == name.as_bytes() && matches!(e.mode, mode::REGULAR | mode::EXECUTABLE) {
+            return match objects.get(&e.oid).filter(|o| o.kind == Kind::Blob) {
+                Some(b) => Ok(Some(b.data.to_vec())),
+                None => anyhow::bail!("its {name} is over 64 KiB"),
+            };
+        }
+    }
+    Ok(None)
+}
+
 /// A commit's tree written into `dir`.
 pub fn write_commit(objects: &HashMap<ObjectId, Object>, commit: ObjectId, dir: &Path) -> anyhow::Result<usize> {
     let c = objects.get(&commit).filter(|o| o.kind == Kind::Commit).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring commit {commit}"))?;
