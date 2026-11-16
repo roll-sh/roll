@@ -507,6 +507,12 @@ export interface Plan {
   uses?: ("postgres" | "redis")[];
 }
 
+export interface RootCandidate {
+  root: string;
+  provider: string;
+  framework?: string;
+}
+
 export type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string; branch?: string; root?: string } | { files: Record<string, string> };
 
 export interface Deployment {
@@ -780,6 +786,8 @@ export interface LogQuery {
 export const appsApi = {
   overview: () => call<Overview>("GET", "/v1/apps"),
   plan: (req: PlanRequest) => call<Plan>("POST", "/v1/apps/plan", req),
+  /** The folders of a repo's or a Git URL's tree that build on their own (a monorepo's apps). */
+  roots: (req: { repo: string } | { git: string; branch?: string }) => call<{ roots: RootCandidate[] }>("POST", "/v1/apps/plan", { ...req, roots: true }),
   /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
   exportProject: (project: string, databases: Record<string, string>) => call<{ roll_toml: string; notes: string[] }>("POST", `/v1/apps/projects/${enc(project)}/export`, { databases }),
   /** A roll.toml or Compose file read as a project (nothing made). */

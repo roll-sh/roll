@@ -285,6 +285,12 @@ async fn plan(State(apps): S, b: Bytes) -> R {
                 crate::git_source::materialize(client, url, sha, &dir).await?;
             }
         }
+        // `roots`: the tree's folders that build on their own, to choose one from (a monorepo).
+        if v.get("roots") == Some(&Value::Bool(true)) {
+            let d = dir.clone();
+            let roots = tokio::task::spawn_blocking(move || apps_build::candidates(&apps_build::DirTree::new(d))).await.map_err(|e| Error::Internal(e.to_string()))?;
+            return Ok(json!({ "roots": roots }));
+        }
         let root = match v.get("root").and_then(Value::as_str) {
             Some(r) => crate::model::in_tree(&dir, "root", r, true)?,
             None => dir.clone(),
@@ -317,17 +323,13 @@ async fn plan(State(apps): S, b: Bytes) -> R {
         let p = tokio::task::spawn_blocking(move || apps_build::plan(&apps_build::DirTree::new(context), &o)).await.map_err(|e| Error::Internal(e.to_string()))?;
         p.map(|mut p| {
             p.notes.splice(0..0, said);
-            p
+            serde_json::to_value(p).expect("JSON")
         })
         .map_err(|e| Error::BadRequest(e.to_string()))
     }
     .await;
     let _ = tokio::fs::remove_dir_all(&dir).await;
-    let p: apps_build::Plan = match result {
-        Ok(p) => p,
-        Err(e) => return Err(e),
-    };
-    ok(p)
+    ok(result?)
 }
 
 #[derive(Deserialize)]

@@ -1,6 +1,6 @@
 import { ChevronRight, FileText, GitBranch, Image, LoaderCircle, Plus, Terminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, parseEnv, SERVICE_NAME, type Plan, type Service, type ServiceType, type Source } from "@/lib/apps-api";
+import { appsApi, parseEnv, SERVICE_NAME, type Plan, type RootCandidate, type Service, type ServiceType, type Source } from "@/lib/apps-api";
 import { codeApi, type GithubInstallation, type Owner, type Repo } from "@/lib/code-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { freeSpot, KIND_LABEL, resourceKey, suggestName, type ResourceView } from "@/lib/workspace-resources";
@@ -91,6 +91,8 @@ export function NewServiceSheet({
   const makeable = STORES.filter((k) => ws.kinds.has(k));
   const [step, setStep] = useState("");
   const [plan, setPlan] = useState<{ key: string; plan?: Plan; error?: string } | null>(null);
+  // A monorepo's folders that build on their own, offered as roots (per repo or URL).
+  const [roots, setRoots] = useState<{ key: string; list: RootCandidate[] } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -134,6 +136,21 @@ export function NewServiceSheet({
       clearTimeout(t);
     };
   }, [from, repo, git, gitBranch, root, planKey]);
+  const rootsKey = `${git || repo}\n${gitBranch.trim()}`;
+  useEffect(() => {
+    if (from !== "repo" || (!git && !repo) || (git && !/^https?:\/\/[^/@\s]+\/\S+$/.test(git)) || roots?.key === rootsKey) return;
+    let live = true;
+    const t = setTimeout(() => {
+      appsApi.roots(git ? { git, ...(gitBranch.trim() ? { branch: gitBranch.trim() } : {}) } : { repo }).then(
+        (r) => live && setRoots({ key: rootsKey, list: r.roots }),
+        () => live && setRoots({ key: rootsKey, list: [] }),
+      );
+    }, git ? 800 : 350);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [from, repo, git, gitBranch, rootsKey, roots?.key]);
 
   // What the code uses, ticked until the user picks: the project's one database of that kind,
   // else a new one (with two or more, they choose).
@@ -296,6 +313,22 @@ export function NewServiceSheet({
               Root directory <span className="font-normal">optional</span>
             </Label>
             <input value={root} onChange={(e) => setRoot(e.target.value)} placeholder="apps/web" className={field} spellCheck={false} />
+            {roots?.key === rootsKey && roots.list.length > 0 && (
+              <div className="mt-1.5 flex flex-wrap gap-1" aria-label="Folders that build">
+                {roots.list.map((c) => (
+                  <button
+                    key={c.root}
+                    type="button"
+                    onClick={() => setRoot(root === c.root ? "" : c.root)}
+                    aria-pressed={root === c.root}
+                    className={`h-6 rounded-md border px-1.5 font-mono text-[11px] transition-colors ${root === c.root ? "border-accent/60 text-fg" : "border-line-2 text-muted hover:text-fg"}`}
+                    title={`${c.framework ?? c.provider} builds there`}
+                  >
+                    {c.root}
+                  </button>
+                ))}
+              </div>
+            )}
           </>
         )}
         {from === "image" && (

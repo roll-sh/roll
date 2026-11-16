@@ -159,7 +159,7 @@
     },
     "/v1/apps/plan": {
       "post": {
-        "description": "Answers `Plan`.",
+        "description": "Answers `Plan`; with `roots: true` (a repo or a Git URL, no `root`): `{ roots: { root, provider, framework? }[] }`, the folders up to three levels down that build on their own (a start command, a framework or a Dockerfile: no library package, docs or dependencies), at most 20.",
         "operationId": "postPlan",
         "requestBody": {
           "content": {
@@ -173,7 +173,7 @@
         },
         "responses": {
           "200": {
-            "description": "`Plan`"
+            "description": "`Plan`; with `roots: true` (a repo or a Git URL, no `root`): `{ roots: { root, provider, framework? }[] }`, the folders up to three levels down that build on their own (a start command, a framework or a Dockerfile: no library package, docs or dependencies), at most 20"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
