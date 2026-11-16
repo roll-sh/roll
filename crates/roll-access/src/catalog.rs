@@ -142,6 +142,7 @@ pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
         "stream" => ("streams", "stream"),
         "queue" => ("queues", "vhost"),
         "nosql" => ("nosql", "nosql-database"),
+        "search" => ("search", "cluster"),
         // Another service's URLs: no credential, but held to the same `reveal` as the rest.
         "service" => ("apps", "service"),
         // Not a link: a repo apps reads (`apps_repo`).
@@ -275,6 +276,9 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/oauth/devices/{code}", "only a person signs a device in, as on the consent screen"),
     ("/v1/access/notify", "where approvals go is the operator's choice"),
     ("/v1/access/policy", "the rules for every token are the operator's"),
+    ("/v1/access/clients", "a token makes no machine clients: the operator, or a person signed in, makes their own"),
+    ("/v1/access/clients/{id}", "a token revokes no machine clients: the operator, or a person signed in, revokes their own"),
+    ("/v1/access/clients/{id}/rotate", "a token rotates no machine client's credential: the operator, or a person signed in, rotates their own"),
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
