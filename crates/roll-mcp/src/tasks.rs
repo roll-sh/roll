@@ -129,7 +129,8 @@ async fn run(ctx: Arc<Ctx>, access: Arc<roll_access::Access>, hash: String, mut 
         }
     };
     let mut touch = tokio::time::interval_at(tokio::time::Instant::now() + TOUCH_EVERY, TOUCH_EVERY);
-    let mut asked = 0u32;
+    // The approval the task shows: the same one keeps its input request (a client shows it once).
+    let mut showing: Option<String> = None;
     loop {
         tokio::select! {
             done = &mut job => {
@@ -140,18 +141,21 @@ async fn run(ctx: Arc<Ctx>, access: Arc<roll_access::Access>, hash: String, mut 
                 };
                 let s = &result["structuredContent"];
                 if s["status"] == "approval_pending" && let Some(approval) = s["approval"].as_str() {
-                    // A person decides: show where, then call again with the approval, which waits
-                    // for the decision (and runs the call once it's allowed).
-                    asked += 1;
-                    let url = s["url"].as_str().unwrap_or_default();
-                    let message = format!("waiting for a person to approve it: {url}");
-                    let input = (ctx.url_elicitation && !url.is_empty()).then(|| {
-                        let elicit = crate::modern::approval_input_required(&result)["inputRequests"]["approval"].clone();
-                        json!({ format!("approval-{asked}"): elicit }).to_string()
-                    });
-                    let status = if input.is_some() { "input_required" } else { "working" };
-                    if save(TaskUpdate { status, status_message: Some(&message), input: input.as_deref(), result: None, error: None }).await {
-                        return cancelled(&save).await;
+                    // A person decides: show where (once per approval: its key is the approval's own,
+                    // so a request already shown isn't asked again), then call again with the
+                    // approval, which waits for the decision and runs the call once it's allowed.
+                    if showing.as_deref() != Some(approval) {
+                        let url = s["url"].as_str().unwrap_or_default();
+                        let message = format!("waiting for a person to approve it: {url}");
+                        let input = (ctx.url_elicitation && !url.is_empty()).then(|| {
+                            let elicit = crate::modern::approval_input_required(&result)["inputRequests"]["approval"].clone();
+                            json!({ approval: elicit }).to_string()
+                        });
+                        let status = if input.is_some() { "input_required" } else { "working" };
+                        if save(TaskUpdate { status, status_message: Some(&message), input: input.as_deref(), result: None, error: None }).await {
+                            return cancelled(&save).await;
+                        }
+                        showing = Some(approval.to_string());
                     }
                     let mut again = args.clone();
                     again["approval"] = json!(approval);

@@ -371,7 +371,10 @@ async fn a_call_waiting_for_approval_is_a_task_polled_to_its_result() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert_eq!(got["result"]["inputRequests"]["approval-1"]["params"]["mode"], "url", "{got}");
+    // One request per approval, keyed by it: shown once however often the task waits again.
+    let requests = got["result"]["inputRequests"].as_object().cloned().unwrap_or_default();
+    assert_eq!(requests.len(), 1, "{got}");
+    assert!(requests.keys().all(|k| k.starts_with("apr_")) && requests.values().all(|r| r["params"]["mode"] == "url"), "{got}");
     // Nobody else's poll finds it, and a client that didn't declare the extension can't ask.
     assert_eq!(send(reader.clone(), "tasks/get", json!({ "taskId": id }), true).await["error"]["code"], -32602);
     assert_eq!(send(asker.clone(), "tasks/get", json!({ "taskId": id }), false).await["error"]["code"], -32021);

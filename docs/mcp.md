@@ -264,8 +264,9 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
       extension only where tasks can be made.
     - **Running:** the call goes on in the background on the node that made the task, as the same
       gated request with the caller's own headers, so the token is looked up again when it runs.
-      One waiting for approval shows the approval page: `input_required` with a URL elicitation
-      under a new key each time, or a status message. Once a person decides, it runs.
+      One waiting for approval shows the approval page: `input_required` with a URL elicitation,
+      or a status message. There's one input request per approval, keyed by the approval's id, so
+      a client shows it once however often the task waits again. Once a person decides, it runs.
     - **Polling:** `tasks/get` answers from any node, with the result inline once `completed` (a
       tool's `isError` is still `completed`) or the JSON-RPC error once `failed`. `tasks/update`
       is acknowledged: the approval itself is decided on roll's page. `tasks/cancel` stops it.
