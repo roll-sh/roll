@@ -132,6 +132,8 @@ export interface Service {
   run: Run;
   /** The private registry login its image pulls with (the password is never returned). */
   registry: { server: string; username: string } | null;
+  /** A private Git repository's login, bound to the source URL's host (the password is never returned). */
+  git_login: { host: string; username: string } | null;
   /** What it links (the canvas draws them). */
   links?: { kind: LinkKind; ref: string }[];
   created_at: number;
@@ -177,6 +179,8 @@ export interface NewService {
   sealed?: string[];
   /** An image source's private registry login, before its first pull. */
   registry?: { username: string; password: string; server?: string };
+  /** A Git URL source's private repository login, before its branch is checked. */
+  git_login?: { username: string; password: string };
   /** Resources to link before the first deploy (their variables are in it). */
   links?: { kind: LinkKind; ref: string; prefix?: string }[];
   /** A repo source: production follows it (default: the repo's default branch). */
@@ -515,7 +519,7 @@ export interface RootCandidate {
   framework?: string;
 }
 
-export type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string; branch?: string; root?: string } | { files: Record<string, string> };
+export type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string; branch?: string; root?: string; git_login?: { username: string; password: string } } | { files: Record<string, string> };
 
 export interface Deployment {
   id: string;
@@ -545,8 +549,12 @@ export interface Deployment {
   steps?: { step: string; at: number }[];
 }
 
-/** `service`: another web service of the project, its `<NAME>_URL` (private) and `<NAME>_PUBLIC_URL`. */
-export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "service";
+/**
+ * `search`: a roll search cluster, an API key of its own per link (`ELASTICSEARCH_URL`, `ELASTICSEARCH_API_KEY`; an
+ * OpenSearch-flavor cluster's `OPENSEARCH_URL`, `OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD`). `service`: another web service of the project, its `<NAME>_URL`
+ * (private) and `<NAME>_PUBLIC_URL`.
+ */
+export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service";
 
 export interface Link {
   kind: LinkKind;
@@ -789,7 +797,7 @@ export const appsApi = {
   overview: () => call<Overview>("GET", "/v1/apps"),
   plan: (req: PlanRequest) => call<Plan>("POST", "/v1/apps/plan", req),
   /** The folders of a repo's or a Git URL's tree that build on their own (a monorepo's apps). */
-  roots: (req: { repo: string } | { git: string; branch?: string }) => call<{ roots: RootCandidate[] }>("POST", "/v1/apps/plan", { ...req, roots: true }),
+  roots: (req: { repo: string } | { git: string; branch?: string; git_login?: { username: string; password: string } }) => call<{ roots: RootCandidate[] }>("POST", "/v1/apps/plan", { ...req, roots: true }),
   /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
   exportProject: (project: string, databases: Record<string, string>) => call<{ roll_toml: string; notes: string[] }>("POST", `/v1/apps/projects/${enc(project)}/export`, { databases }),
   /** A roll.toml or Compose file read as a project (nothing made). */
@@ -829,6 +837,8 @@ export const appsApi = {
   notifyDeliveries: (project: string, id: string) => call<NotifyDelivery[]>("GET", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/deliveries`),
   putRegistry: (id: string, body: { username: string; password: string; server?: string }) => call<Service>("PUT", `${svc(id)}/registry`, body),
   deleteRegistry: (id: string) => call<Service>("DELETE", `${svc(id)}/registry`),
+  putGitLogin: (id: string, body: { username: string; password: string }) => call<Service>("PUT", `${svc(id)}/git-login`, body),
+  deleteGitLogin: (id: string) => call<Service>("DELETE", `${svc(id)}/git-login`),
   putEnvironment: (id: string, e: string, body: EnvironmentPut) => call<Environment>("PUT", env(id, e), body),
   removeEnvironment: (id: string, e: string) => call<null>("DELETE", env(id, e)),
 

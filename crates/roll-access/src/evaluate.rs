@@ -391,7 +391,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     );
     if as_user && !reachable {
         ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
-        return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents and projects".into(), json!({}));
+        return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, projects and their search clusters".into(), json!({}));
     }
     // A nested service (storage) sees its path without the prefix: the original has it.
     let mut original = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().clone(), |o| o.0.clone());
@@ -419,7 +419,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         let carried = req.extensions().get::<roll_auth::RouteRules>().map(|r| r.access(row.route));
         if !matches!(carried, Some(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_))) {
             ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
-            return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents and projects".into(), json!({}));
+            return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, projects and their search clusters".into(), json!({}));
         }
     }
     // Matched by its real path (a catch-all, a nest, a signed hop): the log names the real route.

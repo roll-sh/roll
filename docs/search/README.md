@@ -90,11 +90,37 @@ own host), `Authorization: ApiKey base64(<name>:<password>)` or
 `{"error": "..."}` with 400, 404, 409, 413 (a console request over the cluster's body limit) or
 500.
 
+**Who reaches it** (docs/accounts.md, "Phase 2"). rolld's gate lets in the operator's token,
+admins and every signed-in person (`Access::User`, `crates/rolld/src/auth.rs`), and search scopes
+them (`api::Caller`):
+
+- A cluster has an `owner`: the signed-in person (`usr_…`) who made it. The operator's and
+  admins' clusters, and every cluster made before owners, have none (`null`). A branch keeps its
+  parent's owner, whoever cuts it.
+- The operator and admins see and manage every cluster.
+- Anyone else lists only their own clusters, creates and branches clusters that are theirs, and
+  gets 404 (`no search cluster <id>`, as for one that doesn't exist) from every
+  `/v1/search/clusters/{id}/…` route about another's, and from a create whose `parent` is
+  another's. The check reads the owner from the catalog after resolving the cluster, before a
+  fleet forwards the call to the cluster's owner node and again there (behind its own gate).
+- `GET /v1/search` gives a person versions, endpoint, defaults, history window and pricing, but
+  not where the node keeps its data (`storage`) or its node-wide figures (`loaded`, `cache`).
+- A person's own token (docs/permissions.md, "Users' own tokens") acts as them: it reaches search
+  (`search` is in `USER_REACH`) and sees only their clusters, narrowed again by its rules.
+- A person's workspace project stands only for their own clusters (`Workspace::trusts`: rolld's
+  `Owners` reads the owner), so previews, roll secrets' links and roll apps' links take only
+  those.
+- Nothing in the API is node-wide besides `GET /v1/search`'s figures: node settings and the
+  default repository are rolld's flags (`--search-*`), not routes. A cluster's data plane is
+  unchanged: the REST port with the cluster's own credentials, which give what any tenant gets.
+
+`crates/search-control/tests/control.rs` `people_see_only_their_own_clusters` covers it.
+
 | method | path | |
 | ------ | ---- | - |
-| GET | `/v1/search` | version, endpoint, storage, defaults, pricing, loaded clusters |
-| GET | `/v1/search/clusters` | list |
-| POST | `/v1/search/clusters` | create `{name, flavor?, parent?, at?, idle_timeout_s?, max_in_flight?, max_body_mb?, destructive_requires_name?}`; answers with `url`, `username`, `password` (once) and `id` — the shape `search-yaml run --cluster-hook` expects |
+| GET | `/v1/search` | version, endpoint, defaults, pricing; for the operator and admins also `storage`, `loaded` clusters and the `cache` |
+| GET | `/v1/search/clusters` | list (a person: their own) |
+| POST | `/v1/search/clusters` | create `{name, flavor?, parent?, at?, idle_timeout_s?, max_in_flight?, max_body_mb?, destructive_requires_name?}`; answers with `url`, `username`, `password` (once) and `id` — the shape `search-yaml run --cluster-hook` expects; `owner` is the signed-in person who isn't an admin, and a branch's is its parent's |
 | GET | `/v1/search/clusters/{id or name}` | settings, `status` (`loaded` with live index count and requests in flight, and live `docs` once every index is open, or `asleep` with `wakes_at`, unix seconds, when a background job is due to wake it), last metered `indices`/`docs`/`stored_bytes` and `own_bytes` (what a branch references that its parent's latest commit points don't; all of `stored_bytes` for a cluster that isn't a branch), `url`, `branches` |
 | PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`; the idle timeout, body limit and `max_in_flight` apply at once (also to a cluster that is waking up); a new flavor or `destructive_requires_name` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
 | DELETE | `/v1/search/clusters/{id}` | waits for running requests and for a wake in progress (which is locked out and unloaded, never left serving); branches keep working |
@@ -162,8 +188,10 @@ document bodies go out as typed (`1.0` stays a float to dynamic mapping, longs a
 exact, key order is kept), `_source` is cut from the response text, and responses are re-indented
 token by token (`lib/search-docs.ts`: `formatJson`, `hitSources`, `sourceCells`). Index names and mappings are fetched only when a completion needs
 them, so opening the console never wakes a sleeping cluster. The dashboard reaches `/v1/search`
-through rolld's API like every product (`VITE_ROLL_API`, the operator token from sign-in), and
-search clusters appear in workspace projects (the `search` resource kind).
+through rolld's API like every product (`VITE_ROLL_API`, the session from sign-in), and search
+clusters appear in workspace projects (the `search` resource kind). A person who isn't an admin
+sees their own clusters, and the Search page leaves out the storage location and the cache, which
+`GET /v1/search` doesn't give them.
 
 ## Metering and pricing
 
@@ -234,7 +262,15 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-1. **The Rally losses left by the full rerun** (docs/benchmarks/search.md: Round 8, every Rally
+1. **A cap on people's clusters: a decision for the user.** Signed-in people's own clusters
+   landed (accounts' phase 2 for search; "Who reaches it" under roll API). Nobody limits how many
+   clusters a person makes. A sleeping cluster costs only its storage, and an empty one costs a
+   catalog row, so a count cap isn't needed for cost. An always-on cluster (`idle_timeout_s: 0`)
+   holds memory on a node all the time, and a person can make as many as they like. Options: a
+   per-person cap on clusters (say 50) and on always-on ones (say 2), set by rolld flags; always-on
+   for admins only; or nothing until billing is per person (docs/accounts.md, "Billing"). Each
+   cap is a count in `create` and in `PATCH` (to `idle_timeout_s: 0`), against `list_owned`.
+2. **The Rally losses left by the full rerun** (docs/benchmarks/search.md: Round 8, every Rally
    track against Elasticsearch 9.5.5 and OpenSearch 3.9 at `83fac5982`; Round 9, the four tracks
    #29 fixed rerun at `c2b47b251`, three alternating rounds each, noaa six). Roll leads most tasks
    1.3-4x (percolator up to 300x) and indexes as many or more docs/s than Elasticsearch on every
@@ -249,7 +285,9 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `knn-search-100-1000_multiple_segments` 2.09x Elasticsearch (Round 8); so_vector, 25 of 32
    `knn` tasks 1.03-1.92x (Round 8; filtered and `concurrency` worst; segments are searched
    concurrently since, `66d16fce6`); nested `randomized-sorted-term-queries` 1.23x OpenSearch
-   (12.6 against 10.2 ms, ranges apart; Round 8 1.62x); nested `nested-date-histo` 1.17x
+   (12.6 against 10.2 ms, ranges apart; Round 8 1.62x; fixed in #125, which skips the parents no
+   child of which can beat the queue: 3.5-4.3 against OpenSearch's 8.5-9.7 ms on the same CPUs,
+   a third of its server CPU, identical hits; Rally rerun pending); nested `nested-date-histo` 1.17x
    Elasticsearch (tie); the nested bulk p50 1.16x (tie, docs/s ahead); http_logs
    `sort-size-desc-after-force-merge-1-seg` 1.12x OpenSearch (Round 8, tie); noaa
    `range_field_disjunction_big_range_small_term_query` 1.06x Elasticsearch (tie, lost in roll's
@@ -261,7 +299,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    "0.57 ms" was an error). Still open from before: one-client indexing CPU (51.8 against 34.6
    µs/doc on the ECS log), BP only for time-series and log indices, the request path's
    allocations, one allocator policy.
-2. **Snapshots on the fleet.** Landed: every cluster whose data is in object storage (the fleet
+3. **Snapshots on the fleet.** Landed: every cluster whose data is in object storage (the fleet
    and a single rolld) has a default repository, `found-snapshots` as on Elastic Cloud
    (`--search-default-repository`), so `_snapshot` and snapshot lifecycle policies work without
    setup; it can't be changed or unregistered, costs an idle cluster nothing (registered in
@@ -285,7 +323,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    the logsdb and time-series default, `_source.enabled: false`) can't come back that way.
    Worth it only once tenants ask to move by backup alone; a live cluster moves by reindex from
    remote.
-3. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
+4. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
    Elasticsearch 9.5.5 and OpenSearch 3.9). Roll leads on indexing (4,735 docs/s against 3,585
    and 2,978 at 8 clients), merged `knn` (1.9 ms CPU against 6.1 and 4.9), `rrf` (3.2 against 13.8
    and 8.3), cold start (36 ms to the first `knn` against a ~25-29 s node start) and memory
@@ -309,7 +347,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    resident float pages) needs an estimator that keeps filtered recall, and the mapping's
    default `rescore_vector.oversample` isn't applied to queries (no change to hits while every
    candidate is rescored); float construction on CPUs without AVX-512 downclocking.
-4. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress). Landed: the
+5. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress). Landed: the
    index browser and console on the per-index routes, an API keys panel in Settings, the mapping
    view as a field table, OpenSearch-flavor clusters' own clients and `OPENSEARCH_*` variables,
    and importing a file into an index from the Indices tab (Kibana's "Upload a file"): NDJSON, a
@@ -330,10 +368,9 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    data stream's retention is set in the same place, as an ISM policy roll keeps for the stream
    (`roll-retention-<stream>`: roll over, then delete each backing index once it has been rolled
    over for the retention, so the write index is never deleted; new backing indices join through
-   its `ism_template`). Next: saved console requests. Signed-in users who aren't admins follow
-   accounts' phase 2: today every product but code, agents and projects answers them 403
-   (docs/accounts.md), search included.
-5. **Compatibility gaps** from the extended suites (5,074 of the 5,541 Elasticsearch passes; a full run on 2026-11-14),
+   its `ism_template`). The console keeps each cluster's recent requests in the
+   browser (credentials redacted), as Dev Tools keeps its history; named saves are left, low. Signed-in users who aren't admins: item 1.
+6. **Compatibility gaps** from the extended suites (5,074 of the 5,541 Elasticsearch passes; a full run on 2026-11-14),
    largest first. Landed: ent-search's last 5 (a `rule` retriever over `rrf`/`linear`, inference
    inside a rule query's organic, workflow-restricted API keys), ES|QL's last 5 (`TOP_SNIPPETS`,
    `CATEGORIZE`, approximation's columns, `LIMIT n BY`, `unsigned_long` past `i64::MAX`),
@@ -347,7 +384,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    fields); downsample's last one (allocation filtering). In the opensearch dialect, pick
    `auto_date_histogram`'s rounding from the bounds as OpenSearch's rewrite does where it differs
    from collecting (roll counts with Elasticsearch's choice in both dialects).
-6. **Language analysis: what's left.** Every analysis plugin Elastic Cloud ships runs now (42 of 42
+7. **Language analysis: what's left.** Every analysis plugin Elastic Cloud ships runs now (42 of 42
    tests). Landed: `analysis-phonetic` (every encoder, Commons Codec's algorithms ported: identical
    codes to Java on 150,000 geonames names), `analysis-stempel` (Polish: Lucene's Egothor stemmer
    and table, identical on 121,000 words) and `analysis-ukrainian` (the Morfologik dictionary
@@ -378,7 +415,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `Han-Latin`, `Latin-ASCII`: ICU's transliteration rule data and its rule features beyond plain
    conversions), custom collation `rules` and `rule_files` for the tokenizer (both need ICU's rule
    compilers); then smartcn's speed.
-7. **Elasticsearch's lifecycles: what's left.** The data stream lifecycle (rollover, retention,
+8. **Elasticsearch's lifecycles: what's left.** The data stream lifecycle (rollover, retention,
    failure stores, the error store), ILM and snapshot lifecycle management (scheduled snapshots,
    retention, `.slm-history-7`, ILM's `wait_for_snapshot`) run now (`api/data_stream_lifecycle.rs`,
    `xpack/ilm_run.rs`, `xpack/slm.rs`; compatibility.md, "Known gaps"). They run time-based work
@@ -386,14 +423,14 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    and `downsample` (roll has both APIs; the steps that swap the new index in aren't written),
    `searchable_snapshot`, and the `ilm-history-*` data stream.
    The data stream lifecycle's force merges and downsampling rounds aren't run either.
-8. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
+9. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
    endpoints, creates them (OpenAI or any compatible URL, Cohere, Anthropic; the API key sent
    once, sealed, never shown back), tests them with a sample, deletes them, and opens a
    `semantic_text` quickstart in the console. The index browser's mapping view is a field table
    (type, inference endpoint, vector dims, similarity and index type, analyzers, what isn't
    indexed; the JSON a toggle away). Left: a roll secret as an endpoint's key (after #20), MCP
    tools (they follow the routes; the MCP thread).
-9. **Semantic search** (the largest gap against Elasticsearch 9 and Elastic Cloud after machine
+10. **Semantic search** (the largest gap against Elasticsearch 9 and Elastic Cloud after machine
    learning). Landed (compatibility.md, "Inference" and "`semantic_text`"): the `_inference` API
    (`openai` with `url`, `cohere`, `anthropic`; keys sealed, `roll_net::PublicOnly`; `rate_limit`
    enforced; the preconfigured endpoints as a cluster without ML nodes; the test plugin's services
@@ -404,32 +441,37 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    multi-field, `index_options` validation, the `embedding` task type and `semantic` field type,
    `random_reranker`, rerankers inside compound retrievers (landed 2026-11-14; the rest is low
    priority).
-10. **Integration with the stacked branches**: previews (search brancher: branch, find, reset,
-   delete, `own_bytes`, `ELASTICSEARCH_URL`) and apps are on this branch; `scripts/preview-cost.sh`
-   now branches a search cluster too (the branch reads the parent's document, its writes stay
-   in it, the service gets its `ELASTICSEARCH_URL`, landing deletes it). Apps' links to search:
-   search's side is `Control::mint_link` / `revoke_link` (an API key with a data-only role,
-   `ELASTICSEARCH_URL` + `ELASTICSEARCH_API_KEY`; on an OpenSearch-flavor cluster an internal
-   user of OpenSearch Security with a data-only role of its own, `OPENSEARCH_URL` with
-   `<user>@<cluster>:<password>@`; never the cluster's password or security);
-   rolld's `RollResources` glue goes on apps' `Resources::link` / `unlink` with whichever of #29
-   and #26 reaches main second. Secrets' link provider (#20) asks for `access: "data"` keys; on
-   OpenSearch-flavor clusters the keys route mints an internal user (`{username, password}`
-   instead of `api_key`; secrets' side is #51, checked live once both are in one rolld). A
-   flavor switch doesn't carry keys across (an API key isn't an OpenSearch user): links made
-   before one are reissued. The fleet test with every product on passed on this branch
-   (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall 1.2 s in
-   the rolling restart).
-11. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
+11. **Integration with the other threads**: on main since #29: previews branch search clusters
+   (`scripts/preview-cost.sh`: the branch reads the parent's document, its writes stay in it, the
+   service gets its `ELASTICSEARCH_URL`, landing deletes it; previews mask search fields), and
+   roll secrets' search link asks for `access: "data"` keys and refuses anything else (#97). On
+   main since #100: apps services link search clusters through roll secrets' search provider like
+   buckets and streams (rolld's `secrets::link_provider("search")`, search's keys route with
+   `access: "data"`): an API key with a data-only role, `ELASTICSEARCH_URL` +
+   `ELASTICSEARCH_API_KEY`, or on an OpenSearch-flavor cluster an internal user with a data-only
+   role of its own, `OPENSEARCH_URL`, `OPENSEARCH_USERNAME` and `OPENSEARCH_PASSWORD`; never the
+   cluster's password (checked live 2026-11-16: relinking keeps the credential, unlinking revokes
+   it, a prefix applies); on a fleet `Control::call` sends search's own in-process requests to the
+   cluster's owner (`cluster::to_owner`). Next: an inference endpoint's key from a roll secret (in
+   progress), roll.toml declaring a search link (apps' side), and checking search's routes through
+   MCP's search mode (#80) end to end. A flavor switch doesn't carry keys across (an API key isn't
+   an OpenSearch user): links made before one are reissued. The fleet test with every product on
+   passed (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall
+   1.2 s in the rolling restart).
+12. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
-12. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
+13. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
    main's cache: under the minute, no room for another crate). (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
-   12 of 40 runs on one CPU failed before, 0 of 40 after.)
-13. **Security**: a second review of what landed since the first (the `_inference` API, `semantic_text`,
+   12 of 40 runs on one CPU failed before, 0 of 40 after.) The extended `transform` suite's
+   `transforms_start_stop` "start already started transform" can lose a race on a loaded host: a
+   batch transform over a few documents finishes before the second `_start`, which then succeeds
+   (one run in three at load 35; Elasticsearch's own task outlives that window). Low; the suite's
+   minimum holds on reruns.
+14. **Security**: a second review of what landed since the first (the `_inference` API, `semantic_text`,
    the new retrievers, workflow-restricted keys, service tokens, OpenSearch Security's new
    endpoints, ES|QL's new functions) landed in 7288684b9: `semantic_text` under field level
    security (queries and the semantic highlighter, `copy_to` sources included), an inference key
@@ -456,3 +498,11 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `PUT _cluster/settings` and the template, pipeline and stored script APIs do (templates among
    the snapshot's own). Left, low: a cluster whose `max_body_mb` is over the node's 100mb can
    write documents its restore from a bucket refuses.
+   The second review's low finding on background jobs is fixed. Transforms, rollup jobs, watches,
+   ILM and SLM ran as the user or API key that set them up, and nothing checked that principal
+   again, so a revoked key's ILM delete policy outlived the key. Each run now checks the user or
+   key first (`internal::principal_problem`). A gone, invalidated or expired key, or a gone or
+   disabled user, fails the run without running anything. Elasticsearch keeps running these jobs
+   (checked on 9.5.5); compatibility.md has the difference and what each job type does. The
+   dashboard's file import keeps exact numbers and ids and reads files with bounded memory (#103).
+   The next review follows per-user access (#127): it changes who may reach what.
