@@ -248,6 +248,11 @@ pub struct Preview {
     /// The same for where it differs from the baseline's, when it does (`?diff=base`).
     #[serde(skip)]
     pub diff_link: Option<(i64, String)>,
+    /// The open notes on its pages, each with its crop's signed link when it has one (`?note=`),
+    /// for roll code's summary (the pull request's comment); filled when reporting, never in API
+    /// answers (`GET …/notes` has them).
+    #[serde(skip)]
+    pub notes: Vec<(crate::notes::Note, Option<(i64, String)>)>,
     pub last_reset_at: Option<i64>,
     pub last_active_at: i64,
     pub expires_at: Option<i64>,

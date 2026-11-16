@@ -20,6 +20,9 @@ pub struct Note {
     pub at: i64,
     /// The replies to it, oldest first (the latest [`MAX_REPLIES`]).
     pub replies: Vec<Reply>,
+    /// Whether a picture of its element is kept (`GET …/notes/{note}/crop`): a screenshot run
+    /// cropped it from the page by its selector.
+    pub crop: bool,
 }
 
 /// A reply to a note: its own review.
@@ -51,7 +54,7 @@ pub fn thread(comments: impl IntoIterator<Item = Comment>) -> Vec<Note> {
     let mut replies: Vec<(String, Reply)> = Vec::new();
     for c in comments {
         if let Some((path, selector, note)) = parse(&c.body) {
-            notes.push(Note { id: c.id, path, selector, note, by: c.by, at: c.at, replies: Vec::new() });
+            notes.push(Note { id: c.id, path, selector, note, by: c.by, at: c.at, replies: Vec::new(), crop: false });
         } else if let Some((to, note)) = parse_reply(&c.body) {
             replies.push((to, Reply { id: c.id, note, by: c.by, at: c.at }));
         }
