@@ -42,6 +42,8 @@ cleanup() {
     wait "$PID" 2>/dev/null || true
     # Only what this daemon made: its service containers and its Postgres computes.
     for c in $(docker ps -aq --filter "label=sh.roll.code.home=$HOME_DIR") $(docker ps -aq --filter "label=roll.home=$HOME_DIR"); do docker rm -f "$c" >/dev/null 2>&1 || true; done
+    # And the previews' own networks (egress roll) a delete just before the stop didn't reach.
+    for n in $(docker network ls -q --filter "label=sh.roll.code.home=$HOME_DIR"); do docker network rm "$n" >/dev/null 2>&1 || true; done
   fi
 }
 trap cleanup EXIT
@@ -470,7 +472,13 @@ BUILD=$(api GET "/v1/previews/$PV" | jq_ "d['head']")
 api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"Docs","files":{"index.html":{"content":"preview of change 1, again"},"docs/setup.md":{"content":"how to run it"},'"$OPENAPI_CHG"'}}' >/dev/null
 DOCS_HEAD=$(api GET "/v1/code/changes/$CHG" | jq_ "d['head']")
 until_head "$DOCS_HEAD"
-RUNS=$(api GET "/v1/previews/$PV" | jq_ "d.get('runs') or ''")
+# (What it runs is set by the converge just after it reports the new head: waited for.)
+RUNS=""
+for _ in $(seq 1 120); do
+  RUNS=$(api GET "/v1/previews/$PV" | jq_ "d.get('runs') or ''")
+  [ -n "$RUNS" ] && break
+  sleep 0.5
+done
 [ "$(bare "$RUNS")" = "$(bare "$BUILD")" ] || { echo "a docs-only push should keep the services on $BUILD, not $RUNS"; exit 1; }
 WAITED2=$(ROLL_API_URL="http://$API" "$ROLL_CLI" preview wait --change "$CHG" --timeout 30) || { echo "roll preview wait should pass for the docs-only head"; exit 1; }
 # This one's page logs an error, which its screenshot's load must catch.
@@ -526,13 +534,25 @@ case "$HEALTH" in *boom*) ;; *) echo "the page's console.error should be caught:
 LINKS=$(api GET "/v1/previews/$PV" | jq_ "' '.join('%s %s' % (b['path'], b['status']) for b in (d.get('page_links') or {}).get('broken', []))")
 [ "$LINKS" = "/gone 404" ] || { echo "the page's broken link should be found: $LINKS"; exit 1; }
 # Against main's (which links nowhere): it's the change's.
-# (The comparison with main comes just after the page's own checks: waited for.)
+# (The comparison with main comes just after the page's own checks, and needs main's own
+# screenshot, which a loaded host takes minutes over: both waited for.)
+for _ in $(seq 1 300); do
+  [ "$(api GET "/v1/previews/$MAINPV" | jq_ "d.get('screenshot_at') is not None")" = True ] && break
+  sleep 1
+done
 for _ in $(seq 1 240); do
   LINKS_NEW=$(api GET "/v1/previews/$PV" | jq_ "(d.get('base_change') or {}).get('links_added')")
   [ "$LINKS_NEW" = 1 ] && break
   sleep 0.5
 done
-[ "$LINKS_NEW" = 1 ] || { echo "the broken link should be new against main: $LINKS_NEW"; exit 1; }
+[ "$LINKS_NEW" = 1 ] || {
+  echo "the broken link should be new against main: $LINKS_NEW"
+  echo "base_change: $(api GET "/v1/previews/$PV" | jq_ "{k: v for k, v in (d.get('base_change') or {}).items() if k in ('branch', 'head', 'errors_added', 'links_added', 'a11y_added', 'seo_added')}")"
+  echo "main's page_links: $(api GET "/v1/previews?project=$PRJ" | jq_ "[(p.get('branch'), p.get('page_links'), p.get('screenshot_at')) for p in d if p.get('change') is None]")"
+  echo "main's preview: $(api GET "/v1/previews/$MAINPV" | jq_ "{k: d.get(k) for k in ('state', 'error', 'head')}")"
+  echo "main's activity: $(api GET "/v1/previews/$MAINPV/activity" | jq_ "[a['message'][:240] for a in d[:12]]")"
+  exit 1
+}
 case "$HEALTH" in *"; 0 failed") ;; *) echo "the link check's own requests aren't the page's: $HEALTH"; exit 1;; esac
 # The test page has no language and no title: the screenshot's browser says so.
 # By axe-core's rules (a bare text page breaks its landmark ones), with no lang and no title.
@@ -719,6 +739,7 @@ curl -sS -o /dev/null -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60 
 OUT_BEFORE=$(docker exec "$CONT2" python -c "$REACH" 2>&1 || true); OUT_BEFORE=$(echo "$OUT_BEFORE" | tail -1)
 # The premise: by default a preview's service reaches the internet.
 [ "$OUT_BEFORE" = out ] || { echo "a preview's service should reach the internet by default (egress open): $OUT_BEFORE"; exit 1; }
+SHOT_BEFORE=$(api GET "/v1/previews/$PV" | jq_ "d.get('screenshot_at')")
 api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"roll"}' >/dev/null
 NETS=""
 for _ in $(seq 1 120); do
@@ -732,7 +753,42 @@ BODY3=$(curl -sS -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60)
 echo "$BODY3" | grep -q "preview of change 1" || { echo "the service on its own network should still be served through roll: $BODY3"; exit 1; }
 OUT_AFTER=$(docker exec "$CONT2" python -c "$REACH" 2>&1 || true); OUT_AFTER=$(echo "$OUT_AFTER" | tail -1)
 case "$OUT_AFTER" in *unreachable*|*Errno*|*timed*) ;; *) echo "with egress roll the service shouldn't reach the internet: $OUT_AFTER"; exit 1;; esac
-api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"open"}' >/dev/null
+# Its screenshot is still taken there (the browser in the service's own network: nothing is
+# published, the port comes from the container's label), at the change's next push.
+api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"Roll only","files":{"index.html":{"content":"preview of change 1, roll only"},"docs/setup.md":{"content":"how to run it"},'"$OPENAPI_CHG"'}}' >/dev/null
+SHOT_ROLL=""
+for _ in $(seq 1 240); do
+  SHOT_ROLL=$(api GET "/v1/previews/$PV" | jq_ "d.get('screenshot_at')")
+  [ "$SHOT_ROLL" != "$SHOT_BEFORE" ] && [ "$SHOT_ROLL" != None ] && break
+  sleep 1
+done
+[ "$SHOT_ROLL" != "$SHOT_BEFORE" ] && [ "$SHOT_ROLL" != None ] || { echo "with egress roll the screenshot should still be taken: $SHOT_BEFORE then $SHOT_ROLL"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d if 'screenshot' in a['message']][:5]"; exit 1; }
+# A host the project allows: reached through the preview's egress proxy, anything else refused
+# and said in the activity.
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"roll","egress_hosts":["github.com"]}' >/dev/null
+FETCH='import sys, urllib.request
+try:
+    print(urllib.request.urlopen(sys.argv[1], timeout=15).status)
+except Exception as e:
+    print(type(e).__name__, str(e)[:80])'
+ALLOWED=""
+for _ in $(seq 1 120); do
+  curl -sS -o /dev/null -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60 || true
+  ALLOWED=$(docker exec "$CONT2" python -c "$FETCH" https://github.com/ 2>&1 || true); ALLOWED=$(echo "$ALLOWED" | tail -1)
+  [ "$ALLOWED" = 200 ] && break
+  sleep 1
+done
+[ "$ALLOWED" = 200 ] || { echo "an allowed host should be reached through the egress proxy: $ALLOWED"; exit 1; }
+REFUSED=$(docker exec "$CONT2" python -c "$FETCH" https://example.com/ 2>&1 || true); REFUSED=$(echo "$REFUSED" | tail -1)
+case "$REFUSED" in *403*|*Tunnel*) ;; *) echo "a host not in egress_hosts should be refused: $REFUSED"; exit 1;; esac
+TOLD=""
+for _ in $(seq 1 60); do
+  TOLD=$(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d if 'egress_hosts' in a.get('message','')][:1]")
+  case "$TOLD" in *example.com*) break;; esac
+  sleep 1
+done
+case "$TOLD" in *example.com*) ;; *) echo "the activity should say what the proxy refused: $TOLD"; exit 1;; esac
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"open","egress_hosts":[]}' >/dev/null
 
 if [ -n "${STOP_BEFORE_LAND:-}" ]; then
   echo "stopped before landing: project $PRJ, preview $PV (run with --keep to leave the daemon up)"
@@ -759,7 +815,8 @@ BRANCHES_LEFT=$(api GET /v1/redis/databases | jq_ "len([x for x in d if x['name'
 cat <<EOF
 | What | Measured |
 | --- | --- |
-| egress: roll: the service's network / 1.1.1.1:443 from it before and after | ${NETS% } / $OUT_BEFORE, then: ${OUT_AFTER:0:60} |
+| egress: roll: the service's network / 1.1.1.1:443 from it before and after / its screenshot | ${NETS% } / $OUT_BEFORE, then: ${OUT_AFTER:0:60} / taken |
+| egress_hosts ["github.com"]: github.com / example.com, through the preview's egress proxy | $ALLOWED / ${REFUSED:0:60} |
 | A note's element, cropped by the next head's screenshot run (a PNG) | $CROP_NOTE |
 | A visit to a service frozen after sleep_after (it read as sleeping), instead of a cold start | $((T7 - T6)) ms, the same container |
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |

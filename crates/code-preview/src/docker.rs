@@ -300,6 +300,11 @@ impl Isolation for Docker {
         if let Some(h) = home_label() {
             args.extend(["--label".into(), h]);
         }
+        // The app's port, said on the container: on a network of its own nothing is published,
+        // and what the image exposes may be more than the app.
+        if let (Kind::Preview, Some(port)) = (job.kind, job.port) {
+            args.extend(["--label".into(), format!("{LABEL}.port={port}")]);
+        }
         match &job.network {
             // Its own network, no route out: nothing published (the host reaches it at its
             // address there), roll's products at the network's gateway.
