@@ -871,6 +871,8 @@ impl Apps {
                 .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh), snapshot: Some(&snap) }))
                 .await?;
             anyhow::ensure!(ok, "another deploy switched this environment meanwhile");
+            // What the old deployment answered isn't this one's.
+            self.responses.clear(&crate::env_key(&d.service, &d.environment));
             Ok(())
         }
         .await;

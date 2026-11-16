@@ -918,6 +918,49 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         getrandom::fill(&mut b).expect("system randomness");
         bucket = Some(b[0] % 100);
     }
+    // A shared cache's answer (`resp_cache`), before anything wakes: a GET or HEAD of the live
+    // deployment (no gradual rollout, no preview's feedback tag), without `Authorization`.
+    let refreshing = req.extensions().get::<crate::resp_cache::Refresh>().is_some();
+    let cache_key = (deployment.is_none()
+        && bucket.is_none()
+        && live.canary().is_none()
+        && !feedback
+        && !rewritten
+        && matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
+        && !req.headers().contains_key(header::AUTHORIZATION)
+        && !is_upgrade(req.headers()))
+    .then(|| req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into()));
+    let cache_env = crate::env_key(service, env);
+    if let (Some(k), false) = (&cache_key, refreshing) {
+        let head = req.method() == axum::http::Method::HEAD;
+        let hit = apps.responses.get(&cache_env, k, req.headers(), head);
+        let seen = || Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req) };
+        match hit {
+            Some(crate::resp_cache::Hit::Fresh(r)) => {
+                seen().write_by(r.status().as_u16(), began, "cache");
+                return r;
+            }
+            Some(crate::resp_cache::Hit::Stale { response, refresh }) => {
+                seen().write_by(response.status().as_u16(), began, "cache");
+                if refresh {
+                    // Fetched again in the background, as this request was (its headers decide
+                    // what it varies on; its client address passes the same allow list).
+                    let mut again = Request::new(Body::empty());
+                    *again.uri_mut() = req.uri().clone();
+                    *again.headers_mut() = req.headers().clone();
+                    again.headers_mut().remove(header::COOKIE);
+                    again.extensions_mut().insert(crate::resp_cache::Refresh);
+                    if let Some(c) = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>() {
+                        again.extensions_mut().insert(*c);
+                    }
+                    tokio::spawn(refresh_cached(apps.clone(), service.to_string(), env.to_string(), again, k.clone()));
+                }
+                return response;
+            }
+            None => {}
+        }
+    }
+    let cache_req = cache_key.as_ref().filter(|_| req.method() == axum::http::Method::GET).map(|_| req.headers().clone());
     // How the lease was had, to have another if its instance turns out gone.
     let mut again: Option<Again> = None;
     let acquired = match deployment {
@@ -1123,6 +1166,14 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     }
     let status = resp.status().as_u16();
     strip_roll_headers(resp.headers_mut());
+    // Kept for the next request when the app says a shared cache may keep it: its own headers,
+    // taken before roll's cookies go on, and a body of known length within the bound.
+    let keep = match (&cache_key, &cache_req) {
+        (Some(k), Some(rh)) if status == 200 => crate::resp_cache::policy(resp.headers())
+            .filter(|_| resp.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse::<usize>().ok()).is_some_and(|n| n <= crate::resp_cache::PER_BODY))
+            .map(|pol| (k.clone(), rh.clone(), resp.headers().clone(), pol)),
+        _ => None,
+    };
     if resp.status() == StatusCode::SWITCHING_PROTOCOLS
         && let Some(client_upgrade) = client_upgrade
     {
@@ -1173,7 +1224,28 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         }
         frame
     });
-    with_feedback(feedback, Response::from_parts(parts, Body::new(http_body_util::StreamBody::new(frames))))
+    let body = Body::new(http_body_util::StreamBody::new(frames));
+    if let Some((k, req_headers, app_headers, pol)) = keep {
+        // Read whole (at most 1 MiB, its length said so), kept, then sent.
+        let bytes = match http_body_util::BodyExt::collect(body).await {
+            Ok(c) => c.to_bytes(),
+            Err(_) => return page(StatusCode::BAD_GATEWAY, "The service didn't answer", "Its answer broke off. Try again in a moment."),
+        };
+        apps.responses.put(&cache_env, &k, &req_headers, &app_headers, bytes.clone(), pol);
+        let mut r = Response::from_parts(parts, Body::from(bytes));
+        r.headers_mut().insert(HeaderName::from_static("x-roll-cache"), HeaderValue::from_static("MISS"));
+        return with_feedback(feedback, r);
+    }
+    with_feedback(feedback, Response::from_parts(parts, body))
+}
+
+/// A stale cached answer fetched again through the proxy (which keeps the new one), boxed: the
+/// proxy is what calls it.
+fn refresh_cached(apps: Arc<Apps>, service: String, env: String, req: Request, key: String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        let _ = proxy(apps.clone(), &service, &env, None, req).await;
+        apps.responses.refresh_failed(&crate::env_key(&service, &env), &key);
+    })
 }
 
 fn with_feedback(on: bool, r: Response) -> Response {

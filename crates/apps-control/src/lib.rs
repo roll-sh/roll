@@ -41,6 +41,7 @@ pub mod model;
 pub mod net;
 pub mod notify;
 pub mod public;
+pub mod resp_cache;
 pub mod runtime;
 pub mod shell;
 pub mod spend;
@@ -247,6 +248,8 @@ pub struct Apps {
     scaling: std::sync::atomic::AtomicBool,
     /// The App's queued events are being run on this node.
     github_running: std::sync::atomic::AtomicBool,
+    /// Web services' answers a shared cache may keep, per environment (`resp_cache`).
+    pub(crate) responses: resp_cache::ResponseCache,
     /// Static sites' file indexes, by image digest, as this node read them.
     sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Per environment, for the live site's key: its earlier static deployments' site keys.
@@ -390,6 +393,7 @@ impl Apps {
             watching_secrets: std::sync::atomic::AtomicBool::new(false),
             scaling: std::sync::atomic::AtomicBool::new(false),
             github_running: std::sync::atomic::AtomicBool::new(false),
+            responses: resp_cache::ResponseCache::default(),
             sites: Mutex::new(HashMap::new()),
             earlier_sites: Mutex::new(HashMap::new()),
             site_loads: Mutex::new(HashMap::new()),

@@ -594,3 +594,12 @@ proxy adds `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host` and `X-Req
 strips `X-Roll-*` request headers. A service that can't wake in `wake_timeout` answers 503 with
 `Retry-After: 5` and a small page; a service with no deployment answers 404 with a page that
 says so.
+
+A 200 whose app lets a shared cache keep it (`CDN-Cache-Control: max-age=N`, else
+`Cache-Control: s-maxage=N`, with `stale-while-revalidate=M` honoured; never with `private`,
+`no-store`, `no-cache`, `Vary: *`, `Set-Cookie`, a body over 1 MiB or of unknown length) answers
+the environment's next GET or HEAD of the same path and query (and the headers it `Vary`s on)
+from the owner's cache, before anything wakes: `X-Roll-Cache: HIT`, `STALE` (fetched again in the
+background), or `MISS` when it was just kept, with `Age`. A request with `Authorization`, a
+deployment's own URL, a gradual rollout and a preview's feedback page never use it. A new live
+deployment empties it.

@@ -309,6 +309,46 @@ async fn image_service(w: &World, name: &str, run: Value) -> (Value, Value) {
     (svc, d)
 }
 
+/// An answer its app lets a shared cache keep (`s-maxage`) is answered from the owner's cache
+/// until it's stale, without reaching the app; another query is another answer, a request with
+/// `Authorization` never reads it, and a new live deployment empties it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shared_cache_answers_without_reaching_the_app() {
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "cached", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80}, "variables": {"FAKE_CACHE": "public, s-maxage=60"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let h = host(&svc["environments"][0]["url"]);
+    let get = |path: &'static str, auth: bool| {
+        let mut r = Request::builder().uri(path).header("host", h.clone());
+        if auth {
+            r = r.header("authorization", "Bearer x");
+        }
+        let req = r.body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(req).await.unwrap();
+            let cache = resp.headers().get("x-roll-cache").map(|v| v.to_str().unwrap().to_string());
+            let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+            (cache, body)
+        }
+    };
+    let count = || async { get("/count", false).await.1.parse::<u64>().unwrap() };
+    let first = get("/page-a", false).await;
+    assert_eq!(first.0.as_deref(), Some("MISS"), "{first:?}");
+    let before = count().await;
+    let again = get("/page-a", false).await;
+    assert_eq!((again.0.as_deref(), &again.1), (Some("HIT"), &first.1));
+    assert_eq!(count().await, before, "the app wasn't asked");
+    assert_eq!(get("/page-a?b=1", false).await.0.as_deref(), Some("MISS"), "another query, another answer");
+    assert_eq!(get("/page-a", true).await.0, None, "Authorization goes past it");
+    // A new live deployment's answers aren't the old one's.
+    let (_, r) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/redeploy"), Some(json!({}))).await;
+    settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
+    assert_eq!(get("/page-a", false).await.0.as_deref(), Some("MISS"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_image_service_scales_to_zero_and_wakes_on_the_first_request() {
     let w = world().await;
