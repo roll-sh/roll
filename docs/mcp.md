@@ -152,6 +152,12 @@ claude mcp add --transport http roll https://api.roll.sh/v1/mcp
 
 Claude.ai: Settings → Connectors → Add custom connector → `https://api.roll.sh/v1/mcp`.
 
+One click for the clients that take a link: the connect panel's "Add to Cursor"
+(`cursor://anysphere.cursor-deeplink/mcp/install?name=roll&config=…`) and "Install in VS Code"
+(`vscode:mcp/install?…`) carry the server's URL with the panel's choices, never a token: a link
+lands in the browser's history, and with OAuth the person chooses what the client may do when it
+signs in.
+
 ### With a scoped token
 
 Create a token with the builder (`/dashboard/access/new`) or `roll token create`, then send it as a
