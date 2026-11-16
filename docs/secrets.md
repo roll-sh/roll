@@ -986,7 +986,7 @@ TLS certificates for services (mTLS between them), with no CA to run.
   not SHA-256). It answers `{certificate, ca, serial, names, not_after}`. Checked with
   OpenSSL's CSRs (P-256 and RSA): `openssl verify -x509_strict` passes against the CA.
 - Every certificate a CA signs is listed until it expires (`GET …/cas/{id}/certificates`: serial,
-  names, `csr` or `link`, its end, who asked, when it was revoked; `roll secrets cas certs NAME`).
+  names, `csr`, `link` or `acme`, its end, who asked, when it was revoked; `roll secrets cas certs NAME`).
   `…/cas/{id}/revoke {serial}` (`write`, audited; `roll secrets cas revoke NAME SERIAL`, the
   dashboard's Revoke) takes one back, a lost device's, say; roll revokes a lease's certificate
   when the lease ends and a managed one's when its grace runs out. The CA signs a CRL of the
@@ -1015,6 +1015,101 @@ TLS certificates for services (mTLS between them), with no CA to run.
   it expires. One CA keeps at most 10,000 certificates from CSRs valid at once. Serials are
   random, positive and never start with a zero byte, so the serial a client shows is the one to
   revoke.
+
+### ACME
+Each CA is an ACME server (RFC 8555), as Vault's PKI is: cert-manager, certbot, Caddy and lego get
+its certificates with no roll client and no roll token. Its directory is
+`<ROLL_CODE_PUBLIC_URL>/v1/secrets/acme/{ca}/directory` (the CA's ACME panel, `roll secrets cas acme
+eab ls NAME`).
+- **External Account Binding, always.** An admin of the CA's project makes a binding (`POST
+  …/cas/{id}/acme/eab {label?, names?, days?}`, audited; `roll secrets cas acme eab add NAME
+  [--name D…] [--days N] [--label L]`, the ACME panel's New binding): a key id (`eab_…`) and an
+  HMAC key, shown once and kept sealed with the project's data key. A binding is tied to its CA and
+  optionally to narrower `names` (each takes itself and every name under it, within the CA's
+  domains) and an end. An account is made only with a binding's MAC over its own key, and acts with
+  that binding's names. Every request of an account looks its binding up, never cached: revoking it
+  (`DELETE …/acme/eab/{id}`, `roll secrets cas acme eab rm NAME ID`, the panel's Revoke), its end,
+  or its maker no longer reaching the project (as with tokens they made) stops the account at once.
+  One binding makes at most 50 accounts (the same key in several clusters is fine); a CA has at most
+  200 live bindings.
+- **Names.** Every name of an order is within the CA's policy and the binding's names, or the order is
+  refused (`rejectedIdentifier`). Then each is proven:
+  - `http-01`: roll fetches `http://<name>/.well-known/acme-challenge/<token>` through rolld's
+    guarded client: public addresses only (`roll_net::PublicOnly` and the literal-address check; a
+    deployment with `ROLL_CODE_WEBHOOK_ALLOW_PRIVATE` reaches private ones), port 80, no redirects
+    followed, no proxy, 10 seconds, 8 KiB read at most. Not for wildcards.
+  - `dns-01`: roll looks up `_acme-challenge.<name>` TXT through public DNS (Cloudflare's resolvers,
+    not the fleet's own, so a private zone can't answer for a name; the system resolver where
+    private addresses are allowed), nothing cached, 10 seconds, 32 records read at most.
+  - `tls-alpn-01` isn't offered.
+  - **Pre-authorized names** (`PATCH …/cas/{id}/acme {pre_authorize: true}`, `roll secrets cas acme
+    pre-authorize NAME on`, the panel's checkbox; off by default, audited): every name an account's
+    binding takes is valid at once, with no challenge. Most internal names resolve to private
+    addresses roll's fleet can't reach, so this is the mode internal clusters (cert-manager inside a
+    VPC) use. **The binding's HMAC key is then the whole proof**: whoever holds it gets certificates
+    for every name the binding takes. Give each cluster its own binding with only its names, and an
+    end.
+- **Finalize** goes through the same path as `…/cas/{id}/sign`: the CSR's signature is checked and only
+  its public key and names are taken (exactly the order's names); usages and lifetime (30 days, or the
+  CA's `max_days` if shorter) are the CA's. The certificate is recorded with `source: "acme"` (the
+  CA's list, its CRL and OCSP have it) and `issued_by: "acme:<binding>"`, and audited
+  (`ca.acme.issue`, naming the binding and its maker) in the write that makes the order valid.
+  `revoke-cert` takes a certificate issued over ACME, signed by the account that ordered it or with
+  the certificate's own key (`ca.revoke`, audited); it's on the CRL at once.
+- **What's checked.** Requests are flattened JWS signed with ES256 (P-256) or RS256 (2048 bits or
+  more); `none`, HMAC and anything else are refused (`badSignatureAlgorithm`). The `url` in the
+  protected header must be the request's own; each request carries a nonce roll made within the hour
+  (a MAC with a deployment-wide key, so handing one out writes nothing) and used once (stored until it
+  would expire). `key-change` takes the old key's request wrapping the new key's. A request is 64 KiB
+  at most, an order 100 names, an account 300 orders a day. Orders and their authorizations last a
+  day; used nonces, old orders and expired certificates' rows go in the sweep. Errors are RFC 8555
+  problem documents (`urn:ietf:params:acme:error:*`) and never hold key material. State lives in the
+  database: any node of a fleet answers any request; claiming a challenge or an order, using a nonce
+  and issuing are each one write, and challenges are checked outside any transaction.
+- The routes are outside the gate (`/v1/secrets/acme` is public in rolld's auth rules, as the CRL is):
+  `directory` (GET), `new-nonce` (HEAD, GET), and POSTs to `new-account`, `acct/{id}`,
+  `acct/{id}/orders`, `new-order`, `order/{id}`, `order/{id}/finalize`, `authz/{id}`, `chall/{id}`,
+  `cert/{serial}`, `revoke-cert` and `key-change`.
+
+cert-manager (inside the cluster, pre-authorized names), after `roll secrets cas acme eab add
+internal --name svc.internal --label cluster-a` printed the key:
+
+```sh
+kubectl -n cert-manager create secret generic roll-internal-eab --from-literal secret=<HMAC key>
+```
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: roll-internal
+spec:
+  acme:
+    server: https://api.roll.example/v1/secrets/acme/ca_example/directory
+    privateKeySecretRef:
+      name: roll-internal-acme-account
+    externalAccountBinding:
+      keyID: eab_example
+      keySecretRef:
+        name: roll-internal-eab
+        key: secret
+    solvers:            # cert-manager needs one; pre-authorized names never use it
+      - http01:
+          ingress:
+            ingressClassName: nginx
+```
+
+certbot and lego:
+
+```sh
+certbot certonly --server https://api.roll.example/v1/secrets/acme/ca_example/directory \
+  --eab-kid eab_example --eab-hmac-key <HMAC key> --standalone -d api.svc.internal
+lego --server https://api.roll.example/v1/secrets/acme/ca_example/directory --eab --kid eab_example \
+  --hmac <HMAC key> --email ops@svc.internal --domains api.svc.internal --http run
+```
+
+Clients that check revocation (and TLS to the directory) trust rolld's public address as any HTTPS
+client does; the certificates themselves chain to the CA's certificate (`roll secrets cas cert NAME`).
 
 ### SSH certificates
 
@@ -1176,6 +1271,8 @@ roll secrets aws-users ls | add NAME USER --role ROLE | rm ID
 roll secrets clouds  ls | add-gcp NAME --audience A --service-account SA | add-azure NAME --tenant T --client-id C [--scope S] | rm ID
 roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
                      | certs ID | revoke ID SERIAL | rm ID
+                     | acme eab add ID [--name D…] [--days N] [--label L] | acme eab ls ID | acme eab rm ID EAB
+                     | acme pre-authorize ID on|off                       (`ca` is the same command)
 roll secrets ssh-cas ls | add NAME [--principal P…] [--max-hours N] [--host-domain D…] [--max-host-days N] | key ID
                      | sign-host ID [KEY.pub|-] --host H… [--days N] | known-hosts ID
                      | sign-user ID KEY.pub --principal P… [--ttl-minutes N] | rm ID
@@ -2414,6 +2511,23 @@ isn't in the workspace is 404.
 | `POST /v1/secrets/ocsp/{id}` | an OCSP request (DER) | an OCSP response (`application/ocsp-response`); no token |
 | `GET /v1/secrets/ocsp/{id}/{request}` | | the same, the request base64 and URL-encoded (RFC 6960 A.1); no token |
 | `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy or a lifetime past `max_days` |
+| `GET /cas/{id}/acme` | | `{directory, pre_authorize, challenges, bindings: AcmeBinding[]}` (`read`); a binding is `{id, label, names, expires_at, created_at, created_by, revoked_at, revoked_by, used_at, accounts}` |
+| `PATCH /cas/{id}/acme` | `{pre_authorize}` | the same (`admin`, audited) |
+| `POST /cas/{id}/acme/eab` | `{label?, names?, days?}` | 201 `AcmeBinding` with `key_id`, `hmac_key` (base64url, this answer only) and `directory` (`admin`, audited) |
+| `DELETE /cas/{id}/acme/eab/{eab}` | | 204: its accounts stop at once (`admin`, audited) |
+| `GET /v1/secrets/acme/{ca}/directory` | | the directory (RFC 8555 §7.1.1), `externalAccountRequired: true`; no token ("ACME") |
+| `HEAD /v1/secrets/acme/{ca}/new-nonce` | | 200 with `Replay-Nonce` (`GET`: 204); no token |
+| `POST /v1/secrets/acme/{ca}/new-account` | JWS (`jwk`) of `{contact?, termsOfServiceAgreed?, onlyReturnExisting?, externalAccountBinding}` | 201 and `Location` (200 for the key's existing account); `externalAccountRequired` without a binding |
+| `POST /v1/secrets/acme/{ca}/acct/{id}` | JWS (`kid`): empty, `{contact}` or `{status: "deactivated"}` | the account |
+| `POST /v1/secrets/acme/{ca}/acct/{id}/orders` | JWS, empty | `{orders}`: its orders that haven't expired |
+| `POST /v1/secrets/acme/{ca}/new-order` | JWS of `{identifiers}` (`dns`, `ip`) | 201 order; `rejectedIdentifier` outside the CA's policy or the binding's names; `rateLimited` past 300 a day |
+| `POST /v1/secrets/acme/{ca}/order/{id}` | JWS, empty | the order: `pending`, `ready`, `processing`, `valid` (with `certificate`) or `invalid` |
+| `POST /v1/secrets/acme/{ca}/order/{id}/finalize` | JWS of `{csr}` | the order, `valid`; `orderNotReady`, `badCSR` (names other than the order's) |
+| `POST /v1/secrets/acme/{ca}/authz/{id}` | JWS: empty or `{status: "deactivated"}` | the authorization and its challenges |
+| `POST /v1/secrets/acme/{ca}/chall/{id}` | JWS: empty, or `{}` to validate now | the challenge, `valid` or `invalid` with its `error` |
+| `POST /v1/secrets/acme/{ca}/cert/{serial}` | JWS, empty | `application/pem-certificate-chain`: the certificate, then the CA's |
+| `POST /v1/secrets/acme/{ca}/revoke-cert` | JWS (`kid`, or the certificate's key as `jwk`) of `{certificate, reason?}` | 200; on the CRL at once; `alreadyRevoked` |
+| `POST /v1/secrets/acme/{ca}/key-change` | JWS wrapping the new key's JWS of `{account, oldKey}` | the account; 409 and `Location` if another account has the new key |
 | `GET /ssh-cas` | | `SshCa[]` (`read` on the project; public keys, never private ones) |
 | `POST /ssh-cas` | `{name, principals, max_hours?, host_domains?, max_host_days?}` | 201 `SshCa` (`admin`) |
 | `DELETE /ssh-cas/{id}` | | 204; 409 while a key links to it (`admin`) |

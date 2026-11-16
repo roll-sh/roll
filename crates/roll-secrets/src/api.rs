@@ -117,6 +117,9 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/cas/{{id}}/sign"), post(sign_csr))
         .route(&format!("{P}/cas/{{id}}/certificates"), get(ca_certificates))
         .route(&format!("{P}/cas/{{id}}/revoke"), post(revoke_certificate))
+        .route(&format!("{P}/cas/{{id}}/acme"), get(acme_settings).patch(set_acme))
+        .route(&format!("{P}/cas/{{id}}/acme/eab"), post(add_acme_binding))
+        .route(&format!("{P}/cas/{{id}}/acme/eab/{{eab}}"), axum::routing::delete(revoke_acme_binding))
         .route("/v1/secrets/crl/{id}", get(crl))
         .route("/v1/secrets/ocsp/{id}", post(ocsp_post).layer(axum::extract::DefaultBodyLimit::max(crate::ocsp::REQUEST_MAX)))
         .route("/v1/secrets/ocsp/{id}/{*request}", get(ocsp_get))
@@ -134,6 +137,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         // Public: a share's link (docs/secrets.md, "Sharing a value once").
         .route("/v1/secrets/shares/{id}", get(peek_share))
         .route("/v1/secrets/shares/{id}/open", post(open_share))
+        .merge(crate::acme::routes())
         .with_state(s)
 }
 
@@ -1116,6 +1120,33 @@ async fn revoke_certificate(State(s): S, Who(c): Who, Path((project, id)): Path<
     let r: Revoke = body(&b)?;
     blocking(s, move |s| s.revoke_certificate(&project, &id, &r.serial, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A CA's ACME directory, pre-authorization and bindings.
+async fn acme_settings(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.acme_settings(&project, &id, &c)).await?))
+}
+
+/// `{pre_authorize}`: names in an account's binding are valid without a challenge.
+async fn set_acme(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Set {
+        pre_authorize: bool,
+    }
+    let v: Set = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.set_acme(&project, &id, v.pre_authorize, &c)).await?))
+}
+
+/// A new External Account Binding: its HMAC key is in this answer only.
+async fn add_acme_binding(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::acme::NewBinding = body(&b)?;
+    Ok(secret_response(created(blocking(s, move |s| s.add_acme_binding(&project, &id, n, &c)).await?)))
+}
+
+async fn revoke_acme_binding(State(s): S, Who(c): Who, Path((project, id, eab)): Path<(String, String, String)>) -> crate::Result<Response> {
+    blocking(s, move |s| s.revoke_acme_binding(&project, &id, &eab, &c)).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// A CA's CRL, without a token: DER (`application/pkix-crl`), or PEM with `?format=pem`.

@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
+mod acme;
 mod clouds;
 
 mod outside;
@@ -313,6 +314,8 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
     // Where clients reach rolld: a CA's certificates name its CRL there.
     secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
+    // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
+    secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
     // A deleted project's secrets go with it.
     let s = secrets.clone();
     workspace.on_delete(Box::new(move |id| {

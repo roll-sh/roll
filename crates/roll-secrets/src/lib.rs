@@ -12,6 +12,7 @@
 
 pub mod folder_policy;
 pub mod access;
+pub mod acme;
 mod alerts;
 pub mod api;
 pub mod health;
@@ -360,6 +361,8 @@ pub struct Secrets {
     crls: pki::Crls,
     /// Live links' fingerprints as last read (read.rs): what digests count.
     live_fps: read::LiveFps,
+    /// ACME's challenge checks and nonce key (acme.rs).
+    acme: acme::State,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -434,6 +437,9 @@ impl Secrets {
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(transit::SCHEMA)?;
         db.ensure_schema(pki::SCHEMA)?;
+        // ACME on a CA (acme.rs): whether its bindings' names are pre-authorized.
+        db.ensure_schema(acme::SCHEMA)?;
+        db.add_column("cas", "acme_preauthorize", "INTEGER")?;
         db.ensure_schema(ssh::SCHEMA)?;
         db.ensure_schema(aws::SCHEMA)?;
         db.ensure_schema(issuer::SCHEMA)?;
@@ -467,7 +473,7 @@ impl Secrets {
         if let (Some(outside), Ok(keys)) = (&opts.outside, &opts.keyring) {
             links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), outside: outside.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default(), acme: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -581,6 +587,10 @@ impl Secrets {
                 c.execute("DELETE FROM imports WHERE env_id = ? OR from_env_id = ?", [e, e])?;
                 c.execute("DELETE FROM exports WHERE env_id = ?", [e])?;
                 c.execute("DELETE FROM folder_policies WHERE env_id = ?", [e])?;
+            }
+            // Its CAs' ACME accounts and bindings stop now (the CAs wait for their revocations).
+            for ca in c.query("SELECT id FROM cas WHERE project_id = ?", [project], |r| r.get::<_, String>(0))? {
+                acme::forget_ca(c, &ca)?;
             }
             // What other projects shared with this one goes with it.
             c.execute("DELETE FROM exports WHERE to_project = ?", [project])?;
