@@ -234,37 +234,33 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-1. **The Rally losses left by the full rerun** (docs/benchmarks/search.md, Round 8: every Rally
-   track against Elasticsearch 9.5.5 and OpenSearch 3.9 at `83fac5982`, three alternating rounds
-   each). Roll leads most tasks 1.3-4x (percolator up to 300x) and indexes 1.05-2.6x
-   Elasticsearch's docs/s on every track but noaa, on 0.63-0.95x its server CPU. Where it still
-   loses, ranked: noaa `range_field_conjunction_big_range_big_term_query` 5.12x Elasticsearch
-   (49.4 against 9.6 ms; roll leads since `96c8d2fc5`, 2.7 against 13-14.5 ms, Rally rerun
-   pending); nested inner hits `big_size` 2.25x Elasticsearch (49 against 22 ms;
-   `default` 1.20x; roll leads both since `7fe679918`, 13 against 22-26 ms, Rally rerun pending); dense_vector `knn-search-100-1000_multiple_segments` 2.09x; so_vector, 25 of
-   32 `knn` tasks 1.03-1.92x (filtered and `concurrency` worst; segments are searched
-   concurrently since, `66d16fce6`); nested `randomized-sorted-term-queries` 1.62x OpenSearch;
-   noaa indexing (Elasticsearch 1.29x roll's docs/s: `double_range` kept every document off the
-   direct parser; it takes them now, -34% server CPU per document, Rally rerun pending); nyc_taxis `distance_amount_agg` 1.27x Elasticsearch (103 against 81 ms: roll
-   runs a shard on one thread, Elasticsearch splits its segments across threads at twice roll's
-   CPU; roll leads since `0d1c0ece2`, still on one thread, 38 against 76-86 ms p50 at a fifth of
-   Elasticsearch's CPU, Rally rerun pending); nyc_taxis `autohisto_agg` 1.19x OpenSearch (tie), with `date_histogram_agg`: the
-   counted segments were still searched for the `size: 0` hit count, at a cost growing with the
-   segment (not since `7584df9f3`: -69% and -83% server CPU at one segment, Rally rerun pending);
-   nested `nested-date-histo` 1.17x OpenSearch (tie);
-   http_logs `sort-size-desc-after-force-merge-1-seg` 1.12x OpenSearch (tie); geonames
-   `asc_sort_population` 1.11x and `desc_sort_population` 1.07x Elasticsearch (ties), +11-16%
-   server CPU since `5942eea08`'s sort bands, 7-10% of it won back since (the bands' per-hit
-   accounting is one comparison; fewer instructions than before the bands, the rest is code
-   placement on Cascade Lake: docs/benchmarks/search.md, "The bands' cost"); bulk p50 ties (nested, pmc, nyc_taxis, so); http_logs
-   `scroll` 1.03x OpenSearch (tie). Regressions: http_logs indexing +8% CPU per document (noaa
-   +14%) since `dbe79f8f7` (every bulk item walked the mapping for `semantic_text` fields,
-   building every field's path, three times: now a walk that stops at the first one and builds
-   nothing, `6c2834a3e`, nyc_taxis 500k at 8 clients 45.4 → 43.2 µs/doc median, 3 of 4 rounds
-   lower, the same aggregations), and the bands' cost (fixed, above). Not a loss: `terms_enum`
-   (OpenSearch has no such API; its "0.57 ms" was an error). Still open from before: one-client
-   indexing CPU (51.8 against 34.6 µs/doc on the ECS log), BP only for time-series and log
-   indices, the request path's allocations, one allocator policy.
+1. **The Rally losses left by the full rerun** (docs/benchmarks/search.md: Round 8, every Rally
+   track against Elasticsearch 9.5.5 and OpenSearch 3.9 at `83fac5982`; Round 9, the four tracks
+   #29 fixed rerun at `c2b47b251`, three alternating rounds each, noaa six). Roll leads most tasks
+   1.3-4x (percolator up to 300x) and indexes as many or more docs/s than Elasticsearch on every
+   track (noaa now included), on less server CPU per race than Elasticsearch wherever it was
+   measured. Round 9 confirmed #29's fixes under
+   Rally: noaa `range_field_conjunction_big_range_big_term_query` 5.12x → 0.67 (6.8 against 10.2
+   ms), noaa indexing 1.29x → 0.86 (tie; server CPU per race -23%), nested inner hits `big_size`
+   2.25x → 0.52 and `_default` 1.20x → 0.74, nyc_taxis `distance_amount_agg` 1.27x → 0.50 (59
+   against 118 ms, still on one thread), `date_histogram_agg` → 0.39, geonames
+   `desc_sort_population` → 0.64 and `asc_sort_population` → 0.83 (ties); `autohisto_agg` is still
+   a tie with OpenSearch (0.87). Where roll still loses, ranked: dense_vector
+   `knn-search-100-1000_multiple_segments` 2.09x Elasticsearch (Round 8); so_vector, 25 of 32
+   `knn` tasks 1.03-1.92x (Round 8; filtered and `concurrency` worst; segments are searched
+   concurrently since, `66d16fce6`); nested `randomized-sorted-term-queries` 1.23x OpenSearch
+   (12.6 against 10.2 ms, ranges apart; Round 8 1.62x); nested `nested-date-histo` 1.17x
+   Elasticsearch (tie); the nested bulk p50 1.16x (tie, docs/s ahead); http_logs
+   `sort-size-desc-after-force-merge-1-seg` 1.12x OpenSearch (Round 8, tie); noaa
+   `range_field_disjunction_big_range_small_term_query` 1.06x Elasticsearch (tie, lost in roll's
+   rounds under heavy foreign load; a direct A/B has this binary 35% faster than Round 8's);
+   nyc_taxis `range` 1.05x OpenSearch (tie); http_logs `scroll` 1.03x OpenSearch and the pmc and so
+   bulk p50s (Round 8, ties). Rerun next: the vector tracks, http_logs (its indexing regression
+   since `dbe79f8f7` is fixed by `6c2834a3e`, not yet measured under Rally), so, pmc and
+   percolator at the current head. Not a loss: `terms_enum` (OpenSearch has no such API; its
+   "0.57 ms" was an error). Still open from before: one-client indexing CPU (51.8 against 34.6
+   µs/doc on the ECS log), BP only for time-series and log indices, the request path's
+   allocations, one allocator policy.
 2. **Snapshots on the fleet.** Landed: every cluster whose data is in object storage (the fleet
    and a single rolld) has a default repository, `found-snapshots` as on Elastic Cloud
    (`--search-default-repository`), so `_snapshot` and snapshot lifecycle policies work without
