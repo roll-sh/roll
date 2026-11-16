@@ -587,13 +587,22 @@ impl Apps {
         let (Some(sources), Some(rev)) = (self.deps.sources.clone(), d.revision.clone()) else { return };
         let (sid, e) = (d.service.clone(), d.environment.clone());
         let Ok((svc, env)) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await else { return };
-        let Source::Repo { repo, .. } = &svc.source else { return };
         let status = crate::integrations::CommitStatus {
             context: format!("roll/apps/{}/{}", svc.name, d.environment),
             state,
             description: what.chars().take(140).collect(),
             target_url: Some(self.url(&env.slug)),
         };
+        // A Git URL service connected to roll's GitHub App: through its installation.
+        if let Source::Git { url, .. } = &svc.source {
+            if let Some((app, installation, owner, repo)) = self.github_for(&svc.id, url).await
+                && let Err(err) = app.status(installation, &owner, &repo, &rev, &status).await
+            {
+                warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a deploy's commit status didn't post");
+            }
+            return;
+        }
+        let Source::Repo { repo, .. } = &svc.source else { return };
         if let Err(err) = sources.set_status(repo, &rev, &status).await {
             warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a deploy's commit status didn't post");
         }

@@ -324,6 +324,7 @@ export function SettingsTab({
           </Grid>
           {service.source.kind === "image" && <RegistryLogin service={service} runner={runner} />}
           {service.source.kind === "git" && <GitLogin service={service} runner={runner} />}
+          {service.source.kind === "git" && <GitHubApp service={service} runner={runner} />}
         </Section>
 
         {form.sourceKind !== "image" && (
@@ -842,6 +843,31 @@ function GitLogin({ service, runner }: { service: Service; runner: Runner }) {
           <span className="text-[12px] text-subtle">Sealed; sent only to this repository's host.</span>
         </form>
       )}
+    </div>
+  );
+}
+
+/** roll's GitHub App for a Git URL service: fetches with its installation's tokens and commit
+ *  statuses on deploys. Connecting is the operator's (installations span tenants). */
+function GitHubApp({ service, runner }: { service: Service; runner: Runner }) {
+  const g = service.github;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-5 py-4">
+      <div>
+        <p className="text-[13px] font-medium">GitHub App</p>
+        <p className="mt-1 text-[12px] text-muted">
+          {g ? (
+            <>
+              Connected to <span className="font-mono text-fg">{g.repo}</span>: fetches with its installation's short-lived tokens, and deploys show as commit statuses.
+            </>
+          ) : (
+            "On GitHub, roll's App can fetch this repository (a private one too) and show deploys as commit statuses. Connecting is the operator's."
+          )}
+        </p>
+      </div>
+      <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("github", () => (g ? appsApi.disconnectGitHub(service.id) : appsApi.connectGitHub(service.id)))}>
+        {g ? "Disconnect" : "Connect"}
+      </button>
     </div>
   );
 }

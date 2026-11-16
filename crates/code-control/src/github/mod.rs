@@ -137,6 +137,51 @@ impl Code {
     pub(crate) fn github_hub(&self) -> Option<&Arc<Hub>> {
         self.github.get()
     }
+
+    /// The App's GitHub host (`github.com`, or a GitHub Enterprise Server's), lowercase; None
+    /// without the App. Other products (roll apps' Git URL services) connect through it.
+    pub fn github_host(&self) -> Option<String> {
+        let hub = self.github_hub()?;
+        let u = url::Url::parse(&hub.config.web_base).ok()?;
+        let host = u.host_str()?.to_ascii_lowercase();
+        Some(match u.port() {
+            Some(p) => format!("{host}:{p}"),
+            None => host,
+        })
+    }
+
+    /// The App's installation (not suspended) that can see `owner/repo`, if any. Installations
+    /// span tenants: only an operator's call may connect one (as connecting a repo is here).
+    pub async fn github_installation_for(&self, owner: &str, repo: &str) -> Result<Option<u64>> {
+        let Some(hub) = self.github_hub() else { return Ok(None) };
+        let gh = |e: code_github::Error| Error::Internal(e.into());
+        let full = format!("{owner}/{repo}");
+        for inst in hub.client.list_installations().await.map_err(gh)? {
+            if inst.suspended_at.is_some() {
+                continue;
+            }
+            if hub.client.installation_repositories(inst.id).await.map_err(gh)?.iter().any(|r| r.full_name.eq_ignore_ascii_case(&full)) {
+                return Ok(Some(inst.id));
+            }
+        }
+        Ok(None)
+    }
+
+    /// HTTPS git credentials for `owner/repo` through `installation` (a short-lived installation
+    /// token as the password): never stored by the caller.
+    pub async fn github_git_login(&self, installation: u64, owner: &str, repo: &str) -> Result<(String, String)> {
+        let hub = self.github_hub().ok_or_else(|| Error::Invalid("roll's GitHub App isn't configured".into()))?;
+        let c = hub.client.git_credentials(installation, owner, repo).await.map_err(|e| Error::Internal(e.into()))?;
+        Ok((c.username, c.password))
+    }
+
+    /// A commit status on `owner/repo` at `sha` through `installation`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn github_commit_status(&self, installation: u64, owner: &str, repo: &str, sha: &str, state: &str, context: &str, description: &str, target_url: Option<&str>) -> Result<()> {
+        let hub = self.github_hub().ok_or_else(|| Error::Invalid("roll's GitHub App isn't configured".into()))?;
+        hub.client.create_status(installation, owner, repo, sha, state, context, Some(description), target_url).await.map_err(|e| Error::Internal(e.into()))?;
+        Ok(())
+    }
 }
 
 /// Turn the GitHub App on: webhooks, connecting repos, mirrors and notifications.

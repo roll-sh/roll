@@ -134,6 +134,26 @@ fn parse_ports(s: &str) -> anyhow::Result<(u16, u16)> {
     Ok((a, b))
 }
 
+/// roll code's GitHub App for roll apps' Git URL services on its host: which installation sees a
+/// repository, short-lived installation tokens, commit statuses.
+struct CodeGitHub(Arc<code_control::Code>);
+
+#[async_trait]
+impl apps_control::integrations::GitHubApp for CodeGitHub {
+    fn host(&self) -> Option<String> {
+        self.0.github_host()
+    }
+    async fn installation_for(&self, owner: &str, repo: &str) -> anyhow::Result<Option<u64>> {
+        Ok(self.0.github_installation_for(owner, repo).await?)
+    }
+    async fn git_login(&self, installation: u64, owner: &str, repo: &str) -> anyhow::Result<(String, String)> {
+        Ok(self.0.github_git_login(installation, owner, repo).await?)
+    }
+    async fn status(&self, installation: u64, owner: &str, repo: &str, sha: &str, s: &apps_control::integrations::CommitStatus) -> anyhow::Result<()> {
+        Ok(self.0.github_commit_status(installation, owner, repo, sha, s.state, &s.context, &s.description, s.target_url.as_deref()).await?)
+    }
+}
+
 /// roll code as roll apps' source of trees and landings.
 #[derive(Clone)]
 struct CodeSources(Arc<code_control::Code>);
@@ -599,7 +619,7 @@ pub async fn start(
     let deps = Deps {
         runtime,
         builder,
-        sources: code.map(|c| Arc::new(CodeSources(c)) as Arc<dyn Sources>),
+        sources: code.clone().map(|c| Arc::new(CodeSources(c)) as Arc<dyn Sources>),
         // The project's secrets, once roll secrets is open (main.rs sets it).
         secrets: Arc::new(secrets),
         resources: Arc::new(RollResources {
@@ -619,6 +639,9 @@ pub async fn start(
         workspace: Some(workspace),
     };
     let apps = Apps::new(cfg, store, deps);
+    if let Some(c) = code {
+        apps.set_github_app(Arc::new(CodeGitHub(c)));
+    }
     apps.start();
     if on_docker && !apps_control::runtime::docker::available().await {
         warn!("apps: docker isn't reachable, so services can't build or run on this node");

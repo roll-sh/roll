@@ -197,6 +197,21 @@ pub trait GitPushes: Send + Sync {
     }
 }
 
+/// roll's GitHub App, for a Git URL service on its host (rolld fills it with roll code's App):
+/// which installation sees a repository, short-lived git credentials through it, commit statuses.
+/// Installations span tenants: connecting one is the operator's (an `admin` route).
+#[async_trait]
+pub trait GitHubApp: Send + Sync {
+    /// The App's host (`github.com`, a GitHub Enterprise Server's), lowercase, with a port if
+    /// any; none while the App isn't set up.
+    fn host(&self) -> Option<String>;
+    /// The installation that sees `owner/repo`, if one does.
+    async fn installation_for(&self, owner: &str, repo: &str) -> anyhow::Result<Option<u64>>;
+    /// A username and short-lived token for fetching `owner/repo` (never stored).
+    async fn git_login(&self, installation: u64, owner: &str, repo: &str) -> anyhow::Result<(String, String)>;
+    async fn status(&self, installation: u64, owner: &str, repo: &str, sha: &str, status: &CommitStatus) -> anyhow::Result<()>;
+}
+
 /// Email to a person through their account (rolld fills it with roll-accounts' mailer). Unset or
 /// off: no email targets.
 #[async_trait]

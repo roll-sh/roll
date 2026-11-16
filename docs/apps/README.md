@@ -1793,7 +1793,20 @@ app installed and no roll code mirror. `git_source.rs` is the whole of it:
   another repository (host or path) drops it in the same transaction, as a registry login is dropped with its
   registry. The branch check when it's made, the plan, deploys, the watch, the hook's ref check
   and watch paths all fetch with it. A GitHub repository can use it too (a fine-grained token
-  with read access to contents), or roll code's GitHub App.
+  with read access to contents), or roll's GitHub App (below).
+- **roll's GitHub App** (Vercel's GitHub integration; roll code's App, `GitHubApp` port in
+  `integrations.rs`, rolld's `CodeGitHub`): `PUT …/services/{id}/github`, `roll apps github`, or
+  Settings' "GitHub App" connects a Git URL service on the App's host to the installation that
+  sees its repository. Then every fetch uses a short-lived installation token (no personal token
+  held), and its deploys post commit statuses (`roll/apps/<service>/<env>`, as a roll code repo's
+  do). Installations span tenants (an installation's token reads any repository it sees), so the
+  route is operator-only in the permissions catalogue (`OPERATOR_ONLY`), as connecting a repo is
+  roll code's admin token's. That keeps grants out; sessions are kept out by rolld's gate, which
+  gives signed-in people no `/v1/apps` route (an admin's session carries `Operator`). If roll apps
+  ever serves signed-in people, this route must refuse a non-admin session itself. A private repository on the App's host can be made before it's
+  connected: its branch check failing there doesn't fail the creation (the App isn't asked: whether
+  it sees a repository is no tenant's to learn), and its first deploy waits for the connection or
+  a login. Moving the source to another repository drops the connection with the login.
 - **Followed**: every five minutes, with the tag watch, the owner asks each of its Git services'
   environments' branches where they are (`ls-refs`, a few hundred bytes). A new commit deploys
   (trigger `push`, actor `git watch`), keyed by the commit so two nodes make one deploy. As with
@@ -2262,15 +2275,12 @@ put items 1–11 first. A second review that day (after #78, against the same si
    doesn't follow and every pull request (`GitPush`, `GitPull`), each checked against the
    repository's refs; previews builds the environments, comments and gates forks behind a
    writer's approval (its side is the previews thread's, stacked on this).
-2. **GitHub's App on a Git URL service** (Vercel's GitHub integration): `PUT …/services/{id}/github
-   {installation}` (admin: someone who manages the owner) connects a github.com Git URL service to
-   an installation that roll code already has for that same owner and repo, checked by a port
-   rolld implements over code-github (installations span tenants: another's is never usable).
-   Then fetches use a short-lived installation token scoped to the repo (no personal token), the
-   hook also requires `X-Hub-Signature-256`, apps posts `roll/deploy` statuses and a GitHub
-   Deployment per environment, and roll previews posts `roll/preview` and its comment through
-   the same port (its `GitReport`). Or, without roll code: `git_login` reading a secrets key
-   (secrets' #73 issues per-lease installation tokens from the project's own GitHub App).
+2. **The rest of GitHub's App on a Git URL service** (connecting, installation tokens and commit
+   statuses are done): GitHub Deployments per environment (Vercel's), pushes and pull requests
+   from the App's own webhook (`X-Hub-Signature-256`) routed from roll code to the service, so no
+   per-environment hook is needed, and roll previews' `GitReport` posting `roll/preview` through
+   the same port. Or, without roll code: `git_login` reading a secrets key (secrets' #73 issues
+   per-lease installation tokens from the project's own GitHub App).
 3. **Search links in roll.toml**: once roll search's #100 is on main, `[databases]` takes
    `kind = "search"` (apps-build's `DB_KINDS`), so a project file declares a search link and
    `roll apps export` writes it instead of naming it in its notes.
