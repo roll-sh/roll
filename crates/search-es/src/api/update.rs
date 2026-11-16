@@ -340,6 +340,12 @@ async fn update_attempt(ctx: &Ctx<'_>, expr: &str, id: &str, args: &WriteArgs, b
     a.if_primary_term = Some(d.primary_term);
     a.internal = true;
     a.create = false;
+    // `semantic_text` fields whose text the update changed lose their stale embeddings (they're
+    // embedded again as the document is written); unchanged ones keep theirs.
+    let new_source = match crate::xpack::inference::semantic::drop_stale(&idx.mapping, &src_bytes, &new_source) {
+        Some(b) => b,
+        None => new_source,
+    };
     let value = document::parse_doc(&new_source)?;
     let prepared = write::prepare(ctx.cluster, idx.clone(), id, routing.as_deref(), &new_source, &value, None).await?;
     let out = write::apply_index(prepared, &a, false, id)?;

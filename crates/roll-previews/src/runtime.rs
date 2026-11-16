@@ -41,6 +41,11 @@ enum Phase {
     Stopped,
     Starting,
     Running { addr: SocketAddr },
+    /// Idle past `sleep_after`, its container paused (`docker pause`) since `since`: its memory
+    /// stays, it uses no CPU, and a request thaws it in tens of milliseconds where a start takes
+    /// seconds. Asleep to everyone else (status, cost); stopped for good after
+    /// [`RuntimeConfig::warm_for`].
+    Frozen { addr: SocketAddr, since: Instant },
     Failed(String),
 }
 
@@ -74,11 +79,64 @@ pub struct RuntimeConfig {
     /// PNG of `$URL` to `$OUT` (`chrome --headless --screenshot`).
     pub screenshot_image: String,
     pub screenshot_command: String,
+    /// How long an idle service stays frozen before it's stopped (zero: stopped at once, as
+    /// before). Docker only: Fargate has no pause.
+    pub warm_for: Duration,
+    /// The most services frozen on this node at once (their memory stays): the oldest are stopped
+    /// past it.
+    pub warm_max: usize,
 }
 
 /// Playwright's image has a headless Chromium shell (its path names its version).
 pub const SCREENSHOT_IMAGE: &str = "mcr.microsoft.com/playwright:v1.64.1-noble";
-pub const SCREENSHOT_COMMAND: &str = r#""$(ls -d /ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell | head -1)" --no-sandbox --hide-scrollbars --window-size=1280,800 --screenshot="$OUT" "$URL""#;
+/// One load of the page that writes the PNG to `$OUT` and its timings to `$OUT.json`
+/// (`shot.js`, in `$ROLL_SHOT_JS`). A command of an operator's own only needs to write `$OUT`.
+pub const SCREENSHOT_COMMAND: &str = r#"CHROME="$(ls -d /ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell | head -1)" node -e "$ROLL_SHOT_JS""#;
+const SHOT_JS: &str = include_str!("shot.js");
+/// The screenshot image with `playwright-core` added (Firefox and WebKit are in the base image,
+/// but only Playwright drives them): built once per node from [`BROWSERS_DOCKERFILE`] when a
+/// project asks for other browsers (`github.browsers`).
+pub const BROWSERS_IMAGE: &str = "roll-previews-shot:1.64.1";
+/// Built `FROM` the configured screenshot image (an operator's mirror of it too). `playwright-core`
+/// pinned to the image's Playwright, with no install scripts run.
+const BROWSERS_DOCKERFILE: &str = "FROM {image}\nRUN npm install -g --no-audit --no-fund --ignore-scripts playwright-core@1.64.1 && npm cache clean --force\nENV NODE_PATH=/usr/lib/node_modules\n";
+/// How long building [`BROWSERS_IMAGE`] may take (a registry that doesn't answer isn't waited on).
+const BROWSERS_BUILD: Duration = Duration::from_secs(180);
+const BROWSERS_JS: &str = include_str!("browsers.js");
+/// axe-core's WCAG rules for the screenshot's session (vendored, MPL-2.0): 640 KB, past what one
+/// environment variable may hold, so it goes in on the container's stdin.
+const AXE_JS: &str = include_str!("../vendor/axe-core/axe.min.js");
+
+/// `docker` with `input` on its stdin, written while its output is read.
+async fn docker_with_input(args: &[&str], input: impl Into<Vec<u8>>, max: usize) -> anyhow::Result<String> {
+    let input: Vec<u8> = input.into();
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut child = tokio::process::Command::new("docker")
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("docker's stdin"))?;
+    let feed = tokio::spawn(async move {
+        let _ = stdin.write_all(&input).await;
+    });
+    // What the container writes is read up to `max` (its page's code runs in there): never more.
+    let (mut stdout, mut stderr) = (child.stdout.take().ok_or_else(|| anyhow::anyhow!("docker's stdout"))?, child.stderr.take().ok_or_else(|| anyhow::anyhow!("docker's stderr"))?);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let (mut stdout, mut stderr) = ((&mut stdout).take(max as u64 + 1), (&mut stderr).take(64 << 10));
+    let (read, _) = tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err));
+    read?;
+    if out.len() > max {
+        let _ = child.kill().await;
+        anyhow::bail!("docker {}: over {max} bytes of output", args.first().unwrap_or(&""));
+    }
+    let status = child.wait().await?;
+    let _ = feed.await;
+    anyhow::ensure!(status.success(), "docker {}: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&err).trim());
+    Ok(String::from_utf8_lossy(&out).trim().to_string())
+}
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -90,6 +148,8 @@ impl Default for RuntimeConfig {
             dashboard: None,
             screenshot_image: SCREENSHOT_IMAGE.into(),
             screenshot_command: SCREENSHOT_COMMAND.into(),
+            warm_for: Duration::from_secs(30 * 60),
+            warm_max: 32,
         }
     }
 }
@@ -106,7 +166,17 @@ pub struct Runtime {
     me: Weak<Runtime>,
     live: Mutex<HashMap<(String, String), Arc<Live>>>,
     client: Client<HttpConnector, Body>,
+    /// When building [`BROWSERS_IMAGE`] last failed (a node without npm's registry, say): not
+    /// tried again for [`BROWSERS_RETRY`], so screenshots don't each wait on a build that fails.
+    browsers_failed: Mutex<Option<std::time::Instant>>,
+    /// One build of [`BROWSERS_IMAGE`] at a time (screenshots may run side by side).
+    browsers_building: tokio::sync::Mutex<()>,
+    /// Held while a preview's egress proxy is checked and (re)made: its services start at once,
+    /// and two makes under the one name would refuse each other (or one remove the other's).
+    egress_making: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
+
+const BROWSERS_RETRY: Duration = Duration::from_secs(3600);
 
 /// A repo's cache volume.
 pub fn cache_name(repo: &str) -> String {
@@ -129,6 +199,9 @@ impl Runtime {
             cluster: OnceLock::new(),
             me: me.clone(),
             live: Mutex::new(HashMap::new()),
+            browsers_failed: Mutex::new(None),
+            browsers_building: tokio::sync::Mutex::new(()),
+            egress_making: Mutex::new(HashMap::new()),
             client: Client::builder(TokioExecutor::new()).build_http(),
         })
     }
@@ -163,7 +236,7 @@ impl Runtime {
                 for ((p, s), live) in lives {
                     info!(preview = %p, service = %s, "the preview moved to another node; stopping its service here");
                     rt.stop(&p, &s, &live, None).await;
-                    rt.live.lock().remove(&(p, s));
+                    rt.forget(&(p, s), live);
                 }
             }
         });
@@ -189,6 +262,17 @@ impl Runtime {
                 })
             })
             .clone()
+    }
+
+    /// Drop a stopped service's entry, unless something took it meanwhile (a request whose start
+    /// must stay serialised with the stop: a fresh entry would start a second container under
+    /// the same name).
+    fn forget(&self, key: &(String, String), live: Arc<Live>) {
+        let mut map = self.live.lock();
+        // Held by the map and by `live`, nothing else.
+        if map.get(key).is_some_and(|l| Arc::ptr_eq(l, &live)) && Arc::strong_count(&live) == 2 {
+            map.remove(key);
+        }
     }
 
     async fn stop(&self, preview: &str, service: &str, live: &Live, why: Option<String>) {
@@ -217,17 +301,96 @@ impl Runtime {
     }
 
     async fn reap(&self) {
-        let idle: Vec<((String, String), Arc<Live>)> = self
-            .live
-            .lock()
-            .iter()
-            .filter(|(_, l)| matches!(*l.phase.borrow(), Phase::Running { .. }) && l.last_request.lock().elapsed() > *l.sleep_after.lock())
-            .map(|(k, l)| (k.clone(), l.clone()))
-            .collect();
+        let warm = self.iso.name() == "docker" && !self.cfg.warm_for.is_zero() && self.cfg.warm_max > 0;
+        let all: Vec<((String, String), Arc<Live>)> = self.live.lock().iter().map(|(k, l)| (k.clone(), l.clone())).collect();
+        let (mut idle, mut frozen) = (Vec::new(), Vec::new());
+        for (key, live) in all {
+            let phase = live.phase.borrow().clone();
+            match phase {
+                Phase::Running { .. } if live.last_request.lock().elapsed() > *live.sleep_after.lock() => idle.push((key, live)),
+                Phase::Frozen { since, .. } => frozen.push((since, key, live)),
+                _ => {}
+            }
+        }
+        // Frozen long enough, or past the node's room (oldest first, leaving room for those
+        // about to freeze): stopped for good.
+        frozen.sort_by_key(|(since, ..)| *since);
+        let over = frozen.len().saturating_sub(self.cfg.warm_max.saturating_sub(if warm { idle.len() } else { 0 }));
+        for (i, (since, (p, s), live)) in frozen.into_iter().enumerate() {
+            if !warm || i < over || since.elapsed() > self.cfg.warm_for {
+                info!(preview = %p, service = %s, "preview service frozen long enough; stopping");
+                self.stop(&p, &s, &live, None).await;
+            }
+        }
         for ((p, s), live) in idle {
+            if warm && self.freeze(&p, &s, &live).await {
+                continue;
+            }
             info!(preview = %p, service = %s, "preview service idle; stopping");
             self.stop(&p, &s, &live, None).await;
         }
+    }
+
+    /// Freeze an idle service (`docker pause`) instead of stopping it: reported asleep, as a stop
+    /// is. `false`: it couldn't be (the caller stops it). A request that raced the pause (it saw
+    /// `Running` and went to the container) thaws it again at once.
+    async fn freeze(&self, preview: &str, service: &str, live: &Live) -> bool {
+        let turn = live.lifecycle.lock().await;
+        let phase = live.phase.borrow().clone();
+        let Phase::Running { addr } = phase else { return true };
+        let checked = Instant::now();
+        // A request since the reaper looked: not idle after all.
+        if live.last_request.lock().elapsed() <= *live.sleep_after.lock() {
+            return true;
+        }
+        let Some(name) = live.container.lock().clone() else { return false };
+        if code_preview::docker::docker(&["pause", &name]).await.is_err() {
+            return false;
+        }
+        live.phase.send_replace(Phase::Frozen { addr, since: Instant::now() });
+        let raced = *live.last_request.lock() >= checked;
+        if raced {
+            if code_preview::docker::docker(&["unpause", &name]).await.is_ok() {
+                live.phase.send_replace(Phase::Running { addr });
+                return true;
+            }
+            return false;
+        }
+        let ran = live.started.lock().take().map(|t| t.elapsed().as_millis() as i64).unwrap_or(0);
+        drop(turn);
+        info!(%preview, %service, "preview service idle; frozen");
+        if let Ok(e) = self.engine() {
+            e.observed(preview, service, ServiceState::Sleeping, None, ran).await;
+        }
+        true
+    }
+
+    /// Thaw a frozen service (`docker unpause`): where it answers, or `None` when it isn't frozen
+    /// any more or won't thaw (its container removed; the caller starts it as usual).
+    async fn thaw(&self, preview: &str, service: &str, live: &Live) -> Option<SocketAddr> {
+        let turn = live.lifecycle.lock().await;
+        let phase = live.phase.borrow().clone();
+        let Phase::Frozen { addr, .. } = phase else { return None };
+        let name = live.container.lock().clone();
+        let thawed = match &name {
+            Some(name) => code_preview::docker::docker(&["unpause", name]).await.is_ok(),
+            None => false,
+        };
+        if !thawed {
+            let name = live.container.lock().take();
+            if let Some(name) = name {
+                self.iso.release(&name).await;
+            }
+            live.phase.send_replace(Phase::Stopped);
+            return None;
+        }
+        *live.started.lock() = Some(Instant::now());
+        live.phase.send_replace(Phase::Running { addr });
+        drop(turn);
+        if let Ok(e) = self.engine() {
+            e.observed(preview, service, ServiceState::Running, None, 0).await;
+        }
+        Some(addr)
     }
 
     /// Where a service answers, starting it if needed; waits up to `wait`.
@@ -239,9 +402,15 @@ impl Runtime {
         }
         let mut rx = live.phase.subscribe();
         // Clone first: a borrow held through the match would deadlock `send_replace`.
-        let phase = rx.borrow_and_update().clone();
+        let mut phase = rx.borrow_and_update().clone();
+        if matches!(phase, Phase::Frozen { .. }) {
+            if let Some(addr) = self.thaw(preview, service, &live).await {
+                return Ok(addr);
+            }
+            phase = rx.borrow_and_update().clone();
+        }
         let start = match phase {
-            Phase::Running { addr } => return Ok(addr),
+            Phase::Running { addr } | Phase::Frozen { addr, .. } => return Ok(addr),
             Phase::Starting => false,
             Phase::Stopped | Phase::Failed(_) => {
                 live.phase.send_replace(Phase::Starting);
@@ -261,7 +430,7 @@ impl Runtime {
                     Phase::Running { addr } => return Ok(addr),
                     Phase::Failed(e) => return Err(Unavailable::Failed(e)),
                     Phase::Stopped => return Err(Unavailable::NotFound),
-                    Phase::Starting => {}
+                    Phase::Starting | Phase::Frozen { .. } => {}
                 }
             }
         });
@@ -333,7 +502,22 @@ impl Runtime {
             // Package caches shared by every preview of the repo: a second preview installs from
             // what the first downloaded.
             cache: Some(cache_name(&t.repo)),
+            // The project limits what its previews' code reaches: the preview's own network.
+            network: if t.egress == crate::settings::EgressRule::Roll && self.iso.name() == "docker" { Some(preview_network(preview).await?) } else { None },
         };
+        // Hosts outside roll it may still reach: through the preview's egress proxy, the one way
+        // out of its network (code that ignores the variables still can't get out).
+        let mut job = job;
+        if let Some(n) = job.network.as_ref().filter(|_| !t.egress_hosts.is_empty()) {
+            self.egress_proxy(preview, &n.name, &t.egress_hosts).await?;
+            let proxy = format!("http://{EGRESS_ALIAS}:3128");
+            for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+                job.env.push((k.into(), proxy.clone()));
+            }
+            for k in ["NO_PROXY", "no_proxy"] {
+                job.env.push((k.into(), "host.docker.internal,localhost,127.0.0.1".into()));
+            }
+        }
         self.trees.prepare(&*self.iso, &job, &t.repo, &t.revision).await?;
         let addr = self.iso.start(&name, t.spec.port).await?;
         // Stopped (slept, redeployed, removed) while it was starting: don't leave it running.
@@ -369,6 +553,36 @@ impl Runtime {
             return None;
         }
         self.store.service_for_host(label).ok().flatten()
+    }
+
+    /// The notes left on `path` of the preview's pages, as JSON (the latest 50; for whoever has
+    /// the button: link access, through roll).
+    async fn feedback_notes(&self, preview: &str, path: &str) -> Response {
+        let here = match self.engine() {
+            Ok(e) => e.notes_of(preview, path).await.unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        ([(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "private, no-store")], axum::Json(here)).into_response()
+    }
+
+    /// A link's way in: its token becomes a cookie (`cookie`, for `max_age` seconds) and the
+    /// visitor is sent to the same URL without `param`.
+    fn enter(&self, req: &Request, param: &str, cookie: &str, value: &str, max_age: i64) -> Response {
+        let query = req.uri().query().unwrap_or("");
+        let prefix = format!("{param}=");
+        let rest: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with(&prefix) && !kv.is_empty()).collect();
+        // Only a path on this host: `//evil.example/` would be another site.
+        let path = format!("/{}", req.uri().path().trim_start_matches(['/', '\\']));
+        let location = if rest.is_empty() { path } else { format!("{path}?{}", rest.join("&")) };
+        let secure = if self.cfg.scheme == "https" { "; Secure" } else { "" };
+        let set = format!("{cookie}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}");
+        let mut r = (StatusCode::FOUND, "").into_response();
+        if let (Ok(l), Ok(c)) = (HeaderValue::from_str(&location), HeaderValue::from_str(&set)) {
+            r.headers_mut().insert(header::LOCATION, l);
+            r.headers_mut().insert(header::SET_COOKIE, c);
+            r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        }
+        r
     }
 
     /// Where a visitor's feedback goes (the preview in roll's dashboard), when they get the button:
@@ -409,22 +623,22 @@ impl Runtime {
         if has_access_cookie(preview, &token, req) {
             return None;
         }
+        // A share link (someone outside the team, until it ends), checked again at every request
+        // so a revoked or ended one stops at once.
+        let share_cookie = format!("roll_share_{preview}");
+        if cookie_value(req, &share_cookie).is_some_and(|t| self.store.share_ends(preview, t).ok().flatten().is_some()) {
+            return None;
+        }
         let query = req.uri().query().unwrap_or("");
-        let given = query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "roll_access").map(|(_, v)| v);
-        if !token.is_empty() && given.is_some_and(|v| same(v, &token)) {
-            let rest: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with("roll_access=") && !kv.is_empty()).collect();
-            // Only a path on this host: `//evil.example/` would be another site.
-            let path = format!("/{}", req.uri().path().trim_start_matches(['/', '\\']));
-            let location = if rest.is_empty() { path } else { format!("{path}?{}", rest.join("&")) };
-            let secure = if self.cfg.scheme == "https" { "; Secure" } else { "" };
-            let set = format!("{cookie}={token}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax{secure}");
-            let mut r = (StatusCode::FOUND, "").into_response();
-            if let (Ok(l), Ok(c)) = (HeaderValue::from_str(&location), HeaderValue::from_str(&set)) {
-                r.headers_mut().insert(header::LOCATION, l);
-                r.headers_mut().insert(header::SET_COOKIE, c);
-                r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            }
-            return Some(r);
+        let given = |name: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v);
+        if !token.is_empty() && given("roll_access").is_some_and(|v| same(v, &token)) {
+            return Some(self.enter(req, "roll_access", &cookie, &token, 2_592_000));
+        }
+        if let Some(t) = given("roll_share")
+            && let Ok(Some(ends)) = self.store.share_ends(preview, t)
+        {
+            let left = ((ends - self.store.now_ms().unwrap_or(ends)) / 1000).max(1);
+            return Some(self.enter(req, "roll_share", &share_cookie, t, left));
         }
         let through = match (&self.cfg.dashboard, self.store.row(preview)) {
             (Some(web), Ok(row)) => Some(format!(
@@ -443,6 +657,11 @@ impl Runtime {
         let addr = loop {
             let addr = match self.ready(preview, service, self.cfg.wait).await {
                 Ok(a) => a,
+                // Stopped while it woke (a sleep or a deploy landing then) and the preview is still
+                // there: the waking page, whose refresh starts what runs now.
+                Err(u) if u.overtaken() && self.store.row(preview).is_ok_and(|r| r.desired == crate::Desired::Active && r.state != crate::State::AwaitingApproval) => {
+                    return Unavailable::Starting.into_response();
+                }
                 Err(u) => return u.into_response(),
             };
             // A container that died underneath us: start it again, once.
@@ -508,6 +727,8 @@ impl Runtime {
 /// Where a preview's pages load the feedback button from (its own host, so `script-src 'self'`
 /// allows it), and the tag that loads it.
 pub const FEEDBACK_PATH: &str = "/__roll/feedback.js";
+/// The feedback already left on a page (`?path=`), for the button to list.
+pub const FEEDBACK_NOTES_PATH: &str = "/__roll/feedback.json";
 const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
 /// Adds the feedback button's tag to a page as it streams: before the first `</body>` (matched
 /// across chunk boundaries, in any case), or at the end of a page without one. Chunks pass on as
@@ -588,21 +809,48 @@ fn feedback_script(target: &str) -> Response {
 
 /// The biggest screenshot kept (a 1280×800 PNG of an ordinary page is 10–200 KiB).
 pub const SCREENSHOT_MAX: usize = 2 << 20;
+/// A screenshot run's report lines (speed, checks and words of the first page; then the other
+/// pages'), each at most this, and everything it writes: every PNG it can take, in base64, and
+/// those lines.
+const SHOT_REPORT_MAX: usize = 4 << 20;
+const SHOT_OUTPUT_MAX: usize = (crate::settings::MAX_PAGES + 2) * SCREENSHOT_MAX * 4 / 3 + 3 * SHOT_REPORT_MAX + crate::store::CROPS_PER_RUN * crate::store::CROP_MAX * 4 / 3 + (64 << 10);
 
 /// The header automation sends a project's bypass secret in (docs/previews.md, "Safety").
 pub const BYPASS_HEADER: &str = "x-roll-preview-bypass";
 
 /// A private preview's answer to a request without its link: where to get in, if roll knows.
+/// `%xx` and `+` in a query value, as a browser's `URLSearchParams` writes them.
+fn percent_decode(v: &str) -> String {
+    let b = v.as_bytes();
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' => match (b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
+                (Some(h), Some(l)) => {
+                    out.push(h * 16 + l);
+                    i += 3;
+                    continue;
+                }
+                _ => out.push(b'%'),
+            },
+            b'+' => out.push(b' '),
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The value of cookie `name` on `req`.
+fn cookie_value<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
+    req.headers().get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(';')).filter_map(|kv| kv.trim().split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v)
+}
+
 /// Whether `req` carries the preview's link access cookie.
 fn has_access_cookie(preview: &str, token: &str, req: &Request) -> bool {
-    let cookie = format!("roll_access_{preview}");
-    req.headers()
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(';'))
-        .filter_map(|kv| kv.trim().split_once('='))
-        .any(|(k, v)| k == cookie && !token.is_empty() && same(v, token))
+    !token.is_empty() && cookie_value(req, &format!("roll_access_{preview}")).is_some_and(|v| same(v, token))
 }
 
 fn private_page(through: Option<&str>) -> Response {
@@ -624,7 +872,7 @@ fn private_page(through: Option<&str>) -> Response {
 }
 
 /// Equal, in time that doesn't depend on where they differ.
-fn same(a: &str, b: &str) -> bool {
+pub(crate) fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
@@ -633,6 +881,10 @@ fn same(a: &str, b: &str) -> bool {
 fn reach_local(v: &str, docker: bool) -> String {
     if !docker {
         return v.to_string();
+    }
+    // A bare host (`SMTP_HOST=127.0.0.1`).
+    if ["127.0.0.1", "localhost", "0.0.0.0", "[::1]"].contains(&v) {
+        return "host.docker.internal".into();
     }
     let mut out = v.to_string();
     for local in ["127.0.0.1", "localhost", "0.0.0.0", "[::1]"] {
@@ -660,6 +912,22 @@ enum Unavailable {
     NotFound,
     Starting,
     Failed(String),
+}
+
+/// A start that a stop, a newer deploy or a lost approval overtook: not the service failing.
+fn superseded(e: &str) -> bool {
+    e.starts_with("stopped while starting") || e.starts_with("the change moved on") || e.contains("isn't approved")
+}
+
+impl Unavailable {
+    /// Stopped before it was up, by something other than the service.
+    fn overtaken(&self) -> bool {
+        match self {
+            Unavailable::NotFound => true,
+            Unavailable::Failed(e) => superseded(e),
+            Unavailable::Starting => false,
+        }
+    }
 }
 
 impl IntoResponse for Unavailable {
@@ -707,13 +975,25 @@ impl Apps for Runtime {
     }
 
     async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()> {
-        let live = self.live.lock().remove(&(preview.to_string(), service.to_string()));
+        let key = (preview.to_string(), service.to_string());
+        let live = self.live.lock().get(&key).cloned();
         if let Some(live) = live {
             self.stop(preview, service, &live, None).await;
+            self.forget(&key, live);
         }
         if let Ok(Some(host)) = self.store.service_host(preview, service) {
             // Whichever node started it.
             self.iso.remove(&container_name(&host)).await;
+        }
+        // The preview's own network goes with its last container (refused while one's attached),
+        // its egress proxy first when no service of the preview is left.
+        if self.iso.name() == "docker" {
+            let others = self.live.lock().keys().any(|(p, s)| p == preview && s != service);
+            if !others {
+                code_preview::docker::remove(&egress_name(preview)).await;
+                self.egress_making.lock().remove(preview);
+            }
+            let _ = code_preview::docker::docker(&["network", "rm", &network_name(preview)]).await;
         }
         // The repo's cache goes with its last preview service.
         if let Ok(Some(svc)) = self.store.services(preview).map(|v| v.into_iter().find(|s| s.name == service))
@@ -742,7 +1022,6 @@ impl Apps for Runtime {
         // Never long in a converge slot: a service still starting (installing, booting) or whose
         // start a stop or a push overtook isn't failing; the engine asks again later.
         let later = |why: String| -> anyhow::Result<Option<(u16, String)>> { Err(crate::ports::StillDeploying(why).into()) };
-        let superseded = |e: &str| e.starts_with("stopped while starting") || e.starts_with("the change moved on") || e.contains("isn't approved");
         let addr = match me.ready(preview, service, Duration::from_secs(5)).await {
             Ok(a) => a,
             Err(Unavailable::Starting) => return later("starting".into()),
@@ -768,17 +1047,11 @@ impl Apps for Runtime {
         Ok(Some((status, first)))
     }
 
-    async fn screenshot(&self, preview: &str, service: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        use base64::Engine as _;
+    async fn screenshot(&self, preview: &str, service: &str, opts: &crate::ports::ShotOptions) -> anyhow::Result<Option<crate::ports::Shot>> {
         if self.iso.name() != "docker" {
             return Ok(None);
         }
         let Some(host) = self.store.services(preview)?.into_iter().find(|s| s.name == service).map(|s| s.host) else { return Ok(None) };
-        // The browser image once, in the background task screenshots run in (a cold pull isn't
-        // bounded by the screenshot's 90 s).
-        if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", &self.cfg.screenshot_image]).await.is_err() {
-            code_preview::docker::docker(&["pull", "--quiet", &self.cfg.screenshot_image]).await?;
-        }
         let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
         match me.ready(preview, service, self.cfg.wait).await {
             Ok(_) => {}
@@ -786,11 +1059,56 @@ impl Apps for Runtime {
             Err(_) => anyhow::bail!("the service didn't start in time"),
         }
         let name = container_name(&host);
-        // The port the runtime published (the service's own), not whatever else its image exposes.
-        let ports = code_preview::docker::docker(&["inspect", "-f", "{{range $p, $_ := .HostConfig.PortBindings}}{{$p}} {{end}}", &name]).await?;
-        let port = ports.split_whitespace().next().and_then(|p| p.split('/').next()).ok_or_else(|| anyhow::anyhow!("the service publishes no port"))?.to_string();
-        let shot = format!("roll-previews-shot-{host}");
-        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), shot.clone(), "--network".into(), format!("container:{name}")];
+        // The service's own port, as its container says (`sh.roll.code.port`: with `egress: roll`
+        // it's on a network of its own and publishes nothing), else the one the runtime published
+        // (a container made before the label), never whatever else its image exposes.
+        let said = code_preview::docker::docker(&["inspect", "-f", &format!("{{{{index .Config.Labels \"{}.port\"}}}} {{{{range $p, $_ := .HostConfig.PortBindings}}}}{{{{$p}}}} {{{{end}}}}", code_preview::docker::LABEL), &name]).await?;
+        let port = said.split_whitespace().find_map(|p| p.split('/').next().and_then(|p| p.parse::<u16>().ok())).ok_or_else(|| anyhow::anyhow!("the service says no port"))?;
+        self.screenshot_in(&name, port, opts).await.map(Some)
+    }
+
+    async fn seed(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {
+        self.seed_job(job).await
+    }
+
+    fn status(&self, preview: &str, service: &str) -> Option<ServiceState> {
+        self.service_status(preview, service)
+    }
+
+    async fn egress_refused(&self, preview: &str) -> Vec<String> {
+        if self.iso.name() != "docker" {
+            return Vec::new();
+        }
+        let tail = code_preview::docker::logs_tail(&egress_name(preview), 200).await;
+        let mut out: Vec<String> = Vec::new();
+        for h in tail.lines().filter_map(|l| l.strip_prefix("refused ")).map(|h| h.trim().chars().take(262).collect::<String>()) {
+            if !h.is_empty() && !out.contains(&h) {
+                out.push(h);
+            }
+        }
+        out
+    }
+
+    fn warm(&self, preview: &str, service: &str) -> bool {
+        self.live.lock().get(&(preview.to_string(), service.to_string())).is_some_and(|l| matches!(*l.phase.borrow(), Phase::Frozen { .. }))
+    }
+}
+
+impl Runtime {
+    /// A screenshot run in container `name`'s own network (its page at `127.0.0.1:<port>`, so the
+    /// page's code reaches only what the service does): this runtime's containers, and roll
+    /// apps' instances (rolld's `RollApps`, through roll apps' `reachable`). The container must
+    /// be running and kept so for the run.
+    pub async fn screenshot_in(&self, name: &str, port: u16, opts: &crate::ports::ShotOptions) -> anyhow::Result<crate::ports::Shot> {
+        use base64::Engine as _;
+        anyhow::ensure!(self.iso.name() == "docker", "screenshots need Docker");
+        // The browser image once, in the background task screenshots run in (a cold pull isn't
+        // bounded by the screenshot's 90 s).
+        if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", &self.cfg.screenshot_image]).await.is_err() {
+            code_preview::docker::docker(&["pull", "--quiet", &self.cfg.screenshot_image]).await?;
+        }
+        let shot = format!("roll-previews-shot-{}", name.trim_start_matches("roll-previews-"));
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--name".into(), shot.clone(), "--network".into(), format!("container:{name}")];
         // Cleaned up with the runtime's own containers after a crash.
         args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL)]);
         if let Some(l) = code_preview::docker::home_label() {
@@ -800,21 +1118,192 @@ impl Apps for Runtime {
         args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=256m".into()]);
         args.extend(code_preview::docker::limits(1024, 1.0));
         args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
-        args.extend([self.cfg.screenshot_image.clone(), "sh".into(), "-c".into(), format!("{} >/dev/null 2>&1 && base64 -w0 /tmp/s.png", self.cfg.screenshot_command)]);
+        args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}"), "--env".into(), "AXE=/tmp/axe.js".into()]);
+        let pages: Vec<&String> = opts
+            .pages
+            .iter()
+            .filter(|p| crate::settings::page_path_ok(p) || crate::settings::width_entry(p).is_some() || crate::settings::state_entry(p).is_some())
+            .take(crate::settings::MAX_PAGES)
+            .collect();
+        args.extend(["--env".into(), format!("PAGES={}", serde_json::to_string(&pages)?)]);
+        let hide: Vec<&String> = opts.hide.iter().filter(|s| crate::settings::selector_ok(s)).take(crate::settings::MAX_HIDE).collect();
+        args.extend(["--env".into(), format!("HIDE={}", serde_json::to_string(&hide)?)]);
+        if let Some(path) = opts.openapi.as_deref().filter(|p| crate::settings::page_path_ok(p)) {
+            args.extend(["--env".into(), format!("OPENAPI={path}")]);
+        }
+        // Each state's page and steps, by name (`shot.js` reaches them before the capture).
+        let states: std::collections::BTreeMap<&str, serde_json::Value> =
+            opts.states
+                .iter()
+                .filter(|s| crate::settings::state_name_ok(&s.name) && crate::settings::page_path_ok(&s.page) && s.steps.len() <= crate::settings::MAX_STEPS && s.steps.iter().all(crate::settings::step_ok))
+                .map(|s| (s.name.as_str(), serde_json::json!({ "page": s.page, "steps": s.steps })))
+                .collect();
+        if !states.is_empty() {
+            args.extend(["--env".into(), format!("STATES={}", serde_json::to_string(&states)?)]);
+        }
+        let endpoints: Vec<&String> = opts.endpoints.iter().filter(|p| crate::settings::page_path_ok(p)).take(crate::settings::MAX_ENDPOINTS).collect();
+        if !endpoints.is_empty() {
+            args.extend(["--env".into(), format!("ENDPOINTS={}", serde_json::to_string(&endpoints)?)]);
+        }
+        // The notes' elements to crop, checked again (they come from the preview's code).
+        let crops: Vec<serde_json::Value> = opts
+            .crops
+            .iter()
+            .filter(|c| crate::settings::page_path_ok(&c.path) && crate::settings::selector_ok(&c.selector) && !c.note.is_empty() && c.note.len() <= 64)
+            .take(crate::store::CROPS_PER_RUN)
+            .map(|c| serde_json::json!({ "note": c.note, "path": c.path, "selector": c.selector }))
+            .collect();
+        if !crops.is_empty() {
+            args.extend(["--env".into(), format!("CROPS={}", serde_json::to_string(&crops)?)]);
+        }
+        // The PNG on the first line, the timings (if the command wrote them) on the second, the
+        // phone-width PNG (if it took one) on the third, then the other pages: what each said,
+        // and their PNGs a line each.
+        args.extend([
+            self.cfg.screenshot_image.clone(),
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "cat > /tmp/axe.js; {} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
+                 && echo && (cat /tmp/s.png.pages.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.$n.png 2>/dev/null || true; done \
+                 && echo && (cat /tmp/s.png.crops.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.crop.$n.png 2>/dev/null || true; done",
+                self.cfg.screenshot_command
+            ),
+        ]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        let out = match tokio::time::timeout(Duration::from_secs(90), code_preview::docker::docker(&argv)).await {
-            Ok(r) => r?,
+        // Each other page is taken and checked too (accessibility, links up to 20 s, SEO, words).
+        // A page state's steps take up to about 25 s more.
+        let state_pages = pages.iter().filter(|p| crate::settings::state_entry(p).is_some()).count() as u64;
+        // A crop loads its page again: about 15 s each.
+        let within = Duration::from_secs(90 + 30 * pages.len() as u64 + 25 * state_pages + 15 * crops.len() as u64 + if endpoints.is_empty() { 0 } else { 25 });
+        let chromium = std::time::Instant::now();
+        // The other browsers the project asked for, in a run of their own alongside Chromium's (a
+        // container each in the service's network): the slot is held for the longer, not both.
+        let browsers_run = async {
+            let started = std::time::Instant::now();
+            let r = if opts.browsers.is_empty() { None } else { Some(self.other_browsers(name, port, opts).await) };
+            (r, started.elapsed().as_millis() as u64)
+        };
+        let (run, (more, browsers_ms)) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)), browsers_run);
+        let out = match run {
+            Ok(Ok(out)) => out,
+            // Its container outlives a docker CLI that gave up on it (too much output).
+            Ok(Err(e)) => {
+                code_preview::docker::remove(&shot).await;
+                return Err(e);
+            }
             Err(_) => {
                 code_preview::docker::remove(&shot).await;
-                anyhow::bail!("the screenshot took over 90 s");
+                anyhow::bail!("the screenshot took over {} s", within.as_secs());
             }
         };
-        let png = base64::engine::general_purpose::STANDARD.decode(out.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
+        let mut lines = out.split('\n');
+        // The report lines are the page's to forge: one too long to be ours reads as nothing.
+        fn report(l: Option<&str>) -> &str {
+            l.filter(|l| l.len() <= SHOT_REPORT_MAX).unwrap_or("")
+        }
+        let (b64, speed, phone) = (lines.next().unwrap_or(""), report(lines.next()), lines.next().unwrap_or(""));
+        let said = report(lines.next());
+        let b64e = base64::engine::general_purpose::STANDARD;
+        let png = b64e.decode(b64.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
         anyhow::ensure!(png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX, "the screenshot isn't a PNG of at most {SCREENSHOT_MAX} bytes");
-        Ok(Some(png))
+        let phone = b64e.decode(phone.trim()).ok().filter(|p| p.starts_with(b"\x89PNG") && p.len() <= SCREENSHOT_MAX);
+        // Ten page lines, then what the crops said and their PNGs.
+        let page_lines: Vec<&str> = lines.by_ref().take(10).collect();
+        let crops_said = report(lines.next());
+        let asked: Vec<&str> = crops.iter().filter_map(|c| c["note"].as_str()).collect();
+        let mut shot = crate::ports::Shot {
+            png,
+            speed: crate::PageSpeed::parse(speed),
+            health: crate::PageHealth::parse(speed),
+            a11y: crate::PageA11y::parse(speed),
+            text: crate::page_text(speed),
+            links: crate::PageLinks::parse(speed),
+            api: crate::openapi::lines(speed),
+            phone,
+            pages: page_shots(&pages, said, page_lines.into_iter()),
+            crops: note_crops(&asked, crops_said, lines),
+        };
+        // The other browsers', best effort: Chromium's screenshot stands.
+        match more {
+            Some(Ok(more)) => shot.pages.extend(more),
+            Some(Err(e)) => tracing::warn!(container = name, error = %e, "previews: other browsers' screenshots"),
+            None => {}
+        }
+        // How long it took, and the other browsers' run within it.
+        tracing::info!(container = name, pages = pages.len(), run_ms = chromium.elapsed().as_millis() as u64, browsers_ms, "previews: screenshot run");
+        Ok(shot)
     }
 
-    async fn seed(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {
+    /// The first page in the other browsers `opts.browsers` names (`browser:<name>` pages), in the
+    /// service's network as Chromium's run is, locked down the same way.
+    async fn other_browsers(&self, name: &str, port: u16, opts: &crate::ports::ShotOptions) -> anyhow::Result<Vec<crate::ports::PageShot>> {
+        use base64::Engine as _;
+        let building = self.browsers_building.lock().await;
+        if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", BROWSERS_IMAGE]).await.is_err() {
+            if let Some(at) = *self.browsers_failed.lock() {
+                anyhow::ensure!(at.elapsed() >= BROWSERS_RETRY, "building {BROWSERS_IMAGE} failed {} min ago; tried again within the hour", at.elapsed().as_secs() / 60);
+            }
+            let label = format!("{}=preview", code_preview::docker::LABEL);
+            let dockerfile = BROWSERS_DOCKERFILE.replace("{image}", &self.cfg.screenshot_image);
+            let built = match tokio::time::timeout(BROWSERS_BUILD, docker_with_input(&["build", "--quiet", "--label", &label, "-t", BROWSERS_IMAGE, "-"], dockerfile, 1 << 20)).await {
+                Ok(r) => r,
+                Err(_) => Err(anyhow::anyhow!("building {BROWSERS_IMAGE} took over {} s", BROWSERS_BUILD.as_secs())),
+            };
+            if let Err(e) = built {
+                *self.browsers_failed.lock() = Some(std::time::Instant::now());
+                return Err(e);
+            }
+            *self.browsers_failed.lock() = None;
+        }
+        // Only the build is one at a time: the runs go side by side.
+        drop(building);
+        let browsers: Vec<&String> = opts.browsers.iter().filter(|b| crate::settings::BROWSERS.contains(&b.as_str())).collect();
+        let hide: Vec<&String> = opts.hide.iter().filter(|s| crate::settings::selector_ok(s)).take(crate::settings::MAX_HIDE).collect();
+        let run = format!("roll-previews-browsers-{}", name.trim_start_matches("roll-previews-"));
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--name".into(), run.clone(), "--network".into(), format!("container:{name}")];
+        args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL)]);
+        if let Some(l) = code_preview::docker::home_label() {
+            args.extend(["--label".into(), l]);
+        }
+        args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=512m".into()]);
+        args.extend(code_preview::docker::limits(1024, 1.0));
+        args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "HOME=/tmp".into()]);
+        args.extend(["--env".into(), format!("BROWSERS={}", serde_json::to_string(&browsers)?), "--env".into(), format!("HIDE={}", serde_json::to_string(&hide)?)]);
+        args.extend(["--env".into(), format!("ROLL_BROWSERS_JS={BROWSERS_JS}"), BROWSERS_IMAGE.into(), "sh".into(), "-c".into(), r#"node -e "$ROLL_BROWSERS_JS""#.into()]);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let within = Duration::from_secs(30 + 40 * browsers.len() as u64);
+        let max = browsers.len() * (SCREENSHOT_MAX * 4 / 3 + 4096);
+        let out = match tokio::time::timeout(within, docker_with_input(&argv, Vec::new(), max)).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => {
+                code_preview::docker::remove(&run).await;
+                return Err(e);
+            }
+            Err(_) => {
+                code_preview::docker::remove(&run).await;
+                anyhow::bail!("the other browsers took over {} s", within.as_secs());
+            }
+        };
+        #[derive(serde::Deserialize)]
+        struct Line {
+            browser: String,
+            #[serde(default)]
+            errors: u32,
+            png: String,
+        }
+        let mut pages: Vec<crate::ports::PageShot> = Vec::new();
+        for l in out.lines().filter_map(|l| serde_json::from_str::<Line>(l).ok()) {
+            let Ok(png) = base64::engine::general_purpose::STANDARD.decode(l.png.trim()) else { continue };
+            let path = format!("browser:{}", l.browser);
+            if png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX && browsers.iter().any(|b| **b == l.browser) && !pages.iter().any(|p| p.path == path) {
+                pages.push(crate::ports::PageShot { path, png, errors: l.errors.min(10_000), report: Default::default() });
+            }
+        }
+        Ok(pages)
+    }
+
+    async fn seed_job(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {
         use code_preview::runner::Outcome;
         let docker = self.iso.name() == "docker";
         let env: Vec<(String, String)> = job.env.iter().map(|(k, v)| (k.clone(), reach_local(&self.iso.reach(v), docker))).collect();
@@ -836,16 +1325,149 @@ impl Apps for Runtime {
         }
     }
 
-    fn status(&self, preview: &str, service: &str) -> Option<ServiceState> {
+    fn service_status(&self, preview: &str, service: &str) -> Option<ServiceState> {
         let live = self.live.lock().get(&(preview.to_string(), service.to_string())).cloned()?;
         let phase = live.phase.borrow().clone();
         Some(match phase {
             Phase::Stopped => ServiceState::Sleeping,
             Phase::Starting => ServiceState::Deploying,
             Phase::Running { .. } => ServiceState::Running,
+            Phase::Frozen { .. } => ServiceState::Sleeping,
             Phase::Failed(_) => ServiceState::Failed,
         })
     }
+}
+
+/// The notes' crops a screenshot run took: which note each line is (`[{note, n}]`, each `n` the
+/// crop's line), and the PNGs a line each. Only notes that were asked for, each once, each a PNG
+/// within [`crate::store::CROP_MAX`].
+fn note_crops<'a>(asked: &[&str], said: &str, pngs: impl Iterator<Item = &'a str>) -> Vec<(String, Vec<u8>)> {
+    #[derive(serde::Deserialize)]
+    struct Said {
+        note: String,
+        n: usize,
+    }
+    use base64::Engine as _;
+    let said: Vec<Said> = serde_json::from_str(said.trim()).unwrap_or_default();
+    let pngs: Vec<&str> = pngs.take(crate::store::CROPS_PER_RUN).collect();
+    let b64e = base64::engine::general_purpose::STANDARD;
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    for s in said {
+        if !asked.contains(&s.note.as_str()) || out.iter().any(|(n, _)| *n == s.note) {
+            continue;
+        }
+        let Some(png) = pngs.get(s.n).and_then(|l| b64e.decode(l.trim()).ok()) else { continue };
+        if png.starts_with(b"\x89PNG") && png.len() <= crate::store::CROP_MAX {
+            out.push((s.note, png));
+        }
+    }
+    out
+}
+
+const EGRESS_JS: &str = include_str!("egress.js");
+/// The egress proxy's name on a preview's network.
+const EGRESS_ALIAS: &str = "roll-egress";
+
+fn egress_name(preview: &str) -> String {
+    format!("roll-previews-egress-{}", preview.trim_start_matches("pv_"))
+}
+
+impl Runtime {
+    /// The preview's egress proxy running with `hosts` (made again when they changed): on the
+    /// preview's network as [`EGRESS_ALIAS`] and on Docker's default one, its way out.
+    async fn egress_proxy(&self, preview: &str, network: &str, hosts: &[String]) -> anyhow::Result<()> {
+        let hosts: Vec<&String> = hosts.iter().filter(|h| crate::settings::egress_host_ok(h)).take(crate::settings::MAX_EGRESS_HOSTS).collect();
+        let list = serde_json::to_string(&hosts)?;
+        let digest = format!("{:016x}", list.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)));
+        let name = egress_name(preview);
+        let turn = self.egress_making.lock().entry(preview.to_string()).or_default().clone();
+        let _turn = turn.lock().await;
+        let running = code_preview::docker::docker(&["inspect", "-f", "{{.State.Running}} {{index .Config.Labels \"sh.roll.egress\"}}", &name]).await.ok();
+        if running.as_deref() == Some(format!("true {digest}").as_str()) {
+            return Ok(());
+        }
+        code_preview::docker::remove(&name).await;
+        let mut args: Vec<String> = vec!["run".into(), "-d".into(), "--name".into(), name.clone(), "--network".into(), network.into(), "--network-alias".into(), EGRESS_ALIAS.into()];
+        args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL), "--label".into(), format!("sh.roll.egress={digest}")]);
+        if let Some(l) = code_preview::docker::home_label() {
+            args.extend(["--label".into(), l]);
+        }
+        args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=16m".into()]);
+        args.extend(code_preview::docker::limits(128, 0.25));
+        args.extend(["--env".into(), format!("HOSTS={list}"), "--env".into(), format!("ROLL_EGRESS_JS={EGRESS_JS}"), self.cfg.screenshot_image.clone(), "sh".into(), "-c".into(), r#"node -e "$ROLL_EGRESS_JS""#.into()]);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        code_preview::docker::docker(&argv).await?;
+        // Its way out: Docker's default network too.
+        code_preview::docker::docker(&["network", "connect", "bridge", &name]).await?;
+        Ok(())
+    }
+}
+
+/// The network a preview whose project limits egress runs on (docs/previews.md, "Egress").
+fn network_name(preview: &str) -> String {
+    format!("roll-previews-net-{}", preview.trim_start_matches("pv_"))
+}
+
+/// The preview's own network, made `--internal` (no route out) if it isn't there yet, with its
+/// gateway (where its containers reach roll's products).
+async fn preview_network(preview: &str) -> anyhow::Result<code_preview::isolation::Network> {
+    let name = network_name(preview);
+    let gateway = |name: String| async move { code_preview::docker::docker(&["network", "inspect", "-f", "{{range .IPAM.Config}}{{.Gateway}} {{end}}", &name]).await.ok().and_then(|g| g.split_whitespace().next().map(str::to_string)) };
+    if let Some(g) = gateway(name.clone()).await {
+        return Ok(code_preview::isolation::Network { name, gateway: g });
+    }
+    let mut args: Vec<String> = vec!["network".into(), "create".into(), "--internal".into(), "--label".into(), format!("{}=preview", code_preview::docker::LABEL)];
+    if let Some(l) = code_preview::docker::home_label() {
+        args.extend(["--label".into(), l]);
+    }
+    args.push(name.clone());
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    // Two starts at once may both make it: the second's "already exists" is fine.
+    let _ = code_preview::docker::docker(&argv).await;
+    let g = gateway(name.clone()).await.ok_or_else(|| anyhow::anyhow!("couldn't make the preview's network {name}"))?;
+    Ok(code_preview::isolation::Network { name, gateway: g })
+}
+
+/// The other pages a screenshot run took: what it said about each (`[{path, errors}]`, in order)
+/// and their PNGs, one line each. Only paths that were asked for, each once.
+fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a str>) -> Vec<crate::ports::PageShot> {
+    use base64::Engine as _;
+    #[derive(serde::Deserialize)]
+    struct Said {
+        path: String,
+        #[serde(default)]
+        errors: u32,
+        #[serde(default)]
+        a11y: Option<serde_json::Value>,
+        #[serde(default)]
+        seo: Option<serde_json::Value>,
+        #[serde(default)]
+        links: Option<serde_json::Value>,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        unstable: bool,
+        #[serde(default)]
+        step: Option<String>,
+    }
+    let said: Vec<Said> = serde_json::from_str(said.trim()).unwrap_or_default();
+    let mut out: Vec<crate::ports::PageShot> = Vec::new();
+    for (s, b64) in said.into_iter().zip(pngs).take(asked.len()) {
+        let Ok(png) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else { continue };
+        if png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX && asked.iter().any(|a| **a == s.path) && !out.iter().any(|p| p.path == s.path) {
+            // Read as the first page's are (the same bounds), from what this page's run wrote.
+            let report = crate::PageReport {
+                a11y: s.a11y.and_then(|a| crate::PageA11y::parse(&serde_json::json!({ "a11y": a, "seo": s.seo }).to_string())),
+                links: s.links.and_then(|l| crate::PageLinks::parse(&serde_json::json!({ "links": l }).to_string())),
+                text: s.text.and_then(|t| crate::page_text(&serde_json::json!({ "text": t }).to_string())),
+                unstable: s.unstable,
+                // A state's step that found nothing (the page's own words in it: one bounded line).
+                step: s.step.map(|t| t.chars().filter(|c| !c.is_control()).take(200).collect()),
+            };
+            out.push(crate::ports::PageShot { path: s.path, png, errors: s.errors.min(10_000), report });
+        }
+    }
+    out
 }
 
 /// Middleware for the API listener: requests for a preview service's host go to it, the rest
@@ -853,6 +1475,15 @@ impl Apps for Runtime {
 pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> Response {
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string));
     let Some((preview, service)) = host.and_then(|h| rt.service_for_host(&h)) else { return next.run(req).await };
+    let mut resp = serve(rt, preview, service, req).await;
+    // Kept out of search engines, whatever the service says (as Vercel's previews are): a public
+    // preview, a share link or an earlier push's URL is never what a search should land on.
+    resp.headers_mut().insert(header::HeaderName::from_static("x-robots-tag"), header::HeaderValue::from_static("noindex"));
+    resp
+}
+
+/// A request for a preview's service: through its gate, then to the service.
+async fn serve(rt: Arc<Runtime>, preview: String, service: String, req: Request) -> Response {
     if let Some(r) = rt.gate(&preview, &service, &req) {
         return r;
     }
@@ -862,6 +1493,10 @@ pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> 
         && let Some(t) = &target
     {
         return feedback_script(t);
+    }
+    if req.uri().path() == FEEDBACK_NOTES_PATH && target.is_some() {
+        let path = req.uri().query().unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "path").map(|(_, v)| percent_decode(v)).unwrap_or_default();
+        return rt.feedback_notes(&preview, &path).await;
     }
     // A page load: a browser says so (`Sec-Fetch-Dest: document`, so not a fetch, a fragment or
     // an iframe); without that header, one that asks for HTML.
@@ -967,7 +1602,8 @@ mod tests {
             out
         };
         // Link access (the default): no token, no preview; the link's token turns into a cookie.
-        assert!(get("web-pr1-shop.preview.test:7070").await.starts_with("HTTP/1.1 401"));
+        let locked = get("web-pr1-shop.preview.test:7070").await;
+        assert!(locked.starts_with("HTTP/1.1 401") && locked.contains("x-robots-tag: noindex"), "{locked}");
         let token = rt.store.access(&row.id).unwrap().unwrap().token;
         let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
         s.write_all(format!("GET /hello?roll_access={token}&x=1 HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
@@ -979,6 +1615,7 @@ mod tests {
         let mut out = String::new();
         s.read_to_string(&mut out).await.unwrap();
         assert!(out.ends_with("service saw /hello"), "{out}");
+        assert!(out.contains("x-robots-tag: noindex"), "never indexed, whatever the service says: {out}");
         // Automation: the project's bypass secret in a header, which the service never sees.
         let raw = |head: String| async move {
             let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -1000,6 +1637,19 @@ mod tests {
         let script = raw(format!("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
         assert!(script.contains("text/javascript") && script.contains(&format!(r#""https://roll.test/dashboard/projects/prj_1/previews?preview={}""#, row.id)), "{script}");
         assert!(raw("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n".into()).await.starts_with("HTTP/1.1 401"));
+        // A share link: in through its token (a cookie of its own, only for its life), out once
+        // it's revoked.
+        let (share, stoken) = rt.store.create_share(&row.id, rt.store.now_ms().unwrap() + 3_600_000, "ada").unwrap();
+        let entered = raw(format!("GET /hello?roll_share={stoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await;
+        assert!(entered.starts_with("HTTP/1.1 302") && entered.contains(&format!("roll_share_{}={stoken}", row.id)) && entered.contains("Max-Age=3"), "{entered}");
+        let with_share = format!("GET /hello HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_share_{}={stoken}\r\nConnection: close\r\n\r\n", row.id);
+        assert!(raw(with_share.clone()).await.ends_with("service saw /hello"));
+        rt.store.revoke_share(&row.id, &share.id).unwrap();
+        assert!(raw(with_share).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
+        // The notes already left on a page: for the same visitors only.
+        let notes = raw(format!("GET /__roll/feedback.json?path=%2F HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
+        assert!(notes.contains("application/json") && notes.ends_with("[]"), "{notes}");
+        assert!(raw("GET /__roll/feedback.json?path=%2F HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n".into()).await.starts_with("HTTP/1.1 401"));
         rt.store.put_settings("prj_1", &crate::Settings { feedback: false, ..Default::default() }).unwrap();
         assert!(raw(page("text/html")).await.ends_with("<p>asked for any</p></BODY></html>"), "the rule turns it off");
         let (secret, _) = rt.store.rotate_bypass("prj_1").unwrap();
@@ -1020,6 +1670,22 @@ mod tests {
     /// The tag goes in as the page streams: before `</body>` even when a chunk splits it, at the
     /// end of a page without one, and once.
     #[test]
+    fn a_screenshot_run_s_pages_are_only_those_asked_for_each_once() {
+        use base64::Engine as _;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let (png, junk) = (b64(b"\x89PNG\r\n\x1a\n..."), b64(b"not a png"));
+        let asked = [&"/pricing".to_string(), &"/about".to_string()];
+        // What the browser container printed: what it said of each page, then their PNGs in order.
+        let run = |said: &str, pngs: &[&String]| page_shots(&asked, said, pngs.iter().map(|s| s.as_str())).into_iter().map(|p| (p.path, p.errors)).collect::<Vec<_>>();
+        let pricing = || ("/pricing".to_string(), 2);
+        assert_eq!(run(r#"[{"path":"/pricing","errors":2},{"path":"/about"}]"#, &[&png, &junk]), [pricing()], "not a PNG");
+        assert_eq!(run(r#"[{"path":"/admin"},{"path":"/pricing","errors":2}]"#, &[&png, &png]), [pricing()], "not asked for");
+        assert_eq!(run(r#"[{"path":"/pricing","errors":2},{"path":"/pricing"}]"#, &[&png, &png]), [pricing()], "once");
+        assert_eq!(run(r#"[{"path":"/pricing","errors":99999}]"#, &[&png]), [("/pricing".to_string(), 10_000)], "bounded");
+        assert_eq!(run("not json", &[&png]), []);
+    }
+
+    #[test]
     fn the_feedback_tag_goes_in_as_the_page_streams() {
         let run = |chunks: &[&str]| {
             let mut t = Tagger::new();
@@ -1035,11 +1701,20 @@ mod tests {
     }
 
     #[test]
+    fn query_values_are_decoded_as_browsers_encode_them() {
+        assert_eq!(percent_decode("%2Fcheckout%3Fstep%3D2"), "/checkout?step=2");
+        assert_eq!(percent_decode("a+b%20c"), "a b c");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    #[test]
     fn loopback_hosts_are_rewritten_for_docker() {
         assert_eq!(reach_local("postgres://u:p@127.0.0.1:55432/main", true), "postgres://u:p@host.docker.internal:55432/main");
         assert_eq!(reach_local("http://localhost:7070/x", true), "http://host.docker.internal:7070/x");
         assert_eq!(reach_local("127.0.0.1:9092,localhost:9093", true), "host.docker.internal:9092,host.docker.internal:9093");
         assert_eq!(reach_local("db.roll.sh:5432", true), "db.roll.sh:5432");
+        assert_eq!((reach_local("127.0.0.1", true), reach_local("10.0.0.1", true)), ("host.docker.internal".to_string(), "10.0.0.1".to_string()));
         assert_eq!(reach_local("http://127.0.0.1:1", false), "http://127.0.0.1:1");
     }
 }

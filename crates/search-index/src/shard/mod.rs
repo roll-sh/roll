@@ -275,6 +275,8 @@ pub struct StoredDoc {
     pub version: i64,
     /// Stored fields (`_id` is field 0).
     pub fields: Vec<(u32, OwnedStoredValue)>,
+    /// The raw vectors of the fields [`Shard::get_with_vectors`] asked for that the doc has.
+    pub vectors: Vec<(u32, Vec<u8>)>,
 }
 
 /// Memory and size figures of a shard.
@@ -1509,8 +1511,14 @@ impl Shard {
     /// Reads a document by id: realtime (latest written state, buffers included) or from
     /// the last published searcher.
     pub fn get(&self, id: &[u8], realtime: bool) -> Result<Option<StoredDoc>> {
+        self.get_with_vectors(id, realtime, &[])
+    }
+
+    /// [`get`](Self::get), also reading the doc's vectors of the fields `vectors` (from the
+    /// same version of the doc).
+    pub fn get_with_vectors(&self, id: &[u8], realtime: bool, vectors: &[u32]) -> Result<Option<StoredDoc>> {
         if !realtime {
-            return get_from_searcher(&self.searcher(), id);
+            return get_from_searcher_with_vectors(&self.searcher(), id, vectors);
         }
         let (si, hash) = stripe_of(id);
         let st = self.inner.state.read();
@@ -1521,21 +1529,22 @@ impl Shard {
                 drop(stripe);
                 // A segment still downloading may block on its documents: not under the lock.
                 drop(st);
-                let fields = match loc {
+                let (fields, vectors) = match loc {
                     Loc::Buffer(slot, d) => {
                         let mut bytes = Vec::new();
-                        slot.buf.read().stored(d, &mut bytes);
+                        let buf = slot.buf.read();
+                        buf.stored(d, &mut bytes);
                         let mut v: Vec<(u32, OwnedStoredValue)> = Vec::new();
                         decode_doc(&bytes, &mut v)?;
-                        v
+                        (v, vectors.iter().filter_map(|&f| buf.vector(f, d).map(|b| (f, b.to_vec()))).collect())
                     }
                     Loc::Segment(e, d) => {
                         let core = e.core.read().clone();
                         core.ensure_stored()?;
-                        core.reader.stored().document(d)?
+                        (core.reader.stored().document(d)?, segment_vectors(&core.reader, d, vectors))
                     }
                 };
-                Ok(Some(StoredDoc { seq_no, primary_term: term, version, fields }))
+                Ok(Some(StoredDoc { seq_no, primary_term: term, version, fields, vectors }))
             }
         }
     }
@@ -2709,6 +2718,16 @@ fn write_file(dir: &std::path::Path, id: &[u8; 16], data: &[u8]) -> Result<PathB
 
 /// Reads a doc by id from a searcher (non-realtime get).
 pub fn get_from_searcher(s: &Searcher, id: &[u8]) -> Result<Option<StoredDoc>> {
+    get_from_searcher_with_vectors(s, id, &[])
+}
+
+/// The raw vectors of doc `d` in the fields `fields` that it has.
+fn segment_vectors(r: &search_codec::SegmentReader, d: u32, fields: &[u32]) -> Vec<(u32, Vec<u8>)> {
+    fields.iter().filter_map(|&f| r.vectors(f).and_then(|v| v.ord(d).map(|o| (f, v.vector(o).to_vec())))).collect()
+}
+
+/// [`get_from_searcher`], also reading the doc's vectors of the fields `vectors`.
+pub fn get_from_searcher_with_vectors(s: &Searcher, id: &[u8], vectors: &[u32]) -> Result<Option<StoredDoc>> {
     let h = search_codec::bloom::hash64(id);
     for seg in s.segments().iter().rev() {
         let Some(terms) = seg.reader.terms(ID_FIELD) else { continue };
@@ -2733,6 +2752,7 @@ pub fn get_from_searcher(s: &Searcher, id: &[u8]) -> Result<Option<StoredDoc>> {
                 primary_term: get(PRIMARY_TERM_FIELD),
                 version: get(VERSION_FIELD),
                 fields: r.stored().document(d)?,
+                vectors: segment_vectors(r, d, vectors),
             }));
         }
     }

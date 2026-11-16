@@ -21,11 +21,13 @@ pub struct QueryRequest {
     pub size: usize,
     pub sort: Vec<(String, bool)>,
     pub search_after: Option<Vec<Value>>,
+    /// `aggs` (the API key query aggregates its matches: [`aggregate`]).
+    pub aggs: Option<Map>,
 }
 
 impl QueryRequest {
     pub fn parse(body: Option<&Value>, what: &str) -> EsResult<QueryRequest> {
-        let mut r = QueryRequest { query: None, from: 0, size: 10, sort: Vec::new(), search_after: None };
+        let mut r = QueryRequest { query: None, from: 0, size: 10, sort: Vec::new(), search_after: None, aggs: None };
         let Some(Value::Obj(m)) = body else { return Ok(r) };
         for (k, v) in m {
             match k.as_str() {
@@ -34,7 +36,8 @@ impl QueryRequest {
                 "size" => r.size = v.as_i64().filter(|n| *n >= 0).ok_or_else(|| EsError::illegal_argument("[size] parameter cannot be negative"))? as usize,
                 "sort" => r.sort = parse_sort(v)?,
                 "search_after" => r.search_after = v.as_array().cloned(),
-                "aggs" | "aggregations" | "with_limited_by" | "with_profile_uid" | "typed_keys" => {}
+                "aggs" | "aggregations" => r.aggs = v.as_object().cloned(),
+                "with_limited_by" | "with_profile_uid" | "typed_keys" => {}
                 other => {
                     return Err(EsError::x_content_parse_bare(format!("[{what}] unknown field [{other}]")));
                 }
@@ -310,6 +313,83 @@ pub fn with_sort(mut v: Value, keys: Vec<Value>, sorted: bool) -> Value {
         m.insert("_sort".into(), Value::Arr(keys));
     }
     v
+}
+
+/// The `aggregations` of the objects the request's query matches (`ApiKeyAggregationsBuilder`'s
+/// subset that roll evaluates over the objects: `terms`, `composite` of `terms` sources, and
+/// `value_count`).
+pub fn aggregate(req: &QueryRequest, aggs: &Map, objects: &[(String, Value)], fields: Fields) -> EsResult<Value> {
+    let mut hits = Vec::new();
+    for (id, obj) in objects {
+        if req.query.as_ref().map(|q| matches(q, id, obj, fields)).transpose()?.unwrap_or(true) {
+            hits.push(obj);
+        }
+    }
+    let field_of = |body: &Value| body.get("field").map(Value::to_es_string).unwrap_or_default();
+    let size_of = |body: &Value| body.get("size").and_then(Value::as_i64).unwrap_or(10).max(0) as usize;
+    let mut out = Map::new();
+    for (name, agg) in aggs {
+        let Some((ty, body)) = agg.as_object().and_then(|m| m.iter().find(|(k, _)| !matches!(k.as_str(), "meta" | "aggs" | "aggregations"))) else { continue };
+        let result = match ty.as_str() {
+            "terms" => {
+                let f = field_of(body);
+                let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+                for h in &hits {
+                    for v in fields(h, &f) {
+                        *counts.entry(v.to_es_string()).or_default() += 1;
+                    }
+                }
+                let mut buckets: Vec<(String, usize)> = counts.into_iter().collect();
+                buckets.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                let size = size_of(body);
+                let other: usize = buckets.iter().skip(size).map(|b| b.1).sum();
+                buckets.truncate(size);
+                crate::obj! {
+                    "doc_count_error_upper_bound" => 0,
+                    "sum_other_doc_count" => other,
+                    "buckets" => Value::Arr(buckets.into_iter().map(|(k, c)| crate::obj! { "key" => k, "doc_count" => c }).collect()),
+                }
+            }
+            "composite" => {
+                let mut sources: Vec<(String, String)> = Vec::new();
+                for src in body.get("sources").and_then(Value::as_array).into_iter().flatten() {
+                    let Some((sname, sdef)) = src.as_object().and_then(|m| m.iter().next()) else { continue };
+                    let Some(t) = sdef.get("terms") else {
+                        return Err(EsError::illegal_argument(format!("Unsupported API Keys agg [{name}] of type [composite]")));
+                    };
+                    sources.push((sname.clone(), field_of(t)));
+                }
+                // Every combination of the sources' values of each object.
+                let mut counts: std::collections::BTreeMap<Vec<String>, usize> = std::collections::BTreeMap::new();
+                for h in &hits {
+                    let mut keys: Vec<Vec<String>> = vec![Vec::new()];
+                    for (_, f) in &sources {
+                        let vals: Vec<String> = fields(h, f).iter().map(Value::to_es_string).collect();
+                        keys = keys.into_iter().flat_map(|k| vals.iter().map(move |v| [k.clone(), vec![v.clone()]].concat())).collect();
+                    }
+                    for k in keys {
+                        *counts.entry(k).or_default() += 1;
+                    }
+                }
+                let after: Option<Vec<String>> = body.get("after").map(|a| sources.iter().map(|(n, _)| a.get(n).map(Value::to_es_string).unwrap_or_default()).collect());
+                let key_obj = |k: &[String]| Value::Obj(sources.iter().zip(k).map(|((n, _), v)| (n.clone(), Value::from(v.clone()))).collect());
+                let buckets: Vec<(Vec<String>, usize)> = counts.into_iter().filter(|(k, _)| after.as_ref().is_none_or(|a| k > a)).take(size_of(body)).collect();
+                let mut m = Map::new();
+                if let Some((last, _)) = buckets.last() {
+                    m.insert("after_key".into(), key_obj(last));
+                }
+                m.insert("buckets".into(), Value::Arr(buckets.iter().map(|(k, c)| crate::obj! { "key" => key_obj(k), "doc_count" => *c }).collect()));
+                Value::Obj(m)
+            }
+            "value_count" => {
+                let f = field_of(body);
+                crate::obj! { "value" => hits.iter().map(|h| fields(h, &f).len()).sum::<usize>() }
+            }
+            other => return Err(EsError::illegal_argument(format!("Unsupported API Keys agg [{name}] of type [{other}]"))),
+        };
+        out.insert(name.clone(), result);
+    }
+    Ok(Value::Obj(out))
 }
 
 /// `{"total": n, "count": m, <key>: [..]}`.

@@ -803,7 +803,7 @@ impl BoundSource {
                 let precision = *precision;
                 let n = 1i32 << precision;
                 let mut tiles: SmallVec<[i64; 4]> = SmallVec::new();
-                for &(lat, lon) in r.points(doc) {
+                for &(lat, lon) in r.points(doc)? {
                     let (x, y) = (crate::geo::tile_x(lon, n), crate::geo::tile_y(lat, n));
                     if self.tile_bounds.is_none_or(|b| b.valid(x as i64, y as i64, precision)) {
                         tiles.push(crate::geo::geotile_long_tiles(precision, x as u32, y as u32));
