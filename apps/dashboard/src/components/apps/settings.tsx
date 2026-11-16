@@ -307,7 +307,7 @@ export function SettingsTab({
             )}
             {form.sourceKind === "git" && (
               <>
-                <Field label="Git URL" hint="a public repository: each new commit on the branch deploys">
+                <Field label="Git URL" hint="each new commit on the branch deploys (a private one: its login below)">
                   {t("url", "https://github.com/owner/name")}
                 </Field>
                 <Field label="Root directory" hint="optional">
