@@ -1,6 +1,8 @@
 // The roll secrets GitHub Action (docs/secrets.md, "GitHub Actions"): an environment's values in
 // the job, each masked before anything else sees it, through a workload identity's login with the
-// job's own OIDC token (no stored token) or a roll token. No dependencies: Node's own fetch.
+// job's own OIDC token (no stored token) or a roll token. With `client-id` it signs the job in to
+// roll as a trusted machine client (docs/permissions.md, "Machine clients"), for any product, and
+// exports that token as ROLL_TOKEN. No dependencies: Node's own fetch.
 "use strict";
 
 const childProcess = require("node:child_process");
@@ -39,6 +41,27 @@ async function oidcToken(fetchFn, env, audience) {
   const value = (await res.json()).value;
   if (!value) throw new Error("GitHub Actions' OIDC answer has no value");
   return value;
+}
+
+/**
+ * The job signed in as trusted machine client `clientId` with its OIDC token (RFC 7523's
+ * `jwt-bearer` grant): roll's access token. Fails with roll's `error_description` (which claim
+ * didn't match), never the token or the assertion.
+ */
+async function signIn(fetchFn, api, clientId, oidc) {
+  const body = new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", client_id: clientId, assertion: oidc });
+  const res = await fetchFn(`${api}/v1/access/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: body.toString() });
+  let answer = {};
+  try {
+    answer = JSON.parse(await res.text());
+  } catch {
+    // not JSON: the status says it
+  }
+  if (!res.ok || !answer.access_token) {
+    const why = [answer.error, answer.error_description].filter(Boolean).join(": ") || `${res.status} ${res.statusText}`.trim();
+    throw new Error(`roll didn't sign the job in as ${clientId}: ${why}`);
+  }
+  return answer.access_token;
 }
 
 /**
@@ -123,10 +146,26 @@ async function run(env, out, fetchFn = fetch) {
   const api = input("api-url").replace(/\/+$/, "");
   const environment = input("environment");
   const scanning = input("scan") === "true";
-  if (!api || (!environment && !scanning)) throw new Error("api-url, and environment unless scanning, are required");
+  const clientId = input("client-id");
+  if (!api || (!environment && !scanning && !clientId)) throw new Error("api-url, and environment unless scanning or signing in with client-id, are required");
   let token = input("token");
   let project = input("project");
-  if (token) {
+  if (clientId) {
+    // Two ways to the same end: say which, never pick one silently.
+    if (input("identity") || token) throw new Error("pass client-id (a trusted machine client) or identity or token, not more than one");
+    const oidc = await oidcToken(fetchFn, env, input("audience") || api);
+    out.write(`::add-mask::${oidc}\n`);
+    token = await signIn(fetchFn, api, clientId, oidc);
+    // Masked before it's written anywhere or printed.
+    out.write(`::add-mask::${token}\n`);
+    if (!environment && !scanning) {
+      if (!env.GITHUB_ENV) throw new Error("GITHUB_ENV isn't set");
+      const d = delimiter(token);
+      fs.appendFileSync(env.GITHUB_ENV, `ROLL_TOKEN<<${d}\n${token}\n${d}\n`, { mode: 0o600 });
+      out.write(`roll: signed in as ${clientId}; later steps have ROLL_TOKEN\n`);
+      return [];
+    }
+  } else if (token) {
     out.write(`::add-mask::${token}\n`);
   } else {
     const identity = input("identity");
