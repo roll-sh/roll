@@ -288,7 +288,7 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     o.open(path)?.write_all(text.as_bytes())
 }
 
-pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, grants: Option<Arc<dyn roll_auth::Grants>>, people: People) -> anyhow::Result<Arc<Secrets>> {
+pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, access: Arc<roll_access::Access>, people: People) -> anyhow::Result<Arc<Secrets>> {
     let system = args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty());
     let target = match system {
         Some(url) => code_sql::Target::Postgres { url: url.to_string(), schema: "secrets".into() },
@@ -302,7 +302,12 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     let web_url = std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.trim().is_empty());
     // Syncs' webhooks go to private addresses only where roll code's may (local development).
     let allow_private = args.code_webhook_allow_private.unwrap_or(open);
-    let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))), grants, people: Some(Arc::new(people)), kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private })), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
+    let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))),
+        // Grants are looked up when a sync made by one pushes; identities' logins mint workload tokens.
+        grants: Some(access.clone() as Arc<dyn roll_auth::Grants>),
+        workloads: Some(Arc::new(Workloads(access))),
+        people: Some(Arc::new(people)),
+        kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private })), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
     };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
@@ -357,6 +362,9 @@ pub fn link_provider(api: &Api, kind: &str) -> Option<Arc<dyn LinkProvider>> {
         "bucket" => Some(Arc::new(Bucket(api.clone()))),
         "stream" => Some(Arc::new(Stream(api.clone()))),
         "nosql" => Some(Arc::new(Nosql(api.clone()))),
+        // A data-only key of the cluster's own (`ELASTICSEARCH_API_KEY`, or an OpenSearch-flavor
+        // cluster's internal user), never its password.
+        "search" => Some(Arc::new(Search(api.clone(), Default::default()))),
         _ => None,
     }
 }
@@ -886,6 +894,36 @@ impl roll_workspace::Owners for People {
     }
 }
 
+/// After a product's own route changes a resource's credential (a password reset, a restore),
+/// tell roll secrets, so every folder linking it live moves its digest at once (watches, syncs,
+/// apps' redeploys and conditional reads see it). Without this they'd still see it within
+/// seconds: a digest reads live values' fingerprints. Only the route's pattern is looked at.
+pub async fn source_changes(axum::extract::State(s): axum::extract::State<Arc<Secrets>>, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let changed = (req.method() == Method::POST).then(|| changed_source(req.uri().path())).flatten();
+    let resp = next.run(req).await;
+    if let Some((kind, r#ref)) = changed
+        && resp.status().is_success()
+    {
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = s.source_changed(kind, &r#ref) {
+                tracing::warn!(%kind, "telling roll secrets a credential changed failed: {e}");
+            }
+        });
+    }
+    resp
+}
+
+/// The link kind and resource a credential-changing product route names.
+fn changed_source(path: &str) -> Option<(&'static str, String)> {
+    let p: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match p.as_slice() {
+        ["v1", "redis", "databases", id, "password" | "restore"] => Some(("redis", id.to_string())),
+        ["v1", "nosql", "databases", id, "password" | "reset" | "restore"] => Some(("nosql", id.to_string())),
+        ["v1", "projects", id, "branches", _, "restore" | "reset"] => Some(("postgres", id.to_string())),
+        _ => None,
+    }
+}
+
 /// roll secrets for roll apps' deploys (`apps_control::integrations::SecretSource`), set once the
 /// store is open (it opens after roll apps starts).
 #[derive(Clone, Default)]
@@ -991,6 +1029,40 @@ impl apps_control::integrations::SecretSource for ForApps {
             Ok(caller) => caller.allows(roll_secrets::Action::Reveal, &roll_secrets::Scope::at(project, env, "/")),
             Err(_) => false,
         }
+    }
+}
+
+/// Workload identities' logins get roll-access workload tokens (`Access::mint_workload`): the
+/// identity's scope, its addresses, for its minutes, owned by whoever made it.
+pub struct Workloads(pub Arc<roll_access::Access>);
+
+impl roll_secrets::Workloads for Workloads {
+    fn mint(&self, name: &str, rule: roll_auth::scope::Rule, ip_allow: Option<Vec<String>>, minutes: u32, owner: Option<&str>) -> roll_secrets::Result<roll_secrets::Minted> {
+        let within = roll_auth::scope::Scope(vec![rule]);
+        let new = roll_access::store::NewGrant { name: name.chars().take(64).collect(), rules: within.clone(), expires_at: None, ip_allow: ip_allow.unwrap_or_default(), rate_per_minute: None, ask_otherwise: false, ..Default::default() };
+        let (access, owner) = (self.0.clone(), owner.map(str::to_string));
+        // Logins run on the store's blocking threads (`blocking` in roll-secrets' api.rs), inside
+        // the runtime: never call this from an async task, where `block_on` panics.
+        let made = tokio::runtime::Handle::current().block_on(async move { access.mint_workload(new, &within, minutes, owner.as_deref()).await });
+        match made {
+            Ok((g, secret)) => Ok(roll_secrets::Minted { id: g.id, secret, expires_at: g.expires_at.unwrap_or_default() }),
+            Err(roll_access::Error::Forbidden(m)) => Err(Error::Forbidden(m)),
+            Err(roll_access::Error::BadRequest(m)) => Err(Error::BadRequest(m)),
+            Err(roll_access::Error::Conflict(m) | roll_access::Error::TooMany(m)) => Err(Error::TooMany(m)),
+            Err(e) => Err(Error::Internal(format!("minting a workload token: {e}"))),
+        }
+    }
+
+    /// Only a live workload grant, with why and an audit row (`false`: it had already ended).
+    fn revoke(&self, id: &str) -> roll_secrets::Result<()> {
+        self.0.revoke_workload(id, "its workload identity was deleted").map(|_| ()).map_err(|e| Error::Internal(format!("revoking a workload token: {e}")))
+    }
+
+    /// Each token as roll-access answers it now: gone once revoked or expired, or (a person's own)
+    /// once its person can't sign in.
+    fn grants(&self) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
+        let list = self.0.store.list().map_err(|e| Error::Internal(format!("listing roll-access's tokens: {e}")))?;
+        Ok(list.into_iter().filter(|g| g.revoked_at.is_none()).filter_map(|g| roll_auth::Grants::grant(&*self.0, &g.id)).collect())
     }
 }
 
@@ -1137,6 +1209,7 @@ mod tests {
             sts: None,
             outside: None,
             clouds: None,
+            workloads: None,
         };
         let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
         let set = axum::http::Request::put(format!("/v1/secrets/projects/{project}/environments/production/secrets/DB_URL"))

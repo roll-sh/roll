@@ -142,6 +142,7 @@ pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
         "stream" => ("streams", "stream"),
         "queue" => ("queues", "vhost"),
         "nosql" => ("nosql", "nosql-database"),
+        "search" => ("search", "cluster"),
         // Another service's URLs: no credential, but held to the same `reveal` as the rest.
         "service" => ("apps", "service"),
         // Not a link: a repo apps reads (`apps_repo`).
@@ -1201,10 +1202,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions/{v}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
-    // What hands out more than the request itself: secrets' own tokens, syncs (they push values
+    // What hands out more than the request itself: syncs (they push values
     // elsewhere), audit sinks and required keys are admin; a share link of a value reveals it.
-    row("*", "/v1/secrets/projects/{project}/tokens", "secrets", ADMIN, one(&["project"], "project")),
-    row("*", "/v1/secrets/projects/{project}/tokens/", "secrets", ADMIN, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/syncs", "secrets", ADMIN, one(&["project"], "project")).reveals(&["signing_secret"]),
     row("GET", "/v1/secrets/projects/{project}/syncs", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/syncs/", "secrets", ADMIN, one(&["project"], "project")),
@@ -1218,6 +1217,8 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/secrets/projects/{project}/identities/{id}/jwks", "secrets", ADMIN, one(&["project"], "project")),
     // Renewing a lease extends a credential whoever could read it holds.
     row("POST", "/v1/secrets/projects/{project}/leases/{id}/renew", "secrets", REVEAL, one(&["project"], "project")),
+    // Ending a credential only takes access away: whoever could reveal it may.
+    row("DELETE", "/v1/secrets/projects/{project}/leases/{id}", "secrets", REVEAL, one(&["project"], "project")),
     // Exporting an environment's folder shares it with another project.
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/exports", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     // Who and what can read a folder: the project's credentials, as the tokens list (a project admin's).
@@ -1266,6 +1267,9 @@ static ROWS: &[Row] = &[
     // A private registry's login (never answered back), and unlinking a database: settings.
     row("PUT", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
     row("DELETE", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
+    // A private Git repository's login (never answered back), as a registry's.
+    row("PUT", "/v1/apps/services/{id}/git-login", "apps", W, one(PG, "service")),
+    row("DELETE", "/v1/apps/services/{id}/git-login", "apps", W, one(PG, "service")),
     // A link puts the linked resource's address and password in the service's variables, where
     // its code reads them: reveal on that resource too.
     row("PUT", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")).lends(Lend::Path("kind", "ref")),

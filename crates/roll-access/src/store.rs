@@ -13,6 +13,8 @@ use serde_json::Value;
 
 mod device;
 pub use device::{DEVICE_TTL_MS, DeviceRequest, normalize_user_code, show_user_code};
+mod tasks;
+pub use tasks::{McpTask, TASK_STALE_MS, TASK_TTL_MS, TASKS_PER_OWNER, TaskUpdate, iso};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS grants (
@@ -132,6 +134,22 @@ CREATE TABLE IF NOT EXISTS oauth_devices (
     grant_id TEXT,
     denied INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;
+-- MCP tasks (store/tasks.rs): a tool call that outlasts its request, polled from any node.
+CREATE TABLE IF NOT EXISTS mcp_tasks (
+    id_hash TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    status TEXT NOT NULL,
+    status_message TEXT,
+    input TEXT,
+    result TEXT,
+    error TEXT,
+    cancel INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS mcp_tasks_owner ON mcp_tasks (owner, status);
 ";
 
 /// A grant's secret prefixes: scoped tokens, OAuth access and refresh tokens.
@@ -1563,6 +1581,7 @@ impl Store {
             // A network unused for the log's days is forgotten (used again, it's news again).
             c.execute("DELETE FROM grant_networks WHERE last_at < ?", [before])?;
             c.execute("DELETE FROM oauth_codes WHERE expires_at < ?", [now])?;
+            c.execute("DELETE FROM mcp_tasks WHERE expires_at < ?", [now])?;
             c.execute("DELETE FROM grant_secrets WHERE expires_at IS NOT NULL AND expires_at < ?", [now])?;
             let ended = "SELECT id FROM grants WHERE kind = 'workload' AND COALESCE(revoked_at, expires_at) < ?";
             let day = now - 24 * 3600 * 1000;

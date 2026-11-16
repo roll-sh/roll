@@ -41,6 +41,12 @@ fn products() -> Router {
         .route("/v1/projects", get(|| async { axum::Json(json!([{ "id": "pa" }])) }))
         .route("/v1/projects/{id}", delete(|| async { axum::http::StatusCode::NO_CONTENT }))
         .route("/v1/previews/{id}/screenshot", get(|| async { ([(axum::http::header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 0, 1, 2]) }))
+        // A run still going the first two times it's waited on (each wait answers at its limit).
+        .route("/v1/tasks/runs/{id}/wait", get(|| async {
+            static WAITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = WAITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            axum::Json(json!({ "id": "run_1", "status": if n < 2 { "running" } else { "completed" }, "output": if n < 2 { json!(null) } else { json!({ "ok": true }) } }))
+        }))
 }
 
 /// A fronted set (as roll code's tools are): its results are its own, text included.
@@ -310,6 +316,144 @@ async fn lockdown_withholds_what_outsiders_wrote() {
     assert_eq!(locked["structuredContent"]["items"][0]["title"], roll_mcp::lockdown::WITHHELD);
     let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/mcp?lockdown=maybe", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "a typo never turns lockdown off");
+}
+
+/// Seals as rolld's does in shape: bound to the task, opened only with the same binding.
+struct TestSealer;
+
+impl roll_access::sinks::SinkTransport for TestSealer {
+    fn check(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn seal(&self, id: &str, secret: &str) -> Result<String, String> {
+        Ok(format!("{id}|{}", secret.chars().rev().collect::<String>()))
+    }
+    fn open(&self, id: &str, sealed: &str) -> Result<String, String> {
+        let rest = sealed.strip_prefix(&format!("{id}|")).ok_or("sealed for another task")?;
+        Ok(rest.chars().rev().collect())
+    }
+    fn post(&self, _: String, _: Vec<(String, String)>, _: Vec<u8>) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// MCP tasks (2026-07-28's extension): a call that waits for a person answers at once with a task
+/// its client polls; nobody else's poll finds it, a client that didn't declare the extension
+/// can't ask, and once approved the call runs and the task completes with its result.
+#[tokio::test]
+async fn a_call_waiting_for_approval_is_a_task_polled_to_its_result() {
+    let d = Daemon::new();
+    let _ = d.access.sinks.set(Arc::new(TestSealer));
+    let asker = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow", "delete": "ask" } }])).await;
+    let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
+    let send = |token: String, method: &'static str, params: Value, tasks: bool| {
+        let d = &d;
+        async move {
+            let mut caps = json!({ "elicitation": { "url": {} } });
+            if tasks {
+                caps["extensions"] = json!({ "io.modelcontextprotocol/tasks": {} });
+            }
+            let mut params = params;
+            params["_meta"] = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "tasks", "version": "1" }, "io.modelcontextprotocol/clientCapabilities": caps });
+            let name = params.get("name").or_else(|| params.get("taskId")).and_then(Value::as_str).map(str::to_string);
+            let mut h = vec![("mcp-protocol-version", "2026-07-28".to_string()), ("mcp-method", method.to_string())];
+            if let Some(n) = name {
+                h.push(("mcp-name", n));
+            }
+            let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            d.http_with(&token, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })), &h).await.2
+        }
+    };
+    let made = send(asker.clone(), "tools/call", json!({ "name": "postgres_delete_project", "arguments": { "project": "pa" } }), true).await;
+    let task = &made["result"];
+    assert_eq!(task["resultType"], "task", "{made}");
+    let id = task["taskId"].as_str().unwrap().to_string();
+    // It shows where a person decides.
+    let mut got = json!(null);
+    for _ in 0..50 {
+        got = send(asker.clone(), "tasks/get", json!({ "taskId": id }), true).await;
+        if got["result"]["status"] == "input_required" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    // One request per approval, keyed by it: shown once however often the task waits again.
+    let requests = got["result"]["inputRequests"].as_object().cloned().unwrap_or_default();
+    assert_eq!(requests.len(), 1, "{got}");
+    assert!(requests.keys().all(|k| k.starts_with("apr_")) && requests.values().all(|r| r["params"]["mode"] == "url"), "{got}");
+    // Nobody else's poll finds it, and a client that didn't declare the extension can't ask.
+    assert_eq!(send(reader.clone(), "tasks/get", json!({ "taskId": id }), true).await["error"]["code"], -32602);
+    assert_eq!(send(asker.clone(), "tasks/get", json!({ "taskId": id }), false).await["error"]["code"], -32021);
+    // Approved: the call runs, and the task completes with its result.
+    let (_, _, pending) = d.http(OPERATOR, Method::GET, "/v1/access/approvals", None).await;
+    let approval = pending.as_array().unwrap().iter().find(|a| a["state"] == "pending").unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(d.http(OPERATOR, Method::POST, &format!("/v1/access/approvals/{approval}/approve"), None).await.0, StatusCode::OK);
+    for _ in 0..100 {
+        got = send(asker.clone(), "tasks/get", json!({ "taskId": id }), true).await;
+        if got["result"]["status"] == "completed" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!((got["result"]["status"].as_str(), got["result"]["result"]["isError"].as_bool()), (Some("completed"), Some(false)), "{got}");
+}
+
+/// A tool that waits for something (a run) up to its limit per request waits on as a task, asked
+/// again until it's over, and the task completes with the answer that says so.
+#[tokio::test]
+async fn a_wait_outlasting_its_request_goes_on_as_a_task() {
+    let d = Daemon::with_products(vec!["tasks".into()]);
+    let _ = d.access.sinks.set(Arc::new(TestSealer));
+    let send = |method: &'static str, params: Value| {
+        let d = &d;
+        async move {
+            let mut params = params;
+            params["_meta"] = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } } });
+            let name = params.get("name").or_else(|| params.get("taskId")).and_then(Value::as_str).unwrap_or_default().to_string();
+            let h = [("mcp-protocol-version", "2026-07-28"), ("mcp-method", method), ("mcp-name", name.as_str())];
+            d.http_with(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })), &h).await.2
+        }
+    };
+    let made = send("tools/call", json!({ "name": "tasks_wait_run", "arguments": { "id": "run_1" } })).await;
+    assert_eq!(made["result"]["resultType"], "task", "the run wasn't over: {made}");
+    let id = made["result"]["taskId"].as_str().unwrap().to_string();
+    let mut got = json!(null);
+    for _ in 0..100 {
+        got = send("tasks/get", json!({ "taskId": id })).await;
+        if got["result"]["status"] == "completed" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(got["result"]["result"]["structuredContent"]["status"], "completed", "{got}");
+}
+
+/// MCP Apps: a host that declares them in `initialize` keeps them for its session (the id says
+/// so: roll keeps none), its row-reading tools point at roll's table view, and the view is served
+/// as an app's HTML; a host that didn't declare them sees no UI at all.
+#[tokio::test]
+async fn a_host_that_renders_apps_gets_the_table_view() {
+    let d = Daemon::new();
+    let caps = json!({ "extensions": { "io.modelcontextprotocol/ui": { "mimeTypes": ["text/html;profile=mcp-app"] } } });
+    let (_, h, _) = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": caps, "clientInfo": { "name": "host", "version": "1" } } }))).await;
+    let session = h["mcp-session-id"].to_str().unwrap().to_string();
+    let rpc = |method: &'static str, params: Value, session: Option<String>| {
+        let d = &d;
+        async move {
+            let h: Vec<(&str, String)> = session.map(|s| vec![("mcp-session-id", s)]).unwrap_or_default();
+            let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            d.http_with(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 2, "method": method, "params": params })), &h).await.2["result"].clone()
+        }
+    };
+    let tools = rpc("tools/list", json!({}), Some(session.clone())).await;
+    let ui_of = |list: &Value, name: &str| list["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).map(|t| t["_meta"]["ui"]["resourceUri"].clone()).unwrap_or(Value::Null);
+    assert_eq!(ui_of(&tools, "postgres_query"), "ui://roll/table", "{tools}");
+    assert_eq!(ui_of(&tools, "postgres_delete_project"), Value::Null, "only tools that read rows");
+    let view = rpc("resources/read", json!({ "uri": "ui://roll/table" }), Some(session)).await;
+    assert_eq!(view["contents"][0]["mimeType"], "text/html;profile=mcp-app", "{view}");
+    assert!(view["contents"][0]["text"].as_str().unwrap().contains("ui/initialize"));
+    // A host that didn't declare them: no UI.
+    assert_eq!(ui_of(&rpc("tools/list", json!({}), None).await, "postgres_query"), Value::Null);
 }
 
 /// A 2026-07-28 client (the stateless core) is served with no `initialize`: each request names its

@@ -569,17 +569,19 @@ async fn run() -> anyhow::Result<()> {
     // stands only for what's theirs (roll_workspace::Workspace::trusts, asked by every consumer).
     let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
-    // Grants from roll-access are looked up when a sync made by one pushes.
-    let grants: std::sync::Arc<dyn roll_auth::Grants> = access.clone();
-    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), Some(grants), people)?;
+    // Its tokens are roll-access's: grants for syncs a token made, workload tokens for identities.
+    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people)?;
     code_secrets.set(secrets.clone(), workspace.clone());
     apps_secrets.set(secrets.clone(), workspace.clone());
     let _ = secrets_envs.0.set(secrets.clone());
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }
-    router = router.merge(roll_secrets::router(secrets));
+    router = router.merge(roll_secrets::router(secrets.clone()));
     products_api.set(router.clone());
+    // A product's own credential changes (a password reset, a restore) move live links' digests
+    // at once. Layered after the copy above: roll secrets' own rotations say so themselves.
+    router = router.layer(axum::middleware::from_fn_with_state(secrets, secrets::source_changes));
     // apps' deploy hooks found leaked (`rlk_`) stop working, like tokens.
     if let Some(a) = &apps {
         let apps = a.apps.clone();
