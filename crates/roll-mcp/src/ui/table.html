@@ -46,6 +46,15 @@
 
   const el = (tag, text, cls) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; };
   const show = (v) => v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+  // A time a route answers as Unix milliseconds (or seconds) under a `…_at` key, as a UTC time a
+  // person reads; the raw value stays in the cell's title.
+  const when = (k, v) => {
+    if (typeof v !== "number" || !/(_at$|^ts$)/.test(k)) return null;
+    const ms = v > 1e12 && v < 1e14 ? v : v > 1e9 && v < 1e11 ? v * 1000 : null;
+    return ms === null ? null : new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  };
+  const cell = (k, v) => when(k, v) ?? show(v);
+  const blank = (v) => v === null || v === undefined || v === "";
   const mono = (k, v) => typeof v === "number" || /(^id$|_id$|^ts$|_at$|hash|sha|offset)/.test(k);
   // The content's own size: the document's can't be smaller than the frame it's in.
   const resize = () => {
@@ -65,14 +74,16 @@
     // The first list of objects in the answer is the table; the answer itself if it's one.
     const rows = Array.isArray(data) ? data : Object.values(data || {}).find((v) => Array.isArray(v) && v.length && typeof v[0] === "object" && !Array.isArray(v[0]));
     if (Array.isArray(rows) && rows.length && typeof rows[0] === "object") {
-      const cols = [...new Set(rows.slice(0, 200).flatMap((r) => Object.keys(r)))].slice(0, 12);
+      // Columns with a value in some row (an always-empty one is noise), at most 12.
+      const sample = rows.slice(0, 200);
+      const cols = [...new Set(sample.flatMap((r) => Object.keys(r)))].filter((c) => sample.some((r) => !blank(r[c]))).slice(0, 12);
       const table = el("table"), head = el("tr");
       cols.forEach((c) => head.append(el("th", c)));
       table.append(el("thead").appendChild(head).parentNode);
       const body = el("tbody");
       rows.slice(0, 500).forEach((r) => {
         const tr = el("tr");
-        cols.forEach((c) => { const td = el("td", show(r[c]), mono(c, r[c]) ? "mono" : ""); td.title = show(r[c]); tr.append(td); });
+        cols.forEach((c) => { const td = el("td", cell(c, r[c]), mono(c, r[c]) ? "mono" : ""); td.title = show(r[c]); tr.append(td); });
         body.append(tr);
       });
       table.append(body);
@@ -80,7 +91,7 @@
       document.getElementById("count").textContent = rows.length > 500 ? `first 500 of ${rows.length}` : `${rows.length} ${rows.length === 1 ? "row" : "rows"}`;
     } else if (data && typeof data === "object") {
       const dl = el("dl");
-      Object.entries(data).slice(0, 60).forEach(([k, v]) => { dl.append(el("dt", k), el("dd", show(v), mono(k, v) ? "mono" : "")); });
+      Object.entries(data).slice(0, 60).forEach(([k, v]) => { dl.append(el("dt", k), el("dd", cell(k, v), mono(k, v) ? "mono" : "")); });
       view.append(dl);
       document.getElementById("count").textContent = "";
     } else {
@@ -102,7 +113,9 @@
     if (m.method === "ui/notifications/host-context-changed" && m.params && m.params.theme) document.documentElement.dataset.theme = m.params.theme;
   });
 
-  request("ui/initialize", { appInfo: { name: "roll", version: "1" }, appCapabilities: {} })
+  // The MCP Apps protocol version this view speaks (the ext-apps SDK's LATEST_PROTOCOL_VERSION):
+  // hosts validate the request, and one without it is refused.
+  request("ui/initialize", { protocolVersion: "2026-01-26", appInfo: { name: "roll", version: "1" }, appCapabilities: { availableDisplayModes: ["inline"] } })
     .then((r) => {
       const ctx = (r && r.hostContext) || {};
       if (ctx.theme) document.documentElement.dataset.theme = ctx.theme;
