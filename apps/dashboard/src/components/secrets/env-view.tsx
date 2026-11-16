@@ -854,7 +854,7 @@ function ValueHead({ onGenerate }: { onGenerate?: () => void }) {
     <span className={`${label} flex items-center justify-between`}>
       Value
       {onGenerate && (
-        <button type="button" onClick={onGenerate} className="flex items-center gap-1 text-[11px] font-normal text-muted transition-colors hover:text-accent" title="A random value of 48 letters and digits, made here in the browser">
+        <button type="button" onClick={onGenerate} className="flex items-center gap-1 text-[11px] font-normal text-muted transition-colors hover:text-accent" title="A random value made here in the browser: 48 letters and digits, or what the key's password policy asks">
           <Dices className="size-3" /> Generate
         </button>
       )}
