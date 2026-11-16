@@ -10,6 +10,7 @@ pub mod cache;
 pub mod cols;
 mod dead;
 pub mod discard;
+mod dirlock;
 pub mod durable;
 pub mod fileio;
 mod hot;
@@ -488,6 +489,8 @@ fn write_manifest(dir: &Path, m: &Manifest) -> Result<()> {
 impl Store {
     pub fn open(dir: &Path, opts: StoreOptions) -> Result<Arc<Store>> {
         durable::create_dir_all_synced(dir)?;
+        // (A store of this process left open on the directory is closed first: `dirlock`.)
+        let claim = dirlock::take_over(dir)?;
         let manifest: Manifest = match std::fs::read(dir.join("MANIFEST")) {
             Ok(b) => {
                 serde_json::from_slice(&b).map_err(|e| internal(format!("bad MANIFEST: {e}")))?
@@ -632,6 +635,7 @@ impl Store {
                 let _ = durable::remove_file(&wal::wal_path(dir, seq));
             }
         }
+        dirlock::register(claim, &store);
         Ok(store)
     }
 
