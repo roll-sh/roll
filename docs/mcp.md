@@ -720,12 +720,20 @@ waits on a sibling PR reaching main is last.
 
 1. **The merge queue, in turn:** previews' security fixes #123 and #137 go first (agreed), then #108 (skills, waits, missing ids asked for, install links), #114 (trusted
    machine clients: the secrets thread reruns roll-secrets' tests on its head first).
-2. **`roll_machine_client` in the Terraform provider:** built on `feature/roll-mcp-terraform-clients`
+2. **Two-person approvals (in progress, `feature/roll-mcp-approval-quorum` on #114):** a policy
+   rule names what needs more than one approver and who they are (`{product, actions,
+   environments, required, approvers}`), as Teleport's access requests, Vault's control groups,
+   Infisical's approval policies and GitHub's required reviewers do. The token's own person never
+   counts, each approver counts once, any eligible approver denies, and such a request is approved
+   once (never remembered). roll secrets now uses roll-access's approvals for reveals rather than
+   its own access requests, so this is where production reveals get a second pair of eyes. The
+   approvals page and chat cards show "1 of 2".
+3. **`roll_machine_client` in the Terraform provider:** built on `feature/roll-mcp-terraform-clients`
    (6bc1979b9, on #114; with the secrets thread for review). `TF_ACC=1 go test` is green against the fake
    rolld, and so is a run against a real rolld (`live/tf-machine-client.sh`: create with GitHub's
    identity, rules changed in place, a new subject rotates with the same client id, import by id,
    destroy revokes, a scoped token refused). It opens as a PR on main once #114 merges.
-3. **More MCP Apps views:**
+4. **More MCP Apps views:**
    - a preview's screenshot against its baseline;
    - a rollback button on a deploy (calling `apps_rollback` through the host, so through the gate,
      as deploy), once a host that renders views is confirmed (the review pack's decision 4): a
@@ -738,34 +746,34 @@ waits on a sibling PR reaching main is last.
    ChatGPT need a public HTTPS rolld and the user's account (the review pack's decisions);
    MCPJam's inspector (3.18) asks for an MCPJam account first.
 
-4. **Enterprise-managed authorization** (SEP-990): a company IdP's ID-JAG traded for a roll
+5. **Enterprise-managed authorization** (SEP-990): a company IdP's ID-JAG traded for a roll
    token. It needs accounts' SSO first.
-5. **Everyday routes with no tool:** tasks, streams, storage, queues, postgres, Redis and NoSQL have
+6. **Everyday routes with no tool:** tasks, streams, storage, queues, postgres, Redis and NoSQL have
    theirs (`tool-gaps.py origin/main <product>` lists what's left). What's left is mostly what only
    an operator does by hand: keys, passwords, accounts, IAM, roles, CDN, migrations, evict and
    unload, which stay without tools. Recheck each product after its thread lands new routes.
-6. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
+7. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
    automations that pick up issues and chat messages (the agents thread's call; tell it), and
    chat messages that reach an agent marked `outside` (an install's non-members can't drive
    roll, so mostly members' text).
-7. **`apps_purge_cache`** once apps' #139 is on main: a sibling of `apps_restart` for
+8. **`apps_purge_cache`** once apps' #139 is on main: a sibling of `apps_restart` for
    `POST …/environments/{env}/cache/purge {paths?}` (deploy in production, write elsewhere, by
    the environment's prefix row).
-8. **More tools that wait:** `apps_wait_deploy` is in #108; branch backups and search reindexes
+9. **More tools that wait:** `apps_wait_deploy` is in #108; branch backups and search reindexes
    can use `until` once their routes answer a state to wait on (search's reindex is an
    Elasticsearch task today, with no roll route to watch). Recheck with `mcpc` (`~/.local/share/roll-mcp/live/mcpc-tasks.sh`), and with the
    TypeScript SDK's `client/ext/tasks` once it ships.
-9. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+10. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25; agreed conflicts resolved by `known-conflicts.py`), and
    compare each product's routes with its tools (an everyday route with no tool is a gap: apps'
    were found this way). #24 and #25 are on main, so `feature/mcp-on-landing` is retired:
    secrets' #64 lands on main directly.
-10. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+11. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_`, `rlc_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-11. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+12. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset (see Toolsets: it would drop tools from connections that use them; search mode is opt-in); a connection narrowed to one project (Supabase's `project_ref`): their
