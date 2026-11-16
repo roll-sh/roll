@@ -1,6 +1,6 @@
 import { Bot } from "lucide-react";
 import { useEffect, useState } from "react";
-import { accessApi, catalogFor, EXPIRIES, presetRules, publicJwk, statusOf, type Catalog, type MachineClient, type MadeMachineClient, type Rule } from "@/lib/access-api";
+import { accessApi, catalogFor, EXPIRIES, KEEP_OLD, presetRules, publicJwk, statusOf, type Catalog, type MachineClient, type MadeMachineClient, type Rule } from "@/lib/access-api";
 import { btn, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 import { Builder } from "./builder";
 import { GrantRow } from "./overview";
@@ -49,7 +49,10 @@ export function MachineClients({ clients, refresh }: { clients: MachineClient[];
       <ul className="divide-y divide-line">
         {live.map((c) => (
           <li key={c.client_id}>
-            <div className="px-5 pt-3 font-mono text-[12px] text-subtle">{c.client_id}</div>
+            <div className="flex items-center gap-3 px-5 pt-3 text-[12px]">
+              <span className="font-mono text-subtle">{c.client_id}</span>
+              <RotateClient client={c} refresh={refresh} />
+            </div>
             <ul>
               <GrantRow g={c.grant} refresh={refresh} kindLabel={c.signs_with_key ? "signs with a key" : "signs with a secret"} />
             </ul>
@@ -57,6 +60,78 @@ export function MachineClients({ clients, refresh }: { clients: MachineClient[];
         ))}
       </ul>
     </Panel>
+  );
+}
+
+/**
+ * A new credential, the same client id: a pasted key, or a new secret shown once. The old one
+ * stops now (with the tokens it got) or keeps working a while, as a token's rotation does.
+ */
+function RotateClient({ client, refresh }: { client: MachineClient; refresh: () => Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  const [keep, setKeep] = useState(0);
+  const [key, setKey] = useState("");
+  const [secret, setSecret] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const { copied, copy } = useCopy();
+  const parsed = key.trim() ? publicJwk(key) : null;
+  const rotate = async () => {
+    setError(null);
+    try {
+      const r = await accessApi.rotateMachineClient(client.client_id, { public_jwk: parsed && "jwk" in parsed ? parsed.jwk : null, keep_old_for_s: KEEP_OLD[keep].s });
+      setSecret(r.client_secret ?? null);
+      setOpen(false);
+      setKey("");
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  if (secret)
+    return (
+      <span className="rise flex min-w-0 flex-1 items-center gap-2">
+        <span className="text-muted">New secret, shown once:</span>
+        <code className="min-w-0 flex-1 truncate font-mono">{secret}</code>
+        <CopyButton id={`rotated-${client.client_id}`} text={secret} copied={copied} onCopy={copy} />
+      </span>
+    );
+  if (!open)
+    return (
+      <button onClick={() => setOpen(true)} className="text-muted hover:text-fg">
+        Rotate
+      </button>
+    );
+  return (
+    <span className="rise flex min-w-0 flex-1 flex-wrap items-center gap-2">
+      {client.signs_with_key && (
+        <textarea
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          rows={1}
+          spellCheck={false}
+          placeholder="The new public key (PEM or JWK); empty: switch to a secret"
+          className={`${input} min-w-64 flex-1 resize-y font-mono text-[12px]`}
+        />
+      )}
+      <label className="flex items-center gap-1.5 text-muted">
+        The old one
+        <select value={keep} onChange={(e) => setKeep(Number(e.target.value))} className={`${input} text-[12px]`}>
+          {KEEP_OLD.map((k, i) => (
+            <option key={k.label} value={i}>
+              {k.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button onClick={rotate} disabled={!!parsed && "problem" in parsed} className={btn}>
+        {parsed && "jwk" in parsed ? "Use this key" : "New secret"}
+      </button>
+      <button onClick={() => setOpen(false)} className="text-muted hover:text-fg">
+        Cancel
+      </button>
+      {parsed && "problem" in parsed && <span className="text-subtle">{parsed.problem}</span>}
+      {error && <span className="text-danger">{error}</span>}
+    </span>
   );
 }
 
