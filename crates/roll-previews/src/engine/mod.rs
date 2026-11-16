@@ -142,9 +142,10 @@ pub struct Engine {
     usage_read: Mutex<HashMap<String, i64>>,
     /// Previews whose screenshot a converge asked for; taken after the pass (`pass`).
     shots_wanted: Mutex<std::collections::HashSet<String>>,
-    /// Previews with a screenshot task queued or running: never a second one at once (its
-    /// container's name is the service's, so two would refuse each other).
-    shots_running: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Previews with a screenshot task queued or running, and whether it was asked again
+    /// meanwhile: never a second one at once (its container's name is the service's, so two
+    /// would refuse each other).
+    shots_running: Mutex<HashMap<String, bool>>,
     /// Screenshots that failed once at a head (preview, head): tried again once, since the service
     /// may have been stopped or redeployed underneath, before the head is given up on.
     shots_failed: Mutex<std::collections::HashSet<(String, String)>>,
@@ -214,7 +215,7 @@ impl Engine {
             secrets_told: Mutex::new(HashMap::new()),
             paths_seen: Mutex::new(HashMap::new()),
             shots_wanted: Mutex::new(std::collections::HashSet::new()),
-            shots_running: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            shots_running: Mutex::new(HashMap::new()),
             shots_failed: Mutex::new(std::collections::HashSet::new()),
             counters: Counters::default(),
             shooting: Arc::new(tokio::sync::Semaphore::new(screenshot_slots())),
@@ -345,35 +346,28 @@ impl Engine {
         // or a first pull of the browser image holds nothing else up.
         let wanted: Vec<String> = self.shots_wanted.lock().drain().collect();
         for id in wanted {
-            // One at a time per preview: a later pass's ask waits for the one queued or running
-            // (asked again, it runs after, at whatever head the preview is at then).
-            if !self.shots_running.lock().insert(id.clone()) {
-                self.shots_wanted.lock().insert(id);
-                continue;
+            // One task per preview at a time: an ask while one is queued or running marks it to
+            // go again once it's done (at whatever head the preview is at then).
+            {
+                let mut running = self.shots_running.lock();
+                if let Some(again) = running.get_mut(&id) {
+                    *again = true;
+                    continue;
+                }
+                running.insert(id.clone(), false);
             }
             let this = self.clone();
             let gate = self.shooting.clone();
-            struct Running(Arc<Mutex<std::collections::HashSet<String>>>, String);
-            impl Drop for Running {
-                fn drop(&mut self) {
-                    self.0.lock().remove(&self.1);
-                }
-            }
-            let running = Running(self.shots_running.clone(), id.clone());
             tokio::spawn(async move {
-                let _running = running;
-                let Ok(_one) = gate.acquire_owned().await else { return };
-                let Ok(r) = this.store.row(&id) else { return };
-                let Ok(s) = this.store.settings(&r.project_id) else { return };
-                // Still wanted: ready, the rules still ask, not taken at this head meanwhile.
-                if r.state != State::Ready || !s.github.screenshot || this.store.screenshot_head(&r.id).ok().flatten().as_deref() == Some(r.build()) {
-                    return;
-                }
-                if this.take_screenshot(&r).await {
-                    // The change and its pull request comment show the new one now, not at the
-                    // preview's next converge.
-                    if let Ok(row) = this.store.row(&id) {
-                        this.report(row).await;
+                loop {
+                    this.screenshot_once(&gate, &id).await;
+                    let mut running = this.shots_running.lock();
+                    match running.get_mut(&id) {
+                        Some(again) if *again => *again = false,
+                        _ => {
+                            running.remove(&id);
+                            break;
+                        }
                     }
                 }
             });
@@ -383,6 +377,22 @@ impl Engine {
 }
 
 impl Engine {
+    /// One screenshot run of a preview, in a slot: if it's still wanted (ready, the rules still
+    /// ask, not taken at this head meanwhile), then the change and its pull request told at once.
+    async fn screenshot_once(&self, gate: &Arc<tokio::sync::Semaphore>, id: &str) {
+        let Ok(_one) = gate.clone().acquire_owned().await else { return };
+        let Ok(r) = self.store.row(id) else { return };
+        let Ok(s) = self.store.settings(&r.project_id) else { return };
+        if r.state != State::Ready || !s.github.screenshot || self.store.screenshot_head(&r.id).ok().flatten().as_deref() == Some(r.build()) {
+            return;
+        }
+        if self.take_screenshot(&r).await
+            && let Ok(row) = self.store.row(id)
+        {
+            self.report(row).await;
+        }
+    }
+
     /// Whether `c` gets a preview: [`wants`], then the path filters on what it touches (unless
     /// its title asked for one). Paths that can't be read count as a match: one change's diff
     /// never stops the project's other previews.
