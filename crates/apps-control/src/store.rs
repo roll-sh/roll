@@ -12,7 +12,7 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
 use code_sql::{Db, OptionalExtension, params};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS services (
@@ -331,6 +331,10 @@ pub struct EnvRow {
     pub hook_hash: Option<String>,
     /// An image service's tag is watched: it deploys when the tag moves.
     pub follow_tag: bool,
+    /// Redeploys when the project's secrets change ([`crate::Apps::watch_secrets`]), and the
+    /// digest it last acted on.
+    pub redeploy_on_secrets: bool,
+    pub secrets_seen: Option<String>,
     /// The digest the watched tag pointed at when it was last acted on (deployed, or found
     /// where the live deployment already is): only a move past it deploys.
     pub tag_seen: Option<String>,
@@ -347,6 +351,13 @@ pub struct EnvRow {
     /// A TCP service's port here (`run.tcp`), from the node's TCP range.
     pub tcp_port: Option<u16>,
     pub firewall: Vec<crate::model::FirewallRule>,
+    pub headers: Vec<crate::model::HeaderRule>,
+    /// Paused (Render's Suspend): nothing of it runs, wakes, deploys or is scheduled until it's
+    /// resumed.
+    pub paused: bool,
+    /// Deploys held after this rollback (Vercel's Instant Rollback): pushes, hooks and tag moves
+    /// don't put anything live until a person deploys or resumes them.
+    pub held_by: Option<String>,
 }
 
 /// A link: its kind, resource, variables' prefix, and the credentials it made for itself.
@@ -407,6 +418,7 @@ pub struct MinuteRow {
     pub instances: i64,
     pub cold_starts: i64,
     pub cold_start_ms: f64,
+    pub egress_bytes: i64,
 }
 
 /// What an hour of an environment used.
@@ -446,8 +458,14 @@ pub struct Store {
 }
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages";
-const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by";
+/// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
+pub struct Pruned {
+    pub id: String,
+    pub image: Option<String>,
+}
+
+const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor, pruned_at, error_detail";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
     serde_json::from_str(s).map_err(|e| code_sql::Error::Conversion(e.to_string()))
@@ -506,11 +524,36 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         tcp_port: r.get::<_, Option<i64>>(17)?.map(|p| p as u16),
         firewall: r.get::<_, Option<String>>(18)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
         pages: r.get::<_, Option<String>>(19)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        redeploy_on_secrets: r.get::<_, i64>(20)? != 0,
+        secrets_seen: r.get(21)?,
+        headers: r.get::<_, Option<String>>(22)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        paused: r.get::<_, i64>(23)? != 0,
+        held_by: r.get(24)?,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drain_of(id: String, project: String, host: String, created_at: i64, sources: Option<String>, environments: Option<String>, services: Option<String>, previews: bool, names: Option<String>) -> LogDrain {
+    let list = |j: Option<String>| -> Vec<String> { j.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default() };
+    // A drain made before sources were chosen sends its runtime output.
+    let sources = sources.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_else(|| vec!["runtime".to_string()]);
+    LogDrain { id, project, host, created_at, sources, environments: list(environments), services: list(services), previews, headers: list(names) }
 }
 
 fn spend_row(r: &code_sql::Row<'_>) -> code_sql::Result<crate::spend::Limits> {
     Ok(crate::spend::Limits { alert_usd: r.get(0)?, hard_usd: r.get(1)?, alerted: r.get(2)?, capped: r.get(3)? })
+}
+
+fn run_row(r: &code_sql::Row<'_>) -> code_sql::Result<CronRun> {
+    Ok(CronRun {
+        id: r.get(0)?,
+        deployment: r.get(1)?,
+        status: RunStatus::parse(&r.get::<_, String>(2)?),
+        exit_code: r.get::<_, Option<i64>>(3)?.map(|c| c as i32),
+        started_at: r.get(4)?,
+        finished_at: r.get(5)?,
+        attempt: r.get::<_, i64>(6)? as u32,
+    })
 }
 
 fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
@@ -535,6 +578,8 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         run: json(&r.get::<_, String>(15)?)?,
         vars_hash: r.get(16)?,
         actor: r.get(17)?,
+        pruned_at: r.get(18)?,
+        error_detail: r.get(19)?,
         steps: Vec::new(),
     })
 }
@@ -571,7 +616,18 @@ impl Store {
         db.add_column("domains", "tls_error", "TEXT")?;
         db.add_column("domains", "verified_at", "INTEGER")?;
         db.add_column("env_access", "bypass_hash", "TEXT")?;
+        // Bytes answered a minute (what egress is billed by), for Metrics.
+        db.add_column("metrics", "egress_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("deployments", "actor", "TEXT")?;
+        db.add_column("deployments", "pruned_at", "INTEGER")?;
+        db.add_column("deployments", "retired_at", "INTEGER")?;
+        db.add_column("deployments", "error_detail", "TEXT")?;
+        db.add_column("runs", "instance", "TEXT")?;
+        db.add_column("domains", "warned_at", "INTEGER")?;
+        // Targets made before filters follow every environment, previews too, as they did.
+        db.add_column("notify_targets", "environments", "TEXT NOT NULL DEFAULT '[]'")?;
+        db.add_column("notify_targets", "services", "TEXT NOT NULL DEFAULT '[]'")?;
+        db.add_column("notify_targets", "previews", "INTEGER NOT NULL DEFAULT 1")?;
         db.add_column("environments", "wait_for_ci", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "run", "TEXT NOT NULL DEFAULT '{}'")?;
         db.add_column("environments", "hook_hash", "TEXT")?;
@@ -580,6 +636,8 @@ impl Store {
         db.add_column("variables", "write_only", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("services", "build_cache", "TEXT")?;
         db.add_column("environments", "pages", "TEXT")?;
+        db.add_column("environments", "redeploy_on_secrets", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("environments", "secrets_seen", "TEXT")?;
         db.add_column("environments", "feedback", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("links", "minted", "TEXT")?;
         db.add_column("environments", "maintenance", "TEXT")?;
@@ -588,6 +646,18 @@ impl Store {
         db.add_column("jobs", "tasks", "INTEGER NOT NULL DEFAULT 1")?;
         db.add_column("environments", "tcp_port", "INTEGER")?;
         db.add_column("environments", "firewall", "TEXT")?;
+        db.add_column("environments", "headers", "TEXT")?;
+        db.add_column("environments", "paused", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("runs", "attempt", "INTEGER NOT NULL DEFAULT 1")?;
+        db.add_column("environments", "held_by", "TEXT")?;
+        // Drains made before their filters sent every environment's runtime output: still so.
+        db.add_column("log_drains", "sources", "TEXT")?;
+        db.add_column("log_drains", "environments", "TEXT")?;
+        db.add_column("log_drains", "services", "TEXT")?;
+        db.add_column("log_drains", "previews", "INTEGER NOT NULL DEFAULT 1")?;
+        db.add_column("log_drains", "headers_sealed", "TEXT")?;
+        // The headers' names, unsealed: a drain lists without opening anything.
+        db.add_column("log_drains", "header_names", "TEXT")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
         Ok(Store { db, sealer })
     }
@@ -672,6 +742,15 @@ impl Store {
 
     // ── environments ──
 
+    /// Whether another service of `project` (not `except`) has an environment named `env`.
+    pub fn env_in_use(&self, project: &str, env: &str, except: &str) -> Result<bool> {
+        Ok(self
+            .db
+            .query_row("SELECT 1 FROM environments e JOIN services s ON s.id = e.service WHERE s.project = ? AND e.name = ? AND e.service <> ? LIMIT 1", [project, env, except], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
     pub fn environments(&self, service: &str) -> Result<Vec<EnvRow>> {
         Ok(self.db.query(&format!("SELECT {ENV_COLS} FROM environments WHERE service = ? ORDER BY created_at, name"), [service], env_row)?)
     }
@@ -749,7 +828,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -801,7 +880,8 @@ impl Store {
             }
             c.execute("UPDATE environments SET active = ? WHERE service = ? AND name = ?", params![to, service, env])?;
             if let Some(f) = from.filter(|f| *f != to) {
-                c.execute("UPDATE deployments SET status = 'inactive' WHERE id = ? AND status = 'active'", [f])?;
+                // When it stopped being live: what pruning's day of grace counts from.
+                c.execute("UPDATE deployments SET status = 'inactive', retired_at = ? WHERE id = ? AND status = 'active'", params![now, f])?;
             }
             c.execute(
                 "UPDATE deployments SET status = 'active', finished_at = COALESCE(finished_at, ?), ready_ms = COALESCE(?, ready_ms), error = NULL WHERE id = ?",
@@ -825,12 +905,13 @@ impl Store {
     }
 
     /// A deploy failed: its status, and the event, in one transaction.
-    pub fn fail_deployment(&self, id: &str, error: &str) -> Result<bool> {
+    /// `detail`: what the app or the build printed, the owner's to read (never in the event).
+    pub fn fail_deployment(&self, id: &str, error: &str, detail: Option<&str>) -> Result<bool> {
         let now = self.now()?;
         self.db.write(|c| {
             let n = c.execute(
-                "UPDATE deployments SET status = 'failed', error = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ? AND status IN ('queued', 'building', 'deploying')",
-                params![error, now, id],
+                "UPDATE deployments SET status = 'failed', error = ?, error_detail = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ? AND status IN ('queued', 'building', 'deploying')",
+                params![error, detail, now, id],
             )?;
             if n == 0 {
                 return Ok(false);
@@ -843,27 +924,49 @@ impl Store {
 
     // ── notifications ──
 
-    pub fn add_target(&self, project: &str, kind: &str, host: &str, url: &str, secret: Option<&str>, events: &[String]) -> Result<NotifyTarget> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_target(&self, project: &str, kind: &str, host: &str, url: &str, secret: Option<&str>, events: &[String], filters: &TargetFilters) -> Result<NotifyTarget> {
         let id = new_id("ntf");
         let now = self.now()?;
         let url_sealed = self.sealer.seal(&format!("notify:{id}:url"), url);
         let secret_sealed = secret.map(|s| self.sealer.seal(&format!("notify:{id}:secret"), s));
         self.db.execute(
-            "INSERT INTO notify_targets (id, project, kind, host, url_sealed, secret_sealed, events, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            params![id, project, kind, host, url_sealed, secret_sealed, serde_json::to_string(events).expect("JSON"), now],
+            "INSERT INTO notify_targets (id, project, kind, host, url_sealed, secret_sealed, events, created_at, environments, services, previews) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![id, project, kind, host, url_sealed, secret_sealed, serde_json::to_string(events).expect("JSON"), now, to_json(&filters.environments), to_json(&filters.services), filters.previews],
         )?;
-        Ok(NotifyTarget { id, project: project.into(), kind: kind.into(), host: host.into(), events: events.to_vec(), created_at: now })
+        Ok(NotifyTarget {
+            id,
+            project: project.into(),
+            kind: kind.into(),
+            host: host.into(),
+            events: events.to_vec(),
+            environments: filters.environments.clone(),
+            services: filters.services.clone(),
+            previews: filters.previews,
+            created_at: now,
+        })
+    }
+
+    pub fn update_target(&self, project: &str, id: &str, events: &[String], filters: &TargetFilters) -> Result<NotifyTarget> {
+        let n = self.db.execute(
+            "UPDATE notify_targets SET events = ?, environments = ?, services = ?, previews = ? WHERE id = ? AND project = ?",
+            params![serde_json::to_string(events).expect("JSON"), to_json(&filters.environments), to_json(&filters.services), filters.previews, id, project],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("no notification target {id}")));
+        }
+        self.targets(project)?.into_iter().find(|t| t.id == id).ok_or_else(|| Error::NotFound(format!("no notification target {id}")))
     }
 
     pub fn targets(&self, project: &str) -> Result<Vec<NotifyTarget>> {
-        Ok(self.db.query("SELECT id, project, kind, host, events, created_at FROM notify_targets WHERE project = ? ORDER BY created_at", [project], target_row)?)
+        Ok(self.db.query(&format!("SELECT {TARGET_COLS} FROM notify_targets WHERE project = ? ORDER BY created_at"), [project], target_row)?)
     }
 
     /// A target with its URL and signing secret opened, to deliver to.
     pub fn target_secrets(&self, id: &str) -> Result<Option<(NotifyTarget, String, Option<String>)>> {
         let row: Option<(NotifyTarget, String, Option<String>)> = self
             .db
-            .query_row("SELECT id, project, kind, host, events, created_at, url_sealed, secret_sealed FROM notify_targets WHERE id = ?", [id], |r| Ok((target_row(r)?, r.get(6)?, r.get(7)?)))
+            .query_row(&format!("SELECT {TARGET_COLS}, url_sealed, secret_sealed FROM notify_targets WHERE id = ?"), [id], |r| Ok((target_row(r)?, r.get(9)?, r.get(10)?)))
             .optional()?;
         row.map(|(t, u, s)| {
             let url = self.sealer.open(&format!("notify:{}:url", t.id), &u)?;
@@ -976,9 +1079,12 @@ impl Store {
     }
 
     /// A service's audit trail (`audit.*` events), newest first.
-    pub fn activity(&self, service: &str, limit: usize) -> Result<Vec<Event>> {
+    /// A service's events, newest first: the audit trail (what people changed), or (`all`) every
+    /// kind (deploys, failures, crash loops, alerts, domains) as one timeline.
+    pub fn activity(&self, service: &str, limit: usize, all: bool) -> Result<Vec<Event>> {
+        let only = if all { "" } else { " AND kind LIKE 'audit.%'" };
         Ok(self.db.query(
-            "SELECT seq, at, kind, service, env, deployment, data FROM events WHERE service = ? AND kind LIKE 'audit.%' ORDER BY seq DESC LIMIT ?",
+            &format!("SELECT seq, at, kind, service, env, deployment, data FROM events WHERE service = ?{only} ORDER BY seq DESC LIMIT ?"),
             params![service, limit.clamp(1, 500) as i64],
             |r| {
                 let data: String = r.get(6)?;
@@ -1030,6 +1136,13 @@ impl Store {
         let id = new_id("dep");
         let now = self.now()?;
         self.db.write(|c| {
+            // A rollback to one pruned meanwhile (its image may be gone): refused here, in the
+            // transaction that would make it.
+            if let Some(of) = &d.rollback_of
+                && c.query_row("SELECT 1 FROM deployments WHERE id = ? AND pruned_at IS NOT NULL", [of], |_| Ok(())).optional()?.is_some()
+            {
+                return Err(Error::Conflict(format!("{of} is older than what's kept to roll back to and its image was cleaned up; deploy its revision again")));
+            }
             if let Some(k) = key {
                 let had: Option<String> = c.query_row("SELECT deployment FROM deploy_keys WHERE service = ? AND env = ? AND key = ?", params![service, env, k], |r| r.get(0)).optional()?;
                 if let Some(had) = had {
@@ -1046,7 +1159,7 @@ impl Store {
                 )?;
             }
             c.execute(
-                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, ?)"),
+                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, ?)"),
                 params![
                     id,
                     service,
@@ -1112,17 +1225,79 @@ impl Store {
         Ok(())
     }
 
-    pub fn deployments(&self, service: &str, env: &str, limit: usize) -> Result<Vec<Deployment>> {
+    /// Whether a deployment not pruned runs an image of this digest (any service's).
+    pub fn digest_in_use(&self, digest: &str) -> Result<bool> {
+        let like = format!("%{}", digest.replace(['%', '_'], ""));
+        Ok(self.db.query_row("SELECT 1 FROM deployments WHERE pruned_at IS NULL AND image LIKE ? LIMIT 1", [like], |_| Ok(())).optional()?.is_some())
+    }
+
+    /// Newest first; `before` (ms): only those made before then (the next page).
+    pub fn deployments(&self, service: &str, env: &str, limit: usize, before: Option<i64>) -> Result<Vec<Deployment>> {
         Ok(self.db.query(
-            &format!("SELECT {DEPLOY_COLS} FROM deployments WHERE service = ? AND env = ? ORDER BY created_at DESC, id DESC LIMIT ?"),
-            params![service, env, limit as i64],
+            &format!("SELECT {DEPLOY_COLS} FROM deployments WHERE service = ? AND env = ? AND created_at < ? ORDER BY created_at DESC, id DESC LIMIT ?"),
+            params![service, env, before.unwrap_or(i64::MAX), limit as i64],
             deploy_row,
         )?)
+    }
+
+    /// A service's deployments past what's kept, marked pruned in one transaction: what's kept
+    /// is each environment's newest `keep` that were live (the rollback targets; a failed or
+    /// superseded build never counts), its live one, any pending, live or ready, and any that
+    /// stopped being live (or ended, never live) since `recent` (draining, skew protection)
+    /// unless its environment was deleted. The images no deployment left names (another's may: a
+    /// promotion, a rollback).
+    pub fn prune_deployments(&self, service: &str, keep: usize, recent: i64) -> Result<Vec<Pruned>> {
+        let now = self.now()?;
+        Ok(self.db.write(|c| {
+            let rows: Vec<(String, String, String, Option<String>, i64)> = c.query(
+                "SELECT id, env, status, image, COALESCE(retired_at, finished_at, created_at) FROM deployments WHERE service = ? AND pruned_at IS NULL ORDER BY created_at DESC, id DESC",
+                [service],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?;
+            let live: Vec<String> = c.query("SELECT active FROM environments WHERE service = ? AND active IS NOT NULL", [service], |r| r.get(0))?;
+            let mut built: HashMap<String, usize> = HashMap::new();
+            let mut out = Vec::new();
+            for (id, env, status, image, ended) in rows {
+                let removed = status == "removed";
+                if image.is_some() && matches!(status.as_str(), "active" | "inactive") {
+                    let n = built.entry(env).or_default();
+                    *n += 1;
+                    if *n <= keep {
+                        continue;
+                    }
+                }
+                let running = matches!(status.as_str(), "queued" | "building" | "deploying" | "active" | "ready");
+                if running || live.contains(&id) || (!removed && ended >= recent) {
+                    continue;
+                }
+                c.execute("UPDATE deployments SET pruned_at = ? WHERE id = ?", params![now, id])?;
+                out.push(Pruned { id, image });
+            }
+            for p in &mut out {
+                if let Some(img) = &p.image
+                    && c.query_row("SELECT 1 FROM deployments WHERE image = ? AND pruned_at IS NULL LIMIT 1", [img], |_| Ok(())).optional()?.is_some()
+                {
+                    p.image = None;
+                }
+            }
+            Ok::<_, code_sql::Error>(out)
+        })?)
     }
 
     /// Every deployment of a service, any environment.
     pub fn deployments_all(&self, service: &str) -> Result<Vec<Deployment>> {
         Ok(self.db.query(&format!("SELECT {DEPLOY_COLS} FROM deployments WHERE service = ? ORDER BY created_at"), [service], deploy_row)?)
+    }
+
+    /// The ids of every service's deployments that may still run: live or about to be, ready to
+    /// be put live, or ended since `since_ms` (its instances may still be draining).
+    pub fn deployments_in_use(&self, since_ms: i64) -> Result<Vec<String>> {
+        Ok(self.db.query(
+            "SELECT id FROM deployments WHERE status IN ('queued', 'building', 'deploying', 'active', 'ready') OR COALESCE(finished_at, created_at) >= ?
+             UNION SELECT active FROM environments WHERE active IS NOT NULL",
+            [since_ms],
+            |r| r.get(0),
+        )?)
     }
 
     /// Deployments still queued or in progress, oldest first (the queue, and what a new owner
@@ -1408,16 +1583,38 @@ impl Store {
     }
 
     /// A domain's DNS state; the first time it's `active` is kept (the claim no longer expires).
+    /// A domain going live is its `domain.active` event, in the same transaction (once, however
+    /// many checks race).
     pub fn set_domain_status(&self, host: &str, status: DomainStatus, error: Option<&str>) -> Result<()> {
         let now = self.now()?;
         let verified = (status == DomainStatus::Active).then_some(now);
-        self.db.execute("UPDATE domains SET status = ?, error = ?, verified_at = COALESCE(verified_at, ?) WHERE hostname = ?", params![status.as_str(), error, verified, host])?;
-        Ok(())
+        Ok(self.db.write(|c| {
+            let was: Option<(String, String, String)> = c.query_row("SELECT service, env, status FROM domains WHERE hostname = ?", [host], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            c.execute("UPDATE domains SET status = ?, error = ?, verified_at = COALESCE(verified_at, ?) WHERE hostname = ?", params![status.as_str(), error, verified, host])?;
+            if let Some((svc, env, before)) = was
+                && status == DomainStatus::Active
+                && before != DomainStatus::Active.as_str()
+            {
+                insert_event(c, now, "domain.active", &svc, &env, None, &serde_json::json!({ "hostname": host }))?;
+            }
+            Ok::<_, code_sql::Error>(())
+        })?)
     }
 
     /// A custom domain's certificate state. False if there's no such custom domain.
+    /// A custom domain's certificate state; one that just failed is a `domain.tls_failed` event,
+    /// in the same transaction (once per failure, not each check that still finds it failed).
     pub fn set_domain_tls(&self, host: &str, tls: TlsStatus, error: Option<&str>) -> Result<bool> {
-        Ok(self.db.execute("UPDATE domains SET tls = ?, tls_error = ? WHERE hostname = ? AND kind = 'custom'", params![tls.as_str(), error, host])? > 0)
+        let now = self.now()?;
+        Ok(self.db.write(|c| {
+            let was: Option<(String, String, String)> = c.query_row("SELECT service, env, tls FROM domains WHERE hostname = ? AND kind = 'custom'", [host], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            let Some((svc, env, before)) = was else { return Ok::<_, code_sql::Error>(false) };
+            c.execute("UPDATE domains SET tls = ?, tls_error = ? WHERE hostname = ? AND kind = 'custom'", params![tls.as_str(), error, host])?;
+            if tls == TlsStatus::Failed && before != TlsStatus::Failed.as_str() {
+                insert_event(c, now, "domain.tls_failed", &svc, &env, None, &serde_json::json!({ "hostname": host, "error": error }))?;
+            }
+            Ok(true)
+        })?)
     }
 
     pub fn delete_domain(&self, service: &str, env: &str, host: &str) -> Result<()> {
@@ -1430,43 +1627,62 @@ impl Store {
     /// Remove the custom domains added before `cutoff` (ms) that were never verified, and return
     /// them: a claim nobody proves frees the hostname for its real owner.
     pub fn expire_domain_claims(&self, cutoff: i64) -> Result<Vec<(String, String, String)>> {
+        let now = self.now()?;
         self.db.write(|c| {
             let expired: Vec<(String, String, String)> = c.query(
                 "SELECT service, env, hostname FROM domains WHERE kind = 'custom' AND status <> 'active' AND verified_at IS NULL AND created_at < ?",
                 [cutoff],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
-            for (_, _, host) in &expired {
+            for (svc, env, host) in &expired {
                 c.execute("DELETE FROM domains WHERE hostname = ? AND status <> 'active' AND verified_at IS NULL", [host])?;
+                insert_event(c, now, "domain.expired", svc, env, None, &serde_json::json!({ "hostname": host }))?;
             }
             Ok(expired)
         })
+    }
+
+    /// Unverified custom domains made before `cutoff` not warned yet: warned now, each with
+    /// its `domain.expiring` event (and what DNS said), in one transaction.
+    pub fn warn_domain_claims(&self, cutoff: i64) -> Result<usize> {
+        let now = self.now()?;
+        Ok(self.db.write(|c| {
+            let due: Vec<(String, String, String, Option<String>)> = c.query(
+                "SELECT service, env, hostname, error FROM domains WHERE kind = 'custom' AND status <> 'active' AND verified_at IS NULL AND warned_at IS NULL AND created_at < ?",
+                [cutoff],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            for (svc, env, host, error) in &due {
+                c.execute("UPDATE domains SET warned_at = ? WHERE hostname = ?", params![now, host])?;
+                insert_event(c, now, "domain.expiring", svc, env, None, &serde_json::json!({ "hostname": host, "error": error }))?;
+            }
+            Ok::<_, code_sql::Error>(due.len())
+        })?)
     }
 
     // ── cron runs ──
 
     pub fn runs(&self, service: &str, env: &str, limit: usize) -> Result<Vec<CronRun>> {
         Ok(self.db.query(
-            "SELECT id, deployment, status, exit_code, started_at, finished_at FROM runs WHERE service = ? AND env = ? ORDER BY started_at DESC, id DESC LIMIT ?",
+            "SELECT id, deployment, status, exit_code, started_at, finished_at, attempt FROM runs WHERE service = ? AND env = ? ORDER BY started_at DESC, id DESC LIMIT ?",
             params![service, env, limit as i64],
-            |r| {
-                Ok(CronRun {
-                    id: r.get(0)?,
-                    deployment: r.get(1)?,
-                    status: RunStatus::parse(&r.get::<_, String>(2)?),
-                    exit_code: r.get::<_, Option<i64>>(3)?.map(|c| c as i32),
-                    started_at: r.get(4)?,
-                    finished_at: r.get(5)?,
-                })
-            },
+            run_row,
         )?)
+    }
+
+    pub fn run(&self, service: &str, env: &str, id: &str) -> Result<CronRun> {
+        self.db
+            .query_row("SELECT id, deployment, status, exit_code, started_at, finished_at, attempt FROM runs WHERE service = ? AND env = ? AND id = ?", params![service, env, id], run_row)
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("no run {id}")))
     }
 
     /// A run, `running`, or `skipped` when one is still going (any of them, not just the newest:
     /// skipped rows come between), decided in one transaction. A `running` row older than
     /// `timeout_ms` is one a stopped node left: its run is over whatever the row says.
-    pub fn start_run(&self, service: &str, env: &str, deployment: &str, timeout_ms: i64) -> Result<CronRun> {
-        let id = new_id("run");
+    /// `id`: made by the caller, which knows it's running before its row says so.
+    pub fn start_run(&self, id: &str, service: &str, env: &str, deployment: &str, timeout_ms: i64, attempt: u32) -> Result<CronRun> {
+        let id = id.to_string();
         let now = self.now()?;
         self.db.write(|c| {
             let going = c
@@ -1476,17 +1692,17 @@ impl Store {
             let status = if going { RunStatus::Skipped } else { RunStatus::Running };
             let finished = going.then_some(now);
             c.execute(
-                "INSERT INTO runs (id, service, env, deployment, status, exit_code, started_at, finished_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
-                params![id, service, env, deployment, status.as_str(), now, finished],
+                "INSERT INTO runs (id, service, env, deployment, status, exit_code, started_at, finished_at, attempt) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+                params![id, service, env, deployment, status.as_str(), now, finished, attempt as i64],
             )?;
-            Ok(CronRun { id: id.clone(), deployment: deployment.into(), status, exit_code: None, started_at: now, finished_at: finished })
+            Ok(CronRun { id: id.clone(), deployment: deployment.into(), status, exit_code: None, started_at: now, finished_at: finished, attempt })
         })
     }
 
-    pub fn finish_run(&self, id: &str, status: RunStatus, exit_code: Option<i32>) -> Result<()> {
-        let now = self.now()?;
-        self.db.execute("UPDATE runs SET status = ?, exit_code = ?, finished_at = ? WHERE id = ?", params![status.as_str(), exit_code, now, id])?;
-        Ok(())
+    /// A cron run ends, if it's still running: a failure is its `cron.failed` event in the same
+    /// transaction, unless another try follows (`retrying`). Whether it was still running.
+    pub fn finish_run(&self, id: &str, status: RunStatus, exit_code: Option<i32>, retrying: bool) -> Result<bool> {
+        self.finish("runs", if retrying { "" } else { "cron.failed" }, "run", id, status, exit_code)
     }
 
     // ── private registries ──
@@ -1549,17 +1765,50 @@ impl Store {
         Ok(Job { id, deployment: deployment.into(), command: command.into(), tasks, status: RunStatus::Running, exit_code: None, started_at: now, finished_at: None })
     }
 
-    pub fn finish_job(&self, id: &str, status: RunStatus, exit_code: Option<i32>) -> Result<()> {
+    /// A job ends, if it's still running (a takeover may have failed it first): a failure is its
+    /// `job.failed` event in the same transaction. Whether it was still running.
+    pub fn finish_job(&self, id: &str, status: RunStatus, exit_code: Option<i32>) -> Result<bool> {
+        self.finish("jobs", "job.failed", "job", id, status, exit_code)
+    }
+
+    fn finish(&self, table: &str, kind: &str, key: &str, id: &str, status: RunStatus, exit_code: Option<i32>) -> Result<bool> {
         let now = self.now()?;
-        self.db.execute("UPDATE jobs SET status = ?, exit_code = ?, finished_at = ? WHERE id = ? AND status = 'running'", params![status.as_str(), exit_code, now, id])?;
-        Ok(())
+        Ok(self.db.write(|c| {
+            let row: Option<(String, String, String)> = c.query_row(&format!("SELECT service, env, deployment FROM {table} WHERE id = ? AND status = 'running'"), [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            let Some((svc, env, dep)) = row else { return Ok::<_, code_sql::Error>(false) };
+            if c.execute(&format!("UPDATE {table} SET status = ?, exit_code = ?, finished_at = ? WHERE id = ? AND status = 'running'"), params![status.as_str(), exit_code, now, id])? == 0 {
+                return Ok(false);
+            }
+            if matches!(status, RunStatus::Failed | RunStatus::TimedOut) && !kind.is_empty() {
+                insert_event(c, now, kind, &svc, &env, Some(&dep), &serde_json::json!({ key: id, "status": status.as_str(), "exit_code": exit_code }))?;
+            }
+            Ok(true)
+        })?)
     }
 
     /// Jobs a node that stopped had running: their containers went with it.
-    pub fn fail_running_jobs(&self, service: &str) -> Result<()> {
+    /// A service's cron runs and jobs still `running` that no process runs any more (their node
+    /// stopped; `spare`: those this one does): failed, each with its `cron.failed`/`job.failed`
+    /// event in the same transaction. How many.
+    /// `before`: only those started before then (the database's ms: when this node took the
+    /// service), never one this node started since.
+    pub fn fail_orphans(&self, service: &str, spare: &[String], before: i64) -> Result<usize> {
         let now = self.now()?;
-        self.db.execute("UPDATE jobs SET status = 'failed', finished_at = ? WHERE service = ? AND status = 'running'", params![now, service])?;
-        Ok(())
+        Ok(self.db.write(|c| {
+            let mut n = 0;
+            for (table, kind, key) in [("runs", "cron.failed", "run"), ("jobs", "job.failed", "job")] {
+                let rows: Vec<(String, String, String)> = c.query(&format!("SELECT id, env, deployment FROM {table} WHERE service = ? AND status = 'running' AND started_at < ?"), params![service, before], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                for (id, env, dep) in rows.into_iter().filter(|(id, ..)| !spare.contains(id)) {
+                    if c.execute(&format!("UPDATE {table} SET status = 'failed', finished_at = ? WHERE id = ? AND status = 'running'"), params![now, id])? == 0 {
+                        continue;
+                    }
+                    let data = serde_json::json!({ key: id, "status": "failed", "exit_code": null, "why": "its node stopped before it finished" });
+                    insert_event(c, now, kind, service, &env, Some(&dep), &data)?;
+                    n += 1;
+                }
+            }
+            Ok::<_, code_sql::Error>(n)
+        })?)
     }
 
     pub fn jobs(&self, service: &str, env: &str, limit: usize) -> Result<Vec<Job>> {
@@ -1583,8 +1832,8 @@ impl Store {
             for m in rows {
                 c.execute("DELETE FROM metrics WHERE service = ? AND env = ? AND minute = ?", params![service, env, m.minute])?;
                 c.execute(
-                    "INSERT INTO metrics (service, env, minute, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![service, env, m.minute, m.requests, m.errors, m.p50_ms, m.p95_ms, m.p99_ms, m.cpu, m.memory_bytes, m.instances, m.cold_starts, m.cold_start_ms],
+                    "INSERT INTO metrics (service, env, minute, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms, egress_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![service, env, m.minute, m.requests, m.errors, m.p50_ms, m.p95_ms, m.p99_ms, m.cpu, m.memory_bytes, m.instances, m.cold_starts, m.cold_start_ms, m.egress_bytes],
                 )?;
             }
             Ok(())
@@ -1593,7 +1842,7 @@ impl Store {
 
     pub fn minutes(&self, service: &str, env: &str, since_minute: i64) -> Result<Vec<MinuteRow>> {
         Ok(self.db.query(
-            "SELECT minute, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms FROM metrics WHERE service = ? AND env = ? AND minute >= ? ORDER BY minute",
+            "SELECT minute, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms, egress_bytes FROM metrics WHERE service = ? AND env = ? AND minute >= ? ORDER BY minute",
             params![service, env, since_minute],
             |r| {
                 Ok(MinuteRow {
@@ -1608,6 +1857,7 @@ impl Store {
                     instances: r.get(8)?,
                     cold_starts: r.get(9)?,
                     cold_start_ms: r.get(10)?,
+                    egress_bytes: r.get(11)?,
                 })
             },
         )?)
@@ -1662,9 +1912,25 @@ impl Store {
 
     // ── pushes waiting for their checks ──
 
+    pub fn set_redeploy_on_secrets(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        self.db.execute("UPDATE environments SET redeploy_on_secrets = ?, secrets_seen = NULL WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_secrets_seen(&self, service: &str, env: &str, digest: &str) -> Result<()> {
+        self.db.execute("UPDATE environments SET secrets_seen = ? WHERE service = ? AND name = ?", params![digest, service, env])?;
+        Ok(())
+    }
+
     pub fn set_follow_tag(&self, service: &str, env: &str, on: bool) -> Result<()> {
         // Turned on or off, it starts again from what the tag points at then.
         self.db.execute("UPDATE environments SET follow_tag = ?, tag_seen = NULL WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_headers(&self, service: &str, env: &str, rules: &[crate::model::HeaderRule]) -> Result<()> {
+        let j = (!rules.is_empty()).then(|| serde_json::to_string(rules).expect("JSON"));
+        self.db.execute("UPDATE environments SET headers = ? WHERE service = ? AND name = ?", params![j, service, env])?;
         Ok(())
     }
 
@@ -1701,6 +1967,21 @@ impl Store {
             c.execute("UPDATE environments SET pages = ? WHERE service = ? AND name = ?", params![j, service, env])?;
             Ok(())
         })
+    }
+
+    /// Hold the environment's deploys after `rollback` (or lift the hold): whether it changed.
+    pub fn set_hold(&self, service: &str, env: &str, rollback: Option<&str>) -> Result<bool> {
+        // Written only when it changes (whether it did is what's said); SQL both SQLite and Postgres take.
+        let n = match rollback {
+            Some(r) => self.db.execute("UPDATE environments SET held_by = ? WHERE service = ? AND name = ? AND (held_by IS NULL OR held_by <> ?)", params![r, service, env, r])?,
+            None => self.db.execute("UPDATE environments SET held_by = NULL WHERE service = ? AND name = ? AND held_by IS NOT NULL", params![service, env])?,
+        };
+        Ok(n > 0)
+    }
+
+    pub fn set_paused(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        self.db.execute("UPDATE environments SET paused = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        Ok(())
     }
 
     pub fn set_maintenance(&self, service: &str, env: &str, message: Option<&str>) -> Result<()> {
@@ -1767,32 +2048,99 @@ impl Store {
 
     // ── log drains ──
 
-    pub fn add_drain(&self, project: &str, host: &str, url: &str, secret: &str) -> Result<LogDrain> {
+    pub fn add_drain(&self, project: &str, host: &str, url: &str, secret: &str, d: &DrainSettings) -> Result<LogDrain> {
         let id = new_id("lgd");
         let now = self.now()?;
         let (u, s) = (self.sealer.seal(&format!("drain:{id}:url"), url), self.sealer.seal(&format!("drain:{id}:secret"), secret));
-        self.db.execute("INSERT INTO log_drains (id, project, host, url_sealed, secret_sealed, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![id, project, host, u, s, now])?;
-        Ok(LogDrain { id, project: project.into(), host: host.into(), created_at: now })
+        let h = self.seal_drain_headers(&id, &d.headers);
+        let names = to_json(&d.headers.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>());
+        self.db.execute(
+            "INSERT INTO log_drains (id, project, host, url_sealed, secret_sealed, created_at, sources, environments, services, previews, headers_sealed, header_names) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![id, project, host, u, s, now, to_json(&d.sources), to_json(&d.environments), to_json(&d.services), d.previews, h, names],
+        )?;
+        Ok(self.drains(project)?.into_iter().find(|x| x.id == id).expect("just made"))
     }
 
+    fn seal_drain_headers(&self, id: &str, headers: &[(String, String)]) -> Option<String> {
+        (!headers.is_empty()).then(|| self.sealer.seal(&format!("drain:{id}:headers"), &serde_json::to_string(headers).expect("JSON")))
+    }
+
+    /// Its sources, filters and (when given) headers: the URL and secret stay.
+    pub fn update_drain(&self, project: &str, id: &str, d: &DrainSettings, headers: bool) -> Result<LogDrain> {
+        let n = if headers {
+            let h = self.seal_drain_headers(id, &d.headers);
+            let names = to_json(&d.headers.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>());
+            self.db.execute(
+                "UPDATE log_drains SET sources = ?, environments = ?, services = ?, previews = ?, headers_sealed = ?, header_names = ? WHERE id = ? AND project = ?",
+                params![to_json(&d.sources), to_json(&d.environments), to_json(&d.services), d.previews, h, names, id, project],
+            )?
+        } else {
+            self.db.execute(
+                "UPDATE log_drains SET sources = ?, environments = ?, services = ?, previews = ? WHERE id = ? AND project = ?",
+                params![to_json(&d.sources), to_json(&d.environments), to_json(&d.services), d.previews, id, project],
+            )?
+        };
+        if n == 0 {
+            return Err(Error::NotFound(format!("no log drain {id}")));
+        }
+        Ok(self.drains(project)?.into_iter().find(|x| x.id == id).expect("updated"))
+    }
+
+    /// A project's drains, nothing opened (their URLs, secrets and headers stay sealed).
     pub fn drains(&self, project: &str) -> Result<Vec<LogDrain>> {
-        Ok(self.db.query("SELECT id, project, host, created_at FROM log_drains WHERE project = ? ORDER BY created_at", [project], |r| {
-            Ok(LogDrain { id: r.get(0)?, project: r.get(1)?, host: r.get(2)?, created_at: r.get(3)? })
-        })?)
+        type Row = (String, String, String, i64, Option<String>, Option<String>, Option<String>, bool, Option<String>);
+        let rows: Vec<Row> = self.db.query(
+            "SELECT id, project, host, created_at, sources, environments, services, previews, header_names FROM log_drains WHERE project = ? ORDER BY created_at",
+            [project],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get::<_, i64>(7)? != 0, r.get(8)?)),
+        )?;
+        Ok(rows.into_iter().map(|(id, project, host, created_at, sources, environments, services, previews, names)| drain_of(id, project, host, created_at, sources, environments, services, previews, names)).collect())
     }
 
-    /// A project's drains with their URLs and secrets opened, to send to.
-    pub fn drain_secrets(&self, project: &str) -> Result<Vec<(LogDrain, String, String)>> {
-        let rows: Vec<(LogDrain, String, String)> = self.db.query("SELECT id, project, host, created_at, url_sealed, secret_sealed FROM log_drains WHERE project = ?", [project], |r| {
-            Ok((LogDrain { id: r.get(0)?, project: r.get(1)?, host: r.get(2)?, created_at: r.get(3)? }, r.get(4)?, r.get(5)?))
-        })?;
-        rows.into_iter()
-            .map(|(d, u, s)| {
-                let url = self.sealer.open(&format!("drain:{}:url", d.id), &u)?;
-                let secret = self.sealer.open(&format!("drain:{}:secret", d.id), &s)?;
-                Ok((d, url, secret))
+    /// Whether any drain asks for request lines and for build lines (the log tap's gate).
+    pub fn drain_sources_wanted(&self) -> Result<(bool, bool)> {
+        let all: Vec<Option<String>> = self.db.query("SELECT sources FROM log_drains", (), |r| r.get(0))?;
+        let has = |k: &str| all.iter().flatten().any(|j| serde_json::from_str::<Vec<String>>(j).is_ok_and(|v| v.iter().any(|s| s == k)));
+        Ok((has("http"), has("build")))
+    }
+
+    /// A project's drains with their URLs, secrets and headers opened, to send to.
+    /// A project's drains with their URLs, secrets and headers opened, to send to. One that won't
+    /// open (a key rotated badly) is left out, said in the node's log, not every drain failing.
+    pub fn drain_secrets(&self, project: &str) -> Result<Vec<OpenedDrain>> {
+        // A drain's URL, secret and headers, opened.
+        type Opened = (String, String, Vec<(String, String)>);
+        type Row = (String, String, String, i64, String, String, Option<String>, Option<String>, Option<String>, bool, Option<String>, Option<String>);
+        let rows: Vec<Row> = self.db.query(
+            "SELECT id, project, host, created_at, url_sealed, secret_sealed, sources, environments, services, previews, headers_sealed, header_names FROM log_drains WHERE project = ? ORDER BY created_at",
+            [project],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get::<_, i64>(9)? != 0, r.get(10)?, r.get(11)?)),
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, project, host, created_at, u, s, sources, environments, services, previews, h, names)| {
+                let opened = (|| -> Result<Opened> {
+                    let url = self.sealer.open(&format!("drain:{id}:url"), &u)?;
+                    let secret = self.sealer.open(&format!("drain:{id}:secret"), &s)?;
+                    let headers = match &h {
+                        Some(h) => serde_json::from_str(&self.sealer.open(&format!("drain:{id}:headers"), h)?).unwrap_or_default(),
+                        None => Vec::new(),
+                    };
+                    Ok((url, secret, headers))
+                })();
+                match opened {
+                    Ok((url, secret, headers)) => {
+                        let names = names.or_else(|| Some(to_json(&headers.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>())));
+                        let drain = drain_of(id, project, host, created_at, sources, environments, services, previews, names);
+                        Some(OpenedDrain { drain, url, secret, headers })
+                    }
+                    Err(e) => {
+                        tracing::warn!(drain = %id, error = %e, "apps: a log drain's sealed settings didn't open; it's skipped");
+                        None
+                    }
+                }
             })
-            .collect()
+            .collect())
     }
 
     pub fn delete_drain(&self, project: &str, id: &str) -> Result<()> {
@@ -1878,6 +2226,11 @@ impl Store {
         Ok(self.db.query_row("SELECT value FROM state WHERE key = ?", [key], |r| r.get(0)).optional()?)
     }
 
+    /// Set `key` only when it isn't set: whether this call set it (one wins, on any node).
+    pub fn claim_state(&self, key: &str, value: &str) -> Result<bool> {
+        Ok(self.db.write(|c| c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", [key, value]))? == 1)
+    }
+
     pub fn set_state(&self, key: &str, value: &str) -> Result<()> {
         self.db.write(|c| {
             c.execute("DELETE FROM state WHERE key = ?", [key])?;
@@ -1887,9 +2240,47 @@ impl Store {
     }
 }
 
+const TARGET_COLS: &str = "id, project, kind, host, events, created_at, environments, services, previews";
+
+/// A drain's sources, filters and headers, checked. No `Debug`: its headers' values are a
+/// vendor's keys.
+#[derive(Clone, Default)]
+pub struct DrainSettings {
+    pub sources: Vec<String>,
+    pub environments: Vec<String>,
+    pub services: Vec<String>,
+    pub previews: bool,
+    pub headers: Vec<(String, String)>,
+}
+
+/// A drain with what sending to it needs, opened.
+pub struct OpenedDrain {
+    pub drain: LogDrain,
+    pub url: String,
+    pub secret: String,
+    pub headers: Vec<(String, String)>,
+}
+
+/// What a target follows ([`NotifyTarget::follows`]).
+pub struct TargetFilters {
+    pub environments: Vec<String>,
+    pub services: Vec<String>,
+    pub previews: bool,
+}
+
 fn target_row(r: &code_sql::Row<'_>) -> code_sql::Result<NotifyTarget> {
-    let events: String = r.get(4)?;
-    Ok(NotifyTarget { id: r.get(0)?, project: r.get(1)?, kind: r.get(2)?, host: r.get(3)?, events: serde_json::from_str(&events).unwrap_or_default(), created_at: r.get(5)? })
+    let list = |i: usize| -> code_sql::Result<Vec<String>> { Ok(serde_json::from_str(&r.get::<_, String>(i)?).unwrap_or_default()) };
+    Ok(NotifyTarget {
+        id: r.get(0)?,
+        project: r.get(1)?,
+        kind: r.get(2)?,
+        host: r.get(3)?,
+        events: list(4)?,
+        created_at: r.get(5)?,
+        environments: list(6)?,
+        services: list(7)?,
+        previews: r.get(8)?,
+    })
 }
 
 const JOB_COLS: &str = "id, deployment, command, status, exit_code, started_at, finished_at, tasks";

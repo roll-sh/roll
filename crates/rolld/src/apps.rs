@@ -209,9 +209,12 @@ impl Sources for CodeSources {
                 };
                 let row = names.entry(l.repo.clone()).or_insert_with(|| this.0.repo_by_id(&l.repo).ok()).clone();
                 let Some(r) = row else { continue };
-                // Who the deployment it makes names: the landed commit's author.
-                let author = this.0.store.changeset(&l.repo, &l.changeset).ok().flatten().map(|c| c.author.name()).filter(|n| !n.is_empty());
-                out.push(Landing { seq, repo: r.full_name(), branch: branch.to_string(), revision: Revision { sha: l.git_commit.to_string(), message: l.summary.clone() }, author });
+                // Who the deployment it makes names: the landed commit's author; and its whole
+                // message (a `[skip ci]` is often in the body, not the summary).
+                let cs = this.0.store.changeset(&l.repo, &l.changeset).ok().flatten();
+                let author = cs.as_ref().map(|c| c.author.name()).filter(|n| !n.is_empty());
+                let message = cs.map(|c| String::from_utf8_lossy(&c.message).into_owned()).filter(|m| !m.is_empty()).unwrap_or_else(|| l.summary.clone());
+                out.push(Landing { seq, repo: r.full_name(), branch: branch.to_string(), revision: Revision { sha: l.git_commit.to_string(), message }, author });
             }
             Ok(out)
         })
@@ -244,6 +247,35 @@ impl Sources for CodeSources {
             let at = |rev: &str| this.0.store.resolve(&r.id, rev)?.ok_or_else(|| anyhow::anyhow!("no revision {rev}"));
             let (a, b) = (at(&from)?, at(&to)?);
             Ok(this.0.store.compare(&r.id, &a, &b)?.iter().any(|d| code_control::review::pattern::any_match(&patterns, d.path.as_str())))
+        })
+        .await
+    }
+
+    async fn commits(&self, repo: &str, from: &str, to: &str, limit: usize) -> anyhow::Result<Option<(Vec<apps_control::integrations::CommitInfo>, bool)>> {
+        let (this, repo, from, to) = (self.clone(), repo.to_string(), from.to_string(), to.to_string());
+        blocking(move || {
+            let r = this.repo(&repo)?;
+            let at = |rev: &str| this.0.store.resolve(&r.id, rev)?.ok_or_else(|| anyhow::anyhow!("no revision {rev}"));
+            let (a, b) = (at(&from)?, at(&to)?);
+            // One past the limit: whether there are more than it shows.
+            let log = this.0.store.log(&r.id, &b, &code_store::LogQuery { limit: limit + 1, ..Default::default() })?;
+            let mut out = Vec::new();
+            let mut reached = false;
+            for c in log {
+                if c.id == a {
+                    reached = true;
+                    break;
+                }
+                if out.len() == limit {
+                    break;
+                }
+                let sha = match c.git_commit {
+                    Some(o) => o.to_string(),
+                    None => this.0.store.derive_git(&r.id, &c.id)?.0.to_string(),
+                };
+                out.push(apps_control::integrations::CommitInfo { sha, summary: c.summary, author: c.author.name() });
+            }
+            Ok(Some((out, reached)))
         })
         .await
     }
@@ -400,6 +432,10 @@ pub async fn start(
     cfg.web_url = Some(args.web_url.trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
     // Local development only: notification targets on this machine or a private network.
     cfg.allow_private = std::env::var("ROLL_APPS_ALLOW_PRIVATE").is_ok_and(|v| v == "1" || v == "true");
+    // Built deployments each environment keeps to roll back to (older ones' images go).
+    if let Some(n) = std::env::var("ROLL_APPS_KEEP_DEPLOYMENTS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0) {
+        cfg.keep_deployments = n;
+    }
     let edge = crate::edge::Public::of(args);
     cfg.domain = a.domain.clone().unwrap_or_else(|| if edge.is_some() { format!("up.{}", args.edge.site_domain) } else { "apps.localhost".into() });
     if edge.is_some() {
@@ -549,5 +585,19 @@ impl AppsNode {
     pub async fn shutdown(&self) {
         self.apps.shutdown().await;
         self.apps.flush_meters(true).await;
+    }
+}
+
+/// roll apps' email to a project's owner: roll-accounts' mailer, to the account's own address.
+pub struct AccountsMail(pub Arc<roll_accounts::Accounts>);
+
+#[async_trait::async_trait]
+impl apps_control::integrations::Mailbox for AccountsMail {
+    fn on(&self) -> bool {
+        self.0.mail_available()
+    }
+
+    async fn send(&self, user: &str, subject: &str, text: &str) -> anyhow::Result<()> {
+        self.0.mail_user(user, subject, text).await
     }
 }
