@@ -61,6 +61,10 @@ pub struct Settings {
     /// anything; `roll` only roll's own products, on a Docker network with no route out.
     #[serde(default)]
     pub egress: EgressRule,
+    /// With `egress: "roll"`, the hosts outside roll its code may still reach (`api.stripe.com`,
+    /// `*.sentry.io`), through a proxy on the preview's network that refuses anything else.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress_hosts: Vec<String>,
     /// Branch the data as of a point in time (Neon's time-travel branches), where the product
     /// keeps history: `-24h` (`-30m`, `-7d`) before each branching or reset, or an RFC 3339 time;
     /// at most 30 days back. Products without history branch as of now and say so.
@@ -277,6 +281,20 @@ pub fn selector_ok(s: &str) -> bool {
 
 pub const MAX_PAGES: usize = 10;
 
+/// The most hosts `egress_hosts` lists.
+pub const MAX_EGRESS_HOSTS: usize = 20;
+
+/// A host `egress_hosts` may name: lowercase DNS labels, at least two, optionally `*.` first
+/// (its subdomains), never an address (a name is what the proxy checks).
+pub fn egress_host_ok(h: &str) -> bool {
+    let name = h.strip_prefix("*.").unwrap_or(h);
+    let labels: Vec<&str> = name.split('.').collect();
+    name.len() <= 253
+        && labels.len() >= 2
+        && labels.iter().all(|l| !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-') && l.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
+        && !labels.last().is_some_and(|tld| tld.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// A `github.pages` entry: a path of the first service's, or `<service>:<path>` of another's
 /// (Percy snapshots each app). `None` when it's neither.
 pub fn page_entry(e: &str) -> Option<(Option<&str>, &str)> {
@@ -322,6 +340,7 @@ impl Default for Settings {
             visual_review: VisualReviewRule::Off,
             mail: MailRule::Catch,
             egress: EgressRule::Open,
+            egress_hosts: Vec::new(),
             data_at: None,
             feedback: true,
             warm: true,
@@ -392,6 +411,15 @@ impl Settings {
         }
         if !(60..=7 * 86_400).contains(&self.sleep_after_s) {
             return bad("sleep_after_s: 60 to 604800".into());
+        }
+        if self.egress_hosts.len() > MAX_EGRESS_HOSTS {
+            return bad(format!("egress_hosts: at most {MAX_EGRESS_HOSTS}"));
+        }
+        if let Some(h) = self.egress_hosts.iter().find(|h| !egress_host_ok(h)) {
+            return bad(format!("egress_hosts: {h:?} isn't a host name (api.stripe.com, or *.sentry.io for its subdomains)"));
+        }
+        if !self.egress_hosts.is_empty() && self.egress != EgressRule::Roll {
+            return bad("egress_hosts: only with egress \"roll\" (with \"open\" everything is reachable)".into());
         }
         if !(1..=24 * 90).contains(&self.ttl_hours) {
             return bad("ttl_hours: 1 to 2160".into());
