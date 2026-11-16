@@ -259,6 +259,13 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     `ttlMs: 60000` and `cacheScope: "private"`: a token's tools are its own, and its rules can
     change.
   - Approvals are Multi Round-Trip Requests (see Approvals).
+  - **Asking for a missing id** (`roll_mcp::ask`): a call without an id it requires (a project, a
+    Postgres project, an apps service or environment), from a client that declared form
+    elicitation, answers `input_required` with a form whose choices are what the connection may
+    read (the same list tool completions use, through the gate, never asking a person). The
+    retry's `inputResponses` fills the id in, and the call runs as if the client had sent it, so
+    the gate decides it as usual and there's no `requestState` to trust. A declined form stops the
+    call; a value that isn't an id is refused. Other clients get the call's own answer.
   - **MCP Apps** (`roll_mcp::ui`, `io.modelcontextprotocol/ui`, SEP-1865): for a host that
     declares HTML views (`mimeTypes: ["text/html;profile=mcp-app"]`), the read-only tools that
     answer rows (lists, queries, logs, reads, usage) point at `ui://roll/table` (`_meta.ui`). The

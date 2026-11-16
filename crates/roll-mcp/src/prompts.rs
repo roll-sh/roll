@@ -170,10 +170,11 @@ pub fn workspace_projects() -> Source {
 
 /// The completion source for argument `arg` of prompt `prompt`, when it has one.
 pub fn source(prompt: &str, arg: &str) -> Option<Source> {
-    PROMPTS.iter().find(|p| p.name == prompt)?.args.iter().find(|a| a.name == arg)?;
+    let p = PROMPTS.iter().find(|p| p.name == prompt)?;
+    p.args.iter().find(|a| a.name == arg)?;
     match arg {
-        // A Postgres project is Postgres's own, not a workspace project.
-        "project" if prompt == "try_migration_on_branch" => Some(Source { tool: "postgres_list_projects", args: |_| json!({}), fields: &["id"] }),
+        // A Postgres workflow's project is Postgres's own, not a workspace project.
+        "project" if p.needs.iter().any(|n| n.starts_with("postgres_")) => Some(Source { tool: "postgres_list_projects", args: |_| json!({}), fields: &["id"] }),
         "project" => Some(workspace_projects()),
         "service" => Some(Source { tool: "apps_list_services", args: |_| json!({}), fields: &["id"] }),
         "env" => Some(Source { tool: "apps_list_environments", args: |ctx| json!({ "service": ctx["service"] }), fields: &["name"] }),
@@ -216,7 +217,7 @@ fn clean(v: Option<&Value>) -> String {
 /// Whether `s` is an id or a name tools take (`prj_…`, `svc_…`, `production`): letters, digits,
 /// `_`, `.` and `-`, at most 64. A prompt's arguments are only these: anyone can name a project,
 /// and a prompt's text is the person's own message to the agent.
-fn is_id(s: &str) -> bool {
+pub(crate) fn is_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 

@@ -25,6 +25,7 @@
 //! - Search mode: `?tools=search` (or `X-MCP-Tools: search`) lists a search tool and two run tools
 //!   instead of every tool ([`search`]).
 
+pub mod ask;
 pub mod lockdown;
 pub mod modern;
 pub mod prompts;
@@ -154,6 +155,7 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
         as_user,
         ip: None,
         url_elicitation: false,
+        form_elicitation: false,
         modern: false,
         toolsets: None,
         readonly: false,
@@ -191,7 +193,7 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     if !caller {
         return unauthorized(&m.config);
     }
-    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, form_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
         let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
@@ -389,7 +391,8 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).and_then(session_client))
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
+    let form_elicitation = modern && modern::form_elicitation(&messages[0]);
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, form_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
@@ -487,6 +490,8 @@ struct Ctx {
     as_user: bool,
     /// The client opens URLs for elicitation: an approval comes back as one to open, then retry.
     url_elicitation: bool,
+    /// A 2026-07-28 client that fills in forms: a call missing an id asks for it (`ask`).
+    form_elicitation: bool,
     /// A modern request (2026-07-28): served on its own, its answers marked as that revision's.
     modern: bool,
     /// The products whose tools are listed (`None`: every product's).
@@ -622,6 +627,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     rpc_error(id, -32602, "arguments must be an object")
                 } else if ctx.readonly && !tool_names(ctx).contains(&name) {
                     rpc_result(id, json!({ "content": [{ "type": "text", "text": format!("{name} isn't read-only, and this connection is (?readonly=1): connect without it to change things") }], "isError": true }))
+                } else if let Some(r) = ask_for_missing(ctx, &name, &mut args, &params).await {
+                    rpc_result(id, r)
                 } else {
                     // A client that takes tasks gets one for a call that runs long (or waits for
                     // a person); everyone else waits for the answer.
@@ -730,6 +737,37 @@ async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, String> {
     }
     let (values, more) = prompts::values(&answer["structuredContent"], src.fields, &typed);
     Ok(json!({ "completion": { "values": values, "hasMore": more } }))
+}
+
+/// A call missing an id it needs, from a client that fills in forms: the person's choice from the
+/// retry's `inputResponses` goes into `args`; while one is still missing, the form asking for it
+/// (its choices what the connection may read), or why the call stops. `None`: run the call.
+async fn ask_for_missing(ctx: &Arc<Ctx>, name: &str, args: &mut Value, params: &Value) -> Option<Value> {
+    if !ctx.form_elicitation {
+        return None;
+    }
+    let refused = |why: String| json!({ "content": [{ "type": "text", "text": why }], "isError": true });
+    if let Some(responses) = params.get("inputResponses")
+        && let Err(why) = ask::fill(args, responses)
+    {
+        return Some(refused(why));
+    }
+    // Only a tool this connection is offered; the gate still decides the call.
+    let tool = tools::all().iter().find(|t| t.name == name).filter(|_| tool_names(ctx).iter().any(|n| n == name))?;
+    let (param, src) = ask::missing(tool, args)?;
+    if !tool_names(ctx).iter().any(|t| t == src.tool) {
+        return None;
+    }
+    // The choices, read through the gate with the caller's token (never asking a person).
+    let answer = call_as(ctx, src.tool, (src.args)(args), true).await?;
+    if answer["isError"] == true {
+        return None;
+    }
+    let (values, more) = prompts::values(&answer["structuredContent"], src.fields, "");
+    if values.is_empty() {
+        return None;
+    }
+    Some(ask::input_required(tool.title, param, &values, more))
 }
 
 /// The names of the tools this connection is offered (what prompts may use).

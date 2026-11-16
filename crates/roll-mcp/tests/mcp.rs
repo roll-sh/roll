@@ -551,6 +551,42 @@ async fn tools_list_cost() {
 /// A prompt's arguments complete from what the connection may list (MCP `completion/complete`,
 /// read through the gate): the operator gets matching projects; a token without the prompt's
 /// tools gets nothing.
+/// A call missing an id it needs, from a 2026 client that fills in forms, asks the person to pick
+/// one (the choices what the connection may read), and the retry with the choice runs; a client
+/// that doesn't fill in forms gets the call's own answer, as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_id_is_asked_for() {
+    let d = Daemon::new();
+    let call = |caps: Value, extra: Value| {
+        let mut params = json!({ "name": "postgres_delete_project", "arguments": {} });
+        params["_meta"] = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "modern", "version": "2" }, "io.modelcontextprotocol/clientCapabilities": caps });
+        if let Some(o) = extra.as_object() {
+            for (k, v) in o {
+                params[k] = v.clone();
+            }
+        }
+        let d = &d;
+        async move {
+            let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
+            let h = [("mcp-protocol-version", "2026-07-28"), ("mcp-method", "tools/call"), ("mcp-name", "postgres_delete_project")];
+            d.http_with(OPERATOR, Method::POST, "/v1/mcp", Some(body), &h).await.2
+        }
+    };
+    let forms = json!({ "elicitation": { "form": {} } });
+    let asked = call(forms.clone(), json!({})).await;
+    let form = &asked["result"]["inputRequests"]["missing:project"];
+    assert_eq!((asked["result"]["resultType"].as_str(), form["params"]["mode"].as_str()), (Some("input_required"), Some("form")), "{asked}");
+    assert_eq!(form["params"]["requestedSchema"]["properties"]["value"]["enum"], json!(["pa"]), "{asked}");
+
+    let ran = call(forms.clone(), json!({ "inputResponses": { "missing:project": { "action": "accept", "content": { "value": "pa" } } } })).await;
+    assert_eq!((ran["result"]["resultType"].as_str(), ran["result"]["isError"].as_bool()), (Some("complete"), Some(false)), "{ran}");
+    let declined = call(forms, json!({ "inputResponses": { "missing:project": { "action": "decline" } } })).await;
+    assert_eq!(declined["result"]["isError"], true, "{declined}");
+    // A client without forms: no form, the call answers as it would.
+    let plain = call(json!({}), json!({})).await;
+    assert_ne!(plain["result"]["resultType"], "input_required", "{plain}");
+}
+
 /// Skills over MCP (SEP-2640): `server/discover` declares the extension, `skills/list` has the
 /// guide and the workflows this connection's tools allow, and each listed file reads back with
 /// exactly its listed size and digest and the entry's frontmatter.
