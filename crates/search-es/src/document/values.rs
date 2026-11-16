@@ -185,6 +185,19 @@ pub fn geo_point_of(v: &Value) -> Option<GeoPoint> {
     crate::query::geo::parse_point(&mut p).ok()
 }
 
+/// A `scaled_float`'s scaling factor.
+pub(crate) fn scaling_factor(f: &FieldMapper, ctx: &MappingCtx) -> f64 {
+    f.effective("scaling_factor", ctx).as_f64().unwrap_or(1.0)
+}
+
+/// A finite `scaled_float` value as the long it's indexed as: Java's `Math.round(d * factor)`
+/// (ties go up: -22.5 is -22); `None` past a long's range.
+pub(crate) fn scale(d: f64, factor: f64) -> Option<i64> {
+    let x = d * factor;
+    let scaled = if x - x.floor() >= 0.5 { x.floor() + 1.0 } else { x.floor() };
+    (scaled <= i64::MAX as f64 && scaled >= i64::MIN as f64).then_some(scaled as i64)
+}
+
 pub(crate) fn half_float(v: f32) -> f32 {
     // Round to the nearest half-precision value.
     let bits = v.to_bits();
@@ -575,18 +588,14 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
                 "scaled_float" => {
                     let d = w.p.double_value()?;
                     finite_check("scaled_float", d, crate::json::write::java_double(d))?;
-                    let factor = f.effective("scaling_factor", ctx).as_f64().unwrap_or(1.0);
-                    // Java's `Math.round`: ties go up (-22.5 is -22).
-                    let x = d * factor;
-                    let scaled = if x - x.floor() >= 0.5 { x.floor() + 1.0 } else { x.floor() };
-                    if scaled > i64::MAX as f64 || scaled < i64::MIN as f64 {
+                    let Some(scaled) = scale(d, scaling_factor(f, ctx)) else {
                         return Err(EsError::illegal_argument(format!(
                             "[scaled_float] exceeds the maximum value of long: [{}]",
                             crate::json::write::java_double(d)
                         ))
                         .into());
-                    }
-                    vec![FieldValue::Long(scaled as i64)]
+                    };
+                    vec![FieldValue::Long(scaled)]
                 }
                 ty => {
                     let v = w.p.float_value()?;
@@ -629,7 +638,7 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
                 None => return Err(EsError::illegal_argument(format!("'{s}' is not an IP string literal.")).into()),
             }
         }
-        "keyword" | "wildcard" | "version" => {
+        "keyword" | "wildcard" | "version" | "icu_collation_keyword" => {
             let s = text_of(w.p)?;
             // `version` has no `ignore_above`; a wildcard past it is left out like a keyword.
             if f.ty != "version"
@@ -698,6 +707,13 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
         }
         "geo_shape" | "shape" => vec![FieldValue::Shape(crate::query::geo::parse_geometry(w.p).map_err(ValueError::typed)?)],
         "integer_range" | "long_range" | "float_range" | "double_range" | "date_range" | "ip_range" => vec![parse_range(w, f, full, ctx)?],
+        // The text is in `_source`; its embeddings come from `_inference_fields`.
+        "semantic_text" => {
+            if token == Token::StartObject {
+                return Err(EsError::illegal_argument(format!("[semantic_text] field [{full}] does not support object values")).into());
+            }
+            Vec::new()
+        }
         "dense_vector" => parse_dense_vector(w, f, full, ctx)?,
         "knn_vector" => parse_knn_vector(w, f, full, ctx)?,
         "rank_feature" => {
@@ -719,7 +735,12 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
             while let Some(t) = w.p.next_token() {
                 match t {
                     Token::EndObject => break,
-                    Token::FieldName => key = w.p.current_name().unwrap_or("").to_string(),
+                    Token::FieldName => {
+                        key = w.p.current_name().unwrap_or("").to_string();
+                        if f.ty == "rank_features" && key.contains('.') {
+                            return Err(ValueError::plain(EsError::illegal_argument(format!("[rank_features] fields do not support dots in feature names but found [{key}]"))));
+                        }
+                    }
                     _ => {
                         let v = w.p.float_value()?;
                         if f.ty == "rank_features" {
@@ -776,11 +797,6 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
                 return Err(EsError::java(400, "illegal_argument_exception", format!("Encountered unexpected token [{}].", t.name())).into());
             }
         },
-        "semantic_text" => {
-            // Kept in _source; indexing these types comes with their engines.
-            w.p.skip_children();
-            Vec::new()
-        }
         _ => {
             w.p.skip_children();
             Vec::new()

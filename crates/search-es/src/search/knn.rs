@@ -234,7 +234,7 @@ pub fn inner_hits(qctx: &QueryCtx, sections: &[(Knn, Option<crate::query::joinin
         }
         let child: QueryRef = arc(b);
         let name = ih.name.clone().unwrap_or_else(|| path.clone());
-        qctx.inner_hits.borrow_mut().push(super::query::InnerHitsDef { name, spec: ih.clone(), nested_path: Some(path), query: child, join: None, children: Vec::new() });
+        qctx.inner_hits.borrow_mut().push(super::query::InnerHitsDef { name, spec: ih.clone(), nested_path: Some(path), query: child, join: None, children: Vec::new(), weight: Default::default() });
     }
     Ok(())
 }

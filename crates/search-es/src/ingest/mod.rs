@@ -32,6 +32,8 @@ pub struct Ingested {
     pub args: WriteArgs,
     /// The pipelines the write ran (request or default, final, and those of reroute targets).
     pub executed: Vec<String>,
+    /// The indices the pipelines' reroutes created.
+    pub created: Vec<String>,
 }
 
 /// Runs the pipelines that apply to a write into `target`.

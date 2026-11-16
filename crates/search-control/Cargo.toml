@@ -32,6 +32,7 @@ tower-http.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+flate2.workspace = true
 tempfile.workspace = true
 futures-util.workspace = true
 rusqlite.workspace = true

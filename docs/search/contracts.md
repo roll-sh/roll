@@ -1206,7 +1206,8 @@ pub fn rest::error_response(e: &EsError, req: &EsRequest, d: Dialect) -> EsRespo
 pub struct MemoryStore;                                                           // MetaStore in memory
 pub struct ClusterConfig { pub name, pub dialect: Dialect /* Elasticsearch|OpenSearch */, pub node_name, pub destructive_requires_name: bool,
                           pub node_settings: Vec<(String, String)> /* -E k=v: node.attr.*, node.processors, .. */, pub test_features: bool,
-                          pub host_metrics: bool /* false: node stats report synthetic figures (shared nodes must not leak the host) */ }
+                          pub host_metrics: bool /* false: node stats report synthetic figures (shared nodes must not leak the host) */,
+                          pub default_repository: Option<String> /* roll's default snapshot repository's name (api::snapshots::install_default_repository) */ }
                           // + fn node_setting(key) -> Option<&str>; fn processors() -> usize
 impl Cluster { async fn open(ClusterConfig, Arc<dyn MetaStore>) -> Result<Cluster>; async fn in_memory(name) -> Cluster;
                fn state(&self) -> Arc<meta::ClusterState>;                        // published metadata (immutable snapshot)
@@ -1477,6 +1478,7 @@ pub struct NodeConfig { pub node_name, pub node_id: Option<String> /* lease iden
                         pub max_running: usize /* node-wide running requests, granted round-robin across clusters; 0 = 2 × cores, usize::MAX = off */,
                         pub lease_ttl: Duration /* 10 s */,
                         pub snapshot_leftover_grace: Duration /* 1 h: age before the post-wake sweep drops unrecorded snapshot pins */,
+                        pub default_repository: Option<String> /* copied into ClusterConfig for clusters with object storage */,
                         pub memory_budget: Option<u64> /* resident bytes of all loaded clusters; LRU idle clusters are unloaded past it,
                                                           and a wake makes room first */,
                         pub unload_memory_only: bool /* false: with a StoreProvider whose data() is None, idle and budget unloads skip
@@ -1692,7 +1694,8 @@ the name. Full shapes: [README.md](README.md).
 ```rust
 pub struct SearchConfig { home, node_name, region, public_host, http_port, tls, domain, idle_unload, cache_bytes, sync_objects,
                           history_retention /* StoreConfig::manifest_retain_ms */, gc_interval, metering_interval, stats_interval, test_features,
-                          defaults: Defaults, pricing: Pricing }      // SearchConfig::local(home)
+                          defaults: Defaults, pricing: Pricing,
+                          default_repository: Option<String> /* "found-snapshots" */ }      // SearchConfig::local(home)
 impl Control { async fn new(SearchConfig, pg_storage::Objects) -> Result<Arc<Control>>;   // opens search_store::Store + Node
                pub node: Arc<search_server::Node>; pub data: search_store::Store; pub store /* SQLite */; pub meter: Arc<Meter>;
                async fn shutdown(&self) -> Result<()>;  async fn sample(&self) /* one metering pass */; fn usage(id, days);
