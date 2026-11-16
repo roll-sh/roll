@@ -642,6 +642,9 @@ export function withToolsets(url: string, products: string[], mode: McpMode = {}
   return u.toString().replace(/%2C/g, ",");
 }
 
+/** A word as a shell reads it: a URL with a query (`?`, `&`) quoted, so `&` doesn't end the command. */
+export const shellWord = (s: string) => (/^[A-Za-z0-9_./:@%+=,-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+
 export function mcpConfig(client: McpClient, url: string, token?: string): { lang: "sh" | "json" | "toml" | "text"; text: string } {
   const header = token ? `Bearer ${token}` : undefined;
   const server = (wrap: "mcpServers" | "servers", typed: boolean) => {
@@ -651,7 +654,7 @@ export function mcpConfig(client: McpClient, url: string, token?: string): { lan
   };
   switch (client) {
     case "claude-code":
-      return { lang: "sh", text: `claude mcp add --transport http roll ${url}${header ? ` --header "Authorization: ${header}"` : ""}` };
+      return { lang: "sh", text: `claude mcp add --transport http roll ${shellWord(url)}${header ? ` --header "Authorization: ${header}"` : ""}` };
     case "cursor":
       return { lang: "json", text: server("mcpServers", false) };
     case "vscode":
