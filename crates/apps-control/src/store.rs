@@ -1983,6 +1983,11 @@ impl Store {
             .optional()?)
     }
 
+    pub fn delete_visit_session(&self, hash: &str) -> Result<()> {
+        self.db.execute("DELETE FROM visit_sessions WHERE hash = ?", [hash])?;
+        Ok(())
+    }
+
     pub fn expire_visits(&self, now: i64) -> Result<()> {
         self.db.execute("DELETE FROM visit_sessions WHERE expires_at < ?", [now])?;
         self.db.execute("DELETE FROM visit_tickets WHERE expires_at < ?", [now])?;

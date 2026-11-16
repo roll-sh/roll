@@ -364,10 +364,22 @@ async fn traces_sent_by_instances_read_back() {
 /// Signing in to an environment: a page load with no session goes to roll's dashboard; a person
 /// signed in there gets a one-use ticket to a page at one of the environment's names (a token
 /// gets none); the ticket opens a host-only session, which the app never sees; changing the
-/// environment's access ends it.
+/// environment's access ends it, and so does the person losing the project.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_signed_in_person_gets_into_a_gated_environment() {
-    let w = world_with(|c| c.web_url = Some("https://roll.test".into())).await;
+    let w = world_with(|c| {
+        c.web_url = Some("https://roll.test".into());
+        c.visitor_recheck = Duration::ZERO;
+    })
+    .await;
+    struct Allowed(std::sync::atomic::AtomicBool);
+    impl apps_control::integrations::Visitors for Allowed {
+        fn may_open(&self, user: &str, _project: &str) -> bool {
+            user == "usr_ada" && self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+    let allowed = Arc::new(Allowed(true.into()));
+    w.apps.set_visitors(allowed.clone());
     let (svc, _) = image_service(&w, "admin", json!({"port": 80})).await;
     let id = svc["id"].as_str().unwrap().to_string();
     let h = host(&svc["environments"][0]["url"]);
@@ -423,7 +435,18 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
     assert_eq!(get(path.to_string(), None, true).await.0, StatusCode::UNAUTHORIZED, "a ticket opens once");
     let (st, _, body) = get("/dash".into(), Some(format!("{session}; theirs=1")), true).await;
     assert_eq!((st, body["cookie"].as_str()), (StatusCode::OK, Some("theirs=1")), "the app never sees roll's cookie: {body}");
+    assert_eq!(ask(Some("usr_bob"), to.clone()).await.0, StatusCode::FORBIDDEN, "someone who can't open the project gets no ticket");
+    // The person loses the project: their session ends at the next look.
+    allowed.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(get("/dash".into(), Some(session.clone()), true).await.0, StatusCode::FOUND);
+    allowed.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(get("/dash".into(), Some(session), true).await.0, StatusCode::FOUND, "it ended for good");
     // New access, new sign-in.
+    let (_, t) = ask(Some("usr_ada"), to.clone()).await;
+    let url = t["url"].as_str().unwrap();
+    let (_, hd, _) = get(url[url.find("/__roll/visit").unwrap()..].to_string(), None, true).await;
+    let session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    assert_eq!(get("/dash".into(), Some(session.clone()), true).await.0, StatusCode::OK);
     call(&w.api, "PUT", &env, Some(json!({"access": {"signed_in": true}}))).await;
     assert_eq!(get("/dash".into(), Some(session), true).await.0, StatusCode::FOUND);
 }

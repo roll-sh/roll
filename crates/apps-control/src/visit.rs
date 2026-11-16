@@ -7,7 +7,8 @@
 //! minute) to the page they wanted. The ticket goes back to the environment's own host
 //! (`/__roll/visit`), which trades it for a host-only session cookie (`roll_visit_<env>`, 12
 //! hours) and sends them on. Tickets and sessions are kept by their SHA-256; changing the
-//! environment's access ends every session.
+//! environment's access ends every session, and a session whose person may no longer open the
+//! project ([`crate::integrations::Visitors`], asked every `visitor_recheck`) ends at once.
 
 use crate::{Apps, Error, Result};
 use std::sync::Arc;
@@ -19,6 +20,18 @@ const TICKET_MS: i64 = 60_000;
 pub const SESSION_S: i64 = 12 * 3600;
 /// Sessions remembered on a node before the cache starts again.
 const CACHE_MAX: usize = 10_000;
+
+/// A visitor's session as this node last read it.
+#[derive(Clone)]
+pub(crate) struct Seen {
+    env: String,
+    user: String,
+    until: i64,
+    /// The access generation it was read under: a change to any environment's access reads it again.
+    generation: u64,
+    /// When its person was last asked about.
+    checked: i64,
+}
 
 /// The session cookie's name in an environment.
 pub fn cookie(env: &str) -> String {
@@ -48,6 +61,9 @@ impl Apps {
         if !ours || !matches!(url.scheme(), "http" | "https") {
             return Err(Error::BadRequest("to isn't at one of the environment's names".into()));
         }
+        if !self.may_open(service, user).await {
+            return Err(Error::Forbidden("you can't open this project's environments".into()));
+        }
         let token = format!("rlv_{}", crate::model::random(32));
         let (hash, sid, e, u) = (crate::public::token_hash(&token), service.to_string(), env.to_string(), user.to_string());
         let until = code_sql::now_ms() + TICKET_MS;
@@ -73,26 +89,48 @@ impl Apps {
         Some(token)
     }
 
-    /// Whose session `token` is in the environment, while it lasts (remembered on this node
-    /// until it ends or the environment's access changes).
+    /// Whether `user` may (still) open `service`'s project: yes where nothing says (no
+    /// [`crate::integrations::Visitors`]); a failed lookup is a no.
+    async fn may_open(self: &Arc<Self>, service: &str, user: &str) -> bool {
+        let Some(v) = self.visitors.get().cloned() else { return true };
+        let sid = service.to_string();
+        let Ok(svc) = self.db(move |s| s.service(&sid)).await else { return false };
+        let user = user.to_string();
+        tokio::task::spawn_blocking(move || v.may_open(&user, &svc.project)).await.unwrap_or(false)
+    }
+
+    /// Whose session `token` is in the environment, while it lasts and its person may still open
+    /// the project (remembered on this node for `visitor_recheck`, and never past the
+    /// environment's access changing).
     pub(crate) async fn visitor(self: &Arc<Self>, service: &str, env: &str, token: &str) -> Option<String> {
         let hash = crate::public::token_hash(token);
         let key = crate::env_key(service, env);
         let generation = self.access_gen.load(std::sync::atomic::Ordering::SeqCst);
         let now = code_sql::now_ms();
-        if let Some((k, user, until, g)) = self.visits.lock().get(&hash).cloned()
-            && k == key
-            && g == generation
+        let fresh = now - self.cfg.visitor_recheck.as_millis() as i64;
+        if let Some(s) = self.visits.lock().get(&hash).cloned()
+            && s.env == key
+            && s.generation == generation
+            && s.checked > fresh
         {
-            return (until > now).then_some(user);
+            return (s.until > now).then_some(s.user);
         }
         let (h, sid, e) = (hash.clone(), service.to_string(), env.to_string());
         let (user, until) = self.db(move |s| s.visit_session(&h, &sid, &e)).await.ok()??;
+        if until <= now {
+            return None;
+        }
+        // Their account went, or they may no longer open the project: the session ends now.
+        if !self.may_open(service, &user).await {
+            self.visits.lock().remove(&hash);
+            let _ = self.db(move |s| s.delete_visit_session(&hash)).await;
+            return None;
+        }
         let mut cache = self.visits.lock();
         if cache.len() >= CACHE_MAX {
             cache.clear();
         }
-        cache.insert(hash, (key, user.clone(), until, generation));
-        (until > now).then_some(user)
+        cache.insert(hash, Seen { env: key, user: user.clone(), until, generation, checked: now });
+        Some(user)
     }
 }

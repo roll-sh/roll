@@ -135,6 +135,9 @@ pub struct AppsConfig {
     pub upload_max: usize,
     /// The dashboard (roll code's `web_url`): a private preview's 401 page links into it.
     pub web_url: Option<String>,
+    /// How long a sign-in-gated environment trusts a visitor's session before it asks again
+    /// whether they may still open the project ([`integrations::Visitors`]).
+    pub visitor_recheck: Duration,
     /// Where an instance sends its traces (OTLP/HTTP): the apps listener's base (public traffic's,
     /// never the API's: `http://127.0.0.1:7080`, made reachable from instances by the runtime), or
     /// the public apps address on a fleet. None: traces can't be turned on.
@@ -172,6 +175,7 @@ impl AppsConfig {
             prices: Prices::default(),
             upload_max: 512 << 20,
             web_url: None,
+            visitor_recheck: Duration::from_secs(300),
             otlp_base: None,
             allow_private: false,
             spend_every: Duration::from_secs(30),
@@ -229,6 +233,8 @@ pub struct Apps {
     github: std::sync::OnceLock<Arc<dyn integrations::GitHubApp>>,
     /// Email to projects' owners (`notify`), once rolld has accounts.
     mail: std::sync::OnceLock<Arc<dyn integrations::Mailbox>>,
+    /// Who may still open a project's environments ([`Apps::set_visitors`]).
+    pub(crate) visitors: std::sync::OnceLock<Arc<dyn integrations::Visitors>>,
     /// Log drains whose batch came back (the drainer sends the next).
     drain_done: Arc<Mutex<Vec<String>>>,
     /// Projects whose drains changed on this node: the drainer reads theirs again (only theirs).
@@ -238,9 +244,8 @@ pub struct Apps {
     /// Bumped by every change to the access cache: a cold read caches what it read only if
     /// nothing changed meanwhile (a token rotated while it read would otherwise come back).
     access_gen: std::sync::atomic::AtomicU64,
-    /// Signed-in visitors' sessions this node has looked up: their hash → (environment, person,
-    /// end, the access generation it was read under).
-    visits: Mutex<HashMap<String, (String, String, i64, u64)>>,
+    /// Signed-in visitors' sessions this node has looked up, by their hash.
+    visits: Mutex<HashMap<String, visit::Seen>>,
     /// Each environment's `needs_deploy` as last worked out (it decrypts every variable and asks
     /// each linked product for its own): when, the settings generation and active deployment it
     /// was for, and the answer. Good for a minute, or until either moves.
@@ -392,6 +397,7 @@ impl Apps {
             pushes: std::sync::OnceLock::new(),
             github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
+            visitors: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
             access: Mutex::new(HashMap::new()),
@@ -2665,6 +2671,11 @@ impl Apps {
     /// Where a Git URL service's pushes to branches it doesn't follow go (roll previews). Set once.
     pub fn set_git_pushes(&self, pushes: Arc<dyn integrations::GitPushes>) {
         let _ = self.pushes.set(pushes);
+    }
+
+    /// Who may still open a project's environments (roll-accounts). Set once.
+    pub fn set_visitors(&self, v: Arc<dyn integrations::Visitors>) {
+        let _ = self.visitors.set(v);
     }
 
     /// How email reaches people (roll-accounts' mailer). Set once.

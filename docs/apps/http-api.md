@@ -313,7 +313,8 @@ type EnvironmentPut = {
    *  sends them back to `/__roll/visit?ticket=&to=` on the same host, where the ticket (one use,
    *  a minute) becomes a host-only HttpOnly cookie `roll_visit_<env>` (12 hours; the app never
    *  sees it) and a 302 to `to`; anything else is a 401. 409 without the node's `web_url`.
-   *  Changing access ends every session. null: public again. */
+   *  Changing access ends every session, and a session asks again every 5 minutes whether its
+   *  person may still open the project (a disabled account is turned away). null: public again. */
   /** `bypass_sha256`: the SHA-256 (hex) of an automation's secret (CI's end-to-end tests): a
    *  request with `X-Roll-Preview-Bypass: <secret>` goes in with no cookie or redirect. */
   access?: { token?: string; signed_in?: boolean; bypass_sha256?: string } | null;

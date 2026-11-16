@@ -219,6 +219,13 @@ pub trait GitHubApp: Send + Sync {
     async fn deployment_status(&self, installation: u64, owner: &str, repo: &str, deployment: u64, state: &str, url: Option<&str>, description: &str) -> anyhow::Result<()>;
 }
 
+/// Whether a person may still open a project's environments (rolld answers from roll-accounts:
+/// the account still signs in, and may use roll apps). A sign-in-gated environment asks when it
+/// gives a ticket and again every few minutes of a visitor's session. Unset: a session lasts.
+pub trait Visitors: Send + Sync {
+    fn may_open(&self, user: &str, project: &str) -> bool;
+}
+
 /// Email to a person through their account (rolld fills it with roll-accounts' mailer). Unset or
 /// off: no email targets.
 #[async_trait]
