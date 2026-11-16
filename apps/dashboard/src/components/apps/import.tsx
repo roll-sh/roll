@@ -6,6 +6,7 @@ import type { Template } from "@/lib/templates";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { redisApi } from "@/lib/redis-api";
 import { nosqlApi } from "@/lib/nosql-api";
+import { searchApi } from "@/lib/search-api";
 import { api, streams } from "@/lib/roll-api";
 import { storageApi } from "@/lib/storage-api";
 import { freeSpot, service as serviceView } from "@/lib/workspace-resources";
@@ -204,6 +205,7 @@ export function ImportPane({ project, spot, onDone, repo, git, template }: { pro
       if (kinds.has("bucket")) for (const b of await storageApi.buckets()) names.set(`bucket:${b.name}`, b.name);
       if (kinds.has("stream")) for (const s of await streams.list()) names.set(`stream:${s.id}`, s.name);
       if (kinds.has("nosql")) for (const d of await nosqlApi.list()) names.set(`nosql:${d.id}`, d.name);
+      if (kinds.has("search")) for (const c of await searchApi.list()) names.set(`search:${c.id}`, c.name);
       const dbs = new Map<string, string>();
       for (const r of project.resources) {
         const n = names.get(`${r.kind}:${r.ref}`);
