@@ -265,7 +265,9 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     read (the same list tool completions use, through the gate, never asking a person). The
     retry's `inputResponses` fills the id in, and the call runs as if the client had sent it, so
     the gate decides it as usual and there's no `requestState` to trust. A declined form stops the
-    call; a value that isn't an id is refused. Other clients get the call's own answer.
+    call; a value that isn't an id is refused. Other clients get the call's own answer. Checked
+    live with the official TypeScript SDK v2 (`live/sdk2/ask.mjs`: its elicitation handler picks
+    from the form, and it retries by itself).
   - **MCP Apps** (`roll_mcp::ui`, `io.modelcontextprotocol/ui`, SEP-1865): for a host that
     declares HTML views (`mimeTypes: ["text/html;profile=mcp-app"]`), the read-only tools that
     answer rows (lists, queries, logs, reads, usage) point at `ui://roll/table` (`_meta.ui`). The

@@ -17,7 +17,8 @@ pub fn source(product: &str, param: &str) -> Option<Source> {
     match (product, param) {
         // A Postgres project is Postgres's own, not a workspace project.
         ("postgres", "project") => Some(Source { tool: "postgres_list_projects", args: |_| json!({}), fields: &["id"] }),
-        ("workspace" | "secrets" | "previews" | "apps", "project") => Some(workspace_projects()),
+        // A workspace project: the workspace's own tools name it `id`, the others `project`.
+        ("workspace", "id") | ("workspace" | "secrets" | "previews" | "apps", "project") => Some(workspace_projects()),
         ("apps", "service") => Some(Source { tool: "apps_list_services", args: |_| json!({}), fields: &["id"] }),
         ("apps", "env") => Some(Source { tool: "apps_list_environments", args: |a| json!({ "service": a["service"] }), fields: &["name"] }),
         _ => None,
@@ -48,11 +49,17 @@ pub fn fill(args: &mut Value, responses: &Value) -> Result<(), String> {
 
 /// The form asking for `param` of `title`, offering `values` (each an id the connection may read).
 pub fn input_required(title: &str, param: &str, values: &[String], more: bool) -> Value {
-    let mut field = json!({ "type": "string", "title": param });
+    // What a person calls it: the workspace's tools name a project `id`.
+    let label = match param {
+        "id" => "project",
+        "env" => "environment",
+        p => p,
+    };
+    let mut field = json!({ "type": "string", "title": label });
     if !values.is_empty() && !more {
         field["enum"] = json!(values);
     } else {
-        field["description"] = json!(format!("The {param}'s id"));
+        field["description"] = json!(format!("The {label}'s id"));
     }
     json!({
         "resultType": "input_required",
@@ -61,7 +68,7 @@ pub fn input_required(title: &str, param: &str, values: &[String], more: bool) -
                 "method": "elicitation/create",
                 "params": {
                     "mode": "form",
-                    "message": format!("{title}: which {param}?"),
+                    "message": format!("{title}: which {label}?"),
                     "requestedSchema": { "type": "object", "properties": { "value": field }, "required": ["value"] },
                 },
             },
@@ -83,5 +90,7 @@ mod tests {
         let postgres = crate::tools::all().iter().find(|t| t.name == "postgres_get_project").unwrap();
         assert_eq!(missing(postgres, &json!({})).map(|(p, s)| (p, s.tool)), Some(("project", "postgres_list_projects")));
         assert!(missing(postgres, &json!({ "project": "prj_a1" })).is_none());
+        let workspace = crate::tools::all().iter().find(|t| t.name == "workspace_get_project").unwrap();
+        assert_eq!(missing(workspace, &json!({})).map(|(p, s)| (p, s.tool)), Some(("id", "workspace_list_projects")));
     }
 }
