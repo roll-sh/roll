@@ -1,6 +1,6 @@
 import { ChevronRight, FileText, GitBranch, Image, LoaderCircle, Plus, Terminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, parseEnv, SERVICE_NAME, type Plan, type Service, type ServiceType, type Source } from "@/lib/apps-api";
+import { appsApi, parseEnv, SERVICE_NAME, type Plan, type RootCandidate, type Service, type ServiceType, type Source } from "@/lib/apps-api";
 import { codeApi, type GithubInstallation, type Owner, type Repo } from "@/lib/code-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { freeSpot, KIND_LABEL, resourceKey, suggestName, type ResourceView } from "@/lib/workspace-resources";
@@ -10,6 +10,8 @@ import { LINKABLE } from "./variables";
 import { CopyField, Head, Label, Rows } from "../workspace/inspector";
 import { KindTile } from "../workspace/kind";
 import { FolderDeploy } from "./folder-deploy";
+import { TemplateList } from "./deploy-repo";
+import { useInstallLine } from "@/lib/install-line";
 
 type From = "repo" | "image" | "upload" | "file";
 
@@ -57,9 +59,13 @@ export function NewServiceSheet({
   onImported: (made: Service[]) => void;
 }) {
   const [from, setFrom] = useState<From>("repo");
+  const install = useInstallLine();
   const [repos, setRepos] = useState<Repo[] | null>(null);
   const [reposError, setReposError] = useState<string | null>(null);
   const [repo, setRepo] = useState("");
+  // Any public Git URL instead (GitHub, GitLab…): no app to install, no mirror.
+  const [gitUrl, setGitUrl] = useState("");
+  const [gitBranch, setGitBranch] = useState("");
   const [root, setRoot] = useState("");
   const [image, setImage] = useState("");
   const [regUser, setRegUser] = useState("");
@@ -85,6 +91,8 @@ export function NewServiceSheet({
   const makeable = STORES.filter((k) => ws.kinds.has(k));
   const [step, setStep] = useState("");
   const [plan, setPlan] = useState<{ key: string; plan?: Plan; error?: string } | null>(null);
+  // A monorepo's folders that build on their own, offered as roots (per repo or URL).
+  const [roots, setRoots] = useState<{ key: string; list: RootCandidate[] } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -105,27 +113,44 @@ export function NewServiceSheet({
   // The name follows the source until it's typed.
   useEffect(() => {
     if (named) return;
-    const base = from === "repo" ? nameFrom(repo) : from === "image" ? nameFrom(image) : "";
+    const base = from === "repo" ? nameFrom(gitUrl.trim() ? gitUrl.trim().replace(/\.git$/, "") : repo) : from === "image" ? nameFrom(image) : "";
     setName(base);
-  }, [from, repo, image, named]);
+  }, [from, repo, gitUrl, image, named]);
 
-  // rolld's plan for the repo and root, looked up when they settle.
-  const planKey = `${repo}\n${root.trim()}`;
+  // rolld's plan for the repo (or the Git URL, at its branch) and root, looked up when they settle.
+  const git = gitUrl.trim();
+  const planKey = `${git || repo}\n${gitBranch.trim()}\n${root.trim()}`;
   useEffect(() => {
-    if (from !== "repo" || !repo) return;
+    if (from !== "repo" || (!git && !repo) || (git && !/^https?:\/\/[^/@\s]+\/\S+$/.test(git))) return;
     let live = true;
+    const at = root.trim() ? { root: root.trim() } : {};
     const t = setTimeout(() => {
       setPlan({ key: planKey });
-      appsApi.plan({ repo, ...(root.trim() ? { root: root.trim() } : {}) }).then(
+      appsApi.plan(git ? { git, ...(gitBranch.trim() ? { branch: gitBranch.trim() } : {}), ...at } : { repo, ...at }).then(
         (p) => live && setPlan({ key: planKey, plan: p }),
         (e) => live && setPlan({ key: planKey, error: message(e) }),
       );
-    }, 350);
+    }, git ? 800 : 350);
     return () => {
       live = false;
       clearTimeout(t);
     };
-  }, [from, repo, root, planKey]);
+  }, [from, repo, git, gitBranch, root, planKey]);
+  const rootsKey = `${git || repo}\n${gitBranch.trim()}`;
+  useEffect(() => {
+    if (from !== "repo" || (!git && !repo) || (git && !/^https?:\/\/[^/@\s]+\/\S+$/.test(git)) || roots?.key === rootsKey) return;
+    let live = true;
+    const t = setTimeout(() => {
+      appsApi.roots(git ? { git, ...(gitBranch.trim() ? { branch: gitBranch.trim() } : {}) } : { repo }).then(
+        (r) => live && setRoots({ key: rootsKey, list: r.roots }),
+        () => live && setRoots({ key: rootsKey, list: [] }),
+      );
+    }, git ? 800 : 350);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [from, repo, git, gitBranch, rootsKey, roots?.key]);
 
   // What the code uses, ticked until the user picks: the project's one database of that kind,
   // else a new one (with two or more, they choose).
@@ -152,14 +177,26 @@ export function NewServiceSheet({
     });
   };
 
+  const rootPart = root.trim() ? { root: root.trim() } : {};
   const source: Source | null =
-    from === "repo" ? (repo ? { kind: "repo", repo, ...(root.trim() ? { root: root.trim() } : {}) } : null) : from === "image" ? (image.trim() ? { kind: "image", image: image.trim() } : null) : null;
+    from === "repo"
+      ? gitUrl.trim()
+        ? { kind: "git", url: gitUrl.trim(), ...rootPart }
+        : repo
+          ? { kind: "repo", repo, ...rootPart }
+          : null
+      : from === "image"
+        ? image.trim()
+          ? { kind: "image", image: image.trim() }
+          : null
+        : null;
+  const gitOk = !gitUrl.trim() || /^https:\/\/[^/@\s]+\/\S+$/.test(gitUrl.trim());
   const portN = port.trim() ? Number(port) : undefined;
   const portOk = portN === undefined || (Number.isInteger(portN) && portN > 0 && portN < 65536);
   const parsed = useMemo(() => parseEnv(env), [env]);
   const scheduleOk = kind !== "cron" || schedule.trim().split(/\s+/).length === 5;
   const healthOk = !health.trim() || health.trim().startsWith("/");
-  const ready = !!source && SERVICE_NAME.test(name) && portOk && healthOk && scheduleOk && parsed.errors.length === 0 && !busy;
+  const ready = !!source && gitOk && SERVICE_NAME.test(name) && portOk && healthOk && scheduleOk && parsed.errors.length === 0 && !busy;
 
   const create = async () => {
     if (!source) return;
@@ -200,7 +237,8 @@ export function NewServiceSheet({
         ...fresh.map((r) => ({ kind: LINKABLE[r.kind]!, ref: r.ref })),
         ...linkable.filter((v) => links.has(resourceKey(v)) && !freshKeys.has(resourceKey(v))).map((v) => ({ kind: LINKABLE[v.kind]!, ref: v.ref })),
       ];
-      const s = await appsApi.create({ project: project.id, name, source, ...(run ? { run } : {}), ...variables, ...registry, ...(chosen.length ? { links: chosen } : {}), ...spot });
+      const branch = source.kind === "git" && gitBranch.trim() ? { branch: gitBranch.trim() } : {};
+      const s = await appsApi.create({ project: project.id, name, source, ...branch, ...(run ? { run } : {}), ...variables, ...registry, ...(chosen.length ? { links: chosen } : {}), ...spot });
       onCreated(s);
     } catch (e) {
       setError(message(e));
@@ -258,9 +296,39 @@ export function NewServiceSheet({
               }}
             />
             <Label>
+              Or a public Git URL <span className="font-normal">no app to install</span>
+            </Label>
+            <input value={gitUrl} onChange={(e) => setGitUrl(e.target.value)} placeholder="https://github.com/owner/name" className={field} spellCheck={false} aria-invalid={!gitOk} />
+            {gitUrl.trim() && (
+              <>
+                {!gitOk && <p className="mt-1.5 text-[11px] text-danger">An https:// URL of a repository, without a login in it.</p>}
+                <Label>
+                  Branch <span className="font-normal">optional</span>
+                </Label>
+                <input value={gitBranch} onChange={(e) => setGitBranch(e.target.value)} placeholder="its default branch" className={field} spellCheck={false} />
+                <p className="mt-1.5 text-[11px] leading-relaxed text-subtle">Each new commit on it deploys (checked every 5 minutes). Private repositories go through roll code.</p>
+              </>
+            )}
+            <Label>
               Root directory <span className="font-normal">optional</span>
             </Label>
             <input value={root} onChange={(e) => setRoot(e.target.value)} placeholder="apps/web" className={field} spellCheck={false} />
+            {roots?.key === rootsKey && roots.list.length > 0 && (
+              <div className="mt-1.5 flex flex-wrap gap-1" aria-label="Folders that build">
+                {roots.list.map((c) => (
+                  <button
+                    key={c.root}
+                    type="button"
+                    onClick={() => setRoot(root === c.root ? "" : c.root)}
+                    aria-pressed={root === c.root}
+                    className={`h-6 rounded-md border px-1.5 font-mono text-[11px] transition-colors ${root === c.root ? "border-accent/60 text-fg" : "border-line-2 text-muted hover:text-fg"}`}
+                    title={`${c.framework ?? c.provider} builds there`}
+                  >
+                    {c.root}
+                  </button>
+                ))}
+              </div>
+            )}
           </>
         )}
         {from === "image" && (
@@ -277,7 +345,11 @@ export function NewServiceSheet({
           </>
         )}
         {from === "file" ? (
-          <ImportPane project={project} spot={spot} onDone={onImported} />
+          <>
+            <Label>A template</Label>
+            <TemplateList project={project.id} className="grid grid-cols-2 gap-1.5" />
+            <ImportPane project={project} spot={spot} onDone={onImported} />
+          </>
         ) : from === "upload" ? (
           <>
             <Label>A folder, from here</Label>
@@ -288,6 +360,8 @@ export function NewServiceSheet({
             />
             <Label>From the app's directory</Label>
             <CopyField shown={`roll up --project ${shellQuote(project.name)}`} value={`roll up --project ${shellQuote(project.name)}`} />
+            <p className="mt-2 text-[11.5px] text-subtle">No CLI yet? Install it, then sign it in:</p>
+            <CopyField shown={install} value={`${install}\nroll login`} />
             <p className="mt-2 text-[11.5px] leading-relaxed text-muted">
               Makes a service named after the directory in {project.name}, uploads the tree and follows the build. Its card shows up here; run it again to deploy what changed.
             </p>

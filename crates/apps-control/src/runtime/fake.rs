@@ -69,6 +69,8 @@ pub struct Fake {
     pub pulled_as: Mutex<Option<String>>,
     /// Each build's `no_cache` and its Dockerfile, in order.
     pub built: Mutex<Vec<(bool, String)>>,
+    /// The manifests of the image archives it loaded.
+    pub loaded: Mutex<Vec<String>>,
     /// Images removed ([`Builder::remove_image`]).
     pub removed: Mutex<Vec<String>>,
     /// Instances that answer 500 from now on (a running app that broke: [`Fake::sicken`]).
@@ -578,6 +580,21 @@ impl Runtime for Fake {
 impl Builder for Fake {
     fn name(&self) -> &'static str {
         "fake"
+    }
+
+    /// Records the archive's manifest (what it would load).
+    async fn load(&self, archive: &std::path::Path, tag: &str, log: &LogSink) -> anyhow::Result<String> {
+        use std::io::Read;
+        let mut manifest = String::new();
+        for e in tar::Archive::new(std::fs::File::open(archive)?).entries()? {
+            let mut e = e?;
+            if e.path()?.to_string_lossy() == "manifest.json" {
+                e.read_to_string(&mut manifest)?;
+            }
+        }
+        self.loaded.lock().push(manifest);
+        log.line(format!("loaded as {tag}"));
+        Ok(tag.to_string())
     }
 
     async fn build(&self, job: &BuildJob, log: &LogSink, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String> {

@@ -863,6 +863,41 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 4);
     api.ok(Method::DELETE, "/environments/tmp", None).await;
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
+
+    // A cache revalidates with the digest: unchanged is a 304 that decrypts and issues nothing; a
+    // change reads again; and a folder with a dynamic key always reads again (a
+    // credential's lease ends without moving the digest), unless dynamic keys are left out.
+    let get = |env: &str, query: &str, tag: Option<String>| {
+        let mut r = Request::get(format!("/v1/secrets/projects/{}/environments/{env}/values?{query}", api.project));
+        if let Some(t) = tag {
+            r = r.header("if-none-match", format!("\"{t}\""));
+        }
+        let router = api.router.clone();
+        async move {
+            let resp = router.oneshot(r.body(Body::empty()).unwrap()).await.unwrap();
+            (resp.status(), resp.headers().get("etag").map(|v| v.to_str().unwrap().trim_matches('"').to_string()))
+        }
+    };
+    let audited = || -> i64 { api.db.read(|c| c.query_row("SELECT COUNT(*) FROM audit WHERE project_id = ?", [api.project.as_str()], |r| r.get(0))).unwrap() };
+    api.set("development", "FLAG", "off").await;
+    let (s, tag) = get("development", "digest=1", None).await;
+    assert!(s == StatusCode::OK && tag.is_some());
+    let before = audited();
+    assert_eq!(get("development", "", tag.clone()).await, (StatusCode::NOT_MODIFIED, tag.clone()));
+    // A revalidation is still a read for health and insights: one row a day per caller and folder.
+    assert_eq!(audited(), before + 1);
+    assert_eq!(get("development", "", tag.clone()).await.0, StatusCode::NOT_MODIFIED);
+    assert_eq!(audited(), before + 1, "not again the same day");
+    api.set("development", "NEW_FLAG", "on").await;
+    let (s, moved) = get("development", "", tag.clone()).await;
+    assert!(s == StatusCode::OK && moved.is_some() && moved != tag);
+    // A folder with a live link always reads again: its product may change the credential (a
+    // password reset) without the digest moving.
+    let (_, production) = get("production", "digest=1", None).await;
+    assert_eq!(get("production", "", production).await.0, StatusCode::OK, "it reads a live link");
+    let (_, staging) = get("staging", "dynamic=false&digest=1", None).await;
+    assert_eq!(get("staging", "", staging.clone()).await.0, StatusCode::OK, "it holds a dynamic key");
+    assert_eq!(get("staging", "dynamic=false", staging.clone()).await.0, StatusCode::NOT_MODIFIED);
 }
 
 #[tokio::test]

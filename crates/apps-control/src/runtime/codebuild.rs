@@ -123,6 +123,18 @@ pub fn buildspec(registry: &str, repo_uri: &str, tag: &str, dockerfile: &str, na
     out
 }
 
+/// The buildspec that loads an uploaded image (`image.tar`, its names already taken out) and
+/// pushes it as `<repo>:<tag>`: nothing of it is the uploader's but the image itself.
+pub fn load_spec(registry: &str, repo_uri: &str, tag: &str) -> String {
+    let image = quote(&format!("{repo_uri}:{tag}"));
+    let line = |c: &str| format!("      - {}\n", serde_json::Value::String(c.to_string()));
+    let mut out = String::from("version: 0.2\nenv:\n  shell: bash\nphases:\n  pre_build:\n    commands:\n");
+    out.push_str(&line(&format!("aws ecr get-login-password --region \"$AWS_REGION\" | docker login --username AWS --password-stdin {}", quote(registry))));
+    out.push_str("  build:\n    commands:\n");
+    out.push_str(&line(&format!("ID=$(docker load -q -i image.tar | sed -n 's/^Loaded image ID: //p' | tail -n 1) && test -n \"$ID\" && docker tag \"$ID\" {image} && docker push {image}")));
+    out
+}
+
 /// Zip `dir` to `out`: files with their modes, symlinks as symlinks, nothing followed.
 fn zip_dir(dir: &Path, out: &Path) -> anyhow::Result<()> {
     use zip::write::SimpleFileOptions;
@@ -271,11 +283,8 @@ impl CodeBuild {
 
     /// Run the build to its end: the image.
     async fn run(&self, job: &BuildJob, log: &LogSink, cancel: &CancellationToken, source: &str, secret: Option<&str>, names: &[String]) -> anyhow::Result<String> {
-        let repo_uri = self.repository(&job.service).await?;
-        let registry = repo_uri.split('/').next().unwrap_or(&repo_uri).to_string();
         let tag = job.deployment.strip_prefix("dep_").unwrap_or(&job.deployment);
         let args = super::build_args(job);
-        let spec = buildspec(&registry, &repo_uri, tag, &job.dockerfile, names, job.own_dockerfile.then_some(&args[..]), &job.env_hash, job.no_cache, job.target.as_deref());
         let env: Vec<EnvironmentVariable> = match secret {
             Some(s) => names
                 .iter()
@@ -283,7 +292,19 @@ impl CodeBuild {
                 .collect::<Result<_, _>>()?,
             None => Vec::new(),
         };
-        let minutes = (job.timeout.as_secs().div_ceil(60) as i32).clamp(5, 2160);
+        let spec = |registry: &str, repo_uri: &str| buildspec(registry, repo_uri, tag, &job.dockerfile, names, job.own_dockerfile.then_some(&args[..]), &job.env_hash, job.no_cache, job.target.as_deref());
+        self.run_spec(&job.service, tag, spec, env, job.timeout, log, cancel, source).await
+    }
+
+    /// A CodeBuild run of `spec` (given the registry and the service's repository) on the zip at
+    /// `source`, to its end: the pushed `<repo>:<tag>` by its digest.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_spec(&self, service: &str, tag: &str, spec: impl FnOnce(&str, &str) -> String, env: Vec<EnvironmentVariable>, timeout: std::time::Duration, log: &LogSink, cancel: &CancellationToken, source: &str) -> anyhow::Result<String> {
+        let repo_uri = self.repository(service).await?;
+        let registry = repo_uri.split('/').next().unwrap_or(&repo_uri).to_string();
+        let spec = spec(&registry, &repo_uri);
+        let job_timeout = timeout;
+        let minutes = (job_timeout.as_secs().div_ceil(60) as i32).clamp(5, 2160);
         let started = self
             .codebuild
             .start_build()
@@ -299,7 +320,7 @@ impl CodeBuild {
             .map_err(|e| anyhow::anyhow!("StartBuild: {}", aws_sdk_codebuild::error::DisplayErrorContext(e)))?;
         let id = started.build_value().and_then(|b| b.id()).context("StartBuild returned no build")?.to_string();
         log.stream(Stream::System).line(format!("CodeBuild build {id}"));
-        let deadline = Instant::now() + job.timeout;
+        let deadline = Instant::now() + job_timeout;
         let mut token = None;
         loop {
             tokio::select! {
@@ -349,7 +370,7 @@ impl CodeBuild {
             }
             if Instant::now() >= deadline {
                 self.stop_build(&id).await;
-                bail!("the build took longer than {} minutes", job.timeout.as_secs() / 60);
+                bail!("the build took longer than {} minutes", job_timeout.as_secs() / 60);
             }
         }
     }
@@ -402,6 +423,32 @@ impl Builder for CodeBuild {
         {
             warn!(secret = %name, error = %aws_sdk_secretsmanager::error::DisplayErrorContext(e), "apps: deleting a build's variables");
         }
+        r
+    }
+
+    /// An uploaded image (its names already taken out), loaded and pushed by a CodeBuild run of
+    /// its own (no customer code runs on a fleet node): the archive goes to the bucket in a zip,
+    /// the run loads, tags and pushes it to the service's repository.
+    async fn load(&self, archive: &Path, tag: &str, log: &LogSink) -> anyhow::Result<String> {
+        let (repo, dep) = tag.strip_prefix(super::PREFIX).and_then(|t| t.split_once(':')).ok_or_else(|| anyhow::anyhow!("{tag} isn't a roll apps image name"))?;
+        let service = format!("svc_{repo}");
+        let id = format!("{repo}-{dep}-{}", crate::model::random(6));
+        let dir = self.cfg.scratch.join(format!("{id}-src"));
+        tokio::fs::create_dir_all(&dir).await?;
+        let file = self.cfg.scratch.join(format!("{id}.zip"));
+        let key = format!("{}builds/{id}.zip", self.cfg.prefix);
+        let r = async {
+            tokio::fs::copy(archive, dir.join("image.tar")).await?;
+            let (d, f) = (dir.clone(), file.clone());
+            tokio::task::spawn_blocking(move || zip_dir(&d, &f)).await??;
+            self.bucket.put_file(&key, &file).await?;
+            let spec = |registry: &str, repo_uri: &str| load_spec(registry, repo_uri, dep);
+            self.run_spec(&service, dep, spec, Vec::new(), std::time::Duration::from_secs(1800), log, &CancellationToken::new(), &key).await
+        }
+        .await;
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let _ = tokio::fs::remove_file(&file).await;
+        self.bucket.delete(&key).await;
         r
     }
 
