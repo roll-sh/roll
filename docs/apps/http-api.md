@@ -60,6 +60,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/changes` | | server-sent events: `ready`, then a `changed` (data `{}`) whenever a deploy moves, an instance wakes, sleeps or crashes, or someone changes the service; the page reads it again (on the owner, in memory; it carries nothing itself) | read |
 | `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }` | `Service` (a private registry's login for an image source; sealed, never returned) | write |
 | `DELETE /v1/apps/services/{id}/registry` | | `Service` | write |
+| `PUT /v1/apps/services/{id}/git-login` | `{ username, password }` (a deploy token, app password or access token as `password`; one line each) | `Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another host; sealed, never returned) | write |
+| `DELETE /v1/apps/services/{id}/git-login` | | `Service` | write |
 | `GET /v1/apps/services/{id}/environments` | | `Environment[]` | read |
 | `PUT /v1/apps/services/{id}/environments/{env}` | `EnvironmentPut` | `Environment` | deploy*; with `variables_from` also reveal in that environment (it copies its values) |
 | `GET /v1/apps/services/{id}/environments/{env}` | | `Environment` | read |
@@ -260,6 +262,7 @@ type Service = {
   build: Build;
   run: Run;
   registry: { server: string; username: string } | null; // a private registry's login (never the password)
+  git_login: { host: string; username: string } | null; // a private Git repository's login (never the password)
   links: { kind: LinkKind; ref: string }[]; // what it links (no variables): the canvas draws them
   created_at: number;
   environments: EnvironmentSummary[];
@@ -277,7 +280,7 @@ type EnvironmentSummary = {
 type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
 
 type Patch<T> = { [K in keyof T]?: T[K] | null }; // null: back to the default
-type NewService = { project: string; name: string; source: Source; build?: Patch<Build>; run?: Patch<Run>; variables?: { [name: string]: string } /* production, before its first deploy */; sealed?: string[] /* which of those are sealed from the start (a template's generated secrets) */; registry?: { username: string; password: string; server?: string } /* an image's login, before its first pull (as PUT …/registry) */; links?: { kind: LinkKind; ref: string; prefix?: string }[] /* at most 20, made before the first deploy (as PUT …/links); one that doesn't resolve makes no service */; branch?: string /* a repo or Git source: production follows it, its first deploy that branch's head (default: the repo's default branch); 400 when the repo has no such branch, or a Git URL doesn't answer */; x?: number; y?: number };
+type NewService = { project: string; name: string; source: Source; build?: Patch<Build>; run?: Patch<Run>; variables?: { [name: string]: string } /* production, before its first deploy */; sealed?: string[] /* which of those are sealed from the start (a template's generated secrets) */; registry?: { username: string; password: string; server?: string } /* an image's login, before its first pull (as PUT …/registry) */; git_login?: { username: string; password: string } /* a private Git repository's login, before its branch is checked (as PUT …/git-login) */; links?: { kind: LinkKind; ref: string; prefix?: string }[] /* at most 20, made before the first deploy (as PUT …/links); one that doesn't resolve makes no service */; branch?: string /* a repo or Git source: production follows it, its first deploy that branch's head (default: the repo's default branch); 400 when the repo has no such branch, or a Git URL doesn't answer */; x?: number; y?: number };
 type ServicePatch = { name?: string; source?: Source; build?: Patch<Build>; run?: Patch<Run> };
 
 type EnvironmentPut = {
@@ -442,7 +445,7 @@ type ProjectImport = {
   databases: { [name: string]: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" } };
 };
 
-type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string /* a public Git URL, fetched at its branch's head as its deploy would be */; branch?: string; root?: string } | { files: Record<string, string> };
+type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string /* a Git URL, fetched at its branch's head as its deploy would be */; branch?: string; root?: string; git_login?: { username: string; password: string } /* a private repository's */ } | { files: Record<string, string> };
 
 type Plan = {
   provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "static";

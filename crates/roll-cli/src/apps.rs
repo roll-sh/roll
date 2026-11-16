@@ -200,17 +200,21 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
-    /// Make a service from a repo (`--repo owner/name`), a public Git URL (`--git
-    /// https://github.com/owner/name`) or an image (`--image`).
+    /// Make a service from a repo (`--repo owner/name`), a Git URL (`--git
+    /// https://github.com/owner/name`; a private one with `--git-username` and its token on stdin)
+    /// or an image (`--image`).
     Create {
         name: String,
         #[arg(long, short = 'p')]
         project: String,
         #[arg(long, conflicts_with_all = ["image", "git"])]
         repo: Option<String>,
-        /// A public Git repository's URL: each new commit on its branch deploys.
+        /// A Git repository's URL: each new commit on its branch deploys.
         #[arg(long, conflicts_with = "image")]
         git: Option<String>,
+        /// A private Git repository's login: this username, its token on stdin.
+        #[arg(long, requires = "git")]
+        git_username: Option<String>,
         /// The branch production follows (the repo's default when not given).
         #[arg(long)]
         branch: Option<String>,
@@ -649,6 +653,16 @@ pub enum AppsCmd {
     /// An image service's private registry login: `--username` with the password or token on
     /// stdin, or `--remove`. Sealed, sent only to that image's registry, never shown again.
     Registry {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, conflicts_with = "remove")]
+        username: Option<String>,
+        #[arg(long)]
+        remove: bool,
+    },
+    /// A Git URL service's private repository login: `--username` with the token or app password
+    /// on stdin, or `--remove`. Sealed, sent only to the URL's host, never shown again.
+    GitLogin {
         #[command(flatten)]
         target: Target,
         #[arg(long, conflicts_with = "remove")]
@@ -2256,7 +2270,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             svc
         }
-        AppsCmd::Create { name, project, repo, git, branch, root, image, kind, port, schedule, timezone } => {
+        AppsCmd::Create { name, project, repo, git, git_username, branch, root, image, kind, port, schedule, timezone } => {
             let source = match (repo, git, image) {
                 (Some(r), None, None) => json!({ "kind": "repo", "repo": r, "root": root }),
                 (None, Some(u), None) => json!({ "kind": "git", "url": u, "root": root }),
@@ -2279,6 +2293,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             let project = project_id(api, &project).await?;
             let mut body = json!({ "project": project, "name": name, "source": source, "run": run });
+            if let Some(user) = git_username {
+                body["git_login"] = json!({ "username": user, "password": secret_from_stdin("the token")? });
+            }
             if let Some(b) = branch {
                 body["branch"] = json!(b);
             }
@@ -3043,11 +3060,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 api.call(reqwest::Method::DELETE, &path, None).await?
             } else {
                 let user = username.ok_or_else(|| anyhow::anyhow!("--username, with the password or token on stdin (or --remove)"))?;
-                let mut password = String::new();
-                std::io::Read::read_to_string(&mut std::io::stdin(), &mut password)?;
-                let password = password.trim_end_matches(['\r', '\n']).to_string();
-                anyhow::ensure!(!password.is_empty(), "the password or token goes on stdin (never argv)");
-                api.call(reqwest::Method::PUT, &path, Some(json!({ "username": user, "password": password }))).await?
+                api.call(reqwest::Method::PUT, &path, Some(json!({ "username": user, "password": secret_from_stdin("the password or token")? }))).await?
+            }
+        }
+        AppsCmd::GitLogin { target, username, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/services/{}/git-login", enc(&s(&svc["id"])));
+            if remove {
+                api.call(reqwest::Method::DELETE, &path, None).await?
+            } else {
+                let user = username.ok_or_else(|| anyhow::anyhow!("--username, with the token on stdin (or --remove)"))?;
+                api.call(reqwest::Method::PUT, &path, Some(json!({ "username": user, "password": secret_from_stdin("the token")? }))).await?
             }
         }
         AppsCmd::Sleep { target } => {
@@ -3660,6 +3683,15 @@ fn header_rules(lines: &[String]) -> anyhow::Result<Value> {
     ))
 }
 
+/// A secret read from stdin, never argv: one line, its line ending trimmed.
+fn secret_from_stdin(what: &str) -> anyhow::Result<String> {
+    let mut v = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut v)?;
+    let v = v.trim_end_matches(['\r', '\n']).to_string();
+    anyhow::ensure!(!v.is_empty(), "{what} goes on stdin (never argv)");
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3768,3 +3800,4 @@ mod tests {
         out
     }
 }
+

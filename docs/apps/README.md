@@ -1726,10 +1726,10 @@ serves the answer. With `ROLL_APPS_LINK_RELAY=0` the same test fails. The Umami 
 live on a real roll Postgres this way on the review rolld (healthy after 12.9 s), where it had
 failed before.
 
-## A public Git URL
+## A Git URL
 
-A service can build from any public Git repository by its URL (`{"kind": "git", "url":
-"https://github.com/acme/site"}`; "Or a public Git URL" under Repository in New service; `roll apps
+A service can build from any Git repository by its URL (a private one with its own login, below) (`{"kind": "git", "url":
+"https://github.com/acme/site"}`; "Or a Git URL" under Repository in New service; `roll apps
 create --git URL --branch main`; `git = "…"` in a project file), as Render's "public Git
 repository" and Railway's and Cloud Run's repo URLs are: a GitHub or GitLab repository with no
 app installed and no roll code mirror. `git_source.rs` is the whole of it:
@@ -1746,9 +1746,17 @@ app installed and no roll code mirror. `git_source.rs` is the whole of it:
 - **Fetched safely**: the URL is `https://` (`http://` only where private addresses are allowed),
   carries no credentials, and goes through the same public-only client as webhooks and drains
   (`net::client`: every resolved address checked, no redirects, a timeout), plus the
-  literal-address check, since an IP literal skips the resolver. Private repositories stay
-  roll code's (the GitHub App, a mirror): a token in a URL would be a credential in a service's
-  settings.
+  literal-address check, since an IP literal skips the resolver.
+- **Private repositories** on GitLab, Bitbucket, Gitea or any smart-HTTP host (Render's,
+  Vercel's, Netlify's): the service's own login (`PUT …/git-login`, `git_login` when it's made,
+  `roll apps git-login`, Settings' "Private repository": a deploy token, an app password or an
+  access token). It's sealed at rest (`git_auth`, bound to the service) and never returned, never
+  in the URL, and sent as Basic auth only to the host it was set for: every fetch
+  (`git_source::Remote`) checks the source URL's host against it, and moving the source to
+  another host drops it in the same transaction, as a registry login is dropped with its
+  registry. The branch check when it's made, the plan, deploys, the watch, the hook's ref check
+  and watch paths all fetch with it. A GitHub repository can use it too (a fine-grained token
+  with read access to contents), or roll code's GitHub App.
 - **Followed**: every five minutes, with the tag watch, the owner asks each of its Git services'
   environments' branches where they are (`ls-refs`, a few hundred bytes). A new commit deploys
   (trigger `push`, actor `git watch`), keyed by the commit so two nodes make one deploy. As with
@@ -2215,57 +2223,52 @@ put items 1–11 first. A second review that day (after #78, against the same si
    against the repository's refs (`GitPush`); previews builds the environments (its side is the
    previews thread's). Then same-repo pull requests (`refs/pull/N/head`), and fork pull requests
    only once a writer approves their head (`approve-run`).
-2. **Private repositories on GitLab, Bitbucket or any Git host** (Render's, Vercel's, Netlify's):
-   a Git URL service with a credential of its own (a deploy token or app password), sealed at rest
-   as registry logins are (`registry_auth`), sent as Basic auth by the `code_git` client and never
-   returned; the URL itself stays credential-free. Today only GitHub (through roll code's app) or
-   the GitHub Action's upload reach a private repository.
-3. **One repository webhook for every environment** (Render's, Railway's): a push to `develop`
+2. **One repository webhook for every environment** (Render's, Railway's): a push to `develop`
    posted to production's hook deploys staging when staging follows `develop`, opt-in per hook
    (it widens what a leaked URL can deploy, to heads the repository already has).
-4. **`roll apps dev -- <cmd>`** (Railway's `railway run`, Vercel's `env pull`, Netlify's `netlify
+3. **`roll apps dev -- <cmd>`** (Railway's `railway run`, Vercel's `env pull`, Netlify's `netlify
    dev`): a local command with an environment's variables and links, each linked resource
    reached through `roll apps proxy`'s tunnels.
-5. **Search links in roll.toml**: once roll search's #100 is on main, `[databases]` takes
+4. **Search links in roll.toml**: once roll search's #100 is on main, `[databases]` takes
    `kind = "search"` (apps-build's `DB_KINDS`), so a project file declares a search link and
    `roll apps export` writes it instead of naming it in its notes.
-6. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
+5. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
    on main, `watch_secrets` holds one `SecretSource::wait_digest` long poll per watched
    environment instead of polling every minute.
-7. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+6. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-8. **Region**: the region shown on the overview and each environment, defaulting to the project's
+7. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-9. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+8. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-10. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+9. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-11. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
+10. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
    digests mark "needs deploy", roll secrets' reveal rules, linked and sensitive keys, dynamic
    credentials refused, new environments ensured); what's left is service variables kept in roll
    secrets at `/services/<name>` (one store for both), and links as per-environment secrets
    links.
-12. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+11. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-13. *Waiting on a queue link provider in roll secrets.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); a queue needs a provider that issues its own user first.
-14. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+12. *Waiting on a queue link provider in roll secrets.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); a queue needs a provider that issues its own user first.
+13. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-15. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+14. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-16. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+15. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-17. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+16. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-18. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+17. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

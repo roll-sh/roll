@@ -119,14 +119,17 @@ export function NewServiceSheet({
 
   // rolld's plan for the repo (or the Git URL, at its branch) and root, looked up when they settle.
   const git = gitUrl.trim();
-  const planKey = `${git || repo}\n${gitBranch.trim()}\n${root.trim()}`;
+  // A private repository's login, for the plan and the roots as for the service.
+  const gitLogin = git && regUser.trim() && regPassword ? { git_login: { username: regUser.trim(), password: regPassword } } : {};
+  const loginKey = "git_login" in gitLogin ? `${regUser.trim()}:${regPassword.length}` : "";
+  const planKey = `${git || repo}\n${gitBranch.trim()}\n${root.trim()}\n${loginKey}`;
   useEffect(() => {
     if (from !== "repo" || (!git && !repo) || (git && !/^https?:\/\/[^/@\s]+\/\S+$/.test(git))) return;
     let live = true;
     const at = root.trim() ? { root: root.trim() } : {};
     const t = setTimeout(() => {
       setPlan({ key: planKey });
-      appsApi.plan(git ? { git, ...(gitBranch.trim() ? { branch: gitBranch.trim() } : {}), ...at } : { repo, ...at }).then(
+      appsApi.plan(git ? { git, ...(gitBranch.trim() ? { branch: gitBranch.trim() } : {}), ...at, ...gitLogin } : { repo, ...at }).then(
         (p) => live && setPlan({ key: planKey, plan: p }),
         (e) => live && setPlan({ key: planKey, error: message(e) }),
       );
@@ -135,13 +138,14 @@ export function NewServiceSheet({
       live = false;
       clearTimeout(t);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the login is in planKey
   }, [from, repo, git, gitBranch, root, planKey]);
-  const rootsKey = `${git || repo}\n${gitBranch.trim()}`;
+  const rootsKey = `${git || repo}\n${gitBranch.trim()}\n${loginKey}`;
   useEffect(() => {
     if (from !== "repo" || (!git && !repo) || (git && !/^https?:\/\/[^/@\s]+\/\S+$/.test(git)) || roots?.key === rootsKey) return;
     let live = true;
     const t = setTimeout(() => {
-      appsApi.roots(git ? { git, ...(gitBranch.trim() ? { branch: gitBranch.trim() } : {}) } : { repo }).then(
+      appsApi.roots(git ? { git, ...(gitBranch.trim() ? { branch: gitBranch.trim() } : {}), ...gitLogin } : { repo }).then(
         (r) => live && setRoots({ key: rootsKey, list: r.roots }),
         () => live && setRoots({ key: rootsKey, list: [] }),
       );
@@ -150,6 +154,7 @@ export function NewServiceSheet({
       live = false;
       clearTimeout(t);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the login is in rootsKey
   }, [from, repo, git, gitBranch, rootsKey, roots?.key]);
 
   // What the code uses, ticked until the user picks: the project's one database of that kind,
@@ -206,7 +211,8 @@ export function NewServiceSheet({
       const variables = Object.keys(parsed.vars).length ? { variables: parsed.vars } : {};
       const web = { ...(portN ? { port: portN } : {}), ...(health.trim() ? { health_path: health.trim() } : {}) };
       const run = kind === "web" ? (Object.keys(web).length ? web : undefined) : kind === "cron" ? { type: kind, schedule: schedule.trim() } : { type: kind };
-      const registry = from === "image" && regUser.trim() && regPassword ? { registry: { username: regUser.trim(), password: regPassword } } : {};
+      const login = regUser.trim() && regPassword ? { username: regUser.trim(), password: regPassword } : null;
+      const registry = from === "image" && login ? { registry: login } : from === "repo" && gitUrl.trim() && login ? { git_login: login } : {};
       // The new databases first, each placed beside the service, so their variables are in the
       // first deploy. One made before a failure stays in the project, and a retry links it.
       const fresh = [...made];
@@ -296,7 +302,7 @@ export function NewServiceSheet({
               }}
             />
             <Label>
-              Or a public Git URL <span className="font-normal">no app to install</span>
+              Or a Git URL <span className="font-normal">no app to install</span>
             </Label>
             <input value={gitUrl} onChange={(e) => setGitUrl(e.target.value)} placeholder="https://github.com/owner/name" className={field} spellCheck={false} aria-invalid={!gitOk} />
             {gitUrl.trim() && (
@@ -306,7 +312,15 @@ export function NewServiceSheet({
                   Branch <span className="font-normal">optional</span>
                 </Label>
                 <input value={gitBranch} onChange={(e) => setGitBranch(e.target.value)} placeholder="its default branch" className={field} spellCheck={false} />
-                <p className="mt-1.5 text-[11px] leading-relaxed text-subtle">Each new commit on it deploys (checked every 5 minutes). Private repositories go through roll code.</p>
+                <p className="mt-1.5 text-[11px] leading-relaxed text-subtle">Each new commit on it deploys (checked every 5 minutes, or at once with its push webhook).</p>
+                <Label>
+                  Private repository login <span className="font-normal">optional</span>
+                </Label>
+                <div className="flex gap-2">
+                  <input value={regUser} onChange={(e) => setRegUser(e.target.value)} placeholder="username" aria-label="Git username" className={field} spellCheck={false} autoComplete="off" />
+                  <input value={regPassword} onChange={(e) => setRegPassword(e.target.value)} placeholder="token or app password" aria-label="Git token" type="password" className={field} autoComplete="new-password" />
+                </div>
+                <p className="mt-1.5 text-[11px] leading-relaxed text-subtle">A deploy token, app password or access token: sealed, sent only to this repository's host, never shown again.</p>
               </>
             )}
             <Label>

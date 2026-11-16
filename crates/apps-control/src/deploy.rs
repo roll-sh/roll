@@ -138,7 +138,7 @@ impl Apps {
                 let sha = match &revision {
                     Some(r) if r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit()) => r.to_ascii_lowercase(),
                     Some(_) => return Err(Error::BadRequest("revision is a full commit id (40 hex digits) for a Git URL".into())),
-                    None => crate::git_source::head(&crate::git_source::client(self.cfg.allow_private), url, row.branch.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?.0,
+                    None => crate::git_source::head(&self.git_remote(service, url).await, row.branch.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?.0,
                 };
                 if message.is_empty() {
                     message = format!("{} at {}", row.branch.as_deref().unwrap_or("HEAD"), &sha[..12]);
@@ -1029,7 +1029,7 @@ impl Apps {
             (Source::Git { url, root }, _) => {
                 let rev = d.revision.as_deref().ok_or_else(|| anyhow::anyhow!("no revision to build"))?;
                 log.line(format!("fetching {url} at {}", &rev[..rev.len().min(12)]));
-                let files = crate::git_source::materialize(&crate::git_source::client(self.cfg.allow_private), url, rev, &tree).await?;
+                let files = crate::git_source::materialize(&self.git_remote(&svc.id, url).await, rev, &tree).await?;
                 log.line(format!("fetched {files} files"));
                 root.clone()
             }
@@ -1875,7 +1875,7 @@ impl Apps {
         };
         let read = match (&svc.source, &self.deps.sources) {
             (Source::Repo { repo, .. }, Some(sources)) => sources.read_file(repo, revision, &path).await,
-            (Source::Git { url, .. }, _) => crate::git_source::read_file(&crate::git_source::client(self.cfg.allow_private), url, revision, &path).await,
+            (Source::Git { url, .. }, _) => crate::git_source::read_file(&self.git_remote(&svc.id, url).await, revision, &path).await,
             _ => return None,
         };
         match read {
@@ -1906,8 +1906,7 @@ impl Apps {
         if let (Source::Git { url, .. }, Some(sources)) = (&svc.source, &self.deps.sources) {
             let Some(active) = env.active.clone() else { return true };
             let Ok(Some(from)) = self.db(move |s| s.deployment(&active).map(|d| d.revision)).await else { return true };
-            let client = crate::git_source::client(self.cfg.allow_private);
-            return match crate::git_source::changed_paths(&client, url, &from, revision).await {
+            return match crate::git_source::changed_paths(&self.git_remote(&svc.id, url).await, &from, revision).await {
                 Ok(Some(paths)) => sources.any_path_matches(patterns, &paths),
                 Ok(None) => true,
                 Err(e) => {

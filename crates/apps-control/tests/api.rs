@@ -3694,6 +3694,8 @@ struct GitHost {
     main: Mutex<Option<code_git::ObjectId>>,
     /// Other branches, by name.
     branches: Mutex<std::collections::BTreeMap<String, code_git::ObjectId>>,
+    /// A private repository's login: reads need it.
+    login: Mutex<Option<(String, String)>>,
 }
 
 /// roll previews' side of a Git URL's pushes: what it was handed.
@@ -3743,9 +3745,12 @@ impl GitHost {
 
 #[async_trait]
 impl code_git::GitBackend for GitHost {
-    async fn authorize(&self, _repo: &str, _c: Option<&code_git::Credentials>, access: code_git::Access) -> code_git::GitResult<Option<String>> {
+    async fn authorize(&self, _repo: &str, c: Option<&code_git::Credentials>, access: code_git::Access) -> code_git::GitResult<Option<String>> {
         match access {
-            code_git::Access::Read => Ok(None),
+            code_git::Access::Read => match &*self.login.lock() {
+                Some((u, p)) if c.is_none_or(|c| (&c.username, &c.password) != (u, p)) => Err(code_git::GitError::Unauthorized),
+                _ => Ok(None),
+            },
             code_git::Access::Write => Err(code_git::GitError::Unauthorized),
         }
     }
@@ -3887,6 +3892,47 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let (st, d) = call(&w.api, "POST", &hook, Some(bitbucket)).await;
     assert_eq!((st, d["revision"].as_str(), d["message"].as_str()), (StatusCode::ACCEPTED, Some(api.as_str()), Some("add the api")), "{d}");
     assert_eq!(pushes.0.lock().len(), 3, "feature went to previews too");
+}
+
+/// A private repository on any Git host: the service's own login (sealed, never returned, sent
+/// only to the URL's host) is what its branch check, deploys and the watch fetch with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_private_git_url_fetches_with_its_login() {
+    let w = world().await;
+    let git = Arc::new(GitHost::default());
+    *git.login.lock() = Some(("deploy".into(), "glpat-sekret-token".into()));
+    let pkg = ("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#);
+    let first = git.commit(&[pkg, ("server.js", "require('http')")]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}/git/acme/private");
+    let app = code_git::router(git.clone(), code_git::ServerConfig::default());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let body = |login: Value| json!({ "project": w.project, "name": "private", "source": {"kind": "git", "url": url}, "git_login": login });
+    let (st, v) = call(&w.api, "POST", "/v1/apps/services", Some(body(Value::Null))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "no login: {v}");
+    let (st, v) = call(&w.api, "POST", "/v1/apps/services", Some(body(json!({"username": "deploy", "password": "wrong"})))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "a wrong one: {v}");
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(body(json!({"username": "deploy", "password": "glpat-sekret-token"})))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    assert_eq!(svc["git_login"], json!({"host": format!("127.0.0.1:{port}"), "username": "deploy"}));
+    assert!(!svc.to_string().contains("sekret"));
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d1 = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!((d1["status"].as_str(), d1["revision"].as_str()), (Some("active"), Some(first.as_str())), "{d1}");
+    let raw = [std::fs::read(w.apps.cfg.home.join("apps.db")).unwrap(), std::fs::read(w.apps.cfg.home.join("apps.db-wal")).unwrap_or_default()].concat();
+    assert!(!raw.windows(6).any(|x| x == b"sekret"), "sealed at rest");
+    // The watch fetches with it too.
+    let second = git.commit(&[pkg, ("server.js", "require('http') // v2")]);
+    let started = w.apps.watch_git().await;
+    assert_eq!(started.len(), 1);
+    assert_eq!(settled(&w, &id, "production", &started[0]).await["revision"].as_str(), Some(second.as_str()));
+    // Another host never gets it: moving the source there drops the login.
+    let (_, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"source": {"kind": "git", "url": format!("http://localhost:{port}/git/acme/private")}}))).await;
+    assert_eq!(s["git_login"], Value::Null, "{s}");
+    let (st, s) = call(&w.api, "PUT", &format!("/v1/apps/services/{id}/git-login"), Some(json!({"username": "deploy", "password": "glpat-sekret-token"}))).await;
+    assert_eq!((st, s["git_login"]["host"].as_str()), (StatusCode::OK, Some(format!("localhost:{port}").as_str())), "{s}");
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}/git-login"), None).await.1["git_login"], Value::Null);
 }
 
 /// The dashboard's starter templates (apps/dashboard/src/lib/templates) read as the import reads

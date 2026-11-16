@@ -88,8 +88,7 @@ impl Apps {
                     // Only where the branch is now deploys: the body alone never names a commit
                     // (a leaked hook URL can't put an old commit, or a fork's, live). A push
                     // overtaken by a newer one is that one's to deploy.
-                    let client = crate::git_source::client(self.cfg.allow_private);
-                    match crate::git_source::head(&client, url, Some(&branch)).await {
+                    match crate::git_source::head(&self.git_remote(service, url).await, Some(&branch)).await {
                         Ok((now, _)) if now == sha => {}
                         Ok((now, _)) => return Ok(HookOutcome::Ignored(format!("the repository has {branch} at {}, not {}: only its head deploys", &now[..12], &sha[..12]))),
                         Err(e) => return Ok(HookOutcome::Ignored(format!("{branch} couldn't be checked against the repository ({e:#}): not deployed"))),
@@ -141,10 +140,9 @@ pub struct Webhook {
 impl Apps {
     /// A push to a branch apps doesn't follow, checked against the repository's refs and handed
     /// to roll previews. What the hook answers (`{ ignored }`).
-    async fn hand_to_previews(&self, pushes: Arc<dyn crate::integrations::GitPushes>, service: &str, url: &str, push: BranchPush) -> String {
+    async fn hand_to_previews(self: &Arc<Self>, pushes: Arc<dyn crate::integrations::GitPushes>, service: &str, url: &str, push: BranchPush) -> String {
         let BranchPush { branch, sha, message } = push;
-        let client = crate::git_source::client(self.cfg.allow_private);
-        let refs = match client.ls_refs(url, None).await {
+        let refs = match self.git_remote(service, url).await.ls_refs().await {
             Ok(r) => r,
             Err(e) => return format!("a push to {branch}: the repository didn't answer ({e:#})"),
         };
