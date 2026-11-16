@@ -51,13 +51,14 @@ impl Store {
     }
 
     /// A live machine client's credential and grant (`None`: no such client, an ordinary one, or
-    /// one whose grant is revoked or expired).
+    /// one whose grant is revoked, expired, or waiting for an admin's approval).
     pub fn machine_client(&self, client_id: &str) -> Result<Option<MachineClient>> {
         let now = code_sql::now_ms();
         Ok(self.db.read(|c| {
             c.query_row(
                 "SELECT g.id, o.secret_hash, o.jwk FROM oauth_clients o JOIN grants g ON g.client_id = o.id \
-                 WHERE o.id = ? AND o.confidential = 1 AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at > ?)",
+                 WHERE o.id = ? AND o.confidential = 1 AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at > ?) \
+                 AND (g.pending IS NULL OR g.pending = 0)",
                 params![client_id, now],
                 |r| Ok(MachineClient { grant_id: r.get(0)?, secret_hash: r.get(1)?, jwk: r.get(2)? }),
             )

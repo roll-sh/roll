@@ -80,7 +80,7 @@ pub enum Token {
     Presets,
     /// Machine clients: automation with no person (CI, a scheduled agent) that trades a JWT it
     /// signed with its key, or a secret, for an hour's token its rules bound (OAuth client
-    /// credentials). An operator's to make and revoke.
+    /// credentials). The operator's, or, signed in, a person's own acting as them.
     #[command(subcommand)]
     Client(MachineCmd),
     /// roll's rules for every token: `--max-days 90`, `--require-expiry`, `--no-limit`,

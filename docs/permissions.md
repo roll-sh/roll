@@ -131,8 +131,8 @@ Automation with no person (CI, a scheduled agent) uses OAuth client credentials
 (`io.modelcontextprotocol/oauth-client-credentials`): it trades a credential at the token
 endpoint for an hour's access token, rather than holding a long-lived token in a header.
 
-- **Making one:** the operator calls `POST /v1/access/clients {name, rules, expires_at?,
-  public_jwk?}`. The rules are exactly a token's, and so is the token policy (maximum life, an
+- **Making one:** the operator, or a person signed in, calls `POST /v1/access/clients {name,
+  rules, expires_at?, public_jwk?}`. The rules are exactly a token's, and so is the token policy (maximum life, an
   expiry it must have).
 - **What it is:** a confidential OAuth client plus one OAuth grant holding those rules. Each token
   it gets is one more access secret on that grant, so revoking the client
@@ -157,11 +157,17 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
   as `roll token create` takes them; the key an openssl PEM, Ed25519 or P-256, or a JWK; without
   one, roll makes a secret and shows it once), `roll token client list` and
   `roll token client revoke <id>`.
-- **Who:** machine clients are the operator's to make, list and revoke (grants never reach these
-  routes). A person's own, acting as them within their reach, comes later (docs/mcp.md, Next).
+- **Who:** the operator makes, lists and revokes every machine client. A person signed in makes,
+  lists and revokes their own, which act as them, as their tokens do:
+  - within their account's reach;
+  - past the policy's `approve_people`, only once an admin approves (no token until then);
+  - stopping when they can't sign in.
+
+  They're mailed when one is added. A token never reaches these routes, so a credential can't
+  mint another kind of credential.
 - **Tests:** `roll-access/tests/access.rs::a_machine_client_trades_its_credential_for_a_token_its_rules_bound`
   (secret and key, rules bounding the token, a replayed assertion, a leaked secret, a revoked
-  client); `roll-cli/tests/token.rs::a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules`.
+  client); `a_persons_machine_client_acts_as_them`; `roll-cli/tests/token.rs::a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules`.
 
 ## The grant
 

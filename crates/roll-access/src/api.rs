@@ -583,6 +583,10 @@ impl Access {
                 let client = crate::mail_name(client);
                 (format!("{client} was connected to your roll account"), format!("{client} was connected to your roll account{from}, as \"{name}\" ({})", g.id))
             }
+            Added::Machine => (
+                format!("A machine client was added to your roll account: \"{name}\""),
+                format!("The machine client \"{name}\" ({}) was made on your roll account{from}: automation that signs in with its key or secret acts as you", g.id),
+            ),
             Added::Device { client, asked_from } => {
                 let client = crate::mail_name(client);
                 let asked = asked_from.map(|n| format!(", asked from {n}")).unwrap_or_default();
@@ -603,6 +607,8 @@ pub(crate) enum Added<'a> {
     /// A device, by its client's name, with a code, and the network the device asked from (the
     /// request's network is the approver's own browser: a phished victim's).
     Device { client: &'a str, asked_from: Option<&'a str> },
+    /// A machine client (automation's OAuth client credentials).
+    Machine,
 }
 
 /// What a grant may do, a line a product, for mail: products and actions, never a resource (a

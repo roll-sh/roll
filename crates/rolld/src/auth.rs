@@ -33,11 +33,9 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/mcp", access: Access::Product("MCP: 401 with OAuth discovery without a token") },
     // Scoped tokens: the operator's, and each signed-in user's own (the routes check which).
     Rule { route: "/v1/access", access: Access::User("access: a user's own tokens, approvals and audit") },
-    // …except where approvals are posted, where the audit log streams, and machine clients: the
-    // operator's.
+    // …except where approvals are posted and where the audit log streams: the operator's.
     Rule { route: "/v1/access/notify", access: Access::Operator },
     Rule { route: "/v1/access/audit/sinks", access: Access::Operator },
-    Rule { route: "/v1/access/clients", access: Access::Operator },
     // Health: load balancers and the dashboard's status; nothing a tenant owns.
     Rule { route: "/v1/health", access: Access::Public("health: Postgres control plane version and status") },
     Rule { route: "/v1/code/health", access: Access::Public("health: load balancers") },

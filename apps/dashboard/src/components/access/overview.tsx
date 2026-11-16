@@ -41,8 +41,8 @@ export function AccessOverview() {
   const { data: grants, error, refresh } = usePoll(() => accessApi.tokens(), 10_000);
   const { data: me } = usePoll(() => accessApi.me(), 60_000);
   const { data: checkup, refresh: recheck } = usePoll(() => accessApi.checkup(), 60_000);
-  // The operator's machine clients (anyone else's list is refused: the panel stays hidden). Their
-  // grants are listed with them, not among the tokens.
+  // Machine clients: every one for the operator, a person's own for them (a token is refused: the
+  // panel stays hidden). Their grants are listed with them, not among the tokens.
   const { data: machines, refresh: remachine } = usePoll(() => accessApi.machineClients().catch(() => null), 30_000);
   const machineGrants = new Set((machines ?? []).map((c) => c.grant.id));
   return (

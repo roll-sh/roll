@@ -8,7 +8,8 @@ import { GrantRow } from "./overview";
 /**
  * Machine clients (docs/permissions.md, "Machine clients"): automation with no person (CI, a
  * scheduled agent) that trades a JWT its key signed, or a secret, for an hour's token held to the
- * rules chosen here. The operator's: the panel is shown only when the list answers.
+ * rules chosen here. The operator sees every one; a person signed in, their own, which act as them.
+ * Hidden when the list doesn't answer (a token signed in).
  */
 export function MachineClients({ clients, refresh }: { clients: MachineClient[]; refresh: () => Promise<void> }) {
   const [making, setMaking] = useState(false);
