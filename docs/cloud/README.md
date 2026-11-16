@@ -550,13 +550,15 @@ turns them into metrics without an API call from the node. Namespace `RollCloud`
 | `HandoffFailures` | Count | `service` | handoffs that timed out with requests in flight, whose release didn't reach the backend, or that a drain left behind |
 | `LeaseTakeovers` | Count | `service` | leases taken from a holder that never released them (it died or was cut off) |
 | `LeasesFenced` | Count | `service` | leases this node stopped using because it couldn't renew them in time |
+| `PreviewConverges`, `PreviewConvergeFailures` | Count | `service` | roll previews' converges on this node, and those that failed (retried with backoff) |
+| `PreviewScreenshots`, `PreviewScreenshotFailures` | Count | `service` | previews' screenshot runs kept, and those that failed (`roll_previews::Engine::stats`) |
 
 Forwarded requests carry no metrics: the node that received them counted them. The lease
 counters come from `roll_cluster::Cluster::stats` (roll-cluster has no AWS code).
 
 Alarms (`deploy/cloud/README.md`, "Alarms"): `errors` on `Http5xx`; `latency` on the slowest
 p99 of code, postgres, redis, storage, nosql and tasks (streams and queues long-poll, and git
-pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on any.
+pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on any; `preview-converge-failures` and `preview-screenshot-failures` on most of a quarter-hour's runs failing (roll previews' `PreviewConvergeFailures`/`PreviewScreenshotFailures` over their runs), never rolling a deploy back.
 
 ## Redis on the fleet
 

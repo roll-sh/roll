@@ -46,6 +46,50 @@ pub struct RollToml {
     pub preview: Option<PreviewSpec>,
     pub queue: QueueSettings,
     pub main: MainSettings,
+    /// roll apps' `[app.previews.screenshots]`: what roll previews' screenshots of the service do
+    /// (its pages, what to blank, its states), checked here, the rest of `[app]` roll apps' own.
+    pub app_screenshots: Option<Screenshots>,
+}
+
+/// What a service's preview screenshots take beyond its first page, from its repo: `[preview]`'s
+/// `pages`, `hide` and `[[states]]`, or roll apps' `[app.previews.screenshots]`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Screenshots {
+    pub pages: Vec<String>,
+    pub hide: Vec<String>,
+    pub states: Vec<StateRule>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawScreenshots {
+    #[serde(default)]
+    pages: Vec<String>,
+    #[serde(default)]
+    hide: Vec<String>,
+    #[serde(default)]
+    states: Vec<StateRule>,
+}
+
+/// `pages`, `hide` and `states` within roll previews' rules, or what's wrong, under `at`.
+fn screenshot_rules(at: &str, pages: &[String], hide: &[String], states: &[StateRule]) -> Result<(), String> {
+    if pages.len() > 10 || pages.iter().any(|x| !page_path_ok(x) || x == "/") {
+        return Err(format!("{FILE} {at}: pages are at most 10 paths besides / (each starting with /, no spaces, quotes or #)"));
+    }
+    let selector_ok = |s: &str| !s.trim().is_empty() && s.len() <= 200 && !s.contains(['{', '}', '<', ';', '\\']) && !s.contains("/*") && !s.chars().any(char::is_control);
+    if hide.len() > 20 || !hide.iter().all(|s| selector_ok(s)) {
+        return Err(format!("{FILE} {at}: hide is at most 20 CSS selectors"));
+    }
+    let bad_state = states.iter().enumerate().any(|(i, s)| {
+        !state_name_ok(&s.name) || states[..i].iter().any(|o| o.name == s.name) || !page_path_ok(&s.page) || s.steps.is_empty() || s.steps.len() > MAX_STEPS || !s.steps.iter().all(step_ok)
+    });
+    if states.len() > MAX_STATES || bad_state {
+        return Err(format!(
+            "{FILE} {at}: states are at most {MAX_STATES}, each a name (a-z, 0-9, -), a page (a path) and 1 to {MAX_STEPS} steps: click or type on a selector, press one of {}, or wait up to 5000 ms",
+            STEP_KEYS.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -80,6 +124,65 @@ pub struct PreviewSpec {
     pub memory_mb: u32,
     pub cpus: f64,
     pub env: BTreeMap<String, String>,
+    /// Page states its screenshots reach (`[[preview.states]]`), as roll previews' `github.states`.
+    pub states: Vec<StateRule>,
+    /// More of its own pages its screenshots take (`pages = ["/pricing"]`), and selectors blanked
+    /// in them (`hide = [".clock"]`), as roll previews' `github.pages` and `github.hide`.
+    pub pages: Vec<String>,
+    pub hide: Vec<String>,
+}
+
+/// Whether `p` is a page path the screenshot may visit: absolute, on the service's own origin.
+pub fn page_path_ok(p: &str) -> bool {
+    p.starts_with('/') && !p.starts_with("//") && p.len() <= 200 && p.bytes().all(|b| b.is_ascii_graphic() && !b"\\#\"'<>`".contains(&b))
+}
+
+/// A page state (roll previews' `github.states`, or a repo's `[[preview.states]]`): `page` of the first service's, then its steps.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateRule {
+    pub name: String,
+    pub page: String,
+    pub steps: Vec<Step>,
+}
+
+/// One step towards a state, on the page's own elements: `{"click": selector}`, `{"type":
+/// [selector, text]}`, `{"press": key}`, `{"wait": ms}`.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Step {
+    Click(String),
+    Type(String, String),
+    Press(String),
+    Wait(u32),
+}
+
+/// The most states, and steps in each.
+pub const MAX_STATES: usize = 3;
+pub const MAX_STEPS: usize = 10;
+/// The keys a `press` step may name.
+pub const STEP_KEYS: [&str; 9] = ["Enter", "Escape", "Tab", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Space", "Backspace"];
+
+/// A state's name: 1–40 of a-z, 0-9 and `-`.
+pub fn state_name_ok(n: &str) -> bool {
+    (1..=40).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// A `state:<name>` page entry's name.
+pub fn state_entry(e: &str) -> Option<&str> {
+    e.strip_prefix("state:").filter(|n| state_name_ok(n))
+}
+
+/// Whether a step is one roll knows, bounded (checked when set, and again before a run).
+pub fn step_ok(s: &Step) -> bool {
+    let text = |t: &str| t.len() <= 200 && !t.chars().any(char::is_control);
+    let selector = |t: &str| !t.trim().is_empty() && text(t);
+    match s {
+        Step::Click(sel) => selector(sel),
+        Step::Type(sel, t) => selector(sel) && text(t),
+        Step::Press(k) => STEP_KEYS.contains(&k.as_str()),
+        Step::Wait(ms) => *ms <= 5000,
+    }
 }
 
 #[derive(Deserialize)]
@@ -90,8 +193,8 @@ struct RawFile {
     preview: Option<RawPreview>,
     queue: Option<RawQueue>,
     main: Option<RawMain>,
-    /// roll apps' section (`apps_control::config`): read there, only allowed here.
-    #[allow(dead_code)]
+    /// roll apps' section (`apps_control::config`): read there; here only its
+    /// `previews.screenshots`, roll previews'.
     app: Option<toml::Table>,
 }
 
@@ -123,6 +226,14 @@ struct RawPreview {
     cpus: Option<f64>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    /// Page states the preview's screenshots reach (roll previews): versioned with the code
+    /// whose selectors they name.
+    #[serde(default)]
+    states: Vec<StateRule>,
+    #[serde(default)]
+    pages: Vec<String>,
+    #[serde(default)]
+    hide: Vec<String>,
 }
 
 impl RollToml {
@@ -193,6 +304,7 @@ impl RollToml {
                 if p.name.as_deref().is_some_and(|n| !label(n)) {
                     return Err(format!("{FILE} {at}: name is 1-20 characters of a-z, 0-9 and -"));
                 }
+                screenshot_rules(at, &p.pages, &p.hide, &p.states)?;
                 Some(PreviewSpec {
                     name: p.name,
                     image: image(at, p.image)?,
@@ -209,6 +321,9 @@ impl RollToml {
                     memory_mb: memory(at, p.memory)?,
                     cpus: cpus(at, p.cpus)?,
                     env: env(at, p.env)?,
+                    states: p.states,
+                    pages: p.pages,
+                    hide: p.hide,
                 })
             }
         };
@@ -222,7 +337,17 @@ impl RollToml {
             return Err(format!("{FILE} [queue]: checks names {missing:?}, which isn't a [checks.{missing}] table"));
         }
         let main = raw.main.map(code_control::settings::main).unwrap_or_default();
-        Ok(RollToml { checks, preview, queue, main })
+        // roll apps' `[app.previews.screenshots]`, the rest of `[app]` left to roll apps.
+        let app_screenshots = match raw.app.as_ref().and_then(|a| a.get("previews")).and_then(|p| p.get("screenshots")) {
+            None => None,
+            Some(v) => {
+                let at = "[app.previews.screenshots]";
+                let s: RawScreenshots = v.clone().try_into().map_err(|e| format!("{FILE} {at}: {e}"))?;
+                screenshot_rules(at, &s.pages, &s.hide, &s.states)?;
+                Some(Screenshots { pages: s.pages, hide: s.hide, states: s.states })
+            }
+        };
+        Ok(RollToml { checks, preview, queue, main, app_screenshots })
     }
 }
 
@@ -305,7 +430,7 @@ mod tests {
     #[test]
     fn parses_the_documented_example() {
         let t = RollToml::parse(
-            r#"
+            r##"
             [checks.test]
             image = "rust:1"
             run = "cargo test"
@@ -324,7 +449,15 @@ mod tests {
             port = 3000
             postgres = "prj_abc123"
             redis = "rdb_def456"
-            "#,
+
+            pages = ["/pricing"]
+            hide = [".clock"]
+
+            [[preview.states]]
+            name = "cart"
+            page = "/"
+            steps = [{ click = "#open-cart" }, { type = ["#coupon", "SAVE10"] }, { press = "Enter" }, { wait = 300 }]
+            "##,
         )
         .unwrap();
         assert_eq!(t.checks.len(), 2);
@@ -334,6 +467,8 @@ mod tests {
         assert_eq!((lint.timeout.as_secs(), lint.memory_mb, lint.env["RUST_LOG"].as_str()), (120, 512, "debug"));
         let p = t.preview.unwrap();
         assert_eq!((p.port, p.postgres.as_deref(), p.redis.as_deref(), p.auto), (3000, Some("prj_abc123"), Some("rdb_def456"), true));
+        assert_eq!((p.pages.as_slice(), p.hide.as_slice(), p.states.len()), (&["/pricing".to_string()][..], &[".clock".to_string()][..], 1));
+        assert_eq!(p.states[0].steps, [Step::Click("#open-cart".into()), Step::Type("#coupon".into(), "SAVE10".into()), Step::Press("Enter".into()), Step::Wait(300)]);
     }
 
     #[test]
@@ -347,6 +482,11 @@ mod tests {
         assert_eq!(t.queue.batch_size, 4);
         assert!(t.queue.require_change_checks);
         assert!(t.main.auto_revert);
+        assert_eq!(t.app_screenshots, None);
+        // roll apps' service names what roll previews' screenshots do under [app.previews.screenshots].
+        let a = RollToml::parse("[app]\nbuild = \"x\"\n[app.previews.screenshots]\npages = [\"/pricing\"]\nhide = [\".clock\"]\n[[app.previews.screenshots.states]]\nname = \"cart\"\npage = \"/\"\nsteps = [{ press = \"Tab\" }]\n").unwrap();
+        let s = a.app_screenshots.unwrap();
+        assert_eq!((s.pages, s.hide, s.states.len()), (vec!["/pricing".to_string()], vec![".clock".to_string()], 1));
     }
 
     #[test]
@@ -369,6 +509,11 @@ mod tests {
             ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\nhealth = \"healthz\"", "health"),
             ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\nredis = \"rdb_\"", "redis"),
             ("[preview]\nimage = \"a\"\nrun = \"x\"", "port"),
+            ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\nhide = [\"a{}\"]", "hide"),
+            ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\npages = [\"pricing\"]", "pages"),
+            ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\n[[preview.states]]\nname = \"cart\"\npage = \"/\"\nsteps = [{ press = \"F12\" }]", "states"),
+            ("[app.previews.screenshots]\npages = [\"pricing\"]", "[app.previews.screenshots]"),
+            ("[app.previews.screenshots]\nbogus = 1", "[app.previews.screenshots]"),
             ("[queue]\nbatch_size = 0", "batch_size"),
             ("[queue]\nbogus = 1", "bogus"),
             ("[queue]\nchecks = [\"nope\"]", "[checks.nope]"),
