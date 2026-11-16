@@ -361,8 +361,66 @@ export interface ChatTarget {
   approvers: string[];
 }
 
+/**
+ * A machine client (docs/permissions.md, "Machine clients"): automation with no person that trades
+ * a JWT its key signed, or a secret, for an hour's token held to its grant's rules.
+ */
+export interface MachineClient {
+  client_id: string;
+  signs_with_key: boolean;
+  grant: Grant;
+}
+
+export interface NewMachineClient extends Omit<NewGrant, "not_before" | "ask_otherwise"> {
+  /** Its public key: none, and roll makes a secret (shown once). */
+  public_jwk?: Record<string, string> | null;
+}
+
+/** A new machine client: its secret is in the answer this once, when it has no key. */
+export interface MadeMachineClient {
+  client_id: string;
+  grant: Grant;
+  token_endpoint: string;
+  client_secret?: string;
+}
+
+/**
+ * A pasted public key as a JWK: a JWK as it is, or a PEM `PUBLIC KEY` (what `openssl pkey -pubout`
+ * writes) for Ed25519 or P-256, whose encodings are a fixed prefix and then the key's bytes. The
+ * API checks the key for real; this only turns a PEM into what it takes. RSA keys go as JWKs.
+ */
+export function publicJwk(text: string): { jwk: Record<string, string> } | { problem: string } {
+  const t = text.trim();
+  if (t.startsWith("{")) {
+    try {
+      const jwk = JSON.parse(t);
+      return jwk && typeof jwk === "object" && !Array.isArray(jwk) ? { jwk } : { problem: "A JWK is a JSON object" };
+    } catch {
+      return { problem: "That JWK isn't valid JSON" };
+    }
+  }
+  if (t.includes("PRIVATE KEY")) return { problem: "That's a private key: paste only its public part (openssl pkey -in key.pem -pubout)" };
+  let der: Uint8Array;
+  try {
+    der = Uint8Array.from(atob(t.split("\n").filter((l) => !l.startsWith("-----")).join("").trim()), (c) => c.charCodeAt(0));
+  } catch {
+    return { problem: "Paste a PEM public key or a JWK" };
+  }
+  const url = (b: Uint8Array) => btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const after = (prefix: number[], len: number) =>
+    der.length === prefix.length + len && prefix.every((b, i) => der[i] === b) ? der.slice(prefix.length) : null;
+  const ed = after([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00], 32);
+  if (ed) return { jwk: { kty: "OKP", crv: "Ed25519", x: url(ed) } };
+  const ec = after([0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04], 64);
+  if (ec) return { jwk: { kty: "EC", crv: "P-256", x: url(ec.slice(0, 32)), y: url(ec.slice(32)) } };
+  return { problem: "An Ed25519 or P-256 PEM public key (for RSA, paste its JWK)" };
+}
+
 export const accessApi = {
   me: () => call<Me>("GET", "/v1/access"),
+  /** The operator's machine clients, newest first (a 403 for anyone else). */
+  machineClients: () => call<MachineClient[]>("GET", "/v1/access/clients"),
+  createMachineClient: (c: NewMachineClient) => call<MadeMachineClient>("POST", "/v1/access/clients", c),
   catalog: () => call<Catalog>("GET", "/v1/access/catalog"),
   tokens: () => call<Grant[]>("GET", "/v1/access/tokens"),
   /** The latest workload tokens (they're not in `tokens`). */

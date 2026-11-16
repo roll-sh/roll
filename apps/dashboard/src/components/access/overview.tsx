@@ -33,6 +33,7 @@ import { useWorkspace } from "@/lib/workspace-store";
 import { Link } from "../link";
 import { btn, Connecting, CopyButton, danger, EmptyPanel, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 import { Builder } from "./builder";
+import { MachineClients } from "./machine-clients";
 import { AccessShell, relative, usePoll } from "./shell";
 
 /** `/dashboard/access`: how to connect a client, and every token and connection with what it may do. */
@@ -40,6 +41,10 @@ export function AccessOverview() {
   const { data: grants, error, refresh } = usePoll(() => accessApi.tokens(), 10_000);
   const { data: me } = usePoll(() => accessApi.me(), 60_000);
   const { data: checkup, refresh: recheck } = usePoll(() => accessApi.checkup(), 60_000);
+  // The operator's machine clients (anyone else's list is refused: the panel stays hidden). Their
+  // grants are listed with them, not among the tokens.
+  const { data: machines, refresh: remachine } = usePoll(() => accessApi.machineClients().catch(() => null), 30_000);
+  const machineGrants = new Set((machines ?? []).map((c) => c.grant.id));
   return (
     <AccessShell tab="overview">
       <div className="space-y-6">
@@ -67,7 +72,15 @@ export function AccessOverview() {
             }}
           />
         )}
-        {grants === null && !error ? <Connecting /> : <Grants grants={grants ?? []} refresh={refresh} />}
+        {grants === null && !error ? <Connecting /> : <Grants grants={(grants ?? []).filter((g) => !machineGrants.has(g.id))} refresh={refresh} />}
+        {machines && (
+          <MachineClients
+            clients={machines}
+            refresh={async () => {
+              await Promise.all([refresh(), remachine()]);
+            }}
+          />
+        )}
         <Workloads />
       </div>
     </AccessShell>
