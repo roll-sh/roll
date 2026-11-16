@@ -2,9 +2,9 @@
 
 A client for roll secrets (docs/secrets.md, "Consumption") with the same surface as
 `@roll/secrets` and `sdk/go/secrets`: an environment's values, the runtime resolve (sealed to a
-key only this process holds, if asked), the digest that moves when the values would, and a watch
-that follows it and renews dynamic leases. The standard library, but for sealed resolves, which
-need `cryptography` (`pip install "roll-secrets[seal]"`).
+key only this process holds, if asked), the digest that moves when the values would, a watch that
+follows it and renews dynamic leases, and one key's writes. The standard library, but for sealed
+resolves, which need `cryptography` (`pip install "roll-secrets[seal]"`).
 
 ```python
 import roll_secrets
@@ -21,6 +21,17 @@ c.watch("production", lambda v: reload(v.values))   # until `stop` (a threading.
 
 # Read per request? Keep answers 30 s, then revalidate (a 304 while unchanged).
 c = roll_secrets.Client(api, token, cache_ttl=30)
+
+# Nothing here renews a lease? Issue no dynamic credential: those keys are left out and named in
+# v.dynamic, and the answer can be kept by cache_ttl.
+v = c.values("production", dynamic=False)
+
+# One key's writes. set replaces a link the key had; delete of a key that isn't there answers
+# {"deleted": False, ...}. A protected environment, or a folder that needs approval, raises
+# SecretsError with the code "approval_required" (open a change request instead). Errors never
+# hold the value, and both drop the cached reads.
+w = c.set("staging", "FEATURE_FLAGS", "beta", path="/api", comment="rollout")   # w["secret"]["version"]
+d = c.delete("staging", "OLD_KEY", path="/api")                                 # d["deleted"]
 ```
 
 Tests: `PYTHONPATH=src python -m unittest discover -s tests` (CI's `sdk` job).

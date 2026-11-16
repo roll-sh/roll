@@ -86,11 +86,25 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    // then a conditional read that costs a 304 (nothing read, issued or audited) while unchanged.
    const cached = createClient({ api: process.env.ROLL_API_URL!, token: process.env.ROLL_TOKEN!, cacheTtlMs: 30_000 });
 
+   // A reader that can't renew a lease (a playbook, a one-off script): no dynamic credential is
+   // issued, those keys are left out and named in `dynamic`, and the answer can be kept.
+   const { values: plain, dynamic } = await secrets.values("staging", { dynamic: false });
+
+   // One key's writes (`PUT`/`DELETE …/secrets/{key}`). A set replaces a link the key had; a
+   // delete of a key that isn't there is `{deleted: false}`. A protected environment, or a folder
+   // that needs approval, throws `SecretsError` with the code `approval_required` (open a change
+   // request instead). Errors never hold the value, and both drop the client's cached reads.
+   await secrets.set("staging", "FEATURE_FLAGS", "beta", { path: "/api", comment: "rollout" });
+   const { deleted } = await secrets.delete("staging", "OLD_KEY", { path: "/api" });
+
    // An encryption key (below, "Encryption keys"): the key stays in roll.
    const cards = secrets.transit("cards");
    const ct = await cards.encrypt(cardNumber, `order:${id}`);
    const index = await cards.hmac(email); // a lookup column over encrypted emails
    ```
+
+   The Go and Python clients name these `Values(…, secrets.WithoutDynamic())`, `Set` and
+   `Delete`, and `values(…, dynamic=False)`, `set` and `delete`.
 
    In Go, `sdk/go/secrets` has the same surface, and `FromEnv` logs a workload identity in with
    its own OIDC token as `roll run` does (`ROLL_IDENTITY`). It logs in again before the login's
@@ -135,8 +149,17 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
   project's secrets, made through `POST /v1/access/tokens` as the dashboard's New token. Its
   secret is in the state (sensitive). Any change replaces it, and destroying it revokes it.
 - **`data.roll_secrets_values`** is an environment's resolved values, for another provider.
+- **Without values in the state** (Terraform 1.10 and 1.11+), as Vault's and AWS' providers allow:
+  - **`ephemeral "roll_secrets_values"`** reads an environment for one run, never into the plan or
+    the state; it feeds another provider's configuration or a write-only argument. Strict: a key
+    that doesn't resolve fails the run. With `dynamic = true` a dynamic link issues a credential for
+    the run, and closing the run revokes its lease.
+  - **`value_wo`** on `roll_secret` writes a value write-only: it's sent and never kept, and
+    `value_wo_version` is bumped to write a new one (Terraform can't see a write-only value
+    change). Such a value isn't read back, so a change made outside Terraform isn't seen.
 
-Values land in Terraform's state, as with every provider: keep the state as private as the values.
+`value` and the data source still land in Terraform's state, as with every provider: keep that
+state as private as the values, or use the two above.
 ## GitHub Actions
 `sdk/github-action` puts an environment into a job, as Doppler's and Infisical's actions do:
 ```yaml
@@ -2368,8 +2391,8 @@ isn't in the workspace is 404.
 | `POST /environments/{env}/requests/{id}/close` | | `Request` |
 | `GET /links` | | `LinkTarget[]` |
 | `GET /leases` | | `Lease[]` |
-| `DELETE /leases/{id}` | | 204 |
-| `POST /leases/{id}/renew` | `{ttl_minutes?}` | `Lease` (`reveal` on its environment) |
+| `DELETE /leases/{id}` | | 204 (whoever may delete there, or the caller it was issued to while it may still reveal there; 403 for another's) |
+| `POST /leases/{id}/renew` | `{ttl_minutes?}` | `Lease` (as ending one: `delete` there, or the caller it was issued to with `reveal`) |
 | `GET /identities` | | `Identity[]` (admin) |
 | `POST /identities` | `NewIdentity` | 201 `Identity` |
 | `DELETE /identities/{id}` | | 204 (its tokens revoked) |
