@@ -1416,6 +1416,10 @@ async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
     assert_eq!(search(token.clone()).await, StatusCode::OK);
     assert_eq!(d.call(&token, Method::GET, "/v1/secrets/projects/prj_a/transit", None).await.0, StatusCode::FORBIDDEN, "only what its rules allow");
     assert_eq!(d.call(&token, Method::GET, "/v1/access/clients", None).await.0, StatusCode::FORBIDDEN, "a client never manages clients");
+    // Its id is no ordinary OAuth client's: no device or consent flow may hang another grant on
+    // it (someone else's, which its sign-ins could then land on).
+    let (s, e) = d.form("/v1/access/oauth/device_authorization", &[("client_id", &id)]).await;
+    assert_eq!((s, e["error"].as_str()), (StatusCode::UNAUTHORIZED, Some("invalid_client")), "{e}");
 
     // A key it signs with: nothing secret is stored, and an assertion works once.
     let mut seed = [0u8; 32];
