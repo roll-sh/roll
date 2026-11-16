@@ -63,7 +63,15 @@ impl Apps {
                 Push::Ignored(why) => return Ok(HookOutcome::Ignored(why)),
                 Push::Pull(pull) => {
                     let Source::Git { url, .. } = &svc.source else { unreachable!("matched above") };
-                    let Some(pushes) = self.pushes.get() else { return Ok(HookOutcome::Ignored(format!("pull request {}: roll previews isn't on this node", pull.number))) };
+                    let Some(pushes) = self.pushes.get().filter(|p| p.takes_pulls()) else { return Ok(HookOutcome::Ignored(format!("pull request {}: roll previews here doesn't take pull requests", pull.number))) };
+                    // A same-repository one from a branch an environment follows is that
+                    // environment's: no second, preview copy of it.
+                    if !pull.fork {
+                        let (sid, b) = (service.to_string(), pull.branch.clone());
+                        if self.db(move |s| Ok(s.environments(&sid)?.iter().any(|e| !e.ephemeral && e.branch.as_deref() == Some(b.as_str())))).await? {
+                            return Ok(HookOutcome::Ignored(format!("pull request {}: {} is an environment's branch", pull.number, pull.branch)));
+                        }
+                    }
                     return Ok(HookOutcome::Ignored(self.hand_pull_to_previews(pushes.clone(), service, url, pull).await));
                 }
                 Push::Branches(moved) => {

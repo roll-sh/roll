@@ -190,6 +190,11 @@ pub trait GitPushes: Send + Sync {
     /// Called once per delivery (a redelivery, or a second environment's hook, calls it again:
     /// idempotent on `sha`). Quick: record it and return, the hook is waiting.
     async fn pushed(&self, push: GitPush);
+    /// Whether it reads [`GitPush::pull`]. Until it says so, no pull request is handed on: one
+    /// that dropped `pull` would take a fork's head for a branch's and trust it.
+    fn takes_pulls(&self) -> bool {
+        false
+    }
 }
 
 /// Email to a person through their account (rolld fills it with roll-accounts' mailer). Unset or

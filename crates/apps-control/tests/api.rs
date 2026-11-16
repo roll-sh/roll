@@ -915,6 +915,15 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let (_, l) = call(&w.api, "PUT", &format!("{links}/postgres/orders"), Some(json!({"prefix": "ORDERS"}))).await;
     assert_eq!(l["vars"], json!(["ORDERS_DATABASE_URL"]), "{l}");
     assert_eq!(call(&w.api, "PUT", &format!("{links}/postgres/nope"), Some(json!({}))).await.0, StatusCode::BAD_REQUEST);
+    // A preview (an ephemeral environment) gets no resource's production variables: roll
+    // previews sets the branched ones itself.
+    let pv = format!("/v1/apps/services/{id}/environments/pv-1");
+    call(&w.api, "PUT", &pv, Some(json!({"ephemeral": true}))).await;
+    let (_, v) = call(&w.api, "GET", &format!("{pv}/variables/values"), None).await;
+    assert!(v.get("DATABASE_URL").is_none() && v.get("ORDERS_DATABASE_URL").is_none(), "{v}");
+    let (_, v) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/variables/values"), None).await;
+    assert!(v["DATABASE_URL"].is_string(), "{v}");
+    call(&w.api, "DELETE", &pv, None).await;
     // A link that makes credentials of its own makes them once: setting it again keeps them.
     let (st, l) = call(&w.api, "PUT", &format!("{links}/redis/cache"), Some(json!({}))).await;
     assert_eq!((st, &l["vars"]), (StatusCode::OK, &json!(["REDIS_URL"])), "{l}");
@@ -3709,6 +3718,9 @@ impl apps_control::integrations::GitPushes for FakePushes {
     async fn pushed(&self, push: apps_control::integrations::GitPush) {
         self.0.lock().push(push);
     }
+    fn takes_pulls(&self) -> bool {
+        true
+    }
 }
 
 impl GitHost {
@@ -3911,7 +3923,11 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let pr = |action: &str, n: u64, branch: &str, sha: &str, head_repo: u64| {
         json!({ "action": action, "number": n, "pull_request": { "number": n, "title": "Try it", "head": { "ref": branch, "sha": sha, "repo": { "id": head_repo } }, "base": { "repo": { "id": 1 } } } }).to_string()
     };
-    let (st, v) = answer(raw("application/json", Some("pull_request"), pr("opened", 7, "feature", &code, 1))).await;
+    // One from a branch an environment follows (staging's) is that environment's, not a preview.
+    let (_, v) = answer(raw("application/json", Some("pull_request"), pr("opened", 6, "feature", &code, 1))).await;
+    assert!(v["ignored"].as_str().unwrap().contains("an environment's branch"), "{v}");
+    git.branches.lock().insert("topic".into(), code.parse().unwrap());
+    let (st, v) = answer(raw("application/json", Some("pull_request"), pr("opened", 7, "topic", &code, 1))).await;
     assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("handed to roll previews"), "{v}");
     git.pulls.lock().insert(8, first.parse().unwrap());
     let (_, v) = answer(raw("application/json", Some("pull_request"), pr("synchronize", 8, "main", &code, 2))).await;
@@ -3921,17 +3937,17 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let got: Vec<_> = pushes.0.lock()[3..].iter().map(|p| (p.branch.clone(), p.sha.clone(), p.pull.as_ref().map(|q| (q.number, q.fork, q.url.clone(), q.title.clone())))).collect();
     let page = |n: u64| format!("{url}/pull/{n}");
     assert_eq!(got, vec![
-        ("feature".to_string(), Some(code.clone()), Some((7, false, page(7), "Try it".to_string()))),
+        ("topic".to_string(), Some(code.clone()), Some((7, false, page(7), "Try it".to_string()))),
         ("pull/8".to_string(), Some(first.clone()), Some((8, true, page(8), "Try it".to_string()))),
         ("pull/8".to_string(), None, Some((8, true, page(8), "Try it".to_string()))),
     ]);
     // GitLab's merge request: its own event and fields, its page under `/-/merge_requests/`.
-    let mr = json!({ "object_kind": "merge_request", "object_attributes": { "iid": 3, "title": "Try it on GitLab", "action": "open", "source_branch": "feature", "source_project_id": 5, "target_project_id": 5, "last_commit": { "id": code } } }).to_string();
+    let mr = json!({ "object_kind": "merge_request", "object_attributes": { "iid": 3, "title": "Try it on GitLab", "action": "open", "source_branch": "topic", "source_project_id": 5, "target_project_id": 5, "last_commit": { "id": code } } }).to_string();
     let r = Request::builder().method("POST").uri(hook.clone()).header("content-type", "application/json").header("x-gitlab-event", "Merge Request Hook").body(Body::from(mr)).unwrap();
     let (_, v) = answer(r).await;
     assert!(v["ignored"].as_str().unwrap().contains("handed to roll previews"), "{v}");
     let last = pushes.0.lock().last().cloned().unwrap();
-    assert_eq!((last.branch.as_str(), last.pull.map(|p| (p.number, p.fork, p.url))), ("feature", Some((3, false, format!("{url}/-/merge_requests/3")))));
+    assert_eq!((last.branch.as_str(), last.pull.map(|p| (p.number, p.fork, p.url))), ("topic", Some((3, false, format!("{url}/-/merge_requests/3")))));
 }
 
 /// A private repository on any Git host: the service's own login (sealed, never returned, sent
