@@ -86,7 +86,7 @@ struct Daemon {
 
 /// What the stand-in products saw: the operator's marker and a grant.
 fn seen(ext: &axum::http::Extensions) -> Value {
-    let approved = roll_auth::Approved::on(ext).map(|a| json!({ "id": &*a.id, "by": a.by.as_deref(), "until": a.until }));
+    let approved = roll_auth::Approved::on(ext).map(|a| json!({ "id": &*a.id, "by": a.by.iter().map(|b| &**b).collect::<Vec<_>>(), "until": a.until }));
     json!({ "operator": roll_auth::Operator::on(ext), "grant": roll_auth::Grant::on(ext).map(|g| g.id.to_string()), "approved": approved })
 }
 
@@ -1289,7 +1289,7 @@ async fn approvals_can_be_remembered() {
     // The product is told which approval let the request run, who decided it and, for a
     // remembered rule, until when (its audit names them).
     let (s, ran) = d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await;
-    assert_eq!((s, ran["approved"]["id"].as_str(), ran["approved"]["by"].as_str()), (StatusCode::OK, Some(apr.as_str()), Some("operator")), "{ran}");
+    assert_eq!((s, ran["approved"]["id"].as_str(), ran["approved"]["by"][0].as_str()), (StatusCode::OK, Some(apr.as_str()), Some("operator")), "{ran}");
     let hour = apr.clone();
     // For an hour: the same request runs without asking; another project still asks.
     let (s, ran) = ask("pa").await;

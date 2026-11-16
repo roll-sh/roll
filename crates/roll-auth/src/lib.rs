@@ -164,8 +164,10 @@ impl fmt::Debug for Grant {
 pub struct Approved {
     /// `apr_…`
     pub id: Arc<str>,
-    /// Who decided it, as the approvals page names them (`operator`, a person's `usr_…`).
-    pub by: Option<Arc<str>>,
+    /// Who approved it, in order, as the approvals page names them (`operator`, a person's
+    /// `usr_…`, a chat approver's `slack:U…`): more than one when roll's policy asks for two
+    /// people. Empty when it wasn't recorded.
+    pub by: Vec<Arc<str>>,
     /// Unix ms: the remembered rule that allowed it lasts until then. `None`: this request alone.
     pub until: Option<i64>,
 }

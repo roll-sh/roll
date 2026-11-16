@@ -639,7 +639,7 @@ page's "Once ▾", `roll mcp approve --remember 1h`):
 ### What a product is told about an approval
 
 A request that runs because of an approval carries `roll_auth::Approved {id, by, until}` beside its
-`Grant`, so the product's own audit can say "revealed by token X, approved by Y" (roll secrets'
+`Grant` (`by`: who approved it, in order), so the product's own audit can say "revealed by token X, approved by Y" (roll secrets'
 audit and timeline do). `until` is `None` when the approval let this one request run, and when a
 rule remembered for a while allowed it, it's when that rule lapses (the longest-lasting one that
 covers it). A rule remembered for good is one of the grant's rules, so it names no approval; its
