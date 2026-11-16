@@ -195,6 +195,22 @@ pub enum Mcp {
         /// Use this scoped token instead of OAuth.
         #[arg(long)]
         with_token: Option<String>,
+        /// Only these products' tools (comma separated, e.g. postgres,code).
+        #[arg(long, value_delimiter = ',')]
+        toolsets: Vec<String>,
+        /// Only tools that read are listed and run, whatever the token allows.
+        #[arg(long)]
+        readonly: bool,
+        /// What people who can't push to a repo wrote never reaches the agent.
+        #[arg(long)]
+        lockdown: bool,
+        /// A search tool and two run tools instead of every tool (the default for clients with a
+        /// tool limit: VS Code, Cursor).
+        #[arg(long, conflicts_with = "all_tools")]
+        search: bool,
+        /// Every tool, even for a client with a tool limit.
+        #[arg(long)]
+        all_tools: bool,
     },
     /// Requests waiting for your approval (--all: decided ones too).
     Approvals {
@@ -693,14 +709,51 @@ fn server(api: &str) -> String {
     format!("{}/v1/mcp", api.trim_end_matches('/'))
 }
 
+/// How many tools a client takes in one request, if it's known to cap them: VS Code refuses a
+/// request with more than 128 (its own included); Cursor is reported to drop tools past about 40.
+/// With every product on, roll lists about 300, so these clients get search mode by default.
+pub fn tool_limit(client: Client) -> Option<(&'static str, u32)> {
+    match client {
+        Client::Vscode => Some(("VS Code refuses more than 128 tools a request", 128)),
+        Client::Cursor => Some(("Cursor is reported to drop tools past about 40", 40)),
+        _ => None,
+    }
+}
+
+/// How a connection narrows what the server offers it (docs/mcp.md): the URL's query, in the
+/// dashboard's order (`toolsets`, `readonly`, `tools`, `lockdown`).
+pub fn with_mode(url: &str, toolsets: &[String], readonly: bool, search: bool, lockdown: bool) -> String {
+    let mut q = Vec::new();
+    let mut sets: Vec<String> = toolsets.iter().map(|t| t.trim().to_ascii_lowercase()).filter(|t| !t.is_empty()).collect();
+    sets.sort();
+    sets.dedup();
+    if !sets.is_empty() {
+        q.push(format!("toolsets={}", sets.join(",")));
+    }
+    if readonly {
+        q.push("readonly=1".into());
+    }
+    if search {
+        q.push("tools=search".into());
+    }
+    if lockdown {
+        q.push("lockdown=1".into());
+    }
+    if q.is_empty() { url.to_string() } else { format!("{url}?{}", q.join("&")) }
+}
+
 /// The config for one client: OAuth by default, a bearer token header with one.
 pub fn config(client: Client, url: &str, token: Option<&str>) -> String {
     let header = token.map(|t| format!("Bearer {t}"));
     match client {
-        Client::ClaudeCode => match &header {
-            Some(h) => format!("claude mcp add --transport http roll {url} --header \"Authorization: {h}\""),
-            None => format!("claude mcp add --transport http roll {url}"),
-        },
+        Client::ClaudeCode => {
+            // One shell word: a mode's `&` would end the command and run it in the background.
+            let url = if url.chars().all(|c| c.is_ascii_alphanumeric() || "_./:@%+=,-".contains(c)) { url.to_string() } else { format!("'{url}'") };
+            match &header {
+                Some(h) => format!("claude mcp add --transport http roll {url} --header \"Authorization: {h}\""),
+                None => format!("claude mcp add --transport http roll {url}"),
+            }
+        }
         Client::Codex => match &header {
             Some(_) => format!("# ~/.codex/config.toml\n[mcp_servers.roll]\nurl = \"{url}\"\nbearer_token_env_var = \"ROLL_TOKEN\""),
             None => format!("# ~/.codex/config.toml (then: codex mcp login roll)\n[mcp_servers.roll]\nurl = \"{url}\""),
@@ -737,7 +790,14 @@ fn print_approval(a: &Value) {
 
 pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
     match cmd {
-        Mcp::Config { client, with_token } => println!("{}", config(client, &server(&api.base), with_token.as_deref())),
+        Mcp::Config { client, with_token, toolsets, readonly, lockdown, search, all_tools } => {
+            let limit = tool_limit(client);
+            let search = search || (limit.is_some() && !all_tools);
+            if let (Some((why, _)), true, false) = (limit, search, json_out) {
+                eprintln!("search mode: {why}, and roll lists every product's tools (--all-tools for the whole list)");
+            }
+            println!("{}", config(client, &with_mode(&server(&api.base), &toolsets, readonly, search, lockdown), with_token.as_deref()));
+        }
         Mcp::Approvals { all } => {
             let path = if all { "/v1/access/approvals" } else { "/v1/access/approvals?state=pending" };
             let list = api.get(path).await?;
@@ -843,5 +903,11 @@ mod tests {
         assert_eq!(date(0), "1970-01-01");
         assert_eq!(date(1_794_509_022_828), "2026-11-12");
         assert!(config(Client::ClaudeCode, "https://api.roll.sh/v1/mcp", Some("rlt_x")).contains("Authorization: Bearer rlt_x"));
+        // A connection's mode is its URL's query, in the dashboard's order.
+        let url = "https://api.roll.sh/v1/mcp";
+        assert_eq!(with_mode(url, &[], false, false, false), url);
+        assert_eq!(with_mode(url, &["redis".into(), "Postgres".into()], true, true, true), format!("{url}?toolsets=postgres,redis&readonly=1&tools=search&lockdown=1"));
+        assert!(tool_limit(Client::Vscode).is_some() && tool_limit(Client::ClaudeCode).is_none());
+        assert_eq!(config(Client::ClaudeCode, &format!("{url}?tools=search&lockdown=1"), None), format!("claude mcp add --transport http roll '{url}?tools=search&lockdown=1'"));
     }
 }
