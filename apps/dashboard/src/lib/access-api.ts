@@ -174,8 +174,26 @@ export function approvalWhere(a: Pick<Approval, "environment" | "scope_path">): 
   return [a.environment, a.scope_path && a.scope_path !== "/" ? `folder ${a.scope_path}` : null].filter(Boolean).join(" · ");
 }
 
-/** Whether an approval is about one resource, so approving it can be remembered. */
-export const rememberable = (a: Pick<Approval, "resource">) => Boolean(a.resource && !a.resource.startsWith("new in "));
+/** Whether approving it can be remembered: it's about one resource, and roll's policy doesn't ask several people for it. */
+export const rememberable = (a: Pick<Approval, "resource" | "gates">) => Boolean(a.resource && !a.resource.startsWith("new in ")) && !a.gates?.length;
+
+/** One rule of roll's policy a pending approval must pass: so many approvals from whom, so many so far. */
+export interface Gate {
+  approvals: number;
+  approvers?: string[];
+  approved: number;
+}
+
+/** What a pending approval still needs under roll's policy ("approved by usr_bob · 1 more needed"), or null. */
+export function gateProgress(a: Pick<Approval, "gates" | "approved_by">): string | null {
+  const gates = a.gates ?? [];
+  if (!gates.length) return null;
+  const more = gates.reduce((n, g) => n + Math.max(0, g.approvals - g.approved), 0);
+  const from = [...new Set(gates.flatMap((g) => g.approvers ?? []))];
+  const by = a.approved_by?.length ? `approved by ${a.approved_by.join(", ")} · ` : "";
+  const needs = more === 1 ? "1 more approval needed" : `${more} more approvals needed`;
+  return `${by}${needs}${from.length ? ` (from ${from.join(", ")})` : ""}`;
+}
 
 export type ApprovalState = "pending" | "approved" | "denied" | "expired" | "used";
 
@@ -199,6 +217,10 @@ export interface Approval {
   decided_at: number | null;
   decided_by: string | null;
   expires_at: number;
+  /** Who approved it so far, in order (several when roll's policy asks for more than one). */
+  approved_by?: string[];
+  /** While pending: what roll's policy asks of it. */
+  gates?: Gate[];
   /** The environment and path the request is about (what remembering it keeps to). */
   environment?: string | null;
   scope_path?: string | null;
@@ -301,6 +323,27 @@ export interface Policy {
   max_idle_days?: number | null;
   /** A person's token reaching any of these waits for an admin's approval (GitHub's organizations' rule). */
   approve_people?: Action[];
+  /** What needs more than one approver, and whose (each rule covering a request is a gate). */
+  approval_rules?: ApprovalRule[];
+}
+
+/** A rule of the policy: requests it covers need `approvals` approvals from `approvers` (anyone who may decide when left out), never from the token's own person. */
+export interface ApprovalRule {
+  /** A product, or "*". */
+  product: string;
+  /** Every action when left out. */
+  actions?: Action[];
+  /** Every environment when left out (pv-* covers pv-42). */
+  environments?: string[];
+  approvals: number;
+  approvers?: string[];
+}
+
+/** "Postgres · delete · production: 2 approvals (from usr_a, usr_b)". */
+export function describeApprovalRule(r: ApprovalRule): string {
+  const what = [productName(r.product), r.actions?.length ? r.actions.join(", ") : "anything", r.environments?.join(", ")].filter(Boolean).join(" · ");
+  const n = r.approvals === 1 ? "1 approval" : `${r.approvals} approvals`;
+  return `${what}: ${n}${r.approvers?.length ? ` from ${r.approvers.join(", ")}` : ""}`;
 }
 
 /** The actions an admin may require approval for in people's tokens, strongest first. */
@@ -629,6 +672,9 @@ const PRODUCT_NAMES: Record<string, string> = {
 };
 
 export const productName = (p: string) => PRODUCT_NAMES[p] ?? p;
+
+/** Every product a rule can name ("*" first). */
+export const PRODUCTS = Object.keys(PRODUCT_NAMES);
 
 export const ACTION_HELP: Record<Action, string> = {
   read: "See metadata and data",

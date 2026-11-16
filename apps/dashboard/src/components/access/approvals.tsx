@@ -1,6 +1,6 @@
 import { Bell, Hand } from "lucide-react";
 import { useEffect, useState } from "react";
-import { accessApi, approvalWhere, productName, REMEMBER, RISKY, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
+import { accessApi, approvalWhere, gateProgress, productName, REMEMBER, RISKY, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
 import { createIntegrationsApi, type ChatInstall } from "@/lib/integrations-api";
 import { call } from "@/lib/roll-api";
 import { useShownOwner } from "../agents/use-connection";
@@ -105,6 +105,7 @@ function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refre
           <p className="mt-1 font-mono text-[11px] text-subtle">
             {a.method} {a.route} · asked {relative(a.created_at)} · expires {relative(a.expires_at)}
           </p>
+          {gateProgress(a) && <p className="mt-1 text-[12px] text-accent">{gateProgress(a)}</p>}
         </div>
         <div className="flex shrink-0 gap-2">
           {rememberable(a) && (

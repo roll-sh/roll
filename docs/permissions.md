@@ -598,7 +598,8 @@ type Approval = {
   approved one by one.
 - The person decides on the dashboard (a notification in the header, and the list under
   `/dashboard/access/approvals`), with `roll mcp approvals` / `roll mcp approve <id>`, or through the
-  API. Only the operator decides. A grant never approves its own request, not even with `admin` on
+  API. Only the operator (or an admin) decides, and a person decides their own tokens' requests
+  unless the policy asks for someone else ("Two-person approvals"). A grant never approves its own request, not even with `admin` on
   `access`.
 - An approval not decided in 10 minutes expires.
 - MCP tools hold the call open the same way, with keep-alive events, and return the pending
@@ -635,6 +636,35 @@ page's "Once ▾", `roll mcp approve --remember 1h`):
   lapses from the token's page or `roll token take-back <id> <approval>`
   (`DELETE /v1/access/tokens/{id}/temporary/{approval}`), and with it
   the approval when its request hasn't used it (the rule may have run that request instead).
+
+### Two-person approvals
+
+What matters most can need more than one approver, and named ones, as Teleport's access requests,
+Vault's control groups, Infisical's approval policies and GitHub's required reviewers do. The
+policy's `approval_rules` (`PUT /v1/access/policy`, `roll token policy --approval-rule
+secrets:reveal@production=2`, the overview's "Require several approvers…"):
+
+```json
+{ "approval_rules": [
+  { "product": "secrets", "actions": ["reveal"], "environments": ["production"], "approvals": 2 },
+  { "product": "postgres", "actions": ["delete"], "approvals": 1, "approvers": ["usr_ana", "usr_ben"] }
+] }
+```
+
+- Each rule covering a request is a gate it must pass: `approvals` (1–10) from its `approvers`
+  (anyone who may decide when left out: `operator`, an admin's `usr_…`, a chat approver's
+  `slack:U…`). Left-out `actions` or `environments` mean all; a request about no one environment
+  is covered (the stricter reading). The names match roll secrets' protected environments, whose
+  change requests count approvals the same way.
+- An approver counts once; the person whose token asked never counts (as a change request's author
+  can't approve it). The operator's token is one approver, whoever holds it: two people sign in.
+- Approving adds to `approved_by`. The approval stays `pending` until every gate has its approvals
+  (`gates: [{approvals, approvers?, approved}]` on a pending approval, from the policy as it is
+  then); the request waits on as before, and runs once. Anyone who may decide can deny it.
+- Such a request is approved once: never remembered, since a rule for a while would let the next
+  ones through with fewer people.
+- The approvals page and chat cards say who has approved and how many more are needed, and the
+  product hears everyone who approved (`Approved.by`).
 
 ### What a product is told about an approval
 
@@ -1001,7 +1031,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/audit/sinks` | operator | `{url, from_start?}` → 201 `{sink, secret}`; the secret is shown this once |
 | `POST /v1/access/audit/sinks/{id}/retry` | operator | a failed sink's batch at the next sweep → 204 |
 | `DELETE /v1/access/audit/sinks/{id}` | operator | stop streaming → 204 |
-| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days}`: roll's rules for every grant |
+| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days, approve_people, approval_rules}`: roll's rules for every grant, and what needs several approvers ("Two-person approvals") |
 | `PUT /v1/access/policy` | operator | change them; a grant made, rotated, or whose rules, lifetime or addresses change, must fit (consent too) |
 | `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel, approvers} \| null}` |
 | `PUT /v1/access/notify` | operator | `{chat: {install, channel, approvers} \| null}` |

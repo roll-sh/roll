@@ -84,7 +84,8 @@ pub enum Token {
     #[command(subcommand)]
     Client(MachineCmd),
     /// roll's rules for every token: `--max-days 90`, `--require-expiry`, `--no-limit`,
-    /// `--max-idle-days 60` (`0` for no idle limit); nothing to show them.
+    /// `--max-idle-days 60` (`0` for no idle limit), `--approval-rule secrets:reveal@production=2`
+    /// (what needs several approvers); nothing to show them.
     Policy {
         #[arg(long)]
         max_days: Option<u32>,
@@ -95,7 +96,39 @@ pub enum Token {
         /// Tokens unused this many days stop working (0: no limit).
         #[arg(long)]
         max_idle_days: Option<u32>,
+        /// Add a rule asking several people to approve: `product[:action][@env,…]=N[/approver,…]`,
+        /// e.g. `secrets:reveal@production=2` or `postgres:delete=2/usr_a,usr_b`. Repeatable.
+        #[arg(long = "approval-rule", value_parser = approval_rule)]
+        approval_rules: Vec<Value>,
+        /// Remove every approval rule (one person decides each request again).
+        #[arg(long, conflicts_with = "approval_rules")]
+        no_approval_rules: bool,
     },
+}
+
+/// `product[:action][@env,…]=N[/approver,…]` as a policy approval rule.
+fn approval_rule(s: &str) -> Result<Value, String> {
+    let bad = || format!("{s:?}: product[:action][@env,…]=N[/approver,…], e.g. secrets:reveal@production=2");
+    let (what, rest) = s.split_once('=').ok_or_else(bad)?;
+    let (n, approvers) = rest.split_once('/').map_or((rest, None), |(n, a)| (n, Some(a)));
+    let approvals: u8 = n.trim().parse().map_err(|_| bad())?;
+    let (what, envs) = what.split_once('@').map_or((what, None), |(w, e)| (w, Some(e)));
+    let (product, action) = what.split_once(':').map_or((what, None), |(p, a)| (p, Some(a)));
+    if product.trim().is_empty() {
+        return Err(bad());
+    }
+    let list = |l: &str| l.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect::<Vec<_>>();
+    let mut rule = json!({ "product": product.trim(), "approvals": approvals });
+    if let Some(a) = action {
+        rule["actions"] = json!(list(a));
+    }
+    if let Some(e) = envs {
+        rule["environments"] = json!(list(e));
+    }
+    if let Some(a) = approvers {
+        rule["approvers"] = json!(list(a));
+    }
+    Ok(rule)
 }
 
 #[derive(Args)]
@@ -972,12 +1005,21 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
                 println!("note: {u} is set too, and isn't used: {source} wins.");
             }
         }
-        Token::Policy { max_days, require_expiry, no_limit, max_idle_days } => {
+        Token::Policy { max_days, require_expiry, no_limit, max_idle_days, approval_rules, no_approval_rules } => {
             let mut p = api.get("/v1/access/policy").await?;
             if let Some(d) = max_idle_days {
                 p["max_idle_days"] = if d == 0 { Value::Null } else { json!(d) };
             }
-            if max_days.is_some() || require_expiry.is_some() || no_limit || max_idle_days.is_some() {
+            let rules_changed = no_approval_rules || !approval_rules.is_empty();
+            if no_approval_rules {
+                p["approval_rules"] = json!([]);
+            }
+            if !approval_rules.is_empty() {
+                let mut all = p["approval_rules"].as_array().cloned().unwrap_or_default();
+                all.extend(approval_rules);
+                p["approval_rules"] = json!(all);
+            }
+            if max_days.is_some() || require_expiry.is_some() || no_limit || max_idle_days.is_some() || rules_changed {
                 if let Some(d) = max_days {
                     p["max_days"] = json!(d);
                 }
@@ -996,6 +1038,17 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
                 let must = if p["require_expiry"].as_bool() == Some(true) { ", and must expire" } else { "" };
                 let idle = p["max_idle_days"].as_u64().map(|d| format!("; unused for {d} days, they stop")).unwrap_or_default();
                 println!("tokens live {days}{must}{idle}");
+                for r in p["approval_rules"].as_array().into_iter().flatten() {
+                    let names = |k: &str, none: &str| r[k].as_array().map_or_else(|| none.to_string(), |l| l.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "));
+                    println!(
+                        "{} {} in {}: {} approvals from {}",
+                        r["product"].as_str().unwrap_or("?"),
+                        names("actions", "anything"),
+                        names("environments", "every environment"),
+                        r["approvals"],
+                        names("approvers", "anyone who decides (never the token's own person)")
+                    );
+                }
             }
         }
         Token::Client(cmd) => machine(api, json_out, cmd).await?,
@@ -1206,6 +1259,13 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_rules_read_as_the_policy_takes_them() {
+        assert_eq!(approval_rule("secrets:reveal@production=2").unwrap(), json!({ "product": "secrets", "actions": ["reveal"], "environments": ["production"], "approvals": 2 }));
+        assert_eq!(approval_rule("postgres=1/usr_a, usr_b").unwrap(), json!({ "product": "postgres", "approvals": 1, "approvers": ["usr_a", "usr_b"] }));
+        assert!(approval_rule("secrets:reveal").is_err() && approval_rule("=2").is_err() && approval_rule("apps=two").is_err());
+    }
 
     #[test]
     fn expiry_and_dates() {
