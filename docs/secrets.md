@@ -2790,7 +2790,7 @@ windows), #87 (encryption keys by name), #88 (password policies), #92 (SaaS rota
 credential checked at registration), #97 (search keys say `access: data`), #102 (Kubernetes
 service-account tokens), #105 (Java), #110 (.NET with `IConfiguration`), #113 (an AWS Lambda
 extension that logs in with the function's role), #117 (an Ansible collection), #132 (LDAP and
-Active Directory), #136 (Snowflake, on #132) and #144 (ACME on project CAs).
+Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs) and #145 (Pulumi).
 
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
@@ -2819,8 +2819,11 @@ Active Directory), #136 (Snowflake, on #132) and #144 (ACME on project CAs).
    workload identity; it carries only the conversations rolld starts, only to the hosts its own
    local allow-list names (a compromised roll can't scan the network through it), as bytes with TLS
    end to end; on a fleet its link and the calls through it run on one lease holder.
-7. **A Pulumi provider** (building: `feature/roll-secrets-pulumi`), bridged from the Terraform provider (Pulumi's own path for
-   plugin-framework providers), with TypeScript, Python and Go SDKs generated.
+7. **Pulumi** (#145): roll's Terraform provider through Pulumi's any-Terraform-provider package
+   from a local build (no registry release), with TypeScript, Python and Go SDKs generated and an
+   end-to-end `pulumi up`/`destroy` checked. Pulumi keeps every input in its state (encrypted), so
+   values can't stay out of it as they do in Terraform. Next on it: a CI job, and publishing to
+   the registries (public: the user's call).
 8. **Access requests**: a time-boxed `reveal` on a protected environment that an approver grants
    (Infisical's and 1Password's). First check roll-access's `ask` rules (roll MCP's design), which
    may already be the request; roll secrets should then only show and audit it.
