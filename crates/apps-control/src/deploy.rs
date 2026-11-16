@@ -1864,7 +1864,7 @@ impl Apps {
     }
 
     /// `roll.toml` `[app]` at a pushed revision (in the service's root), if it reads.
-    async fn app_config_at(self: &Arc<Self>, svc: &ServiceRow, revision: &str) -> Option<crate::config::AppConfig> {
+    pub(crate) async fn app_config_at(self: &Arc<Self>, svc: &ServiceRow, revision: &str) -> Option<crate::config::AppConfig> {
         let root = match &svc.source {
             Source::Repo { root, .. } | Source::Git { root, .. } => root,
             _ => return None,
@@ -1886,13 +1886,13 @@ impl Apps {
 
     /// Why a Git URL service's push at `sha` isn't deployed to `env`, if it isn't: a skip tag in
     /// its message, or watch paths (roll.toml's at that commit, the environment's block first,
-    /// else the service's) it changes none of. The hook and the five-minute watch both ask.
-    pub(crate) async fn git_push_skip(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, sha: &str, message: &str) -> Option<String> {
+    /// else the service's) it changes none of. The hook and the five-minute watch both ask, with
+    /// roll.toml as read at `sha` (`app_config_at`, once per commit).
+    pub(crate) async fn git_push_skip(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, sha: &str, message: &str, file: Option<&crate::config::AppConfig>) -> Option<String> {
         if let Some(tag) = skip_tag(message) {
             return Some(format!("its message says {tag}"));
         }
-        let file = self.app_config_at(svc, sha).await;
-        let watch = file.as_ref().and_then(|f| f.watch_for(&env.name)).or_else(|| svc.build.watch.clone()).filter(|w| !w.is_empty())?;
+        let watch = file.and_then(|f| f.watch_for(&env.name)).or_else(|| svc.build.watch.clone()).filter(|w| !w.is_empty())?;
         if self.push_touches(svc, env, sha, &watch).await {
             return None;
         }

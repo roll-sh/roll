@@ -126,6 +126,7 @@ func (f *fakeApps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.services[id] = s
 		if l, ok := body["git_login"].(map[string]any); ok {
 			f.logins[id] = fmt.Sprintf("%s:%s", l["username"], l["password"])
+			s["git_login"] = map[string]any{"host": "gitlab.example.com", "username": l["username"]}
 		}
 		write(201, s)
 		return
@@ -154,8 +155,10 @@ func (f *fakeApps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if parts[1] == "git-login" {
 		if r.Method == http.MethodDelete {
 			delete(f.logins, parts[0])
+			s["git_login"] = nil
 		} else {
 			f.logins[parts[0]] = fmt.Sprintf("%s:%s", body["username"], body["password"])
+			s["git_login"] = map[string]any{"host": "gitlab.example.com", "username": body["username"]}
 		}
 		write(200, s)
 		return

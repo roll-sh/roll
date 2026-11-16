@@ -493,10 +493,14 @@ impl Apps {
         // (`PUT …/git-login`'s body).
         let git_login = match o.get("git_login") {
             None | Some(Value::Null) => None,
-            Some(g @ Value::Object(m)) if matches!(source, Source::Git { .. }) => match (m.get("username").and_then(Value::as_str), m.get("password").and_then(Value::as_str)) {
-                (Some(u), Some(p)) => Some((g.clone(), (u.to_string(), p.to_string()))),
-                _ => return Err(Error::BadRequest("git_login is {username, password}".into())),
-            },
+            Some(g @ Value::Object(m)) if matches!(source, Source::Git { .. }) => {
+                // Checked as `PUT …/git-login` checks it, before anything is sent with it.
+                let ok = |k: &str, max: usize| m.get(k).and_then(Value::as_str).filter(|v| !v.is_empty() && v.len() <= max && !v.contains(['\0', '\n', '\r']));
+                match (ok("username", 200), ok("password", 4096)) {
+                    (Some(u), Some(p)) if m.len() == 2 => Some((g.clone(), (u.to_string(), p.to_string()))),
+                    _ => return Err(Error::BadRequest("git_login is {username, password}, each on one line (1–200 and 1–4096 characters)".into())),
+                }
+            }
             Some(Value::Object(_)) => return Err(Error::BadRequest("git_login is for a Git URL source".into())),
             Some(_) => return Err(Error::BadRequest("git_login is {username, password}".into())),
         };
@@ -810,9 +814,10 @@ impl Apps {
                 _ => None,
             };
             forget_login = registry(&row.source) != registry(&source);
-            // So does a Git login its host.
+            // So does a Git login its repository: one given for a repository is never used for
+            // another, even on the same host.
             let git = |s: &Source| match s {
-                Source::Git { url, .. } => git_host(url),
+                Source::Git { url, .. } => git_repo(url),
                 _ => None,
             };
             forget_git = git(&row.source) != git(&source);
@@ -2633,7 +2638,14 @@ fn free_spot(ws: &roll_workspace::Workspace, project: &str) -> (f64, f64) {
     (48.0, 48.0)
 }
 
-/// A Git URL's host, lowercase (with its port when it names one): what a login is bound to.
+/// A Git URL's repository, to compare: its host and path, without a trailing `/` or `.git`.
+fn git_repo(url: &str) -> Option<String> {
+    let u = url::Url::parse(url).ok()?;
+    let path = u.path().trim_end_matches('/');
+    Some(format!("{}{}", git_host(url)?, path.strip_suffix(".git").unwrap_or(path)))
+}
+
+/// A Git URL's host, lowercase (with its port when it names one): where its login is sent.
 fn git_host(url: &str) -> Option<String> {
     let u = url::Url::parse(url).ok()?;
     let host = u.host_str()?.to_ascii_lowercase();

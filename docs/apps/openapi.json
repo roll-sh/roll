@@ -3315,7 +3315,7 @@
         "x-roll-action": "write"
       },
       "put": {
-        "description": "Answers `Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another host; sealed, never returned).",
+        "description": "Answers `Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another repository; sealed, never returned).",
         "operationId": "putServicesIdGitLogin",
         "parameters": [
           {
@@ -3339,7 +3339,7 @@
         },
         "responses": {
           "200": {
-            "description": "`Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another host; sealed, never returned)"
+            "description": "`Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another repository; sealed, never returned)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

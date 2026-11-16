@@ -2575,17 +2575,34 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             // local tunnel to it, as `roll apps proxy` makes one, for as long as the command runs.
             let mut vars = vars;
             let mut tunneled = Vec::new();
-            let links = api.get(&format!("/v1/apps/services/{}/links", enc(&s(&svc["id"])))).await?;
+            // Only when something names one: the links (and each linked service) are read then, and
+            // one that can't be read is said, not fatal.
+            let links = if vars.iter().any(|(_, v)| v.contains(".internal")) {
+                api.get(&format!("/v1/apps/services/{}/links", enc(&s(&svc["id"])))).await.unwrap_or_else(|e| {
+                    eprintln!("its links couldn't be read ({e:#}): no tunnels");
+                    Value::Null
+                })
+            } else {
+                Value::Null
+            };
             for l in links.as_array().into_iter().flatten().filter(|l| l["kind"] == "service") {
-                let other = api.get(&format!("/v1/apps/services/{}", enc(&s(&l["ref"])))).await?;
-                let internal = format!("{}.{}.internal:{}", s(&other["name"]), target.env, other["run"]["port"].as_u64().unwrap_or(8080));
-                if !vars.iter().any(|(_, v)| v.contains(&internal)) {
+                let other = match api.get(&format!("/v1/apps/services/{}", enc(&s(&l["ref"])))).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        eprintln!("the linked service {} couldn't be read ({e:#}): no tunnel to it", s(&l["ref"]));
+                        continue;
+                    }
+                };
+                let host = format!("{}.{}.internal", s(&other["name"]), target.env);
+                if !vars.iter().any(|(_, v)| internal_rewritten(v, &host, "").is_some()) {
                     continue;
                 }
                 let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
                 let local = listener.local_addr()?.to_string();
-                for (_, v) in vars.iter_mut().filter(|(_, v)| v.contains(&internal)) {
-                    *v = v.replace(&internal, &local);
+                for (_, v) in vars.iter_mut() {
+                    if let Some(new) = internal_rewritten(v, &host, &local) {
+                        *v = new;
+                    }
                 }
                 eprintln!("{local} → {} ({}), for {}'s link", s(&other["name"]), target.env, s(&svc["name"]));
                 let (url, headers) = tunnel_to(api, &env_path(&other, &target.env));
@@ -3729,8 +3746,42 @@ fn secret_from_stdin(what: &str) -> anyhow::Result<String> {
     Ok(v)
 }
 
+/// `v` with every URL whose host is exactly `host` (after `//` or `@`, before a port, a path,
+/// a query or the end) pointed at `local` instead, its port too; None when there's none.
+fn internal_rewritten(v: &str, host: &str, local: &str) -> Option<String> {
+    let (mut out, mut rest, mut hit) = (String::new(), v, false);
+    while let Some(i) = rest.find(host) {
+        let (before, after) = (&rest[..i], &rest[i + host.len()..]);
+        let starts = before.ends_with("//") || before.ends_with('@');
+        let ends = after.is_empty() || after.starts_with([':', '/', '?', '#']);
+        if !(starts && ends) {
+            out.push_str(&rest[..i + host.len()]);
+            rest = after;
+            continue;
+        }
+        hit = true;
+        out.push_str(before);
+        out.push_str(local);
+        // The port it named goes too: the tunnel reaches whichever port the service listens on.
+        rest = match after.strip_prefix(':') {
+            Some(p) => &p[p.find(|c: char| !c.is_ascii_digit()).unwrap_or(p.len())..],
+            None => after,
+        };
+    }
+    out.push_str(rest);
+    hit.then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_linked_hosts_urls_are_pointed_at_its_tunnel() {
+        let r = |v: &str| super::internal_rewritten(v, "api.production.internal", "127.0.0.1:4000");
+        assert_eq!(r("http://api.production.internal:3000/v1").as_deref(), Some("http://127.0.0.1:4000/v1"));
+        assert_eq!(r("http://u:p@api.production.internal").as_deref(), Some("http://u:p@127.0.0.1:4000"));
+        assert_eq!(r("http://admin-api.production.internal:8080"), None);
+        assert_eq!(r("http://api.production.internal.evil:80"), None);
+    }
     use super::*;
 
     #[test]

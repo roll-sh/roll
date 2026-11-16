@@ -3802,7 +3802,7 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     // once however often it's delivered; another branch and GitHub's ping deploy nothing.
     let (_, h) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/hook"), None).await;
     let hook = h["path"].as_str().unwrap().to_string();
-    let third = git.commit(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v3")]);
+    let third = git.commit_saying(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v3")], "fix the header\n\nlonger text");
     let push = json!({ "ref": "refs/heads/main", "after": third, "head_commit": { "message": "fix the header\n\nlonger text" } });
     let (st, d3) = call(&w.api, "POST", &hook, Some(push.clone())).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{d3}");
@@ -3884,7 +3884,7 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let readme = git.commit(&[pkg, ("server.js", "require('http') // v5"), ("README.md", "even more docs"), toml]);
     let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/main", "after": readme }))).await;
     assert!(v["ignored"].as_str().unwrap().contains("api.js"), "roll.toml's watch: {v}");
-    let api = git.commit(&[pkg, ("server.js", "require('http') // v5"), ("README.md", "even more docs"), toml, ("api.js", "x")]);
+    let api = git.commit_saying(&[pkg, ("server.js", "require('http') // v5"), ("README.md", "even more docs"), toml, ("api.js", "x")], "add the api");
     let bitbucket = json!({ "push": { "changes": [
         { "new": { "type": "branch", "name": "main", "target": { "hash": api, "message": "add the api" } } },
         { "new": { "type": "branch", "name": "feature", "target": { "hash": code, "message": "try it" } } },
@@ -3899,6 +3899,10 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let (st, d) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": code, "head_commit": { "message": "try it on staging" } }))).await;
     assert_eq!((st, d["environment"].as_str(), d["revision"].as_str()), (StatusCode::ACCEPTED, Some("staging"), Some(code.as_str())), "{d}");
     assert_eq!(pushes.0.lock().len(), 3, "a followed branch isn't a preview's");
+    // The commit's own message decides `[skip ci]`, not the body's.
+    let skip = git.commit_saying(&[pkg, ("server.js", "require('http') // v6"), ("README.md", "even more docs"), toml, ("api.js", "y")], "wip [skip ci]");
+    let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/main", "after": skip, "head_commit": { "message": "ship it" } }))).await;
+    assert!(v["ignored"].as_str().unwrap().contains("[skip ci]"), "{v}");
 }
 
 /// A private repository on any Git host: the service's own login (sealed, never returned, sent
@@ -3934,7 +3938,11 @@ async fn a_private_git_url_fetches_with_its_login() {
     let started = w.apps.watch_git().await;
     assert_eq!(started.len(), 1);
     assert_eq!(settled(&w, &id, "production", &started[0]).await["revision"].as_str(), Some(second.as_str()));
-    // Another host never gets it: moving the source there drops the login.
+    // Another repository never gets it, on the same host either: moving the source drops it.
+    let (_, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"source": {"kind": "git", "url": format!("http://127.0.0.1:{port}/git/acme/other")}}))).await;
+    assert_eq!(s["git_login"], Value::Null, "{s}");
+    call(&w.api, "PUT", &format!("/v1/apps/services/{id}/git-login"), Some(json!({"username": "deploy", "password": "glpat-sekret-token"}))).await;
+    // Nor another host.
     let (_, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"source": {"kind": "git", "url": format!("http://localhost:{port}/git/acme/private")}}))).await;
     assert_eq!(s["git_login"], Value::Null, "{s}");
     let (st, s) = call(&w.api, "PUT", &format!("/v1/apps/services/{id}/git-login"), Some(json!({"username": "deploy", "password": "glpat-sekret-token"}))).await;

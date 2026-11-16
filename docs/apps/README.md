@@ -1299,8 +1299,12 @@ the URL deploys the pushed commit at once to every environment that follows the 
 (one repository webhook for all of them, as Render's and Railway's: a push to `develop` posted to
 production's hook deploys staging when staging follows `develop`), once the repository's refs
 (`ls-refs`) say the branch is at that commit now, with the commit's subject as the deploy's
-message. Each environment's own pause, rollback hold, skip tag and watch paths apply; the answer
-is the hook's own environment's deploy when it made one. The body alone never names what deploys: a leaked URL can't put an old commit, or a
+message. The message is the commit's own, read from the repository (the body's only when that
+read fails), so `[skip ci]` is the author's and a body can't drop it; the refs are read once and
+roll.toml once per commit, whatever number of environments follow. Each environment's own pause,
+rollback hold, skip tag and watch paths apply; the answer is the hook's own environment's deploy
+when it made one, and a deploy that failed with none made is the answer's error (the platform
+shows a failed delivery). The body alone never names what deploys: a leaked URL can't put an old commit, or a
 fork's (which GitHub serves through the parent's URL), live, and a delivery a newer push overtook
 is ignored. Each branch a Bitbucket push moved counts. It's keyed by the commit, as the five-minute watch's deploy is,
 so a redelivery or the watch makes no second deploy. A branch no environment follows (without
@@ -1759,7 +1763,7 @@ app installed and no roll code mirror. `git_source.rs` is the whole of it:
   access token). It's sealed at rest (`git_auth`, bound to the service) and never returned, never
   in the URL, and sent as Basic auth only to the host it was set for: every fetch
   (`git_source::Remote`) checks the source URL's host against it, and moving the source to
-  another host drops it in the same transaction, as a registry login is dropped with its
+  another repository (host or path) drops it in the same transaction, as a registry login is dropped with its
   registry. The branch check when it's made, the plan, deploys, the watch, the hook's ref check
   and watch paths all fetch with it. A GitHub repository can use it too (a fine-grained token
   with read access to contents), or roll code's GitHub App.

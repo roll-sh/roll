@@ -71,7 +71,9 @@ impl Apps {
                     let sid = service.to_string();
                     let envs = self.db(move |s| s.environments(&sid)).await?;
                     let remote = self.git_remote(service, url).await;
-                    let (mut said, mut deployed) = (Vec::new(), Vec::new());
+                    let (mut said, mut deployed, mut failed) = (Vec::new(), Vec::new(), Vec::new());
+                    // The repository's refs, once for the whole delivery.
+                    let mut refs = None;
                     for p in moved {
                         let following: Vec<&crate::store::EnvRow> = envs.iter().filter(|e| !e.ephemeral && e.branch.as_deref() == Some(p.branch.as_str())).collect();
                         if following.is_empty() {
@@ -87,17 +89,30 @@ impl Apps {
                         };
                         // The body alone never names a commit: a leaked hook URL can't put an old
                         // commit, or a fork's, live, and a push a newer one overtook is that one's.
-                        match crate::git_source::head(&remote, Some(&p.branch)).await {
-                            Ok((now, _)) if now == sha => {}
-                            Ok((now, _)) => {
-                                said.push(format!("the repository has {} at {}, not {}: only its head deploys", p.branch, &now[..12], &sha[..12]));
-                                continue;
-                            }
+                        if refs.is_none() {
+                            refs = Some(remote.ls_refs().await.map_err(|e| format!("{e:#}")));
+                        }
+                        match refs.as_ref().expect("read above") {
+                            Ok(r) => match r.get(&format!("refs/heads/{}", p.branch)).map(|r| r.oid.to_string()) {
+                                Some(now) if now == sha => {}
+                                Some(now) => {
+                                    said.push(format!("the repository has {} at {}, not {}: only its head deploys", p.branch, &now[..12], &sha[..12]));
+                                    continue;
+                                }
+                                None => {
+                                    said.push(format!("the repository has no branch {}: not deployed", p.branch));
+                                    continue;
+                                }
+                            },
                             Err(e) => {
-                                said.push(format!("{} couldn't be checked against the repository ({e:#}): not deployed", p.branch));
+                                said.push(format!("{} couldn't be checked against the repository ({e}): not deployed", p.branch));
                                 continue;
                             }
                         }
+                        // Its message as the repository has it (`[skip ci]` is the author's, not the
+                        // body's), and roll.toml at it: once for every environment.
+                        let message = crate::git_source::commit_message(&remote, &sha).await.unwrap_or_else(|_| p.message.clone());
+                        let file = self.app_config_at(&svc, &sha).await;
                         for e in following {
                             if e.paused {
                                 said.push(format!("{} is paused", e.name));
@@ -107,25 +122,31 @@ impl Apps {
                                 said.push(format!("{}'s deploys are held after the rollback {r}", e.name));
                                 continue;
                             }
-                            if let Some(why) = self.git_push_skip(&svc, e, &sha, &p.message).await {
+                            if let Some(why) = self.git_push_skip(&svc, e, &sha, &message, file.as_ref()).await {
                                 said.push(format!("{}: {why}", e.name));
                                 continue;
                             }
-                            let first = p.message.lines().next().unwrap_or("").chars().take(500).collect::<String>();
+                            let first = message.lines().next().unwrap_or("").chars().take(500).collect::<String>();
                             let body = json!({ "revision": sha, "message": if first.is_empty() { format!("push to {}", p.branch) } else { first } });
                             let by = By { trigger: Trigger::Push, actor: Some("deploy hook".into()) };
                             match self.deploy(service, &e.name, body, by, None, Some(&format!("git:{}:{sha}", e.name))).await {
                                 Ok(d) => deployed.push(d),
-                                Err(err) => said.push(format!("{}: {err}", e.name)),
+                                Err(err) => {
+                                    said.push(format!("{}: {err}", e.name));
+                                    failed.push(err);
+                                }
                             }
                         }
                     }
-                    // The answer is this environment's deploy when it made one, else another's.
+                    // The answer is this environment's deploy when it made one, else another's; a
+                    // deploy that failed with none made is the answer's error (the platform shows
+                    // a failed delivery), never a quiet `ignored`.
                     deployed.sort_by_key(|d| d.environment != env);
-                    return Ok(match deployed.into_iter().next() {
-                        Some(d) => HookOutcome::Deployed(Box::new(d)),
-                        None => HookOutcome::Ignored(said.join("; ")),
-                    });
+                    return match (deployed.into_iter().next(), failed.into_iter().next()) {
+                        (Some(d), _) => Ok(HookOutcome::Deployed(Box::new(d))),
+                        (None, Some(err)) => Err(err),
+                        (None, None) => Ok(HookOutcome::Ignored(said.join("; "))),
+                    };
                 }
             }
         }

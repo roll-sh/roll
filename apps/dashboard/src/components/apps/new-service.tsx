@@ -70,6 +70,8 @@ export function NewServiceSheet({
   const [image, setImage] = useState("");
   const [regUser, setRegUser] = useState("");
   const [regPassword, setRegPassword] = useState("");
+  // Bumped at each edit of the token, so a new one asks for the plan again (never the token itself in a key).
+  const [loginRev, setLoginRev] = useState(0);
   const [name, setName] = useState("");
   const [named, setNamed] = useState(false);
   const [port, setPort] = useState("");
@@ -121,7 +123,7 @@ export function NewServiceSheet({
   const git = gitUrl.trim();
   // A private repository's login, for the plan and the roots as for the service.
   const gitLogin = git && regUser.trim() && regPassword ? { git_login: { username: regUser.trim(), password: regPassword } } : {};
-  const loginKey = "git_login" in gitLogin ? `${regUser.trim()}:${regPassword.length}` : "";
+  const loginKey = "git_login" in gitLogin ? `${regUser.trim()}:${loginRev}` : "";
   const planKey = `${git || repo}\n${gitBranch.trim()}\n${root.trim()}\n${loginKey}`;
   useEffect(() => {
     if (from !== "repo" || (!git && !repo) || (git && !/^https?:\/\/[^/@\s]+\/\S+$/.test(git))) return;
@@ -318,7 +320,18 @@ export function NewServiceSheet({
                 </Label>
                 <div className="flex gap-2">
                   <input value={regUser} onChange={(e) => setRegUser(e.target.value)} placeholder="username" aria-label="Git username" className={field} spellCheck={false} autoComplete="off" />
-                  <input value={regPassword} onChange={(e) => setRegPassword(e.target.value)} placeholder="token or app password" aria-label="Git token" type="password" className={field} autoComplete="new-password" />
+                  <input
+                    value={regPassword}
+                    onChange={(e) => {
+                      setRegPassword(e.target.value);
+                      setLoginRev((r) => r + 1);
+                    }}
+                    placeholder="token or app password"
+                    aria-label="Git token"
+                    type="password"
+                    className={field}
+                    autoComplete="new-password"
+                  />
                 </div>
                 <p className="mt-1.5 text-[11px] leading-relaxed text-subtle">A deploy token, app password or access token: sealed, sent only to this repository's host, never shown again.</p>
               </>

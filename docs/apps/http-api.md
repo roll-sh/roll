@@ -60,7 +60,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/changes` | | server-sent events: `ready`, then a `changed` (data `{}`) whenever a deploy moves, an instance wakes, sleeps or crashes, or someone changes the service; the page reads it again (on the owner, in memory; it carries nothing itself) | read |
 | `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }` | `Service` (a private registry's login for an image source; sealed, never returned) | write |
 | `DELETE /v1/apps/services/{id}/registry` | | `Service` | write |
-| `PUT /v1/apps/services/{id}/git-login` | `{ username, password }` (a deploy token, app password or access token as `password`; one line each) | `Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another host; sealed, never returned) | write |
+| `PUT /v1/apps/services/{id}/git-login` | `{ username, password }` (a deploy token, app password or access token as `password`; one line each) | `Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another repository; sealed, never returned) | write |
 | `DELETE /v1/apps/services/{id}/git-login` | | `Service` | write |
 | `GET /v1/apps/services/{id}/environments` | | `Environment[]` | read |
 | `PUT /v1/apps/services/{id}/environments/{env}` | `EnvironmentPut` | `Environment` | deploy*; with `variables_from` also reveal in that environment (it copies its values) |

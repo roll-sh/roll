@@ -366,7 +366,15 @@ async fn create_service(State(apps): S, ext: Extensions, b: Bytes) -> R {
         apps.check_references(project, name, crate::model::PRODUCTION, &values, asker(&ext)).await?;
     }
     let s = apps.create_service(b, actor(&ext)).await?;
+    created_audit(&apps, &s, &ext).await;
     Ok((StatusCode::CREATED, Json(s)).into_response())
+}
+
+/// A service made with a private repository's login: the login's audit entry, as `PUT …/git-login`'s.
+async fn created_audit(apps: &Arc<Apps>, s: &crate::model::Service, ext: &Extensions) {
+    if let Some(l) = &s.git_login {
+        apps.audit("git_login.set", &s.id, "", actor(ext), json!({ "host": l.host })).await;
+    }
 }
 
 async fn create_project_service(State(apps): S, Path(project): Path<String>, ext: Extensions, b: Bytes) -> R {
@@ -378,6 +386,7 @@ async fn create_project_service(State(apps): S, Path(project): Path<String>, ext
     }
     v["project"] = Value::String(project);
     let s = apps.create_service(v, actor(&ext)).await?;
+    created_audit(&apps, &s, &ext).await;
     Ok((StatusCode::CREATED, Json(s)).into_response())
 }
 

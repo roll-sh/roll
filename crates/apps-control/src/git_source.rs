@@ -62,7 +62,8 @@ impl crate::Apps {
                         continue;
                     }
                 };
-                if let Some(why) = self.git_push_skip(&svc, &env, &sha, &message).await {
+                let file = self.app_config_at(&svc, &sha).await;
+                if let Some(why) = self.git_push_skip(&svc, &env, &sha, &message, file.as_ref()).await {
                     sink().line(format!("{} on {branch} not deployed: {why}", &sha[..12]));
                     continue;
                 }
