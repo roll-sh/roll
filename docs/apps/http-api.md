@@ -60,7 +60,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/changes` | | server-sent events: `ready`, then a `changed` (data `{}`) whenever a deploy moves, an instance wakes, sleeps or crashes, or someone changes the service; the page reads it again (on the owner, in memory; it carries nothing itself) | read |
 | `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }` | `Service` (a private registry's login for an image source; sealed, never returned) | write |
 | `DELETE /v1/apps/services/{id}/registry` | | `Service` | write |
-| `PUT /v1/apps/services/{id}/git-login` | `{ username, password }` (a deploy token, app password or access token as `password`; one line each) | `Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another repository; sealed, never returned) | write |
+| `PUT /v1/apps/services/{id}/git-login` | `{ username, password }` (a deploy token, app password or access token as `password`; one line each), or `{ username, secret }` (the name of the project's secret that holds it, read from its production secrets at each fetch: a rotated token just works, nothing is kept here) | `Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another repository; sealed, never returned) | write |
 | `DELETE /v1/apps/services/{id}/git-login` | | `Service` | write |
 | `PUT /v1/apps/services/{id}/github` | | `Service` (a Git URL service on roll's GitHub App's host connected to the installation that sees its repository: fetches use the installation's short-lived tokens, deploys post commit statuses and GitHub Deployments; 409 without the App or when no installation sees the repository; dropped when the source moves to another repository) | operator only (installations span tenants) |
 | `DELETE /v1/apps/services/{id}/github` | | `Service` | operator only |
@@ -269,7 +269,7 @@ type Service = {
   build: Build;
   run: Run;
   registry: { server: string; username: string } | null; // a private registry's login (never the password)
-  git_login: { host: string; username: string } | null; // a private Git repository's login (never the password)
+  git_login: { host: string; username: string; secret?: string } | null; // a private Git repository's login (never the password; `secret`: the project secret it's read from)
   github: { installation: number; repo: string } | null; // connected to roll's GitHub App (`PUT …/github`)
   links: { kind: LinkKind; ref: string }[]; // what it links (no variables): the canvas draws them
   created_at: number;

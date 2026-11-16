@@ -661,12 +661,15 @@ pub enum AppsCmd {
         remove: bool,
     },
     /// A Git URL service's private repository login: `--username` with the token or app password
-    /// on stdin, or `--remove`. Sealed, sent only to the URL's host, never shown again.
+    /// on stdin (sealed, never shown again), or with `--secret NAME`, the project's roll secret
+    /// that holds it (read at each fetch); `--remove`. Sent only to the URL's host.
     GitLogin {
         #[command(flatten)]
         target: Target,
         #[arg(long, conflicts_with = "remove")]
         username: Option<String>,
+        #[arg(long, requires = "username")]
+        secret: Option<String>,
         #[arg(long)]
         remove: bool,
     },
@@ -3208,14 +3211,18 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let method = if remove { reqwest::Method::DELETE } else { reqwest::Method::PUT };
             api.call(method, &path, None).await?
         }
-        AppsCmd::GitLogin { target, username, remove } => {
+        AppsCmd::GitLogin { target, username, secret, remove } => {
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/services/{}/git-login", enc(&s(&svc["id"])));
             if remove {
                 api.call(reqwest::Method::DELETE, &path, None).await?
             } else {
-                let user = username.ok_or_else(|| anyhow::anyhow!("--username, with the token on stdin (or --remove)"))?;
-                api.call(reqwest::Method::PUT, &path, Some(json!({ "username": user, "password": secret_from_stdin("the token")? }))).await?
+                let user = username.ok_or_else(|| anyhow::anyhow!("--username, with the token on stdin or --secret (or --remove)"))?;
+                let body = match secret {
+                    Some(name) => json!({ "username": user, "secret": name }),
+                    None => json!({ "username": user, "password": secret_from_stdin("the token")? }),
+                };
+                api.call(reqwest::Method::PUT, &path, Some(body)).await?
             }
         }
         AppsCmd::Sleep { target } => {

@@ -713,7 +713,7 @@ impl Apps {
     /// host. The URL itself stays without credentials.
     pub async fn put_git_login(self: &Arc<Self>, service: &str, body: Value) -> Result<Service> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["username", "password"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["username", "password", "secret"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
         let text = |k: &str, max: usize| -> Result<String> {
@@ -722,13 +722,24 @@ impl Apps {
                 _ => Err(Error::BadRequest(format!("{k} is 1–{max} characters on one line"))),
             }
         };
-        let (username, password) = (text("username", 200)?, text("password", 4096)?);
+        let username = text("username", 200)?;
+        // The password itself (sealed here), or the name of the project's secret that holds it,
+        // read at each fetch (a rotated token just works; roll secrets audits the read).
+        let (password, secret) = match (o.contains_key("password"), o.contains_key("secret")) {
+            (true, false) => (text("password", 4096)?, None),
+            (false, true) => {
+                let name = text("secret", 128)?;
+                check_var_name(&name)?;
+                (String::new(), Some(name))
+            }
+            _ => return Err(Error::BadRequest("a Git login takes a password, or the secret that holds it (not both)".into())),
+        };
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
         let Source::Git { url, .. } = &svc.source else { return Err(Error::Conflict("only a Git URL source fetches with a login".into())) };
         let host = git_host(url).ok_or_else(|| Error::BadRequest("the source URL has no host".into()))?;
         let sid = service.to_string();
-        self.db(move |s| s.set_git_login(&sid, &host, &username, &password)).await?;
+        self.db(move |s| s.set_git_login(&sid, &host, &username, &password, secret.as_deref())).await?;
         self.service(service).await
     }
 
@@ -856,8 +867,28 @@ impl Apps {
             }
         }
         let sid = service.to_string();
-        let login = self.db(move |s| s.git_login_secret(&sid)).await.ok().flatten();
-        let login = login.filter(|(l, _)| Some(&l.host) == git_host(url).as_ref()).map(|(l, password)| (l.username, password));
+        let login = self.db(move |s| s.git_login_secret(&sid)).await.ok().flatten().filter(|(l, _)| Some(&l.host) == git_host(url).as_ref());
+        let login = match login {
+            // Read from the project's production secrets (what the service runs with), each use.
+            Some((l, _)) if l.secret.is_some() => {
+                let key = l.secret.clone().expect("matched");
+                let sid = service.to_string();
+                let project = self.db(move |s| s.service(&sid)).await.ok().map(|s| s.project);
+                let read = match project {
+                    Some(p) => self.deps.secrets.resolve(&p, crate::model::PRODUCTION, service).await.ok(),
+                    None => None,
+                };
+                match read.and_then(|vars| vars.into_iter().find(|v| v.name == key)) {
+                    Some(v) => Some((l.username, v.value)),
+                    None => {
+                        tracing::warn!(service, secret = %key, "apps: a Git login's secret couldn't be read; fetching without it");
+                        None
+                    }
+                }
+            }
+            Some((l, password)) => Some((l.username, password)),
+            None => None,
+        };
         git_source::Remote::new(self.cfg.allow_private, url, login)
     }
 

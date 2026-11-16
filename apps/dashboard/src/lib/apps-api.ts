@@ -133,7 +133,7 @@ export interface Service {
   /** The private registry login its image pulls with (the password is never returned). */
   registry: { server: string; username: string } | null;
   /** A private Git repository's login, bound to the source URL's host (the password is never returned). */
-  git_login: { host: string; username: string } | null;
+  git_login: { host: string; username: string; secret?: string } | null;
   /** Connected to roll's GitHub App: fetches use its installation's tokens, deploys post statuses. */
   github: { installation: number; repo: string } | null;
   /** What it links (the canvas draws them). */
@@ -880,7 +880,7 @@ export const appsApi = {
   notifyDeliveries: (project: string, id: string) => call<NotifyDelivery[]>("GET", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/deliveries`),
   putRegistry: (id: string, body: { username: string; password: string; server?: string }) => call<Service>("PUT", `${svc(id)}/registry`, body),
   deleteRegistry: (id: string) => call<Service>("DELETE", `${svc(id)}/registry`),
-  putGitLogin: (id: string, body: { username: string; password: string }) => call<Service>("PUT", `${svc(id)}/git-login`, body),
+  putGitLogin: (id: string, body: { username: string; password: string } | { username: string; secret: string }) => call<Service>("PUT", `${svc(id)}/git-login`, body),
   deleteGitLogin: (id: string) => call<Service>("DELETE", `${svc(id)}/git-login`),
   connectGitHub: (id: string) => call<Service>("PUT", `${svc(id)}/github`),
   disconnectGitHub: (id: string) => call<Service>("DELETE", `${svc(id)}/github`),

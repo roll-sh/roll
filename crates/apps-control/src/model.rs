@@ -286,6 +286,9 @@ pub struct Registry {
 pub struct GitLogin {
     pub host: String,
     pub username: String,
+    /// The project's secret its password is read from at each use (roll secrets), if not sealed here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
 }
 
 /// A Git URL service connected to roll's GitHub App (`PUT …/github`): the installation that sees
