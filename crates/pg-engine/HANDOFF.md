@@ -11169,6 +11169,9 @@ note, still open).
 
 ## Short write transactions, round 6 (agent 235)
 
+**Coordinator's note (2026-11-17):** only step 1 (the UPDATE's unique-key point probe) landed with this section. Step 2 (directed group-commit wakeups, `d68ca4019` on `cand/a235`) is held back: on the newest base it lowered instructions and cycles per transaction but throughput fell 2.3% at 8 clients and 5.1% at 32 on quiet pairs. It lands only after a quiet-host measurement shows a throughput win.
+
+
 BENCH.md "Short write transactions, round 6" has the same-day table and the pairs. Kept, each
 its own commit (`ff6ccea30`, `70e7b9906` on `7c1493375`; measured as `5dc14d2ec`, `1799da4ea`
 on `2947ce5a4`, then again rebased):
