@@ -1514,10 +1514,18 @@ async fn a_link_needs_reveal_on_what_it_links() {
         { "product": "postgres", "resources": [{ "id": "prj_y" }, { "id": "prj_z" }], "actions": { "reveal": "ask" } },
     ]), json!({})).await;
     assert_eq!(link(&both, "postgres", "prj_x").await.0, StatusCode::OK);
-    // The link's reveal is what the token used too: tightening keeps it.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let (_, t) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{both_id}/tighten"), None).await;
-    assert!(t["used"].as_array().unwrap().iter().any(|u| u["product"] == "postgres" && u["action"] == "reveal" && u["resource"] == "prj_x"), "{t}");
+    // The link's reveal is what the token used too: tightening keeps it. Usage is recorded after
+    // the answer, so it's waited for (a fixed 100 ms wasn't enough under a loaded gate).
+    let used = |t: &Value| t["used"].as_array().is_some_and(|u| u.iter().any(|u| u["product"] == "postgres" && u["action"] == "reveal" && u["resource"] == "prj_x"));
+    let mut t = Value::Null;
+    for _ in 0..50 {
+        t = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{both_id}/tighten"), None).await.1;
+        if used(&t) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(used(&t), "{t}");
     let (_, pending) = link(&both, "postgres", "prj_y").await;
     let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
     let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{apr}"), None).await;
