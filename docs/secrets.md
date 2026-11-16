@@ -1008,6 +1008,127 @@ documentation and haven't been run against a domain controller yet.
 
 A directory a key links to, or with a retired password or a dynamic user still to delete, can't be
 deleted (409).
+
+### Snowflake
+
+A Snowflake account has a service user's key rotated by roll, with no downtime, and makes a user
+per lease, as Vault's Snowflake database plugin does. A project registers the account (`POST
+…/snowflake-accounts`, `admin`; `roll secrets snowflake add NAME --account A [--privatelink]
+--admin-user U [--admin-role R] --key FILE|- [--auth password] [--user U] [--role R…]`; or the
+dashboard, next to directories):
+
+- `account` is the account identifier: `myorg-myaccount`, or a locator such as
+  `xy12345.us-east-2.aws`. Only letters, digits, `-`, `_` and `.` are accepted, with no
+  `.snowflakecomputing.com`. Statements go to `https://<account>.snowflakecomputing.com`, or to
+  `<account>.privatelink.snowflakecomputing.com` with `privatelink: true`. No other host is ever
+  contacted.
+- `admin_user` is the user roll signs in as, with key-pair JWT auth. `admin_private_key` is its RSA
+  private key: PEM, PKCS#8 unencrypted or PKCS#1, 2048 to 4096 bits. The key is sealed with the
+  project's data key, bound to the account's row, and never returned, logged or audited. Only its
+  public fingerprint is shown (`admin_key_fp`, as `DESC USER` shows `RSA_PUBLIC_KEY_FP`).
+  `admin_role` is the role statements run as (default: the admin user's default role).
+- `auth` is how the credentials roll hands out sign in: `key_pair` (the default) or `password`, for
+  users that can't use keys.
+- `managed_user` is the user managed links rotate. It can't be the admin user, because rotating it
+  would lock roll out.
+- `roles` are the roles dynamic users may be granted, at most 16. `ACCOUNTADMIN`, `ORGADMIN`,
+  `GLOBALORGADMIN` and `SECURITYADMIN` are refused.
+- At least one of `managed_user` and `roles` must be set.
+
+User and role names are names Snowflake reads unquoted: letters, digits, `_` and `$`, not starting
+with a digit. roll upper-cases them and always quotes them in statements, so a role created with a
+quoted lower-case name can't be used. No other text a tenant sends goes into a statement. A
+`COMMENT` keeps only letters, digits and `_-.:#/@` and spaces.
+
+Registering signs in once, outside any transaction. It runs `DESCRIBE USER` on the managed user and
+`SHOW ROLES LIKE` for each role. A refusal is a 400 with Snowflake's code and message, never the
+key. One project can't register the same managed user on one host twice, because the two
+registrations would undo each other's keys.
+
+It's the link kind `snowflake`, with one credential (`login`) of three fields: `user`, `account`, and
+`private_key` (PKCS#8 PEM) or `password`, whichever the account's `auth` gives. A link to the other
+one is a 400 when it's written. The links are `managed` or `dynamic`. The dashboard suggests
+`SNOWFLAKE_USER`, `SNOWFLAKE_ACCOUNT` and `SNOWFLAKE_PRIVATE_KEY` (or `SNOWFLAKE_PASSWORD`). The
+`account` field is the identifier as registered, with `.privatelink` appended when it's reached
+over PrivateLink. That's what Snowflake's connectors take.
+
+**Managed, key pairs.** A Snowflake user has two key slots, `RSA_PUBLIC_KEY` and
+`RSA_PUBLIC_KEY_2`, and they take turns as a database's two roles do (above). Each issue (linking,
+every `rotate_days`, `…/rotate`) makes a new 2048-bit key pair and sets its public half in the slot
+not handed out last (`ALTER USER … SET RSA_PUBLIC_KEY_2 = '…'`). It then hands out the private
+half. The other slot's key keeps working until its grace period ends, and then the slot is cleared
+(`ALTER USER … UNSET RSA_PUBLIC_KEY`). Rotating again within the grace period is a 409.
+
+If only the first slot holds a key when the account is registered (a key set by hand), roll's first
+key goes in the second slot. The hand-set key keeps working until the second rotation.
+
+**Managed, passwords.** One user has no second slot, so there is no grace: each rotation replaces
+the password at once (`ALTER USER … SET PASSWORD = '…' MUST_CHANGE_PASSWORD = FALSE`). A second
+rotation within two minutes of the first is a 409. A `TYPE = SERVICE` user can't have a password,
+so the managed user must be `LEGACY_SERVICE` or `PERSON`.
+
+Either way, an account's managed credential serves one environment (409 elsewhere).
+
+**Dynamic.** Each lease gets the user `ROLL_<LEASE>` (for example `ROLL_LSE_…`). It is created by
+these statements:
+
+```sql
+CREATE USER "ROLL_LSE_…" TYPE = SERVICE RSA_PUBLIC_KEY = '…' DEFAULT_ROLE = "LOADER"
+  DAYS_TO_EXPIRY = 1 COMMENT = 'roll secrets lease lse_… (…)';
+GRANT ROLE "LOADER" TO USER "ROLL_LSE_…";
+```
+
+With `auth: password` the user is `TYPE = LEGACY_SERVICE` with a random password. The roles are the
+link's `roles` option, a subset of the account's (default: all of them), and the first is its
+`DEFAULT_ROLE`. A link that names another role is a 400 when it's written.
+
+`DAYS_TO_EXPIRY` is the lease's end plus five minutes, rounded up to whole days. Each renewal moves
+it (`ALTER USER … SET DAYS_TO_EXPIRY`), so Snowflake refuses the user within a day of its lease
+even if roll is down.
+
+Ending the lease (expiry, `DELETE …/leases/{id}`) runs `DROP USER IF EXISTS`. If making the user
+fails midway (a grant refused), the user is dropped before the resolve answers. Checks, sandboxes
+and previews (untrusted) never get a dynamic user. Dynamic links work in any number of
+environments.
+
+**Passwords** are 32 characters with upper- and lowercase letters, digits and a symbol from
+`!#%+-.:=?@^_~`, which fits Snowflake's default password policy and needs no quoting. A statement
+that holds a password is never in an error: a refusal then says only Snowflake's code and SQLSTATE,
+never its message. Snowflake's own query history may keep that statement's text. Key pairs put
+nothing secret in a statement, so prefer them.
+
+rolld sends each statement to the SQL API (`POST /api/v2/statements`) with a key-pair JWT for the
+admin user (`X-Snowflake-Authorization-Token-Type: KEYPAIR_JWT`; it lives ten minutes). The request
+goes through the same guarded client as webhooks and syncs: https only, a public address it resolved
+itself (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE` allows private ones for local development), no redirects,
+15 seconds per request, and at most 1 MiB read from an answer. A statement still running (202) is
+polled once a second for up to 30 seconds. An account with a network policy must allow roll's
+egress addresses for the admin user.
+
+The admin role needs, at least:
+
+```sql
+CREATE ROLE ROLL_ADMIN;
+GRANT ROLE ROLL_ADMIN TO ROLE SYSADMIN;  -- or wherever your role hierarchy keeps it
+CREATE USER ROLL_ADMIN TYPE = SERVICE DEFAULT_ROLE = ROLL_ADMIN RSA_PUBLIC_KEY = '…';
+GRANT ROLE ROLL_ADMIN TO USER ROLL_ADMIN;
+-- Managed: DESCRIBE and ALTER the service user (its key slots or its password).
+GRANT OWNERSHIP ON USER SVC_APP TO ROLE ROLL_ADMIN COPY CURRENT GRANTS;
+-- Dynamic: make users (it owns them, so it can renew and drop them) and grant them its roles.
+GRANT CREATE USER ON ACCOUNT TO ROLE ROLL_ADMIN;
+GRANT OWNERSHIP ON ROLE LOADER TO ROLE ROLL_ADMIN COPY CURRENT GRANTS;
+```
+
+`GRANT ROLE` needs ownership of the role being granted. Owning the listed roles is the narrow way.
+The alternative, `GRANT MANAGE GRANTS ON ACCOUNT`, lets the admin role grant any role, so avoid it.
+
+The flow is tested against a fake SQL API that checks the JWT's signature and claims
+(`a_snowflake_account_rotates_key_slots_in_turn_and_makes_a_user_per_lease`). The statements, the
+JWT's `iss`/`sub` form, the SQL API's answers and the grants above follow Snowflake's documentation
+and haven't been run against a real account yet.
+
+An account a key links to, or with a retired key or a dynamic user still to drop, can't be deleted
+(409).
 ### GCP and Azure
 Short-lived GCP and Azure access tokens for each lease, as Vault's GCP and Azure engines give, with
 no key of the customer's stored anywhere: **roll is an OpenID Connect issuer**, and the customer's
@@ -1255,6 +1376,7 @@ roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
 roll secrets databases ls | add NAME [--role A --role B] [--group G] [--ca FILE] (admin URL on stdin) | rm ID
 roll secrets directories ls | add NAME --url URL --bind-dn DN [--flavor F] [--account DN…] [--user-base-dn DN] [--group DN…] [--ca FILE] (bind password on stdin) | rm ID
+roll secrets snowflake ls | add NAME --account A [--privatelink] --admin-user U [--admin-role R] --key FILE|- [--auth password] [--user U] [--role R…] | rm ID
 roll secrets aws-users ls | add NAME USER --role ROLE | rm ID
 roll secrets clouds  ls | add-gcp NAME --audience A --service-account SA | add-azure NAME --tenant T --client-id C [--scope S] | rm ID
 roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
@@ -2486,6 +2608,9 @@ isn't in the workspace is 404.
 | `GET /directories` | | `Directory[]` (`read` on the project; never the bind password) |
 | `POST /directories` | `{name, url, bind_dn, bind_password, flavor: "openldap" \| "active_directory", user_base_dn?, managed_accounts?: [dn, dn?], groups?: [dn], ca?}` | 201 `Directory` (`admin`; binds once and finds the accounts, groups and base first: 400 with the server's reason) |
 | `DELETE /directories/{id}` | | 204; 409 while a key links to it, or a retired password or a dynamic user waits (`admin`) |
+| `GET /snowflake-accounts` | | `SnowflakeAccount[]` (`read` on the project; never the admin key, only its fingerprint) |
+| `POST /snowflake-accounts` | `{name, account, privatelink?, admin_user, admin_role?, admin_private_key, auth?: "key_pair" \| "password", managed_user?, roles?: [role]}` | 201 `SnowflakeAccount` (`admin`; signs in once and finds the managed user and the roles first: 400 with Snowflake's reason) |
+| `DELETE /snowflake-accounts/{id}` | | 204; 409 while a key links to it, or a retired key or a dynamic user waits (`admin`) |
 | `GET /cloud-accounts` | | `CloudAccount[]` (`read` on the project) |
 | `POST /cloud-accounts` | `{name, cloud: "gcp", audience, service_account}` or `{name, cloud: "azure", tenant, client_id, scope?}` | 201 `CloudAccount` (`admin`; 400 when a made-up project's token is taken, or this project's isn't) |
 | `DELETE /cloud-accounts/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -2886,9 +3011,10 @@ rotating a database's admin password and editing registrations in place (#75), s
    on the rotator framework (Infisical, Akeyless).
 7. **AWS roles and users edited in place** (a new role ARN or trust; on #68's branch, where trust
    lives), and Terraform updating registrations in place (#72, after #75).
-8. **More dynamic credentials**: Kubernetes service account tokens, Snowflake (Vault, Infisical).
-   LDAP and Active Directory passwords are built (`feature/roll-secrets-ldap`: "Directories (LDAP
-   and Active Directory)", managed accounts taking turns and a user per lease).
+8. **More dynamic credentials**: Kubernetes service account tokens (Vault, Infisical). LDAP and
+   Active Directory passwords are built (`feature/roll-secrets-ldap`: "Directories (LDAP and Active
+   Directory)", managed accounts taking turns and a user per lease), and Snowflake on top of it
+   (`feature/roll-secrets-snowflake`: "Snowflake", key slots taking turns and a user per lease).
 9. **Java and .NET clients, a Pulumi provider, a Lambda extension and an Ansible lookup** (Spring,
    `IConfiguration`; AWS's Parameters and Secrets extension; Vault's and 1Password's Ansible).
 10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project

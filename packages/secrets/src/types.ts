@@ -293,6 +293,10 @@ export type OutsideDatabase = { id: string; name: string; host: string; roles: s
 /** An LDAP or Active Directory server outside roll: one or two managed accounts (two take turns), a base dynamic users are made under (in `groups`), or both; the bind password stays sealed. */
 export type DirectoryFlavor = "openldap" | "active_directory";
 export type Directory = { id: string; name: string; url: string; flavor: DirectoryFlavor; bind_dn: string; user_base_dn?: string; managed_accounts: string[]; groups: string[]; ca?: string; created_at: number; created_by: string };
+/** A Snowflake account: a service user whose key slots take turns (managed), roles a user per lease is granted (dynamic), or both; the admin user's private key stays sealed. */
+export type SnowflakeAuth = "key_pair" | "password";
+export type SnowflakeAccount = { id: string; name: string; account: string; host: string; admin_user: string; admin_role?: string; admin_key_fp: string; auth: SnowflakeAuth; managed_user?: string; roles: string[]; created_at: number; created_by: string };
+export type NewSnowflakeAccount = { name: string; account: string; privatelink?: boolean; admin_user: string; admin_role?: string; admin_private_key: string; auth?: SnowflakeAuth; managed_user?: string; roles?: string[] };
 export type NewDirectory = { name: string; url: string; bind_dn: string; bind_password: string; flavor: DirectoryFlavor; user_base_dn?: string; managed_accounts?: string[]; groups?: string[]; ca?: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
