@@ -1366,7 +1366,9 @@ Ranked by what a person notices first. Done so far:
 - the other browsers' run alongside Chromium's (a screenshot run 12–14 s instead of about 21 s),
   each run's time in rolld's log and the activity, and a node's screenshot slots from its cores
   (one every 8, 1 to 4; `ROLL_PREVIEWS_SCREENSHOT_SLOTS` to set it), the browsers image built once
-  at a time whatever runs side by side;
+  at a time whatever runs side by side, and one screenshot task per preview at a time (two
+  refused each other's container name under load: main's baseline then never got one, and
+  changes weren't compared with it; fixed 2026-11-16);
 - dynamic credentials (roll secrets' leases) issued to each start of a service and each job,
   renewed while it runs, revoked when it stops (a sleeping preview holds none);
 - with roll apps' #26 on main: Promote (a trusted change's preview's build deployed to
@@ -1563,11 +1565,6 @@ Ranked by what a person notices first. Done so far:
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.
-6. **Watch: the live check's broken link against main** (about one run in three on
-   2026-11-16, before and after screenshot runs were kept in one transaction): the change's new
-   broken link isn't counted against main's (`links_added` stays empty). The script now prints the
-   comparison and main's baseline's `page_links` when it fails; the next failure says whether
-   main's link check came back empty (a timeout under load) or the comparison missed it.
 
 
 Looked at and kept: previews' copy of a preview's variables in its roll apps environment, next
