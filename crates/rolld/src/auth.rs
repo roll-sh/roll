@@ -8,8 +8,8 @@
 //! - CORS answers only the dashboard's origins (`ROLL_DASHBOARD_ORIGIN`; on loopback, by default,
 //!   any localhost port), with credentials: people sign in with a session cookie
 //!   (docs/accounts.md), which the gate resolves on every request. An admin's session opens what
-//!   the token does; anyone else's opens roll code, the agents and their own projects, and gets
-//!   403 on the rest.
+//!   the token does; anyone else's opens roll code, the agents, their own projects and their own
+//!   search clusters, and gets 403 on the rest.
 
 use crate::Args;
 use roll_auth::{Access, AdminToken, Gate, Origins, Rule};
@@ -61,18 +61,22 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/accounts", access: Access::Product("accounts: sign-in, then the session decides") },
     // Workspace projects: the operator and every signed-in user, each seeing their own.
     Rule { route: "/v1/workspace", access: Access::User("workspace projects: a user's own") },
+    // roll search's control plane: the operator and every signed-in person, each seeing their own
+    // clusters (search scopes by SignedIn; another's answers 404). Clusters' data plane is the
+    // REST port, with the cluster's own credentials.
+    Rule { route: "/v1/search", access: Access::User("search clusters: a user's own") },
     // Node-to-node hops are signed with the cluster secret; computes fetch WAL with their token.
     Rule { route: "/internal", access: Access::Product("internal: signed hops and the WAL token") },
     // Storage: IAM users signed in to the dashboard (console sessions) act as themselves.
     Rule { route: "/v1/storage/console/signin", access: Access::Public("storage sign-in: checks the IAM user's password and MFA") },
     Rule { route: "/v1/storage/console/session", access: Access::Product("storage: who a console session is, for that session's token only") },
     Rule { route: "/v1/storage", access: Access::Credential("a storage console session") },
-    // roll secrets: the operator, a signed-in person on their own projects, or a secrets token
-    // (`rlst_…`) scoped to a project's environments and folders, checked on every request
-    // (docs/secrets.md, "Access").
-    Rule { route: "/v1/secrets", access: Access::UserOrCredential("a secrets token (rlst_…)") },
+    // roll secrets: the operator, a signed-in person on their own projects, or a roll token with
+    // a rule on a project's environments and folders, checked on every request (docs/secrets.md,
+    // "Access").
+    Rule { route: "/v1/secrets", access: Access::UserOrCredential("a roll token (rlt_…), decided by roll-access") },
     // The deployment key's state is about the whole server: never a person's session.
-    Rule { route: "/v1/secrets/health", access: Access::Credential("a secrets token (rlst_…); the operator's answer") },
+    Rule { route: "/v1/secrets/health", access: Access::Credential("a roll token (rlt_…); the operator's answer") },
     // A one-time share's link: the value is encrypted with a key only the link holds, and opens
     // a few times at most (docs/secrets.md, "Sharing a value once").
     Rule { route: "/v1/secrets/shares", access: Access::Public("a one-time share's link: ciphertext only, the key stays in the link") },

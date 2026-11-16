@@ -3286,6 +3286,72 @@
         "x-roll-action": "write (it starts compute someone pays for; a visitor's request wakes a public environment through the proxy, not this route)"
       }
     },
+    "/v1/apps/services/{id}/git-login": {
+      "delete": {
+        "description": "Answers `Service`.",
+        "operationId": "deleteServicesIdGitLogin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Service`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete git login",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "write"
+      },
+      "put": {
+        "description": "Answers `Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another repository; sealed, never returned).",
+        "operationId": "putServicesIdGitLogin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ username, password }` (a deploy token, app password or access token as `password`; one line each)"
+        },
+        "responses": {
+          "200": {
+            "description": "`Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another repository; sealed, never returned)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Set git login",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/services/{id}/links": {
       "get": {
         "description": "Answers `Link[]`.",

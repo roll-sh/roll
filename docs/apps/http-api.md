@@ -60,6 +60,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/changes` | | server-sent events: `ready`, then a `changed` (data `{}`) whenever a deploy moves, an instance wakes, sleeps or crashes, or someone changes the service; the page reads it again (on the owner, in memory; it carries nothing itself) | read |
 | `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }` | `Service` (a private registry's login for an image source; sealed, never returned) | write |
 | `DELETE /v1/apps/services/{id}/registry` | | `Service` | write |
+| `PUT /v1/apps/services/{id}/git-login` | `{ username, password }` (a deploy token, app password or access token as `password`; one line each) | `Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another repository; sealed, never returned) | write |
+| `DELETE /v1/apps/services/{id}/git-login` | | `Service` | write |
 | `GET /v1/apps/services/{id}/environments` | | `Environment[]` | read |
 | `PUT /v1/apps/services/{id}/environments/{env}` | `EnvironmentPut` | `Environment` | deploy*; with `variables_from` also reveal in that environment (it copies its values) |
 | `GET /v1/apps/services/{id}/environments/{env}` | | `Environment` | read |
@@ -169,8 +171,9 @@ type Build = {
   install?: string;    // overrides the detected commands
   build?: string;
   start?: string;
-  /** A repo source deploys a push only when it changes a path these match (gitignore-style, from
-   *  the repo's root, as CODEOWNERS; at most 50). roll.toml `[app] watch` wins over it. */
+  /** A repo or Git URL source deploys a push only when it changes a path these match
+   *  (gitignore-style, from the repo's root, as CODEOWNERS; at most 50). roll.toml `[app] watch`
+   *  wins over it. */
   watch?: string[];
   spa?: boolean;            // a single-page app (a page path with no file answers index.html); unset: detected
   target?: string;          // the tree's own Dockerfile's stage to build (--target): letters, digits, _ - . (64 at most)
@@ -259,6 +262,7 @@ type Service = {
   build: Build;
   run: Run;
   registry: { server: string; username: string } | null; // a private registry's login (never the password)
+  git_login: { host: string; username: string } | null; // a private Git repository's login (never the password)
   links: { kind: LinkKind; ref: string }[]; // what it links (no variables): the canvas draws them
   created_at: number;
   environments: EnvironmentSummary[];
@@ -276,7 +280,7 @@ type EnvironmentSummary = {
 type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
 
 type Patch<T> = { [K in keyof T]?: T[K] | null }; // null: back to the default
-type NewService = { project: string; name: string; source: Source; build?: Patch<Build>; run?: Patch<Run>; variables?: { [name: string]: string } /* production, before its first deploy */; sealed?: string[] /* which of those are sealed from the start (a template's generated secrets) */; registry?: { username: string; password: string; server?: string } /* an image's login, before its first pull (as PUT …/registry) */; links?: { kind: LinkKind; ref: string; prefix?: string }[] /* at most 20, made before the first deploy (as PUT …/links); one that doesn't resolve makes no service */; branch?: string /* a repo or Git source: production follows it, its first deploy that branch's head (default: the repo's default branch); 400 when the repo has no such branch, or a Git URL doesn't answer */; x?: number; y?: number };
+type NewService = { project: string; name: string; source: Source; build?: Patch<Build>; run?: Patch<Run>; variables?: { [name: string]: string } /* production, before its first deploy */; sealed?: string[] /* which of those are sealed from the start (a template's generated secrets) */; registry?: { username: string; password: string; server?: string } /* an image's login, before its first pull (as PUT …/registry) */; git_login?: { username: string; password: string } /* a private Git repository's login, before its branch is checked (as PUT …/git-login) */; links?: { kind: LinkKind; ref: string; prefix?: string }[] /* at most 20, made before the first deploy (as PUT …/links); one that doesn't resolve makes no service */; branch?: string /* a repo or Git source: production follows it, its first deploy that branch's head (default: the repo's default branch); 400 when the repo has no such branch, or a Git URL doesn't answer */; x?: number; y?: number };
 type ServicePatch = { name?: string; source?: Source; build?: Patch<Build>; run?: Patch<Run> };
 
 type EnvironmentPut = {
@@ -298,7 +302,9 @@ type EnvironmentPut = {
   /** Creating it: start with this environment's variables, except its sealed ones (ignored when it exists). */
   variables_from?: string;
   /** A push deploys only once its commit's checks pass (statuses other than roll apps' own):
-   *  pending waits (up to an hour; `Environment.waiting_for_ci` names it), a failure skips it. */
+   *  pending waits (up to an hour; `Environment.waiting_for_ci` names it), a failure skips it.
+   *  A roll code repo's service only (400 otherwise): a Git URL service deploys from its
+   *  workflow after its tests (sdk/apps-github-action) with the environment's branch unset. */
   wait_for_ci?: boolean;
   /** An image service whose image has a tag: deploy when the tag points at a new digest
    *  (checked every 5 minutes on the owner; actor `tag watch`). 400 otherwise. */
@@ -439,7 +445,7 @@ type ProjectImport = {
   databases: { [name: string]: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" } };
 };
 
-type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string /* a public Git URL, fetched at its branch's head as its deploy would be */; branch?: string; root?: string } | { files: Record<string, string> };
+type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string /* a Git URL, fetched at its branch's head as its deploy would be */; branch?: string; root?: string; git_login?: { username: string; password: string } /* a private repository's */ } | { files: Record<string, string> };
 
 type Plan = {
   provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "static";
@@ -461,8 +467,15 @@ type Plan = {
   release?: string;
 };
 
-/** Wired on a node today: postgres (DATABASE_URL) and redis (REDIS_URL, REDIS_REST_URL/TOKEN). */
-type Link = { kind: "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "service"; ref: string; prefix: string; vars: string[] };
+/** Wired on a node today: postgres (DATABASE_URL), redis (REDIS_URL, REDIS_REST_URL/TOKEN) and search. */
+type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service";
+type Link = { kind: LinkKind; ref: string; prefix: string; vars: string[] };
+// `search`: `ref` is a roll search cluster (id or name). The link makes a data-only credential of
+// its own, once (never the cluster's password): ELASTICSEARCH_URL and ELASTICSEARCH_API_KEY, or on
+// an OpenSearch-flavor cluster OPENSEARCH_URL, OPENSEARCH_USERNAME and OPENSEARCH_PASSWORD (an
+// internal user of its own). Kept
+// sealed with the link; unlinking (or deleting the service) revokes it. A scoped token needs
+// `reveal` on the cluster.
 // `service`: `ref` is another web service of the project (its id); `URL` is
 // `http://<name>.<env>.internal:<port>` in the linking environment, `PUBLIC_URL` its public URL
 // when it has one there. The prefix defaults to its name (`API_`). A service's links go with it.

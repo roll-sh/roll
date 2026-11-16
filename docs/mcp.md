@@ -40,8 +40,10 @@ config with your address filled in.
 
 ### Toolsets
 
-Every product's tools are about 259 (222 of roll's own, ~21k tokens of what a model reads, and
-roll code's), before an agent does anything. Connect to `/v1/mcp?toolsets=postgres,code` (or send `X-MCP-Toolsets: postgres,code`) to
+Every product's tools are about 310 (roll's own and roll code's: ~200 KB, ~25k tokens of what a
+model reads), before an agent does anything. Building that list takes 6.5 ms at p50 and 15.5 ms at
+p99 in release (`tools_list_cost`, an ignored test: linear in the tools, 3.2 ms for 149), and a
+client keeps it for a minute (`ttlMs`). Connect to `/v1/mcp?toolsets=postgres,code` (or send `X-MCP-Toolsets: postgres,code`) to
 list only those products' tools, as GitHub's MCP server does; the access tools (approvals,
 `access_check`) are always listed. On a four-product node, Redis alone is 12 tools, ~2.4k tokens
 instead of ~16k. An unknown name is `400`, naming the toolsets there are. The dashboard's connect
@@ -257,6 +259,48 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     `ttlMs: 60000` and `cacheScope: "private"`: a token's tools are its own, and its rules can
     change.
   - Approvals are Multi Round-Trip Requests (see Approvals).
+  - **MCP Apps** (`roll_mcp::ui`, `io.modelcontextprotocol/ui`, SEP-1865): for a host that
+    declares HTML views (`mimeTypes: ["text/html;profile=mcp-app"]`), the read-only tools that
+    answer rows (lists, queries, logs, reads, usage) point at `ui://roll/table` (`_meta.ui`). The
+    host renders that view in a sandboxed iframe, and it shows the tool's result as a table, light
+    or dark as the host is: times as UTC, columns empty in every row dropped, and links roll
+    answered (an approval's page, a preview) opened by the host (`ui/open-link`) where it can.
+    `access_wait_approval` points at it too: while a call waits for a person, the view is a card
+    with roll's approval page to open.
+    - **Declaring it:** a 2026-07-28 request on itself; in `initialize`, the session id carries it
+      (`~ui.` after its prefix), as URL elicitation does.
+    - **Safety:** the view has no network (its resource declares no domains), writes every value
+      as text, and calls no tools. It only asks the host to open an `http(s)` link roll answered.
+      An approval is never decided from a view, because an agent's token could drive it.
+    - **Checked:** `a_host_that_renders_apps_gets_the_table_view` (roll-mcp); the table in
+      ext-apps' reference host (`examples/basic-host` v2.0.4, `users-live/host-shot.mjs`); the
+      table and the approval card in a stand-in host that checks the handshake as the SDK's
+      AppBridge does (`users-live/app-shot.mjs`).
+  - **Tasks** (`roll_mcp::tasks`, the `io.modelcontextprotocol/tasks` extension, SEP-2663):
+    - **When:** a client that declares the extension on its request gets a task handle
+      (`resultType: "task"`) for a call still running after 3 s, or one waiting for a person's
+      approval. Everyone else waits for the answer, as before. `server/discover` lists the
+      extension only where tasks can be made.
+    - **Running:** the call goes on in the background on the node that made the task, as the same
+      gated request with the caller's own headers, so the token is looked up again when it runs.
+      One waiting for approval shows the approval page: `input_required` with a URL elicitation,
+      or a status message. There's one input request per approval, keyed by the approval's id, so
+      a client shows it once however often the task waits again. Once a person decides, it runs.
+    - **Waiting tools:** a tool that waits for something up to a request's limit (`tasks_wait_run`'s
+      run, `access_wait_approval`'s decision) waits on as a task. Its answer is checked (a tool's
+      `until`), and while it says the wait isn't over the task asks again every 2 s, so it waits
+      as long as it takes. Such a call becomes a task as soon as its first answer isn't final.
+    - **Polling:** `tasks/get` answers from any node, with the result inline once `completed` (a
+      tool's `isError` is still `completed`) or the JSON-RPC error once `failed`. `tasks/update`
+      is acknowledged: the approval itself is decided on roll's page. `tasks/cancel` stops it.
+    - **Who sees it:** a task is its owner's (the grant, or the operator), looked up on every
+      request. Anyone else's poll, or an unknown or expired id, is `-32602`. A request that didn't
+      declare the extension is `-32021`. `Mcp-Name` carries the task id.
+    - **Storage:** the id is the caller's secret (only its hash is stored). Results are sealed at
+      rest, as audit sinks' secrets are (a reveal's answer is a credential), so tasks need
+      `ROLL_SECRET_KEY`.
+    - **Limits:** a task lives an hour, a token runs at most 16 at once, and a working task its
+      node stopped touching for a minute reads as `failed`. Results are cut past 4 MiB.
 - **Stateless:** every node of a cluster answers every request, and nothing is lost on a restart.
   `initialize` answers an `Mcp-Session-Id` that holds no state: its prefix says whether the client
   declared URL elicitation (`roll-url-1.` or `roll-1.`, then a random part, so ids are unique), so
@@ -584,6 +628,9 @@ previews are listed once those products are on.
 | `apps_redeploy` | Deploy what's running again with the current settings and variables. | `POST /v1/apps/services/{service}/environments/{env}/redeploy` |
 | `apps_run_job` | Run a one-off command in an environment's image with its variables. | `POST /v1/apps/services/{service}/environments/{env}/jobs` |
 | `apps_job_logs` | A job's output. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}/logs` |
+| `apps_list_jobs` | An environment's one-off jobs, newest first. | `GET /v1/apps/services/{service}/environments/{env}/jobs` |
+| `apps_get_job` | One job: status, exit code, timing. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}` |
+| `apps_cancel_job` | Stop a running job (production: deploy). | `POST /v1/apps/services/{service}/environments/{env}/jobs/{job}/cancel` |
 | `apps_events` | What happened to services, in order after a cursor. | `GET /v1/apps/events` |
 | `apps_list_variables` | An environment's variables, values masked. | `GET /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_set_variables` | Set or unset an environment's variables (production is a "deploy" action). | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
@@ -659,43 +706,67 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **The admin caller in other products:** `tests/admin_only.rs` holds roll code to it: every
-   "needs the admin token" refusal sits behind a request classified admin. Other products phrase
-   their admin-only checks differently (tasks' "the node's admin token is required" is on
-   operator-only routes; accounts' "needs an admin's session" is for people). Adopt the phrase
-   where a product's check can be reached by a grant, so the test covers it.
-2. **Everyday routes with no tool:** tasks, streams, storage, queues, postgres, Redis and NoSQL have
+1. **CI signs in with its own OIDC token, for any product** (trusted publishing, as PyPI and npm
+   do; AWS's and GCP's workload federation): a machine client whose credential is a trusted issuer,
+   a subject (one repository, named literally for a shared issuer like GitHub Actions) and claims
+   (`ref`, `environment`), traded at the token endpoint with RFC 7523's `jwt-bearer` grant for an
+   hour's token within the client's rules. Nothing long-lived sits in CI, and it reaches every
+   product (deploy an app, migrate Postgres), where roll secrets' identities reach only a project's
+   secrets. Reuse secrets' OIDC checks (shared issuers, key fetches over the guarded client,
+   pinned keys, login caps) rather than a second verifier: agree the shared piece with the secrets
+   thread first. Then `roll token client create --github owner/repo`, the panel, and a GitHub
+   Action step.
+2. **The merge queue, in turn:** #98 (MCP Apps), #101 (machine clients), #104 (server card), #108
+   (skills and `apps_wait_deploy`): each takes the lock, merges main, runs the full gate. #98's
+   pre-gate runs while another thread holds the lock.
+3. **More MCP Apps views:**
+   - a deploy, as `apps_wait_deploy` or `apps_get_deploy` answers it: its steps, logs and a
+     rollback (calling `apps_rollback` through the host, so through the gate, as deploy);
+   - a preview's screenshot against its baseline.
+
+   Check each in ext-apps' reference host (`examples/basic-host` at v2.0.4, run locally:
+   `users-live/host-shot.mjs`; it doesn't declare the extension, so a one-line local patch declares
+   it, as a compliant host does) and the stand-in. The table passed there, after a fix: the view's
+   `ui/initialize` lacked `protocolVersion`, which the SDK's AppBridge requires. Claude.ai or
+   ChatGPT need a public HTTPS rolld and the user's account (the review pack's decisions);
+   MCPJam's inspector (3.18) asks for an MCPJam account first.
+4. **Machine clients, the rest:**
+   - the request's `scope` narrowing the token it gets: it needs rules per access secret (today a
+     grant's rules are its tokens'), so the evaluator reads them;
+   - the panel's Rotate control checked in a browser, with screenshots for the review pack.
+5. **`apps_wait_job`** once apps' #99 is on main: `apps_get_job`'s route, waiting while `status`
+   is `running` (the apps thread agreed the states).
+
+6. **Enterprise-managed authorization** (SEP-990): a company IdP's ID-JAG traded for a roll
+   token. It needs accounts' SSO first.
+7. **Everyday routes with no tool:** tasks, streams, storage, queues, postgres, Redis and NoSQL have
    theirs (`tool-gaps.py origin/main <product>` lists what's left). What's left is mostly what only
    an operator does by hand: keys, passwords, accounts, IAM, roles, CDN, migrations, evict and
    unload, which stay without tools. Recheck each product after its thread lands new routes.
-3. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
+8. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
    automations that pick up issues and chat messages (the agents thread's call; tell it), and
    chat messages that reach an agent marked `outside` (an install's non-members can't drive
    roll, so mostly members' text).
-4. **MCP tasks, as the 2026-07-28 extension** (`io.modelcontextprotocol/tasks`, SEP-2663: the
-   server answers a task handle when a call will take long, `tasks/get` polls with the result in
-   it, `tasks/update` carries input, no `tasks/result` or `tasks/list`; 2025-11-25's experimental
-   tasks are retired, and no client in the extensions matrix supports either yet): for calls that
-   wait for a person, `input_required` with the approval page. It needs a durable task store on
-   the system database (a fleet's poll lands on another node), results sealed with
-   `ROLL_SECRET_KEY` (a reveal's answer is a credential), each task bound to its grant and looked
-   up on every call, caps per caller, and audit rows; and a client people use that sends it. Waits on clients.
-5. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+9. **More tools that wait:** `apps_wait_deploy` is in #108; branch backups and search reindexes
+   can use `until` once their routes answer a state to wait on (search's reindex is an
+   Elasticsearch task today, with no roll route to watch). Recheck with `mcpc` (`~/.local/share/roll-mcp/live/mcpc-tasks.sh`), and with the
+   TypeScript SDK's `client/ext/tasks` once it ships.
+10. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25; agreed conflicts resolved by `known-conflicts.py`), and
    compare each product's routes with its tools (an everyday route with no tool is a gap: apps'
    were found this way). #24 and #25 are on main, so `feature/mcp-on-landing` is retired:
    secrets' #64 lands on main directly.
-6. **Transit keys one at a time, end to end:** #80 names the key in each per-key row, but roll
+11. **Transit keys one at a time, end to end:** #80 names the key in each per-key row, but roll
    secrets checked the project again inside each handler, so a key-limited token still got 403.
    The secrets thread's `feature/roll-secrets-transit-by-key` adds `Caller::need_key`, a key-
    filtered list marked `filters_itself`, and two lines in roll-auth's `Selector::matches`;
    review the roll-auth part when it comes.
-7. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
-   roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
+12. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+   roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_`, `rlc_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-8. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+13. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset (see Toolsets: it would drop tools from connections that use them; search mode is opt-in); a connection narrowed to one project (Supabase's `project_ref`): their
@@ -703,7 +774,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: `roll_find_tools` ranks by how much of a name the query covers, and a test holds 30 everyday queries to their tool (titles now say what a tool acts on: "Roll back a deployment", "Upload an object to a bucket"); search mode for clients that can't take the list (the connect panel and `roll mcp config` turn it on for VS Code and Cursor; `claude mcp add` lines quote a URL with a mode); credentials read tokens could see are hidden (a project's preview variables, tasks' forwarded headers, agents' share links); `tests/admin_only.rs` (every "needs the admin token" refusal is admin in the catalogue); apps' notifications and log drains and secrets' key workflows as tools; write and deploy tokens no longer pass roll code's admin-only checks (connecting a GitHub repository, landing with `bypass`), shorten a stream's retention (now `delete`), mint agents machine tokens (`admin`) or share threads (`reveal`); a rule can grant one transit key (`{"id": "prj_x", "index": "payments"}`: the per-key rows name it); loosening a NoSQL database's masking policy or read-only flag is `admin` (it was `write`, so a token that could read and write could drop the masking and read raw values); postgres, Redis, storage, queues, streams and tasks tools for their everyday routes; lockdown (`?lockdown=1`: work items from GitHub issues, reviews and review comments whose author can't push, and changes from forks, are `outside`, and their text is withheld from the model); search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
+Done lately: #93 (MCP tasks) on main; `apps_wait_deploy` (#108); everyday routes rechecked after secrets #85 and apps' latest: what has no tool is an operator's or admin by design (`visual/accept`, previews' coming `approve`); skills over MCP (SEP-2640: the workflows and the guide as Agent Skills, exact digests; #108); rotating a machine client (`/rotate`, `roll token client rotate`: a new key or secret, the same id; the old one kept a while or stopped with its tokens); an MCP Apps approval card (`access_wait_approval`: what waits, and roll's page to open through the host, never decided from the view) and links opened through the host; the MCP Apps table checked in ext-apps' reference host (its handshake fixed: `protocolVersion`; times shown as UTC, always-empty columns dropped); the server card (SEP-2127: `/v1/mcp/server-card` and `/.well-known/ai-catalog.json`, checked against the extension's schema; #104); a person's own machine clients (acting as them within their reach, waiting for an admin past the policy, theirs alone to see and revoke); a "Machine clients" panel on MCP & access (a pasted PEM or JWK, or a secret shown once with the `curl` that trades it); `roll token client create|list|revoke` (an openssl PEM public key, Ed25519 or P-256, or a JWK; without one, a secret shown once); machine clients (OAuth client credentials: a secret or a key's JWT traded for an hour's token bounded by the client's rules; replays refused; a leaked `rlc_` secret revokes its client); MCP Apps (`ui://roll/table`: tools that answer rows show them as a table in hosts that render apps); the other products' operator checks reviewed: apps' references were the only one a grant got past (fixed in #80); tasks, storage's console, streams and secrets check the grant first or only skip their own keys; tools that wait (`tasks_wait_run`, `access_wait_approval`) wait on as tasks until it's over; MCP tasks checked live with apify's `mcpc` 0.8 (task, approval, result); MCP tasks (2026-07-28's extension: a long call, or one waiting for approval, is a task its owner polls from any node; sealed results, an hour's TTL, 16 per token); `roll_find_tools` ranks by how much of a name the query covers, and a test holds 30 everyday queries to their tool (titles now say what a tool acts on: "Roll back a deployment", "Upload an object to a bucket"); search mode for clients that can't take the list (the connect panel and `roll mcp config` turn it on for VS Code and Cursor; `claude mcp add` lines quote a URL with a mode); credentials read tokens could see are hidden (a project's preview variables, tasks' forwarded headers, agents' share links); `tests/admin_only.rs` (every "needs the admin token" refusal is admin in the catalogue); apps' notifications and log drains and secrets' key workflows as tools; write and deploy tokens no longer pass roll code's admin-only checks (connecting a GitHub repository, landing with `bypass`), shorten a stream's retention (now `delete`), mint agents machine tokens (`admin`) or share threads (`reveal`); a rule can grant one transit key (`{"id": "prj_x", "index": "payments"}`: the per-key rows name it); loosening a NoSQL database's masking policy or read-only flag is `admin` (it was `write`, so a token that could read and write could drop the masking and read raw values); postgres, Redis, storage, queues, streams and tasks tools for their everyday routes; lockdown (`?lockdown=1`: work items from GitHub issues, reviews and review comments whose author can't push, and changes from forks, are `outside`, and their text is withheld from the model); search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
 revocations were counted as asks: "1 asked" on a token that never made a request; seen in the review
 pack) (#25); ended OAuth connections and their kept clients are forgotten after the audit log's days
 (each `roll login` made one of each, kept forever) (#25); `roll login` checked live against a rolld

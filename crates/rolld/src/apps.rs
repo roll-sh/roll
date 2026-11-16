@@ -239,6 +239,11 @@ impl Sources for CodeSources {
         Ok(f.filter(|f| f.mode.is_file() && f.data.len() <= 64 << 10).map(|f| f.data.to_vec()))
     }
 
+    fn any_path_matches(&self, patterns: &[String], paths: &[String]) -> bool {
+        let patterns: Vec<code_control::review::pattern::Pattern> = patterns.iter().filter_map(|p| code_control::review::pattern::Pattern::new(p)).collect();
+        paths.iter().any(|p| code_control::review::pattern::any_match(&patterns, p))
+    }
+
     async fn touches(&self, repo: &str, from: &str, to: &str, patterns: &[String]) -> anyhow::Result<bool> {
         let (this, repo, from, to) = (self.clone(), repo.to_string(), from.to_string(), to.to_string());
         let patterns: Vec<code_control::review::pattern::Pattern> = patterns.iter().filter_map(|p| code_control::review::pattern::Pattern::new(p)).collect();
@@ -435,7 +440,7 @@ impl Resources for RollResources {
                 })
                 .await
             }
-            LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql => match self.provided(kind, r#ref, None).await? {
+            LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search => match self.provided(kind, r#ref, None).await? {
                 Some(p) => Ok(p.vars),
                 None => anyhow::bail!("links to {} aren't wired on this node yet", kind.as_str()),
             },
@@ -443,11 +448,11 @@ impl Resources for RollResources {
         }
     }
 
-    /// A bucket's or a stream's link gets credentials of its own (a key named for the
-    /// service), made once, revoked when the link goes; only those are kept with the link, and
+    /// A bucket's, a stream's or a search cluster's link gets credentials of its own (a key named
+    /// for the service; a search key has data access only, never the cluster's password), made once, revoked when the link goes; only those are kept with the link, and
     /// what's read (an endpoint, NoSQL's login, a database's URL) is read again at each deploy.
     async fn link(&self, kind: LinkKind, r#ref: &str, service: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
-        if !matches!(kind, LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql) {
+        if !matches!(kind, LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search) {
             return Ok(None);
         }
         let Some(p) = self.provided(kind, r#ref, Some(format!("roll apps {service}"))).await? else { return Ok(None) };

@@ -6,15 +6,21 @@
 //! responses that create it (create, branch) or change it (rotate). Creating a cluster answers
 //! in the shape `search-yaml run --cluster-hook` expects (`url`, `username`, `password`, `id`).
 //!
-//! rolld puts the API behind its operator gate (roll-auth), like every product's. On a fleet,
-//! calls about one cluster run on its owner (`crate::cluster::on_owner`), and so does creating a
-//! branch (on its parent's owner).
+//! rolld's gate (roll-auth) lets the operator and signed-in people in (`Access::User`), and
+//! search scopes them ([`Caller`], docs/accounts.md "Phase 2"): the operator and admins see every
+//! cluster; anyone else sees, creates and branches only their own (`SearchCluster::owner`), and
+//! every `/v1/search/clusters/{id}/…` call about another's answers 404, as for a cluster that
+//! doesn't exist. A person's own token reaches search as them (roll-access hands it on with
+//! `SignedIn`, without `Operator`). On a fleet, calls about one cluster run on its owner
+//! (`crate::cluster::on_owner`), and so does creating a branch (on its parent's owner); the
+//! check is made from the catalog before the call is forwarded and again on the owner, behind
+//! its own gate.
 
 use crate::control::{ClusterOptions, ConsoleRequest, ConsoleResponse, Control, ControlError, Usage};
 use crate::store::SearchCluster;
 use axum::body::Body;
-use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::extract::{FromRequestParts, Path, Query, Request, State};
+use axum::http::{Extensions, HeaderMap, Method, StatusCode, request::Parts};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -66,14 +72,81 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/docs/{doc}", get(doc_get).put(doc_put).delete(doc_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(index_bulk))
         .route("/v1/search/clusters/{id}/indices/{index}/delete_by_query", post(index_delete_by_query))
-        // On a fleet, calls about one cluster run on its owner.
-        .layer(axum::middleware::from_fn({
-            let c = control.clone();
-            move |req: Request, next: Next| crate::cluster::on_owner(c.clone(), req, next)
-        }))
+        // Calls about one cluster: the caller's own, then on its owner.
+        .layer(axum::middleware::from_fn_with_state(control.clone(), per_cluster))
         // The dashboard calls it from the browser, like the other control planes.
         .layer(CorsLayer::permissive())
         .with_state(control)
+}
+
+/// Who is asking. The gate lets the operator, admins and signed-in people through; a request with
+/// neither `Operator` nor `SignedIn` comes from an open daemon (no `ROLL_ADMIN_TOKEN`, loopback
+/// only) or from rolld's own in-process calls, and sees everything, as before owners.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Caller {
+    /// The operator, an admin, or an open daemon: every cluster; what it creates has no owner.
+    All,
+    /// A signed-in person who isn't an admin (`usr_…`), or their own token: their clusters only.
+    Person(String),
+}
+
+impl Caller {
+    pub fn of(ext: &Extensions) -> Caller {
+        if ext.get::<roll_auth::Operator>().is_some() {
+            return Caller::All;
+        }
+        match ext.get::<roll_auth::SignedIn>() {
+            Some(s) if !s.admin => Caller::Person(s.user.clone()),
+            _ => Caller::All,
+        }
+    }
+
+    /// Whether `c` is one the caller may see (anyone else's answers 404).
+    pub fn sees(&self, c: &SearchCluster) -> bool {
+        match self {
+            Caller::All => true,
+            Caller::Person(u) => c.owner.as_deref() == Some(u.as_str()),
+        }
+    }
+
+    /// The owner a cluster the caller creates gets.
+    fn owner(&self) -> Option<&str> {
+        match self {
+            Caller::All => None,
+            Caller::Person(u) => Some(u),
+        }
+    }
+
+    /// `id_or_name`, if the caller may see it: another's is "no such cluster".
+    async fn get(&self, c: &Control, id_or_name: &str) -> Result<SearchCluster, ControlError> {
+        let d = c.get(id_or_name).await?;
+        if self.sees(&d) { Ok(d) } else { Err(no_such(id_or_name)) }
+    }
+}
+
+fn no_such(id_or_name: &str) -> ControlError {
+    ControlError::NotFound(format!("no search cluster {id_or_name}"))
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for Caller {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        Ok(Caller::of(&parts.extensions))
+    }
+}
+
+/// Every `/v1/search/clusters/{id}/…` call: the cluster is resolved from the catalog and must be
+/// the caller's (else 404), then the call runs on the cluster's owner. Each node a call reaches
+/// checks it, so the check holds wherever it lands.
+async fn per_cluster(State(c): State<AppState>, req: Request, next: Next) -> Response {
+    let id = req.uri().path().strip_prefix("/v1/search/clusters/").and_then(|r| r.split('/').next()).filter(|s| !s.is_empty());
+    let Some(id) = id.and_then(|id| urlencoding::decode(id).ok().map(|s| s.into_owned())) else { return next.run(req).await };
+    let d = match Caller::of(req.extensions()).get(&c, &id).await {
+        Ok(d) => d,
+        Err(e) => return e.into_response(),
+    };
+    crate::cluster::on_owner(&c, &d.name, req, next).await
 }
 
 /// Forwards an API call to the owner of cluster `name` when that is another node of the fleet
@@ -92,9 +165,10 @@ async fn forward(c: &Control, name: &str, method: Method, path: &str, headers: &
     Some(cluster.forward(&node, req, 0).await)
 }
 
-async fn info(State(c): State<AppState>) -> Json<Value> {
-    let stats = c.data.stats();
-    Json(json!({
+/// The node's versions, endpoint, defaults and pricing, and for the operator where its data is
+/// and its node-wide figures (clusters loaded, the cache), which a person doesn't get.
+async fn info(State(c): State<AppState>, caller: Caller) -> Json<Value> {
+    let mut v = json!({
         "version": search_es::version::ES_VERSION,
         "opensearch_version": search_es::version::OPENSEARCH_VERSION,
         "lucene_version": search_es::version::LUCENE_VERSION,
@@ -102,13 +176,17 @@ async fn info(State(c): State<AppState>) -> Json<Value> {
         "http": format!("{}:{}", c.cfg.public_host, c.cfg.http_port),
         "tls": c.cfg.tls,
         "domain": c.cfg.domain,
-        "storage": c.objects().description,
         "history_retention_s": c.cfg.history_retention.as_secs(),
         "defaults": c.cfg.defaults,
         "pricing": c.cfg.pricing,
-        "loaded": c.node.loaded().len(),
-        "cache": { "used_bytes": stats.cache.used, "budget_bytes": stats.cache.budget },
-    }))
+    });
+    if caller == Caller::All {
+        let stats = c.data.stats();
+        v["storage"] = json!(c.objects().description);
+        v["loaded"] = json!(c.node.loaded().len());
+        v["cache"] = json!({ "used_bytes": stats.cache.used, "budget_bytes": stats.cache.budget });
+    }
+    Json(v)
 }
 
 #[derive(Serialize)]
@@ -174,8 +252,11 @@ async fn views(c: &Control, list: Vec<SearchCluster>) -> Result<Vec<ClusterView>
     Ok(out)
 }
 
-async fn list(State(c): State<AppState>) -> ApiResult<Vec<ClusterView>> {
-    let list = c.list().await?;
+async fn list(State(c): State<AppState>, caller: Caller) -> ApiResult<Vec<ClusterView>> {
+    let list = match &caller {
+        Caller::All => c.list().await?,
+        Caller::Person(u) => c.store.list_owned(u).await?,
+    };
     Ok(Json(views(&c, list).await?))
 }
 
@@ -190,19 +271,20 @@ struct CreateReq {
     opts: ClusterOptions,
 }
 
-async fn create(State(c): State<AppState>, method: Method, headers: HeaderMap, body: bytes::Bytes) -> Result<Response, ControlError> {
+async fn create(State(c): State<AppState>, caller: Caller, method: Method, headers: HeaderMap, body: bytes::Bytes) -> Result<Response, ControlError> {
     let r: CreateReq = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
     let d = match &r.parent {
         Some(p) => {
-            // A branch is cut on the node holding the parent, which commits it first.
-            let parent = c.get(p).await?;
+            // A branch is cut on the node holding the parent, which commits it first. It is the
+            // parent owner's.
+            let parent = caller.get(&c, p).await?;
             if let Some(resp) = forward(&c, &parent.name, method, "/v1/search/clusters", &headers, body.clone()).await {
                 return Ok(resp);
             }
             c.branch(p, &r.name, r.at, r.opts).await?
         }
         None if r.at.is_some() => return Err(ControlError::Invalid("at needs a parent".into())),
-        None => c.create(&r.name, r.opts).await?,
+        None => c.create(&r.name, r.opts, caller.owner()).await?,
     };
     Ok(Json(view(&c, d, true).await?).into_response())
 }
@@ -242,9 +324,9 @@ async fn branch(State(c): State<AppState>, Path(id): Path<String>, method: Metho
     Ok(Json(view(&c, d, true).await?).into_response())
 }
 
-async fn branches(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Vec<ClusterView>> {
+async fn branches(State(c): State<AppState>, caller: Caller, Path(id): Path<String>) -> ApiResult<Vec<ClusterView>> {
     let p = c.get(&id).await?;
-    let list = c.store.children(&p.id).await?;
+    let list = c.store.children(&p.id).await?.into_iter().filter(|b| caller.sees(b)).collect();
     Ok(Json(views(&c, list).await?))
 }
 
