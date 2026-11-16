@@ -202,6 +202,25 @@ steps:
   candidates as `roll secrets scan` cuts them and checked with `POST …/leaks` (fingerprints; only
   values the token may reveal), and each stored value found fails the check with an annotation on
   its file and line naming the key and environment, never the value.
+## Ansible
+`sdk/ansible` is the `roll.secrets` collection, as Vault's `community.hashi_vault` and 1Password's
+`onepassword.connect` are, built on the Python client (`sdk/python/roll_secrets`) with the same
+settings (`ROLL_API_URL`, `ROLL_TOKEN` or `ROLL_IDENTITY` with an OIDC token, `ROLL_PROJECT`):
+```yaml
+- ansible.builtin.template: { src: api.env.j2, dest: /etc/api.env, mode: "0600" }
+  vars:
+    db_url: "{{ lookup('roll.secrets.secret', 'DB_URL', environment='production', path='/api', project='shop') }}"
+  no_log: true
+- roll.secrets.secret: { environment: staging, key: LOG_LEVEL, value: info }   # or state: absent
+  delegate_to: localhost
+```
+- The lookup returns values, or a folder with `as_dict=true`, marked unsafe so Ansible never
+  templates them. It reads with `dynamic=false`: a playbook renews no lease, so dynamic keys are
+  left out and none is issued unless `dynamic=true` asks. Reads go through the client's cache
+  (`cache_ttl`, 30 s), which spans one task's worker process.
+- The module sets or deletes one key and is idempotent (the same value writes nothing). Check mode
+  compares the stored value on the host running the module (`reveal`), and the result never holds
+  the value (`value` is `no_log`). Errors name the key and roll's message, never a value.
 ## Kubernetes
 Three ways, as the best products offer:
 - **Mounted (`sdk/csi-provider`)**: a provider for the [Secrets Store CSI
@@ -2832,8 +2851,9 @@ rotating a database's admin password and editing registrations in place (#75), s
    lives), and Terraform updating registrations in place (#72, after #75).
 8. **More dynamic credentials**: Kubernetes service account tokens, Snowflake, LDAP and Active
    Directory passwords (Vault, Infisical).
-9. **Java and .NET clients, a Pulumi provider, a Lambda extension and an Ansible lookup** (Spring,
-   `IConfiguration`; AWS's Parameters and Secrets extension; Vault's and 1Password's Ansible).
+9. **Java and .NET clients, a Pulumi provider and a Lambda extension** (Spring, `IConfiguration`;
+   AWS's Parameters and Secrets extension). The Ansible collection is built (`sdk/ansible`,
+   `roll.secrets`: a lookup and a module, as Vault's and 1Password's; `feature/roll-secrets-ansible`).
 10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
    CAs**.
 11. *The user's call:* land the stack (#62, then #63–#73; roll search before #62).
