@@ -298,6 +298,7 @@ mod tests {
                 own_bytes: 1000,
                 loaded_on: None,
                 wake_at: None,
+                owner: None,
             })
             .await
             .unwrap();
