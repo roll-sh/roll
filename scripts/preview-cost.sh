@@ -534,7 +534,12 @@ case "$HEALTH" in *boom*) ;; *) echo "the page's console.error should be caught:
 LINKS=$(api GET "/v1/previews/$PV" | jq_ "' '.join('%s %s' % (b['path'], b['status']) for b in (d.get('page_links') or {}).get('broken', []))")
 [ "$LINKS" = "/gone 404" ] || { echo "the page's broken link should be found: $LINKS"; exit 1; }
 # Against main's (which links nowhere): it's the change's.
-# (The comparison with main comes just after the page's own checks: waited for.)
+# (The comparison with main comes just after the page's own checks, and needs main's own
+# screenshot, which a loaded host takes minutes over: both waited for.)
+for _ in $(seq 1 300); do
+  [ "$(api GET "/v1/previews/$MAINPV" | jq_ "d.get('screenshot_at') is not None")" = True ] && break
+  sleep 1
+done
 for _ in $(seq 1 240); do
   LINKS_NEW=$(api GET "/v1/previews/$PV" | jq_ "(d.get('base_change') or {}).get('links_added')")
   [ "$LINKS_NEW" = 1 ] && break
@@ -544,6 +549,8 @@ done
   echo "the broken link should be new against main: $LINKS_NEW"
   echo "base_change: $(api GET "/v1/previews/$PV" | jq_ "{k: v for k, v in (d.get('base_change') or {}).items() if k in ('branch', 'head', 'errors_added', 'links_added', 'a11y_added', 'seo_added')}")"
   echo "main's page_links: $(api GET "/v1/previews?project=$PRJ" | jq_ "[(p.get('branch'), p.get('page_links'), p.get('screenshot_at')) for p in d if p.get('change') is None]")"
+  echo "main's preview: $(api GET "/v1/previews/$MAINPV" | jq_ "{k: d.get(k) for k in ('state', 'error', 'head')}")"
+  echo "main's activity: $(api GET "/v1/previews/$MAINPV/activity" | jq_ "[a['message'][:120] for a in d[:12]]")"
   exit 1
 }
 case "$HEALTH" in *"; 0 failed") ;; *) echo "the link check's own requests aren't the page's: $HEALTH"; exit 1;; esac
