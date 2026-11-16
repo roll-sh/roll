@@ -648,11 +648,8 @@ impl Engine {
                     }
                 }
                 let (store, id, head) = (self.store.clone(), r.id.clone(), r.build().to_string());
-                let kept = tokio::task::spawn_blocking(move || {
-                    store.set_screenshot(&id, &head, &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok()
-                        && store.set_page_report(&id, shot.health.as_ref(), shot.a11y.as_ref(), shot.text.as_deref(), shot.links.as_ref(), shot.api.as_deref()).is_ok()
-                        && store.set_page_shots(&id, &head, &pages, &wanted).is_ok()
-                })
+                // One transaction: a comparison never sees the picture without its checks and pages.
+                let kept = tokio::task::spawn_blocking(move || store.keep_shot(&id, &head, &shot, &pages, &wanted).is_ok())
                 .await
                 .unwrap_or(false);
                 if kept && r.change_id.is_some() {
@@ -728,12 +725,25 @@ impl Engine {
         let services = self.store.services(&r.id).unwrap_or_default();
         let mut out = Vec::new();
         for (svc, paths) in by_service {
-            if !services.iter().any(|s| s.name == svc) {
+            let Some(service) = services.iter().find(|s| s.name == svc) else { continue };
+            // Only the pages a push can change are taken again (Chromatic's TurboSnap): a service
+            // that runs what it ran last time (its revision, what it's deployed with, the same
+            // data) keeps its pages, checks and all, without a browser run.
+            let key = service.deployed.as_ref().map(|rev| format!("{rev}:{}:{}", self.store.service_config(&r.id, svc).ok().flatten().unwrap_or_default(), r.last_reset_at.unwrap_or(0)));
+            if let Some(key) = &key
+                && self.store.service_shot_key(&r.id, svc).ok().flatten().as_deref() == Some(key.as_str())
+                && let Some(kept) = paths.iter().map(|p| self.store.kept_page(&r.id, &format!("{svc}:{p}")).ok().flatten()).collect::<Option<Vec<_>>>()
+            {
+                let _ = self.store.log(&r.id, &format!("kept {svc}'s pages: it runs what it ran at the push before"));
+                out.extend(kept);
                 continue;
             }
             let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), ..Default::default() };
             match self.apps.screenshot(&r.id, svc, &opts).await {
                 Ok(Some(shot)) => {
+                    if let Some(key) = &key {
+                        let _ = self.store.set_service_shot_key(&r.id, svc, key);
+                    }
                     if paths.contains(&"/") {
                         let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
                         let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None };
