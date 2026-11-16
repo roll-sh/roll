@@ -935,6 +935,58 @@ between the two runs of a pair, with instructions within 2%.
 `*`: runs with 2.4-3.1 foreign cores on the server CPUs (not comparable). At 8 clients roll's
 plain dist build is 1.06x pgrust's throughput (0.82x in agent 230's round 5) at the same CPU a
 read; at 32 clients 0.63x (roll's latency tail: p99 5.2 ms against 1.0, the lane busy).
+## Size models, round 9 (2026-11-16, agent 241)
+
+HANDOFF "Size models, round 9" has what changed. **base** is `af42e8495` (before agent 237's
+round 8), **n002** round 8 with this round's estimate persistence and store fix (`ac5b48f37`
+before the rebase), **n001** n002 with the UPDATE's single self-modified check, **n003** n001
+with the bulk load's page owner (the round as pushed, before its rebase onto `c4c0db709`).
+Plain dist builds with line tables, one target dir each. Harness: agent 237's `bulk2.sh` on lane
+C (servers 14,15,32,33, clients 16,17,34,35, under the lane lock; `~/.cache/a241/bench`,
+`rounds.sh` alternates the arms' order every round). Counts are the server cgroup's user
+instructions (`perf stat -G`, the perf container now on the host's cgroup namespace: in a
+private one the cgroup counter never started). Other sessions' unpinned builds ran on lane C's
+CPUs all day: 1-4 foreign cores in nearly every run, so almost no pair meets the 1.0-core rule;
+each step's count repeats within 0.3% from run to run whatever the load (copy_in 10.414 G in
+all five n001 runs, 10.382 in all five n003 runs).
+
+| step (G user instructions) | base | n002 | n001 | n003 | n003 / base, per pair % |
+|---|---|---|---|---|---|
+| copy_in | 10.227 | 10.414 | 10.414 | 10.382 | +1.5 x5 |
+| create_index | 6.172 | 6.178 | 6.183 | 6.183 | +0.1 to +0.3 |
+| create_unique_index | 4.370 | 4.445 | 4.447 | 4.459 | +1.3 to +2.1 |
+| copy_out | 3.113 | 3.113 | 3.113 | 3.113 | +0.0 |
+| insert_select | 7.032 | 7.109 | 7.114 | 7.108 | +0.5 to +1.2 |
+| update_half | 13.430 | 14.757 | 12.746 | 12.754 | -4.8 to -5.1 |
+| delete_quarter | 6.259 | 5.990 | 6.035 | 6.217 | -8.2 to +1.7 |
+| vacuum | 2.051 | 2.052 | 2.052 | 2.052 | +0.0 |
+| count_after | 0.495 | 0.495 | 0.495 | 0.495 | +0.0 |
+| count_star | 2.015 | 0.251 | 0.251 | 0.251 | -87.5 (237's plan) |
+| sum_a | 1.593 | 0.446 | 0.445 | 0.445 | -72.1 (237's plan) |
+| avg_c, count_b, group_b, analyze | | | | | +-0.1 |
+| minmax_a | 0.010 | 0.075 | 0.075 | 0.113 | cold bulk_a blocks |
+
+(base / n002 / n001 from one 3-arm gate, base / n003 from a second; base's counts agree within
+0.1% between them.) n001 against n002: update_half -13.5 to -13.8% in every pair, the other
+steps within noise. `minmax_a` reads bulk_a's blocks cold after round 8's count(*) / sum(a)
+stopped reading that index (base read it for them): run first after ANALYZE, base and n001 both
+count 0.075 G; run again, 0.007 against 0.018 G (one run each, the same plan: InitPlans of
+Limit over Index Only Scan, as PostgreSQL's). The estimate persistence costs the bulk UPDATE
+about 0.08 G (n002 14.757 against round 8's 14.674 in one run: the change records' 15,000-place
+log and dirty leaves encoded at commit).
+
+Where the UPDATE's cost was (instruction-sampled profile of round 8's head): `Txn::buf_get`
+9.9% plus memcmp in it, from `written_by`, three lookups of the transaction's write buffer per
+row (two `self_modified`, one in `lock_row_with`); round 8's own share (the btree summaries'
+inserts, their keys' encoding, the places) about 5%. The remaining copy_in / insert_select /
+create_unique_index cost is round 8's estimate upkeep past the model (rows' places, the leaf
+summary build); the profiles (`perf record`, `-p` or `-a -G`) lose 60-75% of the samples
+unevenly between arms on these 1-2 s steps and couldn't place it.
+
+`pgvector_hnsw::truncate_reindex_and_reopen`, release, 1 run at a time on CPUs 0-5,18-23 under
+the builds' load: `bf9366246` 17 / 300 failed, `af42e8495` 18 / 300, this round 0 / 500 and 0 /
+300 with its own dist build compiling on the same CPUs.
+
 ## Size models, round 8 (2026-11-15, agent 237)
 
 HANDOFF "Size models, round 8: btrees and heap order past the model" has what changed. **base**

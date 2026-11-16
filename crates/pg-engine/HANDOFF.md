@@ -9478,6 +9478,108 @@ pgbench's CPU are at it.
   `KeyMap::key` / `Heap::key_at` to stop lending `&[u8]`. Page counts at 10M rows wait for the
   lift; lineitem's index-only `count(*)` too.
 
+## Size models, round 9: estimates past the model kept across restarts and crashes (agent 241)
+
+Follow-up of agent 237's round 8. BENCH.md "Size models, round 9" has the numbers.
+
+**Verification train on 237's head.** `tools/verification-train.sh` on `bf9366246` (237's pushed head,
+`TRAIN_NO_CHECKOUT=1`; the first run died with the disk full at 98% and was run again): release
+crate tests pass (`pgvector_hnsw` too, this time); Clippy 20 warnings; crash_random seeds 1-30 x
+4; the power stage (power_cut 4 passed, seeds 1-30 x 4 with `CRASH_POWER=1`, with and without
+`CRASH_ASYNC=1`); debug crate tests pass; regress 51,148 / 51,150, 0 newly differing units;
+isolation 1647 / 1648 permutations; pg_dump_tap 14,609 passed, 0 failed. Nothing failed
+because of 237's change.
+
+**The `pgvector_hnsw` checksum error at reopen** (`truncate_reindex_and_reopen`). Reproduced:
+release, pinned to the build CPUs (0-5,18-23) under the builds' load, 17 of 300 runs failed on
+`bf9366246` and 18 of 300 on `af42e8495` (before 237): every failure at the second
+`Store::open` of the directory or right after it: `checksum mismatch in .../000000000000000d.sst
+block 0` (3), `I/O error: No such file or directory` (29), `hnsw: missing element record` (4).
+Cause: two live stores of one process on one directory. The test drops its session without
+`Store::close`; the first store stays open, because `ext/vector/hnsw`'s process-wide graph cache
+(`cache()`, keyed by database instance) holds the index's `AmStore` and through it the `Store`, and
+its background flush / compaction (`schedule_background`) goes on writing while the second store
+opens: the new store reads the manifest the old one then replaces, deletes the SSTs the old one has
+just written (not in the manifest it read), and both hand out the same file ids (two writers of
+one `<id>.sst`: the checksum error). Not a missing fsync, rename ordering or block cache key clash
+(each store has its own cache), and not in the file format: it is the store's lifetime in
+`Store::open`, which agent 239's format v2 doesn't change. Fix (`storage/dirlock.rs`, three lines
+in `Store::open`): a store opened on a directory another open store of the process has closes that
+one first (`close` waits for its running background work and stops the rest, as the engine's idle
+close does before a reopen). A wait for the old store to go instead never ended (60 s: the cache
+keeps it). After the fix: 0 / 500 runs failed, and 0 / 300 with
+this agent's dist build compiling on the same CPUs.
+Left (not this agent's area): the hnsw graph cache (and ivfflat's, `ivfflat/page.rs`) keep a
+database's store and graphs after the engine closes the database idle: memory held per close,
+evicted only when an index of it is loaded or built again.
+
+**Estimates past the model kept across restarts and crashes** (`exec/sizing/estkeep.rs`).
+237's places of versions, fill and fresh pages and btree leaf summaries lived in memory: after a
+restart a big table's sizes were its last measure, its rows came as stored (order, float sums) and
+its btrees were their build's size. Now:
+- A table's estimate is kept as records in the store (engine records, no store format change):
+  in full under the key its heap pages were kept under before (`[0;7] 0x22 ++ oid`; a build before
+  this reads it as no record), then one record of changes per commit (`++ seq`): the places set
+  since (`EstHeap::log`), the runs begun, the btrees' leaves changed (`BtEst::dirty`), the scalars.
+- A commit takes every estimate changed since the last one (`estkeep::take`, from the commit's
+  `check` under the store's commit lock): the records commit with it, in commit order, durable with
+  it; a crash leaves the estimate as of the last commit (what an uncommitted transaction placed goes
+  with the next commit, as PostgreSQL's file keeps an aborted transaction's tuples). Commits that
+  touch no estimate pay one atomic load.
+- The change records are folded into a new full record when they outgrow it (or after 256), and at
+  the database's close (`persist_estimates`).
+- `ensure` restores a table's estimate from its records before the relstats or legacy paths, when
+  they are of its relfilenode and it is still too big under today's limit (kept per estimate:
+  `EstHeap::limit`, the limit it went past, not the closing thread's). Temporary and unlogged
+  tables keep none; a dropped, truncated or rewritten table's records go with the next commit.
+- `key_hash` (the places' key) was `fasthash`'s, seeded per process: no place matched after a
+  restart. It has a fixed hash of its own now.
+Test: `big_tables::sizes_and_heap_order_past_the_model` runs its PostgreSQL 18.6 checks (sizes,
+pg_class, serial sum, first rows, row order md5, plan) before a restart, after a clean restart and
+after `kill -9` (`past_model_crash_child`), and an UPDATE after each leaves the same sizes, order
+and sum.
+
+**Write cost.** BENCH.md "Size models, round 9" has the table (lane C, 5 alternating
+pairs, plain dist; counts repeat within 0.3%, but lane C had 1-4 foreign cores from other
+sessions' unpinned builds in nearly every run). The bulk UPDATE of half the rows: base
+`af42e8495` 13.43 G, round 8 with this round's persistence 14.76 G, now 12.75 G (-5.0% under
+base, -13.5% under round 8). The instruction-sampled profile of round 8's UPDATE put 9.9% (plus
+the memcmp under it) in `Txn::buf_get` from `written_by`: three lookups of the transaction's
+write buffer per row. `UpdateNode` now looks once: the lock right after `self_modified` doesn't
+look again (`lock_row_with(.., later = false)`: nothing ran between), and the second
+`self_modified` (after the new values and BEFORE triggers) is skipped when no BEFORE row
+trigger runs and no assignment is volatile (`UpdateNode::quiet`, the reasoning
+`DeleteNode::defers_entries` uses). A bulk load's rows past the model no longer look up the
+load's state on the page it took (`EstHeap::fill_owner`): COPY -0.3%. Still over base: COPY in
++1.5%, CREATE UNIQUE INDEX +1.3 to +2.1%, INSERT ... SELECT +0.5 to +1.2% (round 8's estimate
+upkeep: the places of rows past the model, the leaf summary build); DELETE -0.7 to -8.2%.
+Scans, VACUUM, ANALYZE unchanged (count(*), sum(a): round 8's plan). Measured before the rebase
+onto `c4c0db709` (format v2, build flags): the gates compare builds of one base. Not
+re-measured: lane A and TPC-H q01 / q06 (no read path changed: a read-only commit returns before
+`check`, `dirlock` runs at open; heap-order scans of tables past the model use the new
+`key_hash`, measured in the bulk script's scans).
+
+Verification: `tools/quick-check.sh` (agent 242's gate, `--profile verify`) on the round rebased
+onto `262443ded`, with `QC_TESTS=pgvector_hnsw`: Clippy 16 warnings, none new in a changed file
+(one was, an `if` with identical blocks in `estkeep::decode_heap`: fixed); 433 tests passed in 28
+binaries (big_tables, pgvector_hnsw, the storage and crash binaries the diff maps to, golden,
+wire, the lib's unit tests); crash_random seeds 1-3 x 2 and power_cut_at_every_point; regress
+51,148 / 51,150 with 0 newly differing units; isolation 1647 / 1648; pg_dump_tap 14,609 passed,
+0 failed. Handed in as `cand/a241` for the batch train (no full train run by this agent; a first
+one died when the cleanup timer deleted its build directory mid-build, as the journal shows at
+21:18 on 2026-11-16, though the train's processes were in the worktree).
+
+**Left.** 1. COPY / CREATE UNIQUE INDEX / INSERT ... SELECT past the model, +1.1 to +1.9% over
+   `af42e8495`: the profiles lost samples unevenly and didn't place it; per row it is the estimate's
+   `add_in` / `placed` / dirty mark (COPY, INSERT ... SELECT), per tuple `EstBuilder::push` and
+   `posting_split` (the index build's summary).
+2. `minmax_a` warm (`minmax2`): 0.007 G against 0.018 in one run each, same plan: not looked at.
+3. 237's list items 1-3, 5 and 7 stand (a second UPDATE's placement in key order, HOT on pages
+   with room, inserts into space VACUUM freed, TRUNCATE + COPY into an index of repeating values,
+   `ctid` past the model): not worked on this round. Item 4 (restart) is done; item 6 (write cost)
+   in part, as above.
+4. The hnsw (and ivfflat) graph caches keep a closed database's store and graphs (above).
+
 ## Size models, round 8: btrees and heap order past the model (agent 237)
 
 BENCH.md "Size models, round 8" has the numbers. Agent 234 found two differences on the
