@@ -369,6 +369,14 @@ none of the service's environments follows, after checking the branch really is 
   `a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head`; live in
   `scripts/preview-apps.sh` with GitHub's `pull_request` events through roll apps' hook (#115:
   `GitPushes::takes_pulls`).
+- They say themselves where the code lives (Vercel's status and comment): a `roll/preview`
+  commit status on the pushed commit (pending, ready, failed; a fork's that waits is pending,
+  "waiting for a writer", unlinked), and for a pull request's preview the same comment a roll code
+  change's gets, edited in place, saying "deleted" when it goes. Each is posted only when it
+  changed, and what was posted (the comment's id too) is kept, so a restart posts nothing new.
+  Through the `GitReport` port: rolld posts with roll apps' GitHub App connection (a short-lived
+  token for that one repository; never the service's git login); a service that isn't connected
+  gets nothing. `a_git_url_preview_reports_its_status_and_pull_request_comment`.
 - roll code's discovery leaves them alone (they follow pushes, not roll code's branches), and
   keeps them while the service is on the canvas.
 
@@ -1614,14 +1622,12 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A Git URL service's preview reported to its repository** (Vercel's deployment status and
-   comment on the pull request): a roll code repo's previews reach GitHub through roll code; a
-   Git URL service's reach only roll. Agreed with the apps thread: a Git URL service on github.com
-   connects through roll's GitHub App (`Service.github: { installation, repo }`, operator-only, an
-   installation already connected to the same owner). Previews' `GitReport` then posts
-   `roll/preview` with `Code::github_commit_status` and the pull request's comment with
-   `Code::github_comment` (an upsert by id), the installation read from the service, never the
-   event; the service's `git_login` is never used to write. Waits on apps' #120.
+1. **A Git URL service's preview reported to its repository, rolld's side** (after apps' #120):
+   previews' side is built (`GitReport`, the statuses and comment; branch
+   `feature/roll-previews-git-report`). rolld implements `GitReport` over #120's
+   `Code::github_commit_status` and `Code::github_comment`, reading the service's
+   `github: {installation, repo}` from roll apps (never from an event), and the live check posts
+   to a fake GitHub.
 2. **Egress rules for previews hosted on roll apps** (agreed with the apps thread, #2 in its
    `## Next`): `"roll"` and `egress_hosts` cover only services roll's runtime runs (#135 says so
    in the Rules dialog). roll apps runs a `pv-` environment's instance on an `--internal` network

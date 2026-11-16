@@ -1135,6 +1135,52 @@ async fn a_secrets_link_to_a_branched_parent_gives_the_branch() {
     assert!(!own.iter().any(|(k, _)| k == "OTHER"), "a link to a parent it didn't branch is left to roll secrets");
 }
 
+/// A Git URL service's preview says itself on its repository (Vercel's status and comment):
+/// `roll/preview` on its head, posted only when it changes; a pull request's comment made once,
+/// then edited in place; a fork waiting for approval is pending with no link to what hasn't run;
+/// a service that isn't connected gets nothing.
+#[tokio::test]
+async fn a_git_url_preview_reports_its_status_and_pull_request_comment() {
+    let e = env(json!({ "enabled": true }));
+    e.ws.place(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Service, "svc_shop", 0.0, 0.0).unwrap();
+    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "shop".into(), repo: Some("git:svc_shop".into()), root: String::new(), memory_mb: 256 }]);
+    let gr = Arc::new(FakeGitReport::default());
+    let _ = e.engine.git_report.set(gr.clone());
+    let push = |branch: &str, sha: &str, number: u64, fork: bool| roll_previews::ports::GitPush {
+        service: "svc_shop".into(),
+        url: "https://github.com/acme/shop.git".into(),
+        branch: branch.into(),
+        sha: Some(sha.into()),
+        message: String::new(),
+        pull: Some(roll_previews::ports::GitPull { number, title: "Cart".into(), url: format!("https://github.com/acme/shop/pull/{number}"), fork }),
+    };
+    e.engine.git_push(&push("feat/cart", "a1", 3, false)).await.unwrap();
+    for _ in 0..3 {
+        e.engine.pass().await.unwrap();
+    }
+    let last = gr.statuses.lock().last().cloned().unwrap();
+    assert_eq!((last.0.as_str(), last.1.as_str(), last.2.as_str()), ("svc_shop", "a1", "success"), "ready on its head");
+    assert!(last.4.is_some(), "linked to the preview");
+    let (n, c) = (gr.statuses.lock().len(), gr.comments.lock().len());
+    e.engine.pass().await.unwrap();
+    assert_eq!((gr.statuses.lock().len(), gr.comments.lock().len()), (n, c), "nothing new: nothing posted");
+    let comments = gr.comments.lock().clone();
+    assert_eq!(comments[0].1, None, "the first comment is made");
+    assert!(comments.iter().skip(1).all(|x| x.1 == Some(77)) && comments.iter().all(|x| x.0 == 3), "then edited in place");
+    // A fork's: pending, linked to roll (not to what hasn't run).
+    e.engine.git_push(&push("pull/7", "f1", 7, true)).await.unwrap();
+    e.engine.pass().await.unwrap();
+    let fork = gr.statuses.lock().iter().rev().find(|s| s.1 == "f1").cloned().unwrap();
+    assert_eq!(fork.2, "pending");
+    assert!(fork.3.contains("approve") && !fork.4.as_deref().unwrap_or("").contains("shop."), "waits for a writer, no service link: {fork:?}");
+    // Not connected: nothing.
+    gr.connected.store(false, std::sync::atomic::Ordering::SeqCst);
+    let n = gr.statuses.lock().len();
+    e.engine.git_push(&push("feat/cart", "a2", 3, false)).await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(gr.statuses.lock().len(), n);
+}
+
 #[tokio::test]
 async fn a_pages_notes_by_its_environment_name() {
     let e = env(json!({ "enabled": true }));

@@ -141,6 +141,8 @@ pub struct Engine {
     kick: Notify,
     /// In a cluster: requests that act on running services go to the reconciler's node.
     pub cluster: std::sync::OnceLock<Arc<roll_cluster::Cluster>>,
+    /// Where a Git URL service's previews are posted (rolld: roll apps' GitHub App connection).
+    pub git_report: std::sync::OnceLock<Arc<dyn crate::ports::GitReport>>,
     usage_read: Mutex<HashMap<String, i64>>,
     /// Previews whose screenshot a converge asked for; taken after the pass (`pass`).
     shots_wanted: Mutex<std::collections::HashSet<String>>,
@@ -213,6 +215,7 @@ impl Engine {
             leader,
             kick: Notify::new(),
             cluster: std::sync::OnceLock::new(),
+            git_report: std::sync::OnceLock::new(),
             usage_read: Mutex::new(HashMap::new()),
             secrets_told: Mutex::new(HashMap::new()),
             paths_seen: Mutex::new(HashMap::new()),
