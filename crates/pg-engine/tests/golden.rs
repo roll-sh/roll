@@ -157,14 +157,56 @@ fn golden_inner() {
         }
         return;
     }
-    compare(&files, "actual", run_engine);
+    let actual = outputs(&files, |_, mine| mine.iter().map(|f| run_engine(f)).collect());
+    compare(&files, "actual", actual);
 }
 
-/// Run every file through `run`, comparing with the recorded output.
-fn compare(files: &[PathBuf], suffix: &str, mut run: impl FnMut(&Path) -> String) {
+/// The threads the files run on: `GOLDEN_THREADS`, else `RUST_TEST_THREADS`, else the CPUs
+/// this process may use; at most 8. Files are independent (a fresh store or database each), so
+/// they split across threads; on each, they run in the sorted order. (On one thread the golden
+/// binary took 4 minutes of the train's release tests and 33 of its debug ones.)
+fn golden_threads() -> usize {
+    std::env::var("GOLDEN_THREADS")
+        .or_else(|_| std::env::var("RUST_TEST_THREADS"))
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+        .clamp(1, 8)
+}
+
+/// Each file's output, in the files' order: thread `k` of `golden_threads()` (a session's
+/// stack) runs files k, k + threads, ... through `run(k, its files)`.
+fn outputs(files: &[PathBuf], run: impl Fn(usize, &[&Path]) -> Vec<String> + Sync) -> Vec<String> {
+    let threads = golden_threads().min(files.len().max(1));
+    let run = &run;
+    let mut out = vec![String::new(); files.len()];
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|k| {
+                let mine: Vec<&Path> = files.iter().skip(k).step_by(threads).map(|p| p.as_path()).collect();
+                std::thread::Builder::new()
+                    .stack_size(64 << 20)
+                    .spawn_scoped(scope, move || {
+                        pg_engine::stack::set_limit(60 << 20);
+                        run(k, &mine)
+                    })
+                    .unwrap()
+            })
+            .collect();
+        for (k, h) in handles.into_iter().enumerate() {
+            for (i, o) in h.join().unwrap().into_iter().enumerate() {
+                out[k + i * threads] = o;
+            }
+        }
+    });
+    out
+}
+
+/// Compare each file's output with the recorded one.
+fn compare(files: &[PathBuf], suffix: &str, actuals: Vec<String>) {
     let mut failures = Vec::new();
     let mut passed = 0;
-    for f in files {
+    for (f, actual) in files.iter().zip(actuals) {
         let expected_path = f.with_extension("out");
         let Ok(expected) = std::fs::read_to_string(&expected_path) else {
             failures.push(format!(
@@ -173,7 +215,6 @@ fn compare(files: &[PathBuf], suffix: &str, mut run: impl FnMut(&Path) -> String
             ));
             continue;
         };
-        let actual = run(f);
         let actual_path = f.with_extension(suffix);
         if actual == expected {
             let _ = std::fs::remove_file(&actual_path);
@@ -210,36 +251,41 @@ fn golden_wire() {
     let mut settings: Vec<usize> = files.iter().map(max_of).collect();
     settings.sort();
     settings.dedup();
+    // (Each thread its own engine, so each file's database is the only one at a time there.)
     for max in settings {
         let mine: Vec<PathBuf> = files.iter().filter(|f| max_of(f) == max).cloned().collect();
-        let opts = pg_engine::engine::EngineOptions {
-            data_dir: dir.path().join(max.to_string()),
-            cache_bytes: 8 << 20,
-            memtable_bytes: 2 << 20,
-            sync: false,
-            idle_close: std::time::Duration::from_millis(200),
-            superuser: "postgres".into(),
-            password: Some("pw".into()),
-            server_files: None,
-            server_programs: false,
-            shared_preload_libraries: Vec::new(),
-            locale: Default::default(),
-            outbound: Vec::new(),
-            max_prepared_transactions: max,
-            auth_files: Default::default(),
-            // (The files run for minutes in one engine: autovacuum's naptime ticks would
-            // analyze some files' tables mid-file, at times that vary run to run.)
-            settings: vec![("autovacuum".into(), "off".into())],
-        };
-        let engine = pg_engine::engine::Engine::open(opts).unwrap();
-        let server = pg_engine::server::ServerOptions {
-            auth: pg_engine::server::AuthMethod::ScramSha256,
-        };
-        let addr = pg_engine::server::spawn(engine.clone(), "127.0.0.1:0", server)
-            .unwrap()
-            .to_string();
-        compare(&mine, "wire.actual", |f| run_wire(&addr, f));
-        engine.shutdown();
+        let actual = outputs(&mine, |k, files| {
+            let opts = pg_engine::engine::EngineOptions {
+                data_dir: dir.path().join(format!("{max}-{k}")),
+                cache_bytes: 8 << 20,
+                memtable_bytes: 2 << 20,
+                sync: false,
+                idle_close: std::time::Duration::from_millis(200),
+                superuser: "postgres".into(),
+                password: Some("pw".into()),
+                server_files: None,
+                server_programs: false,
+                shared_preload_libraries: Vec::new(),
+                locale: Default::default(),
+                outbound: Vec::new(),
+                max_prepared_transactions: max,
+                auth_files: Default::default(),
+                // (The files run for minutes in one engine: autovacuum's naptime ticks would
+                // analyze some files' tables mid-file, at times that vary run to run.)
+                settings: vec![("autovacuum".into(), "off".into())],
+            };
+            let engine = pg_engine::engine::Engine::open(opts).unwrap();
+            let server = pg_engine::server::ServerOptions {
+                auth: pg_engine::server::AuthMethod::ScramSha256,
+            };
+            let addr = pg_engine::server::spawn(engine.clone(), "127.0.0.1:0", server)
+                .unwrap()
+                .to_string();
+            let out = files.iter().map(|f| run_wire(&addr, f)).collect();
+            engine.shutdown();
+            out
+        });
+        compare(&mine, "wire.actual", actual);
     }
 }
 
