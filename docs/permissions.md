@@ -170,7 +170,9 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
       acme/web [--ref refs/heads/main | --environment production]` prints the workflow step that
       trades the job's token and exports a masked `ROLL_TOKEN`; `--gitlab group/project [--ref main
       | --environment production]` prints the `.gitlab-ci.yml` lines (`id_tokens` for roll's
-      audience). The panel's "GitHub Actions" choice does the same for GitHub.
+      audience). The panel's "GitHub Actions" choice does the same for GitHub. Any other CI:
+      `--issuer URL --subject PATTERN [--claim name=value]… [--audience A] [--jwks file]`
+      (Buildkite, CircleCI, Terraform Cloud, a cluster's own with its keys pinned).
 - **The request:** `grant_type=client_credentials`; its `resource`, if any, must be roll's API or
   MCP server. `scope=read-only` narrows that token to its rules' reads (no asks either), checked
   wherever the token is looked up; no scope (or `granted`) is the client's rules, and any other

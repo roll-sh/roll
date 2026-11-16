@@ -163,16 +163,35 @@ pub struct ClientCreate {
     #[arg(long, default_value = "30d")]
     expires: String,
     /// Its public key: a PEM file (Ed25519 or P-256) or a JWK (Ed25519, P-256 or RSA).
-    #[arg(long, conflicts_with_all = ["github", "gitlab"])]
+    #[arg(long, conflicts_with_all = ["github", "gitlab", "issuer"])]
     public_key: Option<std::path::PathBuf>,
     /// Trust this repository's GitHub Actions instead: its jobs sign in with their own OIDC token
     /// (`permissions: id-token: write`), so nothing is stored in GitHub (owner/repo).
-    #[arg(long, conflicts_with = "gitlab")]
+    #[arg(long, conflicts_with_all = ["gitlab", "issuer"])]
     github: Option<String>,
     /// Trust this GitLab.com project's CI jobs instead (`id_tokens`), so nothing is stored in
     /// GitLab (group/project, subgroups too).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "issuer")]
     gitlab: Option<String>,
+    /// Trust any CI system's OIDC tokens instead (Buildkite, CircleCI, Terraform Cloud, a
+    /// cluster's own): its issuer URL, the token's `iss`. With --subject.
+    #[arg(long, requires = "subject")]
+    issuer: Option<String>,
+    /// With --issuer: the token's `sub`, or a pattern of it with `*` (a shared issuer's must name
+    /// one tenant: Buildkite's `organization:acme:…`).
+    #[arg(long, requires = "issuer")]
+    subject: Option<String>,
+    /// With --issuer: another claim the token must carry, `name=value` (`*` patterns too);
+    /// repeatable.
+    #[arg(long = "claim", requires = "issuer")]
+    claims: Vec<String>,
+    /// With --issuer: the audience its tokens are minted for (default roll's API URL).
+    #[arg(long, requires = "issuer")]
+    audience: Option<String>,
+    /// With --issuer: the issuer's keys, pinned, for one roll can't reach (a JWKS file:
+    /// `kubectl get --raw /openid/v1/jwks`).
+    #[arg(long, requires = "issuer")]
+    jwks: Option<std::path::PathBuf>,
     /// With --github or --gitlab: only jobs on this ref (GitHub: refs/heads/main; GitLab: the
     /// branch, main).
     #[arg(long, conflicts_with = "environment")]
@@ -280,10 +299,22 @@ async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<(
             if (c.r#ref.is_some() || c.environment.is_some()) && c.github.is_none() && c.gitlab.is_none() {
                 bail!("--ref and --environment narrow --github or --gitlab");
             }
-            let oidc = match (&c.github, &c.gitlab) {
-                (Some(repo), _) => Some(github_identity(repo, c.r#ref.as_deref(), c.environment.as_deref())?),
-                (None, Some(project)) => Some(gitlab_identity(project, c.r#ref.as_deref(), c.environment.as_deref())?),
-                (None, None) => None,
+            let oidc = match (&c.github, &c.gitlab, &c.issuer) {
+                (Some(repo), ..) => Some(github_identity(repo, c.r#ref.as_deref(), c.environment.as_deref())?),
+                (None, Some(project), _) => Some(gitlab_identity(project, c.r#ref.as_deref(), c.environment.as_deref())?),
+                (None, None, Some(issuer)) => {
+                    let mut claims = serde_json::Map::new();
+                    for kv in &c.claims {
+                        let (k, v) = kv.split_once('=').filter(|(k, v)| !k.is_empty() && !v.is_empty()).with_context(|| format!("--claim {kv}: name=value"))?;
+                        claims.insert(k.to_string(), json!(v));
+                    }
+                    let jwks = match &c.jwks {
+                        Some(path) => Some(std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?),
+                        None => None,
+                    };
+                    Some(json!({ "issuer": issuer, "subject": c.subject, "claims": claims, "audience": c.audience, "jwks": jwks }))
+                }
+                _ => None,
             };
             let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow, "rate_per_minute": c.rate, "public_jwk": jwk, "oidc": oidc });
             let made = api.post("/v1/access/clients", body).await?;
@@ -301,6 +332,13 @@ async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<(
             } else if c.gitlab.is_some() {
                 eprintln!("Nothing to store in GitLab. In .gitlab-ci.yml, add to the job:\n");
                 println!("{}", gitlab_step(&s(&made["client_id"]), &endpoint, audience));
+            } else if c.issuer.is_some() {
+                println!("client_id:      {}\ntoken endpoint: {}", s(&made["client_id"]), endpoint);
+                eprintln!(
+                    "Nothing to store in CI. Get the job's OIDC token for audience {}, then trade it:\n  curl -sSf {endpoint} -d grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer -d client_id={} --data-urlencode \"assertion=$OIDC_TOKEN\"",
+                    c.audience.as_deref().unwrap_or(audience),
+                    s(&made["client_id"])
+                );
             } else if let Some(secret) = made["client_secret"].as_str() {
                 println!("\n{secret}\n");
                 eprintln!("Copy the secret now: it isn't shown again. Trade it for a token with grant_type=client_credentials (client_secret_basic or client_secret_post).");

@@ -144,6 +144,12 @@ async fn a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its
     assert!(lab.status.success() && String::from_utf8_lossy(&lab.stdout).contains("id_tokens:"), "{lab:?}");
     let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
     assert_eq!(list[0]["trusts"]["subject"], "project_path:acme/platform/api:ref_type:branch:ref:main");
+    // Any CI system's: an issuer, a subject, claims; a shared issuer still names one tenant.
+    let bk = roll(&api, "", &["--json", "token", "client", "create", "bk", "--preset", "read-only", "--issuer", "https://agent.buildkite.com", "--subject", "organization:acme:pipeline:deploy:*", "--claim", "build_branch=main"]);
+    assert!(bk.status.success(), "{bk:?}");
+    let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
+    assert_eq!((list[0]["trusts"]["subject"].as_str(), list[0]["trusts"]["claims"]["build_branch"].as_str()), (Some("organization:acme:pipeline:deploy:*"), Some("main")));
+    assert!(!roll(&api, "", &["token", "client", "create", "x", "--preset", "read-only", "--issuer", "https://agent.buildkite.com", "--subject", "*"]).status.success(), "a shared issuer names one tenant");
 }
 
 /// `roll login` signs a person's CLI in through the browser: it registers itself, the consent
