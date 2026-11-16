@@ -17,6 +17,7 @@ pub mod api;
 pub mod health;
 pub mod outside;
 pub mod directories;
+pub mod gateways;
 mod turns;
 pub mod aws;
 pub mod iam;
@@ -474,6 +475,11 @@ impl Secrets {
             links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), outside: outside.clone() }));
         }
         db.ensure_schema(directories::SCHEMA)?;
+        // Gateways into private networks (gateways.rs), and what goes through one.
+        db.ensure_schema(gateways::SCHEMA)?;
+        db.add_column("outside_dbs", "gateway", "TEXT")?;
+        db.add_column("directories", "gateway", "TEXT")?;
+        db.add_column("identities", "gateway", "TEXT")?;
         if let (Some(directory), Ok(keys)) = (&opts.directory, &opts.keyring) {
             links.register(Arc::new(directories::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), directory: directory.clone() }));
         }

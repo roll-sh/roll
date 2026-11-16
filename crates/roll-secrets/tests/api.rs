@@ -172,31 +172,33 @@ impl roll_secrets::clouds::CloudTokens for FakeClouds {
 }
 
 /// A Postgres server outside roll: each role's current password and, for a dynamic login, its
-/// group and `VALID UNTIL`; the flag refuses every change.
+/// group and `VALID UNTIL`; the flag refuses every change; the gateways calls went through.
 #[derive(Default)]
-struct Outside(std::sync::Mutex<BTreeMap<String, String>>, std::sync::atomic::AtomicBool, std::sync::Mutex<BTreeMap<String, (String, i64)>>);
+struct Outside(std::sync::Mutex<BTreeMap<String, String>>, std::sync::atomic::AtomicBool, std::sync::Mutex<BTreeMap<String, (String, i64)>>, std::sync::Mutex<Vec<Option<String>>>);
 
 impl roll_secrets::outside::OutsideDb for Outside {
-    fn check(&self, url: &str, _: Option<&str>, roles: &[String], _: Option<&str>) -> Result<(), String> {
-        if url.contains("@db.example") && roles.iter().all(|r| r.starts_with("app_")) { Ok(()) } else { Err("there's no role that can log in".into()) }
+    fn check(&self, at: &roll_secrets::outside::Target<'_>, roles: &[String], _: Option<&str>) -> Result<(), String> {
+        self.3.lock().unwrap().push(at.gateway.map(str::to_string));
+        if at.url.contains("@db.example") && roles.iter().all(|r| r.starts_with("app_")) { Ok(()) } else { Err("there's no role that can log in".into()) }
     }
-    fn set_password(&self, _: &str, _: Option<&str>, role: &str, password: &str) -> Result<(), String> {
+    fn set_password(&self, at: &roll_secrets::outside::Target<'_>, role: &str, password: &str) -> Result<(), String> {
+        self.3.lock().unwrap().push(at.gateway.map(str::to_string));
         if self.1.load(std::sync::atomic::Ordering::Relaxed) {
             return Err("connection refused".into());
         }
         self.0.lock().unwrap().insert(role.into(), password.into());
         Ok(())
     }
-    fn create_login(&self, _: &str, _: Option<&str>, name: &str, password: &str, group: &str, until: i64) -> Result<(), String> {
+    fn create_login(&self, _: &roll_secrets::outside::Target<'_>, name: &str, password: &str, group: &str, until: i64) -> Result<(), String> {
         self.0.lock().unwrap().insert(name.into(), password.into());
         self.2.lock().unwrap().insert(name.into(), (group.into(), until));
         Ok(())
     }
-    fn extend_login(&self, _: &str, _: Option<&str>, name: &str, until: i64) -> Result<(), String> {
+    fn extend_login(&self, _: &roll_secrets::outside::Target<'_>, name: &str, until: i64) -> Result<(), String> {
         self.2.lock().unwrap().get_mut(name).ok_or("no such role")?.1 = until;
         Ok(())
     }
-    fn drop_login(&self, _: &str, _: Option<&str>, name: &str) -> Result<(), String> {
+    fn drop_login(&self, _: &roll_secrets::outside::Target<'_>, name: &str) -> Result<(), String> {
         self.0.lock().unwrap().remove(name);
         self.2.lock().unwrap().remove(name);
         Ok(())
@@ -443,6 +445,14 @@ impl roll_secrets::Workloads for Gate {
     fn revoke(&self, id: &str) -> roll_secrets::Result<()> {
         self.tokens.lock().unwrap().retain(|_, g| &*g.id != id);
         Ok(())
+    }
+    /// As `POST /v1/access/tokens`: its owner is whoever's request it is.
+    fn token(&self, ext: &axum::http::Extensions, name: &str, rule: roll_auth::scope::Rule) -> roll_secrets::Result<roll_secrets::Minted> {
+        let (secret, id) = self.grant(name, rule, ext.get::<roll_auth::SignedIn>().map(|u| u.user.as_str()));
+        Ok(roll_secrets::Minted { id, secret, expires_at: 0 })
+    }
+    fn revoke_token(&self, id: &str, _: &str) -> roll_secrets::Result<()> {
+        self.revoke(id)
     }
 }
 
@@ -2661,4 +2671,73 @@ async fn reach_names_who_and_what_can_read_a_folder() {
     // It lists the project's credentials: a project admin's.
     let (s, _) = api.req(Method::GET, "/environments/production/reach", None, Some(&deploy)).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_gateway_has_one_token_that_opens_only_its_link_and_reaches_its_projects_databases() {
+    let api = Api::new().await;
+    let reader = api.token(json!({ "actions": ["read"] }));
+    let (s, _) = api.req(Method::POST, "/gateways", Some(json!({ "name": "vpc" })), Some(&reader)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "making a gateway is admin");
+    // A token doesn't make a gateway's token (a project-wide rule doesn't cover it), but may make
+    // one that logs in through an identity.
+    let admin = api.token(json!({ "actions": ["read", "admin"] }));
+    let (s, _) = api.req(Method::POST, "/gateways", Some(json!({ "name": "vpc" })), Some(&admin)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, ci) = api.req(Method::POST, "/gateways", Some(json!({ "name": "ci", "token": false })), Some(&admin)).await;
+    assert!(s == StatusCode::CREATED && ci.get("token").is_none(), "{ci}");
+
+    let made = api.ok(Method::POST, "/gateways", Some(json!({ "name": "vpc" }))).await;
+    let gw = made["gateway"]["id"].as_str().unwrap().to_string();
+    let secret = made["token"].as_str().unwrap().to_string();
+    let grant = api.gate.tokens.lock().unwrap().get(&secret).cloned().unwrap();
+    assert_eq!((grant.scope.0.as_slice(), made["gateway"]["token_id"].as_str()), (&[roll_secrets::gateways::rule(&gw)][..], Some(&*grant.id)), "one rule, naming the gateway");
+    assert!(api.secrets.gateway_link(&gw, false, None, Some(&grant)).is_ok());
+    // It opens its link and reads nothing; other tokens don't open the link.
+    let (s, _) = api.req(Method::GET, "/environments/production/values?path=/", None, Some(&secret)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let reader_grant = api.gate.tokens.lock().unwrap().get(&reader).cloned().unwrap();
+    assert!(api.secrets.gateway_link(&gw, false, None, Some(&reader_grant)).is_err());
+    assert!(api.secrets.gateway_link(&ci["gateway"]["id"].as_str().unwrap().to_string(), false, None, Some(&grant)).is_err(), "nor another gateway's");
+
+    // Status as the link reports it; a replaced link's end leaves it online.
+    let listed = api.ok(Method::GET, "/gateways", None).await;
+    assert_eq!(listed.as_array().unwrap().len(), 2);
+    assert_eq!(listed[1]["status"]["online"], false);
+    let allow = vec!["10.0.0.0/8:5432".to_string()];
+    let hello = |conn| roll_secrets::gateways::Hello { conn, node: "node-a", version: "0.1.0", allow: &allow, grant: Some(&grant.id) };
+    api.secrets.gateway_connected(&gw, &hello("c1")).unwrap();
+    api.secrets.gateway_connected(&gw, &hello("c2")).unwrap();
+    api.secrets.gateway_disconnected(&gw, "c1", "replaced").unwrap();
+    assert!(!api.secrets.gateway_seen(&gw, "c1").unwrap() && api.secrets.gateway_seen(&gw, "c2").unwrap());
+    let status = api.ok(Method::GET, "/gateways", None).await[1]["status"].clone();
+    assert_eq!((status["online"].as_bool(), status["node"].as_str(), status["allow"].clone()), (Some(true), Some("node-a"), json!(allow)));
+
+    // A database through it: the provider is told which gateway (rolld lets it be private there).
+    let db = json!({ "name": "billing", "url": "postgres://admin:hunter2@db.example:5432/app", "roles": ["app_blue", "app_green"], "gateway": gw });
+    let d = api.ok(Method::POST, "/outside-databases", Some(db)).await;
+    assert_eq!((d["gateway"].as_str(), api.outside.3.lock().unwrap().last().cloned().flatten()), (Some(gw.as_str()), Some(gw.clone())));
+    let (s, _) = api.call(Method::POST, "/outside-databases", Some(json!({ "name": "x", "url": "clickhouse://a:b@db.example:8443/x", "roles": ["app_a", "app_b"], "gateway": gw }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "ClickHouse speaks HTTPS through roll's client");
+    let (s, _) = api.call(Method::POST, "/outside-databases", Some(json!({ "name": "y", "url": "postgres://a:b@db.example/x", "roles": ["app_c", "app_d"], "gateway": "gw_nottheirs" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "only the project's own gateways");
+    // An identity that logs the gateway in: no scope of its own.
+    let mut identity = json!({ "name": "gw-k8s", "issuer": "https://k8s.example", "audience": "roll", "subject": "system:serviceaccount:roll:gateway", "gateway": gw, "jwks": Issuer::new().jwks().to_string(), "actions": ["read"] });
+    let (s, _) = api.call(Method::POST, "/identities", Some(identity.clone())).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    identity.as_object_mut().unwrap().remove("actions");
+    let i = api.ok(Method::POST, "/identities", Some(identity)).await;
+    assert_eq!(i["gateway"].as_str(), Some(gw.as_str()));
+
+    // Deleting: refused while used, then its token is revoked and its link can't open.
+    let (s, _) = api.call(Method::DELETE, &format!("/gateways/{gw}"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    api.ok(Method::DELETE, &format!("/outside-databases/{}", d["id"].as_str().unwrap()), None).await;
+    api.ok(Method::DELETE, &format!("/identities/{}", i["id"].as_str().unwrap()), None).await;
+    let (s, _) = api.call(Method::DELETE, &format!("/gateways/{gw}"), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(!api.gate.tokens.lock().unwrap().contains_key(&secret), "its token is revoked");
+    assert!(api.secrets.gateway_link(&gw, true, None, None).is_err());
+    let audit = api.ok(Method::GET, "/audit?action=gateway.connect", None).await.to_string();
+    assert!(audit.contains("node-a") && !audit.contains(&secret), "{audit}");
 }

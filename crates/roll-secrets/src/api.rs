@@ -126,6 +126,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/outside-databases/{{id}}"), axum::routing::delete(delete_outside_database))
         .route(&format!("{P}/directories"), get(directories).post(add_directory))
         .route(&format!("{P}/directories/{{id}}"), axum::routing::delete(delete_directory))
+        .route(&format!("{P}/gateways"), get(gateways).post(add_gateway))
+        .route(&format!("{P}/gateways/{{id}}"), axum::routing::delete(delete_gateway))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -1058,6 +1060,22 @@ async fn add_outside_database(State(s): S, Who(c): Who, Path(project): Path<Stri
 
 async fn delete_outside_database(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_outside_database(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn gateways(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.gateways(&project, &c)).await?))
+}
+
+/// A gateway and its roll token (shown once): made for this request's caller, so it needs the
+/// request's extensions.
+async fn add_gateway(State(s): S, Who(c): Who, ext: axum::http::Extensions, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::gateways::NewGateway = body(&b)?;
+    Ok(secret_response(created(blocking(s, move |s| s.add_gateway(&project, n, &c, &ext)).await?)))
+}
+
+async fn delete_gateway(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_gateway(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
