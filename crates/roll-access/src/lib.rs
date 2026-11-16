@@ -919,6 +919,38 @@ impl Access {
         });
     }
 
+    /// A pending approval with what the policy asks of it (`gates`), for whoever reads it.
+    pub fn gated(&self, mut a: store::Approval) -> store::Approval {
+        if a.state == "pending" {
+            a.gates = self
+                .policy_now()
+                .gates(&a)
+                .into_iter()
+                .map(|g| store::Gate { approved: a.approved_by.iter().filter(|b| g.may_approve(b)).count(), approvals: g.approvals, approvers: g.approvers })
+                .collect();
+        }
+        a
+    }
+
+    /// Decide an approval as `by`, under the policy's approval rules: when rules cover it, `by`
+    /// must be an approver of one of them and never the person whose token asked, and it's approved
+    /// once every rule has its approvals. Without one, one person decides.
+    pub fn decide(&self, id: &str, approve: bool, by: &str, reason: Option<&str>) -> Result<store::Approval> {
+        let found = self.store.approval(id)?;
+        let gates = self.policy().gates(&found);
+        if approve && !gates.is_empty() {
+            let owner = self.store.get(&found.grant_id).ok().and_then(|g| g.user);
+            if owner.as_deref() == Some(by) {
+                return Err(Error::Forbidden("this was asked with your own token: someone else approves it".into()));
+            }
+            if !gates.iter().any(|g| g.may_approve(by)) {
+                let names: Vec<&str> = gates.iter().filter_map(|g| g.approvers.as_ref()).flatten().map(String::as_str).collect();
+                return Err(Error::Forbidden(format!("roll's policy names who approves this: {}", names.join(", "))));
+            }
+        }
+        self.store.decide(id, approve, by, reason, &|who| gates.iter().all(|g| g.met(who))).map(|a| self.gated(a))
+    }
+
     /// A press in chat: decide, when it came from the install approvals go to and from one of the
     /// approvers the operator named. `Err` is what the person who pressed is told.
     pub async fn decide_from_chat(self: &Arc<Self>, approval: String, approve: bool, by: String, install: String) -> std::result::Result<(), String> {
@@ -933,7 +965,7 @@ impl Access {
             if !named {
                 return Err(Error::Forbidden("you aren't one of the people roll's operator lets approve these".into()));
             }
-            let r = me.store.decide(&approval, approve, &by, None);
+            let r = me.decide(&approval, approve, &by, None);
             // Already decided or expired: bring the card up to date as well.
             if r.is_err()
                 && let Ok(a) = me.store.approval(&approval)
@@ -954,9 +986,9 @@ impl Access {
     }
 }
 
-/// The operator's rules for every grant (`PUT /v1/access/policy`): how long one may live, and
-/// whether it must expire at all.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// The operator's rules for every grant (`PUT /v1/access/policy`): how long one may live, whether
+/// it must expire at all, and what needs more than one person to approve.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
     /// At most this many days from when it's made or changed (`None`: no limit).
@@ -973,9 +1005,75 @@ pub struct Policy {
     /// admin's approval, as GitHub's organizations approve fine-grained tokens.
     #[serde(default)]
     pub approve_people: Actions,
+    /// What needs more than one approver, and whose ("Two-person approvals"): each rule covering a
+    /// request is a gate it must pass.
+    #[serde(default)]
+    pub approval_rules: Vec<ApprovalRule>,
 }
 
-/// Some actions: a list on the wire (`["reveal", "admin"]`), bits inside (so `Policy` stays `Copy`).
+/// A rule of the policy's `approval_rules`, as roll secrets' protected environments name theirs:
+/// requests it covers need `approvals` approvals from `approvers` (anyone who may decide when
+/// left out), never from the person whose token asked.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalRule {
+    /// A product, or `*` for every one.
+    pub product: String,
+    /// The actions it's about (every action when left out).
+    #[serde(default, skip_serializing_if = "no_actions")]
+    pub actions: Actions,
+    /// The environments it's about (`pv-*` covers `pv-42`; all when left out). A request about no
+    /// one environment is covered: the stricter reading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environments: Option<Vec<String>>,
+    /// How many people must approve: 1 to 10.
+    pub approvals: u8,
+    /// Who may (`operator`, a person's `usr_…`, a chat approver's `slack:U…` or `discord:…`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvers: Option<Vec<String>>,
+}
+
+fn no_actions(a: &Actions) -> bool {
+    a.is_empty()
+}
+
+impl ApprovalRule {
+    /// Whether it's about this approval's request.
+    pub fn covers(&self, a: &store::Approval) -> bool {
+        (self.product == "*" || self.product == a.product)
+            && (self.actions.is_empty() || Action::parse(&a.action).is_some_and(|x| self.actions.has(x)))
+            && match (&self.environments, &a.environment) {
+                (Some(list), Some(env)) => list.iter().any(|p| roll_auth::scope::env_covers(p, env)),
+                _ => true,
+            }
+    }
+
+    pub fn may_approve(&self, by: &str) -> bool {
+        self.approvers.as_ref().is_none_or(|l| l.iter().any(|x| x == by))
+    }
+
+    /// Whether these approvers are enough for it.
+    pub fn met(&self, by: &[String]) -> bool {
+        by.iter().filter(|b| self.may_approve(b)).count() >= usize::from(self.approvals)
+    }
+
+    fn problems(&self, at: &str) -> Option<String> {
+        let names = |l: &Option<Vec<String>>| l.as_ref().is_some_and(|l| l.is_empty() || l.len() > 20 || l.iter().any(|s| s.trim().is_empty() || s.len() > 100 || s.contains(char::is_control)));
+        if self.product != "*" && !roll_auth::scope::PRODUCTS.contains(&self.product.as_str()) {
+            Some(format!("{at}: no product {:?}", self.product))
+        } else if !(1..=10).contains(&self.approvals) {
+            Some(format!("{at}: approvals is 1 to 10"))
+        } else if names(&self.environments) || names(&self.approvers) {
+            Some(format!("{at}: environments and approvers are 1 to 20 names (or left out)"))
+        } else if self.approvers.as_ref().is_some_and(|l| l.len() < usize::from(self.approvals)) {
+            Some(format!("{at}: it needs {} approvals but names fewer approvers", self.approvals))
+        } else {
+            None
+        }
+    }
+}
+
+/// Some actions: a list on the wire (`["reveal", "admin"]`), bits inside.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Actions(u8);
 
@@ -1001,6 +1099,22 @@ impl<'de> serde::Deserialize<'de> for Actions {
 }
 
 impl Policy {
+    /// What's wrong with it, if anything.
+    pub fn problems(&self) -> Option<String> {
+        if self.max_days == Some(0) || self.max_idle_days == Some(0) {
+            return Some("max_days and max_idle_days are at least 1 (or null for no limit)".into());
+        }
+        if self.approval_rules.len() > 50 {
+            return Some("at most 50 approval rules".into());
+        }
+        self.approval_rules.iter().enumerate().find_map(|(i, r)| r.problems(&format!("approval_rules[{i}]")))
+    }
+
+    /// The approval rules covering a request: each is a gate its approvers must pass.
+    pub fn gates(&self, a: &store::Approval) -> Vec<ApprovalRule> {
+        self.approval_rules.iter().filter(|r| r.covers(a)).cloned().collect()
+    }
+
     /// Whether a person's token with these rules waits for an admin.
     pub fn needs_approval(&self, rules: &Scope, ask_otherwise: bool) -> bool {
         !self.approve_people.is_empty() && (ask_otherwise || rules.0.iter().any(|r| r.actions.keys().any(|a| self.approve_people.has(*a))))
@@ -1019,16 +1133,16 @@ const POLICY_FRESH: std::time::Duration = std::time::Duration::from_secs(10);
 impl Access {
     pub fn policy(&self) -> Policy {
         let p: Policy = self.store.setting("policy").ok().flatten().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
-        *self.policy_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), p));
+        *self.policy_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), p.clone()));
         p
     }
 
     /// The policy, read at most every few seconds (for the evaluator, on every request).
     pub fn policy_now(&self) -> Policy {
-        if let Some((at, p)) = *self.policy_cache.lock().unwrap_or_else(|e| e.into_inner())
+        if let Some((at, p)) = &*self.policy_cache.lock().unwrap_or_else(|e| e.into_inner())
             && at.elapsed() < POLICY_FRESH
         {
-            return p;
+            return p.clone();
         }
         self.policy()
     }

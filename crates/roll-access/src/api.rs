@@ -850,7 +850,7 @@ async fn approvals(State(a): S, ext: Extensions, Query(q): Query<ApprovalsQuery>
             })
         }
     };
-    let list = blocking(a, move |a| a.store.approvals(q.state.as_deref(), grants.as_deref(), q.limit.unwrap_or(100))).await?;
+    let list = blocking(a, move |a| Ok(a.store.approvals(q.state.as_deref(), grants.as_deref(), q.limit.unwrap_or(100))?.into_iter().map(|x| a.gated(x)).collect::<Vec<_>>())).await?;
     Ok(Json(json!(list)))
 }
 
@@ -894,7 +894,7 @@ async fn approval(State(a): S, ext: Extensions, Path(id): Path<String>, Query(q)
         Some(w) => crate::evaluate::wait(&a, &id, std::time::Duration::from_secs(w.min(55))).await?,
         None => found,
     };
-    Ok(Json(json!(found)))
+    Ok(Json(json!(a.gated(found))))
 }
 
 #[derive(Deserialize, Default)]
@@ -915,9 +915,9 @@ async fn approve(State(a): S, ext: Extensions, Path(id): Path<String>, body: axu
     let by = may_decide(&a, &ext, &id).await?;
     let ap: Approve = if body.iter().all(u8::is_ascii_whitespace) { Approve::default() } else { serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))? };
     let remembered = remembered(&a, &id, ap.remember.as_deref()).await?;
-    let decided = blocking(a.clone(), move |a| a.store.decide(&id, true, &by, None)).await?;
+    let decided = blocking(a.clone(), move |a| a.decide(&id, true, &by, None)).await?;
     a.changed(&decided);
-    if let Some((grant, rule, until)) = remembered {
+    if let Some((grant, rule, until)) = remembered.filter(|_| decided.state == "approved") {
         let apr = decided.id.clone();
         blocking(a.clone(), move |a| a.store.remember(&grant, &rule, until, &apr)).await?;
     }
@@ -939,6 +939,11 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     let Some(until) = until else { return Ok(None) };
     let id2 = id.to_string();
     let found = blocking(a.clone(), move |a| a.store.approval(&id2)).await?;
+    // What needs several people is approved once each time: a rule for a while would let the next
+    // ones through with fewer.
+    if let Some(g) = a.policy().gates(&found).first() {
+        return Err(Error::BadRequest(format!("roll's policy asks {} people to approve this: approve it once", g.approvals)));
+    }
     // About one resource, as a rule would name it: not something new, not several links at once.
     let Some(resource) = found.resource.clone().filter(|r| !r.starts_with("new in ") && !r.contains(", ")) else {
         return Err(Error::BadRequest("this request isn't about one resource: approve it once".into()));
@@ -983,7 +988,7 @@ async fn deny(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::
     let by = may_decide(&a, &ext, &id).await?;
     let d: Decision = if body.iter().all(u8::is_ascii_whitespace) { Decision::default() } else { serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))? };
     let reason = d.reason.map(|r| r.chars().take(500).collect::<String>());
-    let decided = blocking(a.clone(), move |a| a.store.decide(&id, false, &by, reason.as_deref())).await?;
+    let decided = blocking(a.clone(), move |a| a.decide(&id, false, &by, reason.as_deref())).await?;
     a.changed(&decided);
     Ok(Json(json!(decided)))
 }
@@ -1051,8 +1056,8 @@ async fn policy(State(a): S) -> crate::Result<Json<Value>> {
 
 async fn set_policy(State(a): S, ext: Extensions, Json(p): Json<crate::Policy>) -> crate::Result<Json<Value>> {
     operator_only(&a, &ext, "set roll's token policy")?;
-    if p.max_days == Some(0) || p.max_idle_days == Some(0) {
-        return Err(Error::BadRequest("max_days and max_idle_days are at least 1 (or null for no limit)".into()));
+    if let Some(problem) = p.problems() {
+        return Err(Error::BadRequest(problem));
     }
     let v = json!(p);
     blocking(a.clone(), move |a| a.store.set_setting("policy", &v)).await?;

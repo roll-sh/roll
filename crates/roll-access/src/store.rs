@@ -435,6 +435,23 @@ pub struct Approval {
     pub scope_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_index: Option<String>,
+    /// Who approved it so far, in order: one name once it's approved, more when roll's policy asks
+    /// for several people ("Two-person approvals"; it stays pending until they're enough).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub approved_by: Vec<String>,
+    /// While it's pending: what roll's policy asks of it, one gate per rule covering it (filled
+    /// when it's answered, from the policy as it is then; not stored).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<Gate>,
+}
+
+/// One rule an approval must pass: how many approvals from whom, and how many it has.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Gate {
+    pub approvals: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approvers: Option<Vec<String>>,
+    pub approved: usize,
 }
 
 /// A new approval, before it's stored.
@@ -717,7 +734,7 @@ pub(crate) fn audit_row(r: &code_sql::Row<'_>) -> code_sql::Result<AuditEvent> {
 }
 
 const APPROVAL_COLUMNS: &str =
-    "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash, environment, scope_path, scope_index";
+    "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash, environment, scope_path, scope_index, approved_by";
 
 fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
     let args: Option<String> = r.get(10)?;
@@ -744,6 +761,8 @@ fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
         environment: r.get(19)?,
         scope_path: r.get(20)?,
         scope_index: r.get(21)?,
+        approved_by: r.get::<_, Option<String>>(22)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+        gates: Vec::new(),
     })
 }
 
@@ -816,8 +835,9 @@ impl Store {
         if !db.has_column("audit", "client")? {
             db.add_column("audit", "client", "TEXT")?;
         }
-        // What environment and path a request was about (a remembered approval keeps to them).
-        for col in ["environment", "scope_path", "scope_index"] {
+        // What environment and path a request was about (a remembered approval keeps to them), and
+        // who approved it so far (a policy can ask for several people).
+        for col in ["environment", "scope_path", "scope_index", "approved_by"] {
             if !db.has_column("approvals", col)? {
                 db.add_column("approvals", col, "TEXT")?;
             }
@@ -1375,7 +1395,7 @@ impl Store {
                 return Err(Error::TooMany("this token has 50 approvals waiting: decide some first".into()));
             }
             c.execute(
-                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?, ?, ?, ?)"),
+                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL)"),
                 params![
                     id,
                     a.grant.id,
@@ -1471,20 +1491,46 @@ impl Store {
             .collect())
     }
 
-    /// Approve or deny a pending approval (once).
-    pub fn decide(&self, id: &str, approve: bool, by: &str, reason: Option<&str>) -> Result<Approval> {
+    /// Decide a pending approval. Approving adds `by` to who approved it; it's approved once
+    /// `enough` says they are (one person when no policy rule covers it), and stays pending until
+    /// then. A person approves once. Denying decides at once.
+    pub fn decide(&self, id: &str, approve: bool, by: &str, reason: Option<&str>, enough: &dyn Fn(&[String]) -> bool) -> Result<Approval> {
         let now = code_sql::now_ms();
-        let state = if approve { "approved" } else { "denied" };
-        // An approved request may run within the next ten minutes, once.
-        let n = self.db.write(|c| {
-            c.execute(
-                "UPDATE approvals SET state = ?, decided_at = ?, decided_by = ?, reason = ?, expires_at = ? WHERE id = ? AND state = 'pending' AND expires_at > ?",
-                params![state, now, by, reason, now + APPROVAL_TTL_MS, id, now],
-            )
+        let changed = self.db.write(|c| {
+            let row: Option<(String, i64, Option<String>)> = c
+                .query_row("SELECT state, expires_at, approved_by FROM approvals WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .optional()?;
+            let Some((state, expires_at, so_far)) = row else { return Err(Error::NotFound(format!("no approval {id}"))) };
+            if state != "pending" || expires_at <= now {
+                return Ok(false);
+            }
+            if !approve {
+                c.execute(
+                    "UPDATE approvals SET state = 'denied', decided_at = ?, decided_by = ?, reason = ?, expires_at = ? WHERE id = ?",
+                    params![now, by, reason, now + APPROVAL_TTL_MS, id],
+                )?;
+                return Ok(true);
+            }
+            let mut who: Vec<String> = so_far.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            if who.iter().any(|w| w == by) {
+                return Err(Error::Conflict("you've approved this already: it needs someone else too".into()));
+            }
+            who.push(by.to_string());
+            let list = serde_json::to_string(&who).unwrap_or_default();
+            if enough(&who) {
+                // An approved request may run within the next ten minutes, once.
+                c.execute(
+                    "UPDATE approvals SET state = 'approved', decided_at = ?, decided_by = ?, approved_by = ?, expires_at = ? WHERE id = ?",
+                    params![now, by, list, now + APPROVAL_TTL_MS, id],
+                )?;
+            } else {
+                c.execute("UPDATE approvals SET approved_by = ? WHERE id = ?", params![list, id])?;
+            }
+            Ok(true)
         })?;
         self.db.notify_after_commit(crate::APPROVALS_CHANNEL);
         let a = self.approval(id)?;
-        if n == 0 {
+        if !changed {
             return Err(Error::Conflict(format!("the approval is {}", a.state)));
         }
         Ok(a)

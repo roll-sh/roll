@@ -1092,6 +1092,65 @@ async fn a_persons_token_past_the_policy_waits_for_an_admin() {
 /// A signed-in user's own token acts as them (docs/permissions.md, "Users' own tokens"): it
 /// reaches only what their account does, whatever its rules say; they see and manage only their
 /// own tokens and decide their own token's approvals; and it stops when their account does.
+/// What roll's policy names needs several people (docs/permissions.md, "Two-person approvals"):
+/// each approves once, the person whose token asked never counts, it stays pending until there
+/// are enough, it's never remembered, and the product is told who approved it.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_people_approve_what_the_policy_names() {
+    let d = Daemon::new(50);
+    for (u, h) in [("usr_alice", "alice"), ("usr_bob", "bob"), ("usr_carol", "carol")] {
+        d.people.add(u, h);
+    }
+    d.people.set_admin("usr_bob", true);
+    d.people.set_admin("usr_carol", true);
+    let policy = |rules: Value| {
+        let d = &d;
+        async move { d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "approval_rules": rules }))).await }
+    };
+    assert_eq!(policy(json!([{ "product": "postgres", "approvals": 2, "approvers": ["usr_bob"] }])).await.0, StatusCode::BAD_REQUEST, "two approvals from one approver");
+    assert_eq!(policy(json!([{ "product": "nope", "approvals": 2 }])).await.0, StatusCode::BAD_REQUEST);
+    let (s, p) = policy(json!([{ "product": "postgres", "actions": ["delete"], "approvals": 2 }])).await;
+    assert_eq!(s, StatusCode::OK, "{p}");
+
+    let (token, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }]), json!({})).await;
+    let apr = d.call(&token, Method::DELETE, "/v1/projects/pa", None).await.1["approval"].as_str().unwrap().to_string();
+    let approve = |who: &'static str, body: Value| {
+        let (d, apr) = (&d, apr.clone());
+        async move { d.as_user(who, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(body)).await }
+    };
+    // One person isn't enough, and approves once; it can't be remembered.
+    let (s, a) = approve("usr_bob", json!({})).await;
+    assert_eq!((s, a["state"].as_str(), a["approved_by"].clone()), (StatusCode::OK, Some("pending"), json!(["usr_bob"])), "{a}");
+    assert_eq!(a["gates"], json!([{ "approvals": 2, "approved": 1 }]), "what it still needs");
+    assert_eq!(approve("usr_bob", json!({})).await.0, StatusCode::CONFLICT);
+    assert_eq!(approve("usr_carol", json!({ "remember": "1h" })).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await.1["code"], "approval_pending");
+    // The second: it runs, and the product hears both.
+    let (s, a) = approve("usr_carol", json!({})).await;
+    assert_eq!((s, a["state"].as_str()), (StatusCode::OK, Some("approved")), "{a}");
+    let (s, ran) = d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await;
+    assert_eq!((s, ran["approved"]["by"].clone()), (StatusCode::OK, json!(["usr_bob", "usr_carol"])), "{ran}");
+
+    // Named approvers: only they count.
+    policy(json!([{ "product": "postgres", "actions": ["delete"], "approvals": 1, "approvers": ["usr_carol"] }])).await;
+    let apr = d.call(&token, Method::DELETE, "/v1/projects/pb", None).await.1["approval"].as_str().unwrap().to_string();
+    let (s, e) = d.as_user("usr_bob", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    assert!(e["error"].as_str().is_some_and(|m| m.contains("usr_carol")), "{e}");
+
+    // A person's own token: someone else approves its request, never them.
+    policy(json!([{ "product": "workspace", "actions": ["delete"], "approvals": 1 }])).await;
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "write": "allow", "delete": "ask" } }]);
+    let (_, made) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "agent", "rules": rules }))).await;
+    let hers = made["token"].as_str().unwrap().to_string();
+    let (_, p) = d.call(&hers, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "scratch" }))).await;
+    let (_, asked) = d.call(&hers, Method::DELETE, &format!("/v1/workspace/projects/{}", p["id"].as_str().unwrap()), None).await;
+    let apr = asked["approval"].as_str().unwrap_or_else(|| panic!("{asked}")).to_string();
+    let (s, e) = d.as_user("usr_alice", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    assert_eq!(d.as_user("usr_bob", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await.1["state"], "approved");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_users_token_acts_as_them() {
     let d = Daemon::new(50);

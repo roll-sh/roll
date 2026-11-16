@@ -607,7 +607,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             };
             let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path, scope_index, product: about };
             match ask(&ctx, row, action, resource.clone(), asked).await {
-                Ok(a) => approved = Some(roll_auth::Approved { id: a.id.into(), by: a.decided_by.into_iter().map(Into::into).collect(), until: None }),
+                Ok(a) => approved = Some(roll_auth::Approved { by: approvers(&a), id: a.id.into(), until: None }),
                 Err(resp) => return *resp,
             }
         }
@@ -983,8 +983,13 @@ async fn remembered(access: &Arc<Access>, grant: &Grant, scope: &Scope, target: 
         .max_by_key(|t| t.until)?;
     let (id, until) = (t.approval.clone()?, t.until);
     let (a, id2) = (access.clone(), id.clone());
-    let by = blocking(move || a.store.approval(&id2)).await.ok().and_then(|a| a.decided_by);
-    Some(roll_auth::Approved { id: id.into(), by: by.into_iter().map(Into::into).collect(), until: Some(until) })
+    let by = blocking(move || a.store.approval(&id2)).await.map(|a| approvers(&a)).unwrap_or_default();
+    Some(roll_auth::Approved { id: id.into(), by, until: Some(until) })
+}
+
+/// Who approved it, in order (approvals from before the list was kept name one).
+fn approvers(a: &crate::store::Approval) -> Vec<Arc<str>> {
+    if a.approved_by.is_empty() { a.decided_by.iter().map(|b| b.as_str().into()).collect() } else { a.approved_by.iter().map(|b| b.as_str().into()).collect() }
 }
 
 /// An approval once it's decided, or as it is after `max`.
