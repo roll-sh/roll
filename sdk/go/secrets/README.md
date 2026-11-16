@@ -21,6 +21,8 @@ v, err = c.ResolveSealed(ctx, "production", "", "app:web", key)
 // An encryption key (docs/secrets.md, "Encryption keys"): the key stays in roll.
 cards := c.Transit("cards")
 ct, err := cards.Encrypt(ctx, []byte(cardNumber), "order:42")
+// Read per request? Keep answers 30 s, then revalidate (a 304 while unchanged).
+c.CacheTTL = 30 * time.Second
 
 err = c.Watch(ctx, "production", secrets.Watch{OnChange: func(v *secrets.Values) error {
 	return reload(v.Values)

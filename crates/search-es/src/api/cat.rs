@@ -1094,7 +1094,23 @@ pub fn segment_replication(ctx: &Ctx) -> EsResult<Reply> {
 }
 
 pub fn plugins(ctx: &Ctx) -> EsResult<Reply> {
-    finish(table(ctx, columns!(ctx, PLUGINS)))
+    let mut t = table(ctx, columns!(ctx, PLUGINS));
+    if ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch {
+        let node = &ctx.cluster.node;
+        let mut plugins: Vec<_> = crate::api::nodes::PLUGINS.iter().collect();
+        plugins.sort_by_key(|p| p.name);
+        for p in plugins {
+            t.push_row(|c| match c {
+                "id" => Cell::str(&node.id),
+                "name" => Cell::str(&node.name),
+                "component" => Cell::str(p.name),
+                "version" => Cell::str(crate::version::ES_VERSION),
+                "description" => Cell::str(p.description),
+                _ => Cell::Null,
+            });
+        }
+    }
+    finish(t)
 }
 
 pub fn nodeattrs(ctx: &Ctx) -> EsResult<Reply> {

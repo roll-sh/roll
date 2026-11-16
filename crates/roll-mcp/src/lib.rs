@@ -20,11 +20,19 @@
 //!   tools, as GitHub's server does: every product's tools are ~33k tokens of an agent's context.
 //! - Read-only: `?readonly=1` (or `X-MCP-Readonly: true`) lists and runs only read-only tools, as
 //!   GitHub's server's read-only mode does; the token's rules still decide each call.
+//! - Lockdown: `?lockdown=1` (or `X-MCP-Lockdown: true`) withholds text written by people who can't
+//!   push to the repo ([`lockdown`]).
+//! - Search mode: `?tools=search` (or `X-MCP-Tools: search`) lists a search tool and two run tools
+//!   instead of every tool ([`search`]).
 
+pub mod lockdown;
 pub mod modern;
 pub mod prompts;
 pub mod resources;
+pub mod search;
+pub mod tasks;
 pub mod tools;
+pub mod ui;
 
 use axum::body::Body;
 use axum::extract::State;
@@ -148,6 +156,10 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
         modern: false,
         toolsets: None,
         readonly: false,
+        search: false,
+        lockdown: false,
+        tasks: false,
+        ui: false,
         client: None,
         names: Default::default(),
     };
@@ -178,7 +190,7 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     if !caller {
         return unauthorized(&m.config);
     }
-    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, modern: false, toolsets: None, readonly: false, client: None, as_user: false, names: Default::default() };
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
         let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
@@ -186,7 +198,14 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
         e.1 += usize::from(t["annotations"]["readOnlyHint"].as_bool() == Some(true));
         e.2 += context_tokens(&t);
     }
-    Json(json!({ "products": by.into_iter().map(|(p, (n, ro, tok))| json!({ "product": p, "tools": n, "read_only": ro, "context_tokens": tok })).collect::<Vec<_>>() })).into_response()
+    // Search mode's own tools (`?tools=search`): listed in place of every product's.
+    let meta: Vec<Value> = search::listed(&ctx.tools()).into_iter().filter(|t| t["name"].as_str().is_some_and(|n| [search::FIND, search::RUN_READ, search::RUN].contains(&n))).collect();
+    let search = json!({
+        "tools": meta.len(),
+        "read_only": meta.iter().filter(|t| t["annotations"]["readOnlyHint"] == true).count(),
+        "context_tokens": meta.iter().map(context_tokens).sum::<usize>(),
+    });
+    Json(json!({ "products": by.into_iter().map(|(p, (n, ro, tok))| json!({ "product": p, "tools": n, "read_only": ro, "context_tokens": tok })).collect::<Vec<_>>(), "search": search })).into_response()
 }
 
 fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
@@ -250,23 +269,29 @@ fn toolsets(uri: &axum::http::Uri, headers: &HeaderMap) -> Result<Option<Vec<Str
 /// read-only when either asks. A value that isn't one of those, or a key spelled another way
 /// (`read_only`, `readOnly`), is an error, so a typo never means "not read-only".
 fn readonly(uri: &axum::http::Uri, headers: &HeaderMap) -> Result<bool, String> {
+    flag(uri, headers, "readonly", "x-mcp-readonly")
+}
+
+/// An on/off switch of a connection, `?<key>=1|true` or its header: on when either asks; any other
+/// value, or the key spelled another way, is an error (a typo never turns a safeguard off).
+fn flag(uri: &axum::http::Uri, headers: &HeaderMap, key: &str, header: &str) -> Result<bool, String> {
     let parse = |v: &str| match v.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "" => Ok(true),
         "0" | "false" => Ok(false),
-        other => Err(format!("readonly={other:?}: 1 or true (0 or false to turn it off)")),
+        other => Err(format!("{key}={other:?}: 1 or true (0 or false to turn it off)")),
     };
     let mut on = false;
     for (k, v) in uri.query().map(|q| url::form_urlencoded::parse(q.as_bytes()).collect::<Vec<_>>()).unwrap_or_default() {
         let folded: String = k.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
-        if folded == "readonly" && k != "readonly" {
-            return Err(format!("?{k}= isn't a parameter: did you mean ?readonly=1?"));
+        if folded == key && k != key {
+            return Err(format!("?{k}= isn't a parameter: did you mean ?{key}=1?"));
         }
-        if k == "readonly" {
+        if k == key {
             on |= parse(&v)?;
         }
     }
-    if let Some(v) = headers.get("x-mcp-readonly") {
-        on |= parse(v.to_str().map_err(|_| "X-MCP-Readonly isn't text".to_string())?)?;
+    if let Some(v) = headers.get(header) {
+        on |= parse(v.to_str().map_err(|_| format!("{header} isn't text"))?)?;
     }
     Ok(on)
 }
@@ -281,6 +306,14 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     };
     let readonly = match readonly(&uri, &headers) {
         Ok(r) => r,
+        Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
+    };
+    let lockdown = match flag(&uri, &headers, "lockdown", "x-mcp-lockdown") {
+        Ok(l) => l,
+        Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
+    };
+    let search = match search::asked(&uri, &headers) {
+        Ok(s) => s,
         Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
     };
     let principal = match roll_auth::Grant::on(&ext) {
@@ -333,6 +366,15 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     let declared = messages.iter().find(|m| m["method"] == "initialize").map(|m| m["params"]["capabilities"]["elicitation"].get("url").is_some());
     // A modern request says on itself what the client offers and who it is.
     let (modern_url, modern_name) = if modern { modern::client(&messages[0]) } else { (false, None) };
+    // The tasks extension, declared on a 2026-07-28 request itself.
+    let tasks = modern && tasks::declared(&messages[0]);
+    // MCP Apps: on a modern request itself, in `initialize`, or carried by the session id since.
+    let ui_declared = messages.iter().find(|m| m["method"] == "initialize").map(|m| ui::declared(&m["params"]["capabilities"]));
+    let ui = if modern {
+        ui::declared(&messages[0]["params"]["_meta"][modern::CAPABILITIES])
+    } else {
+        ui_declared.unwrap_or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).is_some_and(|v| session_rest(v).is_some_and(|r| r.starts_with(ui::SESSION_FLAG))))
+    };
     let url_elicitation = if modern { modern_url } else { declared.unwrap_or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with(SESSION_URL))) };
     // Who's calling, as it named itself in `initialize` (carried in the session id after), for
     // the audit log: a hint, never a proof.
@@ -346,7 +388,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).and_then(session_client))
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, modern, toolsets, readonly, client, names: Default::default() });
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
@@ -370,17 +412,24 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     if let Some(url) = declared {
         use base64::Engine;
         let name = named.map(|n| format!("{}.", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(n))).unwrap_or_default();
-        if let Ok(v) = HeaderValue::from_str(&format!("{}{name}{}", if url { SESSION_URL } else { SESSION_PLAIN }, roll_access::new_id("s"))) {
+        let flag = if ui_declared == Some(true) { ui::SESSION_FLAG } else { "" };
+        if let Ok(v) = HeaderValue::from_str(&format!("{}{flag}{name}{}", if url { SESSION_URL } else { SESSION_PLAIN }, roll_access::new_id("s"))) {
             resp.headers_mut().insert("mcp-session-id", v);
         }
     }
     resp
 }
 
-/// The client name a session id carries (`roll-url-1.<base64>.<random>`), cleaned again.
+/// What follows a session id's prefix: its flags (`~ui.`), the client's name, a random part.
+fn session_rest(id: &str) -> Option<&str> {
+    id.strip_prefix(SESSION_URL).or_else(|| id.strip_prefix(SESSION_PLAIN))
+}
+
+/// The client name a session id carries (`roll-url-1.[~ui.]<base64>.<random>`), cleaned again.
 fn session_client(id: &str) -> Option<String> {
     use base64::Engine;
-    let rest = id.strip_prefix(SESSION_URL).or_else(|| id.strip_prefix(SESSION_PLAIN))?;
+    let rest = session_rest(id)?;
+    let rest = rest.strip_prefix(ui::SESSION_FLAG).unwrap_or(rest);
     let (encoded, _) = rest.split_once('.')?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded).ok()?;
     roll_access::evaluate::client_name(&String::from_utf8_lossy(&bytes))
@@ -443,6 +492,14 @@ struct Ctx {
     toolsets: Option<Vec<String>>,
     /// Only read-only tools are listed and run (`?readonly=1`).
     readonly: bool,
+    /// `tools/list` answers the search and run tools instead of every tool (`?tools=search`).
+    search: bool,
+    /// Text written by people who can't push to the repo is withheld from results (`?lockdown=1`).
+    lockdown: bool,
+    /// The request declares 2026-07-28's tasks extension: a long call may answer with a task.
+    tasks: bool,
+    /// The host renders MCP Apps (`ui`): tools that show rows point at roll's table view.
+    ui: bool,
     /// The client's name and version, as it said in `initialize`.
     client: Option<Arc<str>>,
     /// The names of the tools it's offered, worked out once per request (prompts, completions and
@@ -534,31 +591,68 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         let resp = match method {
             "initialize" => rpc_result(id, initialize(ctx, &params)),
-            "server/discover" => rpc_result(id, modern::discover(&PROTOCOL_VERSIONS, capabilities(), instructions(ctx))),
+            "server/discover" => rpc_result(id, modern::discover(&PROTOCOL_VERSIONS, capabilities(tasks_available(ctx)), instructions(ctx))),
             "ping" => rpc_result(id, json!({})),
-            "tools/list" => rpc_result(id, json!({ "tools": ctx.tools() })),
+            "tools/list" => {
+                let mut tools = if ctx.search { search::listed(&ctx.tools()) } else { ctx.tools() };
+                // A host that renders MCP Apps shows the tools that answer rows in roll's table.
+                if ctx.ui && !ctx.search {
+                    ui::attach(&mut tools);
+                }
+                rpc_result(id, json!({ "tools": tools }))
+            }
             "tools/call" => {
-                let name = params.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-                let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-                if !args.is_object() {
+                let mut name = params.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                let mut args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                // Search mode's run tools are the tool they name from here on: every check below,
+                // the gate and the audit log see that tool.
+                let mut unwrapped = None;
+                if ctx.search && args.is_object() && (name == search::RUN || name == search::RUN_READ) {
+                    match search::unwrap(&ctx.tools(), &name, &args) {
+                        Ok((n, a)) => (name, args) = (n, a),
+                        Err(r) => unwrapped = Some(r),
+                    }
+                }
+                if let Some(r) = unwrapped {
+                    rpc_result(id, r)
+                } else if ctx.search && name == search::FIND {
+                    rpc_result(id, search::find(&ctx.tools(), &args))
+                } else if !args.is_object() {
                     rpc_error(id, -32602, "arguments must be an object")
                 } else if ctx.readonly && !tool_names(ctx).contains(&name) {
                     rpc_result(id, json!({ "content": [{ "type": "text", "text": format!("{name} isn't read-only, and this connection is (?readonly=1): connect without it to change things") }], "isError": true }))
                 } else {
-                    match call(ctx, &name, args).await {
-                        Some(r) if ctx.url_elicitation && r["structuredContent"]["status"] == "approval_pending" && r["structuredContent"]["url"].as_str().is_some_and(|u| !u.is_empty()) => {
+                    // A client that takes tasks gets one for a call that runs long (or waits for
+                    // a person); everyone else waits for the answer.
+                    let answered = if tasks::on(ctx) { tasks::call_or_task(ctx, &name, args).await } else { Ok(call(ctx, &name, args).await) };
+                    match answered {
+                        Err(task) => rpc_result(id, task),
+                        Ok(Some(r)) if ctx.url_elicitation && r["structuredContent"]["status"] == "approval_pending" && r["structuredContent"]["url"].as_str().is_some_and(|u| !u.is_empty()) => {
                             // 2026-07-28 asks for it in the result (Multi Round-Trip Requests);
                             // earlier revisions as URL elicitation's error.
                             if ctx.modern { rpc_result(id, modern::approval_input_required(&r)) } else { approval_elicitation(id, &r) }
                         }
-                        Some(r) => rpc_result(id, r),
-                        None => rpc_error(id, -32602, format!("unknown tool {name:?}")),
+                        Ok(Some(r)) => rpc_result(id, r),
+                        Ok(None) => rpc_error(id, -32602, format!("unknown tool {name:?}")),
                     }
                 }
             }
-            "resources/list" => rpc_result(id, json!({ "resources": resources::list() })),
+            "tasks/get" | "tasks/update" | "tasks/cancel" => match tasks::method(ctx, method, &params).await {
+                Ok(v) => rpc_result(id, v),
+                Err((code, message)) => rpc_error(id, code, message),
+            },
+            "resources/list" => {
+                let mut list = resources::list();
+                if ctx.ui
+                    && let Some(a) = list.as_array_mut()
+                {
+                    a.push(ui::resource());
+                }
+                rpc_result(id, json!({ "resources": list }))
+            }
             "resources/read" => match params.get("uri").and_then(Value::as_str) {
                 Some(resources::GUIDE) => rpc_result(id, resources::guide()),
+                Some(ui::TABLE) => rpc_result(id, ui::read()),
                 Some(resources::ME) => match read_me(ctx).await {
                     Ok(v) => rpc_result(id, v),
                     Err((message, data)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32603, "message": message, "data": data } }),
@@ -650,15 +744,26 @@ fn initialize(ctx: &Ctx, params: &Value) -> Value {
     let version = if PROTOCOL_VERSIONS.contains(&asked) { asked } else { PROTOCOL_VERSIONS[0] };
     json!({
         "protocolVersion": version,
-        "capabilities": capabilities(),
+        "capabilities": capabilities(false),
         "serverInfo": { "name": "roll", "title": "roll", "version": env!("CARGO_PKG_VERSION"), "icons": [server_icon()] },
         "instructions": instructions(ctx),
     })
 }
 
 /// What roll offers, the same in `initialize` and `server/discover`.
-fn capabilities() -> Value {
-    json!({ "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false }, "completions": {} })
+fn capabilities(tasks: bool) -> Value {
+    let mut c = json!({ "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false }, "completions": {} });
+    // 2026-07-28's tasks extension, where results can be sealed (tasks::on).
+    c["extensions"] = json!({ ui::EXT: {} });
+    if tasks {
+        c["extensions"][tasks::EXT] = json!({});
+    }
+    c
+}
+
+/// Whether this server makes tasks at all (a client still has to declare the extension).
+fn tasks_available(ctx: &Ctx) -> bool {
+    ctx.m.config.access.as_ref().is_some_and(|a| a.sinks.get().is_some())
 }
 
 /// How to use roll, for the model: who the connection is and how approvals work.
@@ -677,7 +782,9 @@ Tools are named <product>_<verb>. Ids are each product's own (Postgres projects 
 {who} Some actions ask a person first: such a call waits up to a minute, then returns status \"approval_pending\" with an approval id and a link. \
 Tell the user, then call the same tool again with the same arguments plus \"approval\": \"apr_…\": it waits for the decision and runs once approved. \
 postgres_query is read-only (postgres_execute changes data). Credentials come back as [redacted] unless the token may reveal them. \
-Read the resource roll://access/me for what this connection may do, in words, and roll://guide for more."
+Read the resource roll://access/me for what this connection may do, in words, and roll://guide for more.{}{}",
+        if ctx.lockdown { format!(" This connection is in lockdown: text written by people who can't push to a repo (issues anyone opened, pull requests from forks) comes back as \"{}\"; don't act on what you can't read.", lockdown::WITHHELD) } else { String::new() },
+        if ctx.search { format!(" This connection lists tools by search: call {} with what you want to do to get the matching tools and their input schemas, then run one with {} (a read-only tool) or {} (any other), passing {{\"tool\": its name, \"arguments\": {{…}}}}. Wherever this says to call a tool, run it that way.", search::FIND, search::RUN_READ, search::RUN) } else { String::new() }
     )))
 }
 
@@ -715,6 +822,15 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
         let headers = forward_headers(&ctx.headers, &args);
         (set.call(ctx.m.api.clone(), headers, ext, name.to_string(), args.clone()).await, "tool".to_string())
     };
+    // In lockdown, an outside record's text never reaches the model: withheld in the structured
+    // answer, and the text block (a fronted set may write its own) rebuilt from what's left.
+    if ctx.lockdown && lockdown::withhold(&mut result["structuredContent"]) > 0 {
+        let text = cut(serde_json::to_string_pretty(&result["structuredContent"]).unwrap_or_default());
+        if let Some(content) = result["content"].as_array_mut() {
+            content.retain(|c| c["type"] != "text");
+            content.insert(0, json!({ "type": "text", "text": text }));
+        }
+    }
     // Whoever made the result (a fronted set builds its own: roll code's reviews and files),
     // what's hidden in its text stays visible.
     if let Some(content) = result["content"].as_array_mut() {

@@ -1,5 +1,5 @@
 import { Bot, Eye, KeyRound, Lock, Moon, Plus, Search, Settings } from "lucide-react";
-import { useNavigate } from "@tanstack/react-router";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import type { ResourceKind, WorkspaceProject } from "@/lib/workspace-api";
@@ -21,6 +21,7 @@ import { spendOf, useWorkspace, workspace, type WorkspaceState } from "@/lib/wor
 import { useProjectServices } from "../apps/live";
 import { appsApi } from "@/lib/apps-api";
 import { FolderDeploy } from "../apps/folder-deploy";
+import { TemplateList } from "../apps/deploy-repo";
 import { NewServiceSheet } from "../apps/new-service";
 import { AppShell } from "../app-shell";
 import { Board, type Card } from "./board";
@@ -63,7 +64,9 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
   const [selected, setSelected] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [settings, setSettings] = useState(false);
+  // `?settings=services` (a service's Settings links here) opens the project's settings there.
+  const asked = useLocation({ select: (l) => (l.search as { settings?: string }).settings });
+  const [settings, setSettings] = useState(asked === "services");
   /** Where a new service's card goes while its sheet is open. */
   const [newService, setNewService] = useState<{ x: number; y: number } | null>(null);
   const live = useProjectServices(project.id, ws.kinds.has("service"));
@@ -240,6 +243,7 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
                 />
               ) : null
             }
+            templates={ws.kinds.has("service") ? <TemplateList project={project.id} className="grid grid-cols-2 gap-2 sm:grid-cols-3" /> : null}
           />
         )}
         <ProjectAgents open={agentsOpen} repos={repos} onClose={() => setAgentsOpen(false)} />
@@ -321,12 +325,12 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
           {usd(spend.usd)} this month · ≈ {usd(projectMonth(spend.usd, month))} by {month.end}
         </span>
       </footer>
-      <ProjectSettings project={project} open={settings} onClose={() => setSettings(false)} />
+      <ProjectSettings project={project} open={settings} initialTab={asked === "services" ? "apps" : "general"} onClose={() => setSettings(false)} />
     </AppShell>
   );
 }
 
-function Empty({ name, kinds, onPick, drop }: { name: string; kinds: ResourceKind[]; onPick: (k: ResourceKind) => void; drop?: ReactNode }) {
+function Empty({ name, kinds, onPick, drop, templates }: { name: string; kinds: ResourceKind[]; onPick: (k: ResourceKind) => void; drop?: ReactNode; templates?: ReactNode }) {
   return (
     <div className="pointer-events-none absolute inset-0 grid place-items-center p-4">
       <div className="rise pointer-events-auto w-full max-w-[460px] text-center">
@@ -346,6 +350,12 @@ function Empty({ name, kinds, onPick, drop }: { name: string; kinds: ResourceKin
           ))}
         </div>
         {drop && <div className="mt-3 text-left">{drop}</div>}
+        {templates && (
+          <div className="mt-5 text-left">
+            <div className="mb-2 text-[11.5px] font-medium text-subtle">Or start from a template</div>
+            {templates}
+          </div>
+        )}
       </div>
     </div>
   );

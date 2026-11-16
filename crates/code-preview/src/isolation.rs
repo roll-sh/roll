@@ -61,6 +61,18 @@ pub struct Job {
     /// A cache kept between runs (package downloads, build outputs), by name: mounted at
     /// [`CACHE_DIR`] where the isolation can keep one (Docker: a named volume).
     pub cache: Option<String>,
+    /// A network of its own with no route out (a preview whose project limits egress): the job
+    /// joins it instead of the default one, publishes nothing, and is reached at its address
+    /// there; `host.docker.internal` is the network's gateway (roll's products).
+    pub network: Option<Network>,
+}
+
+/// A job's own network ([`Job::network`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Network {
+    pub name: String,
+    /// Its gateway's address on the host.
+    pub gateway: String,
 }
 
 /// Where a job's cache is mounted, and the package managers' variables that point into it.

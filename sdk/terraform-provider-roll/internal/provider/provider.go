@@ -65,11 +65,12 @@ func (p *rollProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 }
 
 func (p *rollProvider) Resources(context.Context) []func() resource.Resource {
-	return []func() resource.Resource{newEnvironmentResource, newSecretResource, newIdentityResource, newSyncResource, newTokenResource}
+	return []func() resource.Resource{newEnvironmentResource, newSecretResource, newIdentityResource, newSyncResource, newTokenResource,
+		newAppServiceResource, newAppVariableResource, newAppDomainResource, newAppEnvironmentResource, newAppLinkResource, newAppNotificationResource}
 }
 
 func (p *rollProvider) DataSources(context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{newValuesDataSource}
+	return []func() datasource.DataSource{newValuesDataSource, newAppServiceDataSource}
 }
 
 // project is a resource's own project, or the provider's.

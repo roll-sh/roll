@@ -19,7 +19,7 @@ import {
   KEEP_OLD,
   startsLater,
   toolsetCost,
-  type ToolsetCost,
+  type ToolsetCosts,
   mcpUrl,
   reach,
   statusOf,
@@ -82,7 +82,9 @@ export function ConnectPanel({ token }: { token?: string }) {
   const [products, setProducts] = useState<string[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
   const [readonly, setReadonly] = useState(false);
-  const [costs, setCosts] = useState<ToolsetCost[]>([]);
+  const [search, setSearch] = useState(false);
+  const [lockdown, setLockdown] = useState(false);
+  const [costs, setCosts] = useState<ToolsetCosts>({ products: [] });
   useEffect(() => {
     accessApi
       .catalog()
@@ -93,10 +95,18 @@ export function ConnectPanel({ token }: { token?: string }) {
       .then(setCosts)
       .catch(() => {});
   }, []);
-  const cost = toolsetCost(costs, picked, readonly);
+  const cost = toolsetCost(costs.products, picked, readonly, search ? costs.search : undefined);
   const limit = CLIENT_TOOL_LIMIT[client];
+  // A client that can't take the whole list (VS Code, Cursor) gets search mode to start with,
+  // whenever the client is picked or the counts arrive; the checkbox still turns it off.
+  const whole = toolsetCost(costs.products, picked, readonly).tools;
+  useEffect(() => {
+    if (costs.search) setSearch(Boolean(limit && whole > limit.tools));
+    // Only on a new client or new counts: a person's own choice of products stays theirs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, costs]);
   const over = limit && cost.tools > limit.tools;
-  const url = withToolsets(mcpUrl(), picked, readonly);
+  const url = withToolsets(mcpUrl(), picked, { readonly, search, lockdown });
   const cfg = mcpConfig(client, url, token);
   return (
     <Panel
@@ -131,8 +141,9 @@ export function ConnectPanel({ token }: { token?: string }) {
         {products.length > 0 && (
           <div className="space-y-1.5">
             <p className="text-[12px] text-subtle">
-              Tools for {picked.length ? "these products only" : "every product"}: each product's tools take part of the agent's context, so
-              pick the ones it needs.
+              {search
+                ? `Search finds ${picked.length ? "these products' tools only" : "every product's tools"}.`
+                : `Tools for ${picked.length ? "these products only" : "every product"}: each product's tools take part of the agent's context, so pick the ones it needs.`}
             </p>
             <div className="flex flex-wrap gap-1.5">
               {products.map((p) => {
@@ -152,15 +163,25 @@ export function ConnectPanel({ token }: { token?: string }) {
             </div>
           </div>
         )}
-        {costs.length > 0 && (
+        {costs.products.length > 0 && (
           <p className={`text-[12px] ${over ? "text-danger" : "text-subtle"}`} role={over ? "alert" : undefined}>
             {cost.tools} tools · ~{cost.tokens.toLocaleString("en")} tokens of the agent's context before it does anything
-            {over && limit ? `. ${limit.note}: pick the products it needs.` : ""}
+            {over && limit ? `. ${limit.note}: pick the products it needs${costs.search && !search ? ", or turn on search" : ""}.` : ""}
           </p>
+        )}
+        {costs.search && (
+          <label className="flex items-center gap-2 text-[12px] text-muted">
+            <input type="checkbox" checked={search} onChange={(e) => setSearch(e.target.checked)} className="accent-accent" />
+            Search: the client gets a tool that finds the others and tools that run them, instead of every tool
+          </label>
         )}
         <label className="flex items-center gap-2 text-[12px] text-muted">
           <input type="checkbox" checked={readonly} onChange={(e) => setReadonly(e.target.checked)} className="accent-accent" />
           Read-only: the client sees and runs only tools that read, whatever its token allows
+        </label>
+        <label className="flex items-center gap-2 text-[12px] text-muted">
+          <input type="checkbox" checked={lockdown} onChange={(e) => setLockdown(e.target.checked)} className="accent-accent" />
+          Lockdown: what people who can't push to a repo wrote (issues anyone opened, pull requests from forks) never reaches the agent
         </label>
         <p className="text-[13px] text-muted">{CLIENT_WHERE[client]}</p>
         <div className="relative rounded-lg border border-line bg-bg">

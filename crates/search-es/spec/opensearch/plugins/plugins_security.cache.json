@@ -1,0 +1,26 @@
+{
+  "plugins_security.cache": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/security/access-control/api/",
+      "description": "Flushes the Security plugin's caches."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_security/api/cache",
+          "methods": [
+            "DELETE"
+          ]
+        },
+        {
+          "path": "/_opendistro/_security/api/cache",
+          "methods": [
+            "DELETE"
+          ]
+        }
+      ]
+    },
+    "params": {}
+  }
+}

@@ -66,7 +66,7 @@ fn register_inner(ctx: &QueryCtx, ih: Option<&InnerHits>, default_name: &str, qu
     if let Some(ih) = ih {
         super::inner::check_sort(ctx, ih.sort.as_ref(), None)?;
         let name = ih.name.clone().unwrap_or_else(|| default_name.to_string());
-        ctx.inner_hits.borrow_mut().push(InnerHitsDef { name, spec: ih.clone(), nested_path: None, query, join: Some(join), children: Vec::new() });
+        ctx.inner_hits.borrow_mut().push(InnerHitsDef { name, spec: ih.clone(), nested_path: None, query, join: Some(join), children: Vec::new(), weight: Default::default() });
     }
     Ok(())
 }

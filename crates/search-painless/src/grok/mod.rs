@@ -547,14 +547,7 @@ impl Grok {
     #[allow(clippy::type_complexity)]
     pub fn capture_ranges(&self, text: &str) -> Result<Option<Vec<(String, Vec<(String, usize, usize)>)>>, MatchError> {
         let Some(m) = self.search(text)? else { return Ok(None) };
-        // The matcher works in UTF-16 units; offsets are reported in UTF-8 bytes.
-        let mut byte_at = Vec::with_capacity(text.len() + 1);
-        for (b, c) in text.char_indices() {
-            for _ in 0..c.len_utf16() {
-                byte_at.push(b);
-            }
-        }
-        byte_at.push(text.len());
+        let byte_at = utf8_offsets(text);
         let mut out: Vec<(String, Vec<(String, usize, usize)>)> = Vec::new();
         for c in &self.captures {
             for &g in &c.groups {
@@ -572,6 +565,48 @@ impl Grok {
         }
         Ok(Some(out))
     }
+}
+
+impl Grok {
+    /// The named captures of every non-overlapping match, in text order, as (capture name,
+    /// UTF-8 start, UTF-8 end): the regions `RedactProcessor` replaces.
+    pub fn capture_regions(&self, text: &str) -> Result<Vec<(String, usize, usize)>, MatchError> {
+        let mut m = match self.max_execution {
+            Some(d) => crate::regex::MatcherState::with_deadline(self.regex.clone(), text, Instant::now() + d),
+            None => crate::regex::MatcherState::new(self.regex.clone(), text, 0),
+        };
+        let byte_at = utf8_offsets(text);
+        let mut out = Vec::new();
+        loop {
+            match m.find() {
+                Ok(true) => {}
+                Err(_) if m.interrupted() => return Err(MatchError::Interrupted { after_millis: self.max_execution.map_or(0, |d| d.as_millis() as u64) }),
+                _ => return Ok(out),
+            }
+            for c in &self.captures {
+                for &g in &c.groups {
+                    if let (Ok(s), Ok(e)) = (m.start(g as i32), m.end(g as i32))
+                        && s >= 0
+                        && e >= 0
+                    {
+                        out.push((c.name.clone(), byte_at[s as usize], byte_at[e as usize]));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The UTF-8 byte offset of each UTF-16 unit of `text` (the matcher's unit), and of its end.
+fn utf8_offsets(text: &str) -> Vec<usize> {
+    let mut byte_at = Vec::with_capacity(text.len() + 1);
+    for (b, c) in text.char_indices() {
+        for _ in 0..c.len_utf16() {
+            byte_at.push(b);
+        }
+    }
+    byte_at.push(text.len());
+    byte_at
 }
 
 fn convert(ty: CaptureType, s: String) -> Result<GrokValue, ConvertError> {

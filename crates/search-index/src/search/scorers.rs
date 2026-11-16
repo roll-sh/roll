@@ -1392,6 +1392,9 @@ impl BlockMaxConjunctionBulk {
 
 impl BulkScorer for BlockMaxConjunctionBulk {
     fn score(&mut self, c: &mut dyn LeafCollector, live: Option<&LiveDocs>, min: u32, max: u32) -> Result<u32> {
+        // A minimum the collector already has bounds the first window too: a lead without
+        // impact blocks (a doc set, a term without frequencies) windows 64k docs at once.
+        c.set_scorer(&mut self.scorable);
         let lead_doc = self.scorers[0].doc();
         let mut wmin = if positioned(lead_doc) { lead_doc.max(min) } else { min };
         // Windows past the last doc would step through the doc id space 64k at a time when
