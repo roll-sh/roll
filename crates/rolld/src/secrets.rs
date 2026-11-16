@@ -771,7 +771,7 @@ impl LinkProvider for Search {
     }
     fn issue(&self, r#ref: &str, _: &str, _: &Link, label: &str, ttl: Option<u64>) -> roll_secrets::Result<Issued> {
         // Data access only (indices, templates, pipelines, lifecycle): a leaked app key can't make
-        // more keys or users. Builds of roll search before `access` ignore it.
+        // more keys or users.
         let mut body = json!({ "name": label.chars().take(64).collect::<String>(), "access": "data" });
         // A dynamic key expires by itself a little after its lease, should a revoke fail.
         if let Some(m) = ttl {
@@ -779,11 +779,12 @@ impl LinkProvider for Search {
         }
         let k = self.0.call(Method::POST, &format!("/v1/search/clusters/{}/keys", enc(r#ref)), Some(body))?;
         let id = text(&k, "/id")?;
-        // A build that says what it made must have made a data key; one that says nothing is
-        // taken as it is (docs/secrets.md, "Links": search).
-        if let Some(access) = k["access"].as_str().filter(|a| *a != "data") {
+        // roll search says what it made (#29): anything but a data key, or a key that doesn't
+        // say, is deleted and refused (docs/secrets.md, "Links": search).
+        if k["access"].as_str() != Some("data") {
             let _ = self.0.delete_gone(&format!("/v1/search/clusters/{}/keys/{}", enc(r#ref), enc(id.expose())));
-            return Err(Error::Link(format!("roll search made an {access} key, not a data one: refused (and deleted)")));
+            let made = k["access"].as_str().map_or("a key without its access".to_string(), |a| format!("an {a} key"));
+            return Err(Error::Link(format!("roll search made {made}, not a data one: refused (and deleted)")));
         }
         Ok(Issued { parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
     }
