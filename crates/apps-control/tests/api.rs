@@ -4250,6 +4250,52 @@ async fn a_git_url_service_connects_to_rolls_github_app() {
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
 }
 
+/// A Git login whose password is one of the project's secrets: read at each fetch, so a rotated
+/// token is used at once and nothing is kept here; a secret that isn't there fetches without one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_git_login_reads_its_token_from_roll_secrets() {
+    struct Tokens;
+    static TOKEN: Mutex<String> = Mutex::new(String::new());
+    #[async_trait]
+    impl apps_control::integrations::SecretSource for Tokens {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        async fn resolve(&self, _: &str, env: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
+            assert_eq!(env, "production");
+            Ok(vec![apps_control::integrations::SecretVar { name: "GIT_TOKEN".into(), value: TOKEN.lock().clone(), linked: false, sensitive: true }])
+        }
+    }
+    *TOKEN.lock() = "tok-1".into();
+    let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(Tokens)).await;
+    let git = Arc::new(GitHost::default());
+    *git.login.lock() = Some(("deploy".into(), "tok-1".into()));
+    let pkg = ("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#);
+    git.commit(&[pkg, ("server.js", "require('http')")]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/git/acme/private", listener.local_addr().unwrap());
+    let app = code_git::router(git.clone(), code_git::ServerConfig::default());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "private", "source": {"kind": "git", "url": url}, "git_login": {"username": "deploy", "password": "tok-1"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let login = format!("/v1/apps/services/{id}/git-login");
+    assert_eq!(call(&w.api, "PUT", &login, Some(json!({"username": "deploy", "password": "x", "secret": "GIT_TOKEN"}))).await.0, StatusCode::BAD_REQUEST, "not both");
+    let (st, s) = call(&w.api, "PUT", &login, Some(json!({"username": "deploy", "secret": "GIT_TOKEN"}))).await;
+    assert_eq!((st, &s["git_login"]["secret"]), (StatusCode::OK, &json!("GIT_TOKEN")), "{s}");
+    // Rotated on the host and in roll secrets: the next deploy reads the new one.
+    *git.login.lock() = Some(("deploy".into(), "tok-2".into()));
+    *TOKEN.lock() = "tok-2".into();
+    let deploys = format!("/v1/apps/services/{id}/environments/production/deploys");
+    let (st, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
+    // A secret that isn't there: fetched without a login, refused by the host.
+    call(&w.api, "PUT", &login, Some(json!({"username": "deploy", "secret": "NOT_THERE"}))).await;
+    assert_eq!(call(&w.api, "POST", &deploys, Some(json!({}))).await.0, StatusCode::BAD_REQUEST);
+}
+
 /// The dashboard's starter templates (apps/dashboard/src/lib/templates) read as the import reads
 /// them, on public images only, with run settings a service takes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

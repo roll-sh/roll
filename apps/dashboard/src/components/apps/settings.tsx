@@ -809,6 +809,7 @@ const Grid = ({ children }: { children: ReactNode }) => <div className="grid gap
 function GitLogin({ service, runner }: { service: Service; runner: Runner }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [fromSecret, setFromSecret] = useState(false);
   const l = service.git_login;
   return (
     <div className="border-t border-line px-5 py-4">
@@ -817,6 +818,11 @@ function GitLogin({ service, runner }: { service: Service; runner: Runner }) {
         <div className="mt-2 flex flex-wrap items-center gap-3 text-[13px] text-muted">
           <span>
             Fetches as <span className="font-mono text-fg">{l.username}</span> from <span className="font-mono text-fg">{l.host}</span>
+            {l.secret && (
+              <>
+                , its token the project's secret <span className="font-mono text-fg">{l.secret}</span>
+              </>
+            )}
           </span>
           <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("git-login", () => appsApi.deleteGitLogin(service.id))}>
             Remove
@@ -827,7 +833,7 @@ function GitLogin({ service, runner }: { service: Service; runner: Runner }) {
           className="mt-2 flex flex-wrap items-end gap-2"
           onSubmit={(e) => {
             e.preventDefault();
-            void runner.run("git-login", () => appsApi.putGitLogin(service.id, { username, password })).then((ok) => {
+            void runner.run("git-login", () => appsApi.putGitLogin(service.id, fromSecret ? { username, secret: password } : { username, password })).then((ok) => {
               if (ok) {
                 setUsername("");
                 setPassword("");
@@ -836,11 +842,24 @@ function GitLogin({ service, runner }: { service: Service; runner: Runner }) {
           }}
         >
           <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" aria-label="Git username" autoComplete="off" spellCheck={false} className={`${input} w-44 font-mono text-[12px]`} />
-          <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="token or app password" aria-label="Git token" autoComplete="new-password" className={`${input} w-56 font-mono text-[12px]`} />
+          <input
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            type={fromSecret ? "text" : "password"}
+            placeholder={fromSecret ? "the secret's name, GIT_TOKEN" : "token or app password"}
+            aria-label={fromSecret ? "Secret name" : "Git token"}
+            autoComplete="new-password"
+            spellCheck={false}
+            className={`${input} w-56 font-mono text-[12px]`}
+          />
+          <label className="flex items-center gap-1.5 text-[12px] text-muted">
+            <input type="checkbox" checked={fromSecret} onChange={(e) => setFromSecret(e.target.checked)} />
+            from a roll secret
+          </label>
           <button type="submit" className={primary} disabled={!username || !password || runner.busy !== null}>
             Save login
           </button>
-          <span className="text-[12px] text-subtle">Sealed; sent only to this repository's host.</span>
+          <span className="text-[12px] text-subtle">Sealed, or read from that roll secret at each fetch; sent only to this repository's host.</span>
         </form>
       )}
     </div>

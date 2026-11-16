@@ -667,6 +667,8 @@ impl Store {
         // Custom domains' certificates, and when a domain was first verified (a claim that never
         // was expires).
         db.add_column("domains", "tls", "TEXT NOT NULL DEFAULT 'pending'")?;
+        // A Git login's password read from one of the project's secrets, by name (none: sealed here).
+        db.add_column("git_auth", "secret", "TEXT")?;
         db.add_column("domains", "tls_error", "TEXT")?;
         db.add_column("domains", "verified_at", "INTEGER")?;
         db.add_column("env_access", "bypass_hash", "TEXT")?;
@@ -1790,11 +1792,12 @@ impl Store {
 
     // ── private Git repositories ──
 
-    pub fn set_git_login(&self, service: &str, host: &str, username: &str, password: &str) -> Result<()> {
+    /// A login: its password sealed here, or read from the project's secret `secret` at each use.
+    pub fn set_git_login(&self, service: &str, host: &str, username: &str, password: &str, secret: Option<&str>) -> Result<()> {
         let sealed = self.sealer.seal(&format!("git:{service}"), password);
         self.db.execute(
-            "INSERT INTO git_auth (service, host, username, sealed) VALUES (?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET host = excluded.host, username = excluded.username, sealed = excluded.sealed",
-            params![service, host, username, sealed],
+            "INSERT INTO git_auth (service, host, username, sealed, secret) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET host = excluded.host, username = excluded.username, sealed = excluded.sealed, secret = excluded.secret",
+            params![service, host, username, sealed, secret],
         )?;
         Ok(())
     }
@@ -1806,13 +1809,13 @@ impl Store {
 
     /// The login, without the password.
     pub fn git_login(&self, service: &str) -> Result<Option<GitLogin>> {
-        Ok(self.db.query_row("SELECT host, username FROM git_auth WHERE service = ?", [service], |r| Ok(GitLogin { host: r.get(0)?, username: r.get(1)? })).optional()?)
+        Ok(self.db.query_row("SELECT host, username, secret FROM git_auth WHERE service = ?", [service], |r| Ok(GitLogin { host: r.get(0)?, username: r.get(1)?, secret: r.get(2)? })).optional()?)
     }
 
     /// The login with its password opened, for a fetch.
     pub fn git_login_secret(&self, service: &str) -> Result<Option<(GitLogin, String)>> {
-        let row: Option<(String, String, String)> = self.db.query_row("SELECT host, username, sealed FROM git_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-        row.map(|(host, username, sealed)| Ok((GitLogin { host, username }, self.sealer.open(&format!("git:{service}"), &sealed)?))).transpose()
+        let row: Option<(String, String, String, Option<String>)> = self.db.query_row("SELECT host, username, sealed, secret FROM git_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+        row.map(|(host, username, sealed, secret)| Ok((GitLogin { host, username, secret }, self.sealer.open(&format!("git:{service}"), &sealed)?))).transpose()
     }
 
     // ── traces ──
