@@ -1878,7 +1878,17 @@ impl Apps {
 
     /// Whether `revision` changes a watched path since what `env` runs (no active deployment, or
     /// a source that can't tell: yes).
-    async fn push_touches(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, revision: &str, patterns: &[String]) -> bool {
+    pub(crate) async fn push_touches(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, revision: &str, patterns: &[String]) -> bool {
+        // A Git URL's: the paths between the live commit and this one, matched as a repo's are.
+        if let (Source::Git { url, .. }, Some(sources)) = (&svc.source, &self.deps.sources) {
+            let Some(active) = env.active.clone() else { return true };
+            let Ok(Some(from)) = self.db(move |s| s.deployment(&active).map(|d| d.revision)).await else { return true };
+            let client = crate::git_source::client(self.cfg.allow_private);
+            return match crate::git_source::changed_paths(&client, url, &from, revision).await {
+                Ok(Some(paths)) => sources.any_path_matches(patterns, &paths),
+                _ => true,
+            };
+        }
         let (Source::Repo { repo, .. }, Some(sources)) = (&svc.source, &self.deps.sources) else { return true };
         let Some(active) = env.active.clone() else { return true };
         let Ok(Some(from)) = self.db(move |s| s.deployment(&active).map(|d| d.revision)).await else { return true };

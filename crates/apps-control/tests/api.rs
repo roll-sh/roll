@@ -101,7 +101,10 @@ impl Sources for FakeCode {
     }
     async fn touches(&self, _repo: &str, _from: &str, to: &str, patterns: &[String]) -> anyhow::Result<bool> {
         let changed = self.pushed.lock().get(to).cloned().unwrap_or_default();
-        Ok(changed.iter().any(|f| patterns.iter().any(|p| f.starts_with(p.trim_end_matches("**")))))
+        Ok(self.any_path_matches(patterns, &changed))
+    }
+    fn any_path_matches(&self, patterns: &[String], paths: &[String]) -> bool {
+        paths.iter().any(|f| patterns.iter().any(|p| f.starts_with(p.trim_end_matches("**"))))
     }
 }
 
@@ -3689,6 +3692,19 @@ async fn a_repos_roll_toml_is_read_for_a_deploy_link() {
 struct GitHost {
     objects: Mutex<std::collections::HashMap<code_git::ObjectId, code_git::Object>>,
     main: Mutex<Option<code_git::ObjectId>>,
+    /// Other branches, by name.
+    branches: Mutex<std::collections::BTreeMap<String, code_git::ObjectId>>,
+}
+
+/// roll previews' side of a Git URL's pushes: what it was handed.
+#[derive(Default)]
+struct FakePushes(Mutex<Vec<apps_control::integrations::GitPush>>);
+
+#[async_trait]
+impl apps_control::integrations::GitPushes for FakePushes {
+    async fn pushed(&self, push: apps_control::integrations::GitPush) {
+        self.0.lock().push(push);
+    }
 }
 
 impl GitHost {
@@ -3734,7 +3750,8 @@ impl code_git::GitBackend for GitHost {
         }
     }
     async fn refs(&self, _repo: &str) -> code_git::GitResult<code_git::RefList> {
-        let refs = self.main.lock().iter().map(|oid| code_git::Ref { name: "refs/heads/main".into(), oid: *oid, peeled: None }).collect();
+        let mut refs: Vec<code_git::Ref> = self.main.lock().iter().map(|oid| code_git::Ref { name: "refs/heads/main".into(), oid: *oid, peeled: None }).collect();
+        refs.extend(self.branches.lock().iter().map(|(b, oid)| code_git::Ref { name: format!("refs/heads/{b}"), oid: *oid, peeled: None }));
         Ok(code_git::RefList { head: Some("refs/heads/main".into()), refs })
     }
     async fn read_object(&self, _repo: &str, oid: &code_git::ObjectId) -> code_git::GitResult<Option<code_git::Object>> {
@@ -3821,6 +3838,36 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     // The watch reads a commit's message as the hook does: `[skip ci]` isn't deployed.
     git.commit_saying(&[("README.md", "docs")], "docs only [skip ci]");
     assert!(w.apps.watch_git().await.is_empty(), "its message says [skip ci]");
+    // Watch paths: a commit that changes none of them (the live commit's tree against its) isn't
+    // deployed, by the watch or the hook; one that does is.
+    let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"build": {"watch": ["server.js"]}}))).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let pkg = ("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#);
+    let docs = git.commit(&[pkg, ("server.js", "require('http') // v4"), ("README.md", "more docs")]);
+    assert!(w.apps.watch_git().await.is_empty(), "only README.md changed");
+    let (st, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/main", "after": docs }))).await;
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("watches"), "{v}");
+    let code = git.commit(&[pkg, ("server.js", "require('http') // v5"), ("README.md", "more docs")]);
+    let started = w.apps.watch_git().await;
+    assert_eq!(started.len(), 1, "server.js changed");
+    assert_eq!(settled(&w, &id, "production", &started[0]).await["revision"].as_str(), Some(code.as_str()));
+    // With roll previews on the node, a push to a branch no environment follows is handed to it,
+    // once the repository says the branch is there (or gone, for a deletion): a body naming
+    // another commit hands nothing on.
+    let pushes = Arc::new(FakePushes::default());
+    w.apps.set_git_pushes(pushes.clone());
+    git.branches.lock().insert("feature".into(), code.parse().unwrap());
+    let (st, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": code, "head_commit": { "message": "try it" } }))).await;
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("roll previews"), "{v}");
+    let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": first }))).await;
+    assert!(v["ignored"].as_str().unwrap().contains("the repository has it at"), "{v}");
+    let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/gone", "after": "0".repeat(40), "deleted": true }))).await;
+    assert!(v["ignored"].as_str().unwrap().contains("its preview goes"), "{v}");
+    let got: Vec<_> = pushes.0.lock().iter().map(|p| (p.service.clone(), p.url.clone(), p.branch.clone(), p.sha.clone(), p.message.clone())).collect();
+    assert_eq!(got, vec![(id.clone(), url.clone(), "feature".into(), Some(code.clone()), "try it".into()), (id.clone(), url.clone(), "gone".into(), None, String::new())]);
+    // main is production's: deployed by apps as before, never handed on.
+    let (st, _) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/main", "after": code }))).await;
+    assert!(st.is_success() && pushes.0.lock().len() == 2);
 }
 
 /// The dashboard's starter templates (apps/dashboard/src/lib/templates) read as the import reads

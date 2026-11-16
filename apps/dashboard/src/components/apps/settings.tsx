@@ -354,7 +354,7 @@ export function SettingsTab({
               <Field label="System packages" hint="installed in the generated image (apt, or apk on Alpine)">
                 {t("packages", "ffmpeg chromium")}
               </Field>
-              {form.sourceKind === "repo" && (
+              {(form.sourceKind === "repo" || form.sourceKind === "git") && (
                 <Field label="Watch paths" hint="a push deploys only when it changes one">
                   {t("watch", "apps/web/**, packages/ui/**")}
                 </Field>

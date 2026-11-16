@@ -56,6 +56,13 @@ impl crate::Apps {
                     sink().line(format!("{} on {branch} not deployed: its message says {tag}", &sha[..12]));
                     continue;
                 }
+                // Watch paths: a commit that touches none of them isn't deployed.
+                if let Some(patterns) = svc.build.watch.as_ref().filter(|w| !w.is_empty())
+                    && !self.push_touches(&svc, &env, &sha, patterns).await
+                {
+                    sink().line(format!("{} on {branch} changes nothing this service watches ({}): not deployed", &sha[..12], patterns.join(", ")));
+                    continue;
+                }
                 let subject = message.lines().next().unwrap_or("").chars().take(500).collect::<String>();
                 let body = serde_json::json!({ "revision": sha, "message": if subject.is_empty() { format!("new commit on {branch}: {}", &sha[..12]) } else { subject } });
                 let by = crate::model::By { trigger: crate::model::Trigger::Push, actor: Some("git watch".into()) };
@@ -117,6 +124,57 @@ pub async fn materialize(client: &Client, url: &str, sha: &str, dir: &Path) -> a
     let objects: HashMap<ObjectId, Object> = fetched.objects.into_iter().map(|o| (o.id, o)).collect();
     let dir = dir.to_path_buf();
     tokio::task::spawn_blocking(move || write_commit(&objects, oid, &dir)).await?
+}
+
+/// The paths that differ between the trees of commits `from` and `to`: one shallow fetch of
+/// both with no blob (trees compared by id, so an unchanged folder is never walked), at most
+/// 10,000 paths (past that, everything counts as changed: `None`).
+pub async fn changed_paths(client: &Client, url: &str, from: &str, to: &str) -> anyhow::Result<Option<Vec<String>>> {
+    let (a, b): (ObjectId, ObjectId) = (from.parse().map_err(|_| anyhow::anyhow!("{from} isn't a commit id"))?, to.parse().map_err(|_| anyhow::anyhow!("{to} isn't a commit id"))?);
+    let args = FetchArgs { wants: vec![a, b], haves: Vec::new(), depth: Some(1), filter: Some(code_git::Filter::BlobNone) };
+    let objects: HashMap<ObjectId, Object> = client.fetch(url, None, &args).await?.objects.into_iter().map(|o| (o.id, o)).collect();
+    let tree_of = |c: ObjectId| -> anyhow::Result<ObjectId> {
+        let o = objects.get(&c).filter(|o| o.kind == Kind::Commit).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring commit {c}"))?;
+        Ok(parse_commit(&o.data).map_err(|e| anyhow::anyhow!("{e}"))?.tree)
+    };
+    let mut out = Vec::new();
+    let ok = diff_trees(&objects, Some(tree_of(a)?), Some(tree_of(b)?), "", &mut out, 0)?;
+    Ok(ok.then_some(out))
+}
+
+/// The paths under `prefix` that differ between two trees (either may be absent); false once
+/// past the cap.
+fn diff_trees(objects: &HashMap<ObjectId, Object>, a: Option<ObjectId>, b: Option<ObjectId>, prefix: &str, out: &mut Vec<String>, depth: usize) -> anyhow::Result<bool> {
+    if a == b || depth >= MAX_DEPTH {
+        return Ok(true);
+    }
+    let entries = |t: Option<ObjectId>| -> anyhow::Result<HashMap<String, (u32, ObjectId)>> {
+        let Some(t) = t else { return Ok(HashMap::new()) };
+        let o = objects.get(&t).filter(|o| o.kind == Kind::Tree).ok_or_else(|| anyhow::anyhow!("the fetch didn't bring tree {t}"))?;
+        tree_entries(&o.data).map(|e| e.map(|e| (String::from_utf8_lossy(e.name).into_owned(), (e.mode, e.oid))).map_err(|e| anyhow::anyhow!("{e}"))).collect()
+    };
+    let (ea, eb) = (entries(a)?, entries(b)?);
+    let mut names: Vec<&String> = ea.keys().chain(eb.keys()).collect();
+    names.sort();
+    names.dedup();
+    for name in names {
+        let (x, y) = (ea.get(name), eb.get(name));
+        if x == y {
+            continue;
+        }
+        let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+        let tree = |e: Option<&(u32, ObjectId)>| e.filter(|(m, _)| *m == mode::TREE).map(|(_, id)| *id);
+        if (tree(x).is_some() || tree(y).is_some()) && !diff_trees(objects, tree(x), tree(y), &path, out, depth + 1)? {
+            return Ok(false);
+        }
+        if tree(x).is_none() && x.is_some() || tree(y).is_none() && y.is_some() {
+            out.push(path);
+            if out.len() > 10_000 {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// A commit's message: one shallow fetch of the commit alone (no tree, no blob).

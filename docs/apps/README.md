@@ -315,10 +315,13 @@ every deployment is immutable with instant rollback.
   commit's message. The environment's log and the timeline (`deploy.skipped`, with the revision
   and the tag) say so; nothing is built.
 - **Watch paths** (monorepos; `build.watch`, `[app] watch`, the settings page): a push deploys a
-  repo service only when a path that differs between what the environment runs and the pushed
-  commit matches one of its patterns (gitignore-style from the repo's root, roll code's
-  CODEOWNERS matcher; roll.toml's are read at the pushed commit). The environment's log says
-  which pushes it skipped. Nothing set: every push deploys, as before.
+  repo or Git URL service only when a path that differs between what the environment runs and
+  the pushed commit matches one of its patterns (gitignore-style from the repo's root, roll code's
+  CODEOWNERS matcher; roll.toml's are read at the pushed commit). For a Git URL the paths come
+  from one shallow fetch of both commits with no blobs, trees compared by id (an unchanged folder
+  isn't walked; past 10,000 paths, or if the fetch fails, the push deploys). The environment's log
+  says which pushes it skipped, and the hook answers `{ ignored }`. Nothing set: every push
+  deploys, as before.
 - **Pre-deploy command** (`run.pre_deploy`, `roll apps set --pre-deploy`, the settings page):
   once per deploy, after the image is ready and before anything starts, in a container of the
   new image with the deployment's variables on the project network (not the volume: the old
@@ -1295,6 +1298,28 @@ so a redelivery or the watch makes no second deploy. Another branch, a deleted b
 `[skip ci]` commit and GitHub's ping are 200 `{ ignored }`. The URL's token is the secret
 (GitHub's webhook signature isn't needed on top), and the environment panel says where to add it.
 
+A push to a branch none of the service's environments follows is roll previews' when it's on the
+node (`Apps::set_git_pushes`, `integrations::GitPush`): previews makes that branch's `pv-…`
+environment from its project's rules (or moves it to the new commit, or tears it down for a
+deleted branch), deploying it with `{ revision }` and branched links as it does a roll code
+change's. Before anything is handed on, the repository's refs (`ls-refs`) must agree: the pushed
+commit is where the branch is now, and a deleted branch is one it no longer has, so a body posted
+to a leaked hook URL can't name another commit, and pushes come only from the repository's
+writers (a fork can't push to it). The hook answers `{ ignored }` either way.
+
+## GitHub Actions
+
+`sdk/apps-github-action` (no dependencies, like roll secrets' action) deploys a service from a
+workflow after its tests pass (Fly's and Render's deploy actions): a repo or Git URL service
+builds the workflow's commit, an upload service is sent what's committed under `path` (`git
+archive`, so untracked, ignored or built files never go: a private repository without the GitHub
+App), an image service deploys a tag the workflow pushed. It waits for the deployment, gives
+`deployment-id`, `status` and `url`, and on a pull request can keep one comment saying where it's
+deployed. It's keyed by the run and attempt (`Idempotency-Key`), so a retried step makes no second
+deploy. A failed build's lines stay in roll unless `show-logs` is on, because a public repository's job
+log is public. A fork's pull request gets no secrets from GitHub, so it has no token and is told why.
+Tests: `node --test sdk/apps-github-action` (a fake rolld and GitHub API, a real `git archive`).
+
 ## Terraform
 
 `sdk/terraform-provider-roll` (roll secrets' provider) has roll apps' resources too
@@ -2168,60 +2193,51 @@ the charts). A second product review the same day (with the review pack's screen
 put items 1–11 first. A second review that day (after #78, against the same six and Netlify) put the six items above first and found five bugs, fixed: a tag push or any other event on a Git URL service's hook redeployed production; an environment whose first deploy failed was never followed; the watch ignored `[skip ci]`; an environment with no branch took any branch's push; `wait_for_ci` was accepted where nothing reads it. A review on 2026-11-16 (the product against the same six, each gap checked in the code) put items 1–6 first and found three bugs, fixed: links froze what they read (a rotated NoSQL login), `PUT …/environments/{env}` wrote a hold and a name before its last checks, and unlinking stopped at the first credential it couldn't revoke.
 
 1. **Branch previews for Git URL services** (Vercel's, Render's, Railway's preview per branch and
-   pull request): the push hook already sees every branch, so a push to another branch makes an
-   ephemeral `br-<branch>` environment and a deleted branch tears it down (people who push have
-   push access: no fork gate). Then same-repo pull requests (`refs/pull/N/head`), and fork pull
-   requests only once a writer approves their head (`approve-run`). A preview's links must never be
-   production's: branched through roll previews' branchers, or none.
-2. **Watch paths for Git URL services** (Railway's watch paths, Render's build filters): a push
-   deploys only when it touches the root's paths (two shallow trees compared, no blobs), so a
-   monorepo's roots don't all redeploy on every push.
-3. **A deploy GitHub Action** (Fly's, Render's): `roll apps deploy` from a workflow after its tests,
-   and preview URLs commented on pull requests, with GitHub keeping fork pull requests away from
-   secrets; private repositories without the GitHub App.
-4. **MCP tools for jobs**: list a service's jobs, read one, cancel one (an agent can start a
-   migration with `apps_run_job` but can't follow it).
-5. **Wait for CI on Git URL services** (Railway's, Render's): GitHub's `check_suite`/`status` and
+   pull request): apps hands roll previews every push to a branch it doesn't follow, checked
+   against the repository's refs (`GitPush`); previews builds the environments (its side is the
+   previews thread's). Then same-repo pull requests (`refs/pull/N/head`), and fork pull requests
+   only once a writer approves their head (`approve-run`).
+2. **Wait for CI on Git URL services** (Railway's, Render's): GitHub's `check_suite`/`status` and
    GitLab's `pipeline` events on the same hook decide when a pushed commit deploys.
-6. **More Terraform** (Render's and Railway's providers): environments, links and notification
+3. **More Terraform** (Render's and Railway's providers): environments, links and notification
    targets as resources, and data sources for services.
-7. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
+4. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
    on main, `watch_secrets` holds one `SecretSource::wait_digest` long poll per watched
    environment instead of polling every minute.
-8. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+5. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-9. **Region**: the region shown on the overview and each environment, defaulting to the project's
+6. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-10. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+7. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-11. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+8. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-12. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
+9. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
    digests mark "needs deploy", roll secrets' reveal rules, linked and sensitive keys, dynamic
    credentials refused, new environments ensured); what's left is service variables kept in roll
    secrets at `/services/<name>` (one store for both), and links as per-environment secrets
    links.
-13. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+10. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-14. *Waiting on a queue link provider in roll secrets.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); a queue needs a provider that issues its own user first.
-15. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+11. *Waiting on a queue link provider in roll secrets.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); a queue needs a provider that issues its own user first.
+12. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-16. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+13. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-17. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+14. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-18. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+15. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-19. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+16. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
