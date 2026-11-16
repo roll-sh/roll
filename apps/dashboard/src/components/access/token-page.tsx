@@ -32,7 +32,7 @@ function Token({ id }: { id: string }) {
       .catch(() => {});
   }, []);
   const projectName = (p: string) => ws.projects.find((x) => x.id === p)?.name ?? p;
-  const resourceName = (product: string, r: string) => inventory[product]?.find((x) => x.id === r)?.name ?? r;
+  const resourceName = (product: string, r: string) => inventory[product]?.find((x) => x.id === r)?.name ?? (product === "workspace" ? projectName(r) : r);
 
   return (
     <AccessShell tab="overview">
@@ -396,9 +396,8 @@ function Proposed({
   return (
     <Panel title="Asked for">
       <div className="space-y-3 p-5 text-[13px]">
-        <p className="text-muted">
-          A request with this token was refused. Allow it to {describeRule(allow, projectName, resourceName).toLowerCase()}?
-        </p>
+        <p className="text-muted">A request with this token was refused. Let it do this too?</p>
+        <p>{describeRule(allow, projectName, resourceName)}</p>
         <div className="flex flex-wrap items-center gap-2">
           <button onClick={() => void add("allow")} disabled={busy} className={primary}>
             Allow
