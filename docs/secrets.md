@@ -146,6 +146,54 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
 
 `value` and the data source still land in Terraform's state, as with every provider: keep that
 state as private as the values, or use the two above.
+
+## Pulumi
+
+Pulumi runs the same provider through its [`terraform-provider`](https://www.pulumi.com/registry/packages/terraform-provider/)
+package, which bridges any Terraform provider from a local build, with no registry release
+(`sdk/pulumi`). In a Pulumi project:
+
+```sh
+(cd path/to/roll/sdk/terraform-provider-roll && go build -o "$OLDPWD/bin/terraform-provider-roll" .)
+pulumi package add terraform-provider ./bin/terraform-provider-roll   # sdks/roll: @pulumi/roll, pulumi_roll, Go
+pulumi config set roll:apiUrl https://api.roll.example
+pulumi config set roll:project prj_…
+pulumi config set --secret roll:token rlt_…
+```
+
+```ts
+import * as pulumi from "@pulumi/pulumi";
+import * as roll from "@pulumi/roll";
+
+const staging = new roll.SecretsEnvironment("staging", { slug: "staging", name: "staging" });
+new roll.Secret("stripe", {
+  environment: staging.slug,
+  key: "STRIPE_KEY",
+  valueWo: new pulumi.Config().requireSecret("stripeKey"),
+  valueWoVersion: 1,
+});
+const ci = new roll.SecretsToken("ci", { name: "ci", environments: [staging.slug], actions: ["read", "reveal"] });
+export const token = ci.token; // a Pulumi secret
+```
+
+Every resource and both data sources (`getSecretsValues`, `getAppService`) are there. Each machine
+that runs the program needs the binary at the path in `Pulumi.yaml`, and `pulumi install` generates
+the SDK from it. `sdk/pulumi/sdk.sh` generates the SDKs outside a project. Where Pulumi differs:
+
+- **No values out of the state.** Pulumi has no ephemeral resources, so there's no
+  `roll_secrets_values` for one run and no dynamic credential revoked when the run ends. Pulumi also
+  keeps every input in the stack's state, so `valueWo` is there as `value` is. Both are encrypted by
+  the stack's secrets provider, and `valueWo` is never read back. To keep values out of a state
+  entirely, read them where they're used (`roll run`, the clients) instead of through Pulumi.
+- **Secrets.** Anything the provider marks sensitive is a Pulumi secret, encrypted in the state: the
+  provider's token, `value`, `valueWo`, a token's `token`, a sync's `signingSecret`, an app variable's
+  value, a service's `gitToken` and a notification target's `url` and `secret`. A function's results
+  aren't: wrap `getSecretsValuesOutput(…).values` in `pulumi.secret()` before it reaches a stack
+  output or another resource.
+- **Names.** Pulumi auto-names an optional `name` (an environment's becomes `staging-1a2b3c4`): set
+  it.
+
+`sdk/pulumi/e2e.sh` runs `pulumi up` and `pulumi destroy` against the provider's fake rolld.
 ## GitHub Actions
 `sdk/github-action` puts an environment into a job, as Doppler's and Infisical's actions do:
 ```yaml

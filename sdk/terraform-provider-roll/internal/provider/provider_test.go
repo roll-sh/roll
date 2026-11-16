@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -350,4 +351,23 @@ resource "roll_secret" "copy" {
 			),
 		}},
 	})
+}
+
+// TestServeFakeRolld serves the fake on ROLL_FAKE_ROLLD_ADDR until the process is stopped, for
+// sdk/pulumi's end-to-end run (its e2e.sh); GET /fake/state answers what it holds. Skipped otherwise.
+func TestServeFakeRolld(t *testing.T) {
+	addr := os.Getenv("ROLL_FAKE_ROLLD_ADDR")
+	if addr == "" {
+		t.Skip("ROLL_FAKE_ROLLD_ADDR isn't set")
+	}
+	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
+	t.Fatal(http.ListenAndServe(addr, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/fake/state" {
+			f.ServeHTTP(w, r)
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"environments": f.envs, "keys": f.keys, "tokens": f.tokens})
+	})))
 }
