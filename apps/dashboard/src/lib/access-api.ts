@@ -480,7 +480,7 @@ export const accessApi = {
   machineClients: () => call<MachineClient[]>("GET", "/v1/access/clients"),
   createMachineClient: (c: NewMachineClient) => call<MadeMachineClient>("POST", "/v1/access/clients", c),
   /** A new key (or, without one, a new secret, in the answer this once), keeping the id. */
-  rotateMachineClient: (id: string, r: { public_jwk?: Record<string, string> | null; keep_old_for_s?: number }) =>
+  rotateMachineClient: (id: string, r: { public_jwk?: Record<string, string> | null; oidc?: TrustedIdentity | null; keep_old_for_s?: number }) =>
     call<{ grant: Grant; client_secret?: string }>("POST", `/v1/access/clients/${encodeURIComponent(id)}/rotate`, r),
   catalog: () => call<Catalog>("GET", "/v1/access/catalog"),
   tokens: () => call<Grant[]>("GET", "/v1/access/tokens"),

@@ -88,15 +88,25 @@ export function MachineClients({ clients, refresh }: { clients: MachineClient[];
 function RotateClient({ client, refresh }: { client: MachineClient; refresh: () => Promise<void> }) {
   const [open, setOpen] = useState(false);
   const [keep, setKeep] = useState(0);
+  // What it rotates to: a new secret, a key, or CI's own identity (the checkup's fix).
+  const [to, setTo] = useState<"github" | "key" | "secret">("github");
   const [key, setKey] = useState("");
+  const [repo, setRepo] = useState("");
+  const [ref, setRef] = useState("refs/heads/main");
   const [secret, setSecret] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { copied, copy } = useCopy();
-  const parsed = key.trim() ? publicJwk(key) : null;
+  const parsed = to === "key" && key.trim() ? publicJwk(key) : null;
+  const github = to === "github" ? githubIdentity(repo, ref) : null;
+  const problem = (parsed && "problem" in parsed && parsed.problem) || (github && "problem" in github && github.problem) || (to === "key" && !key.trim() ? "Paste the new public key" : null);
   const rotate = async () => {
     setError(null);
     try {
-      const r = await accessApi.rotateMachineClient(client.client_id, { public_jwk: parsed && "jwk" in parsed ? parsed.jwk : null, keep_old_for_s: KEEP_OLD[keep].s });
+      const r = await accessApi.rotateMachineClient(client.client_id, {
+        public_jwk: parsed && "jwk" in parsed ? parsed.jwk : null,
+        oidc: github && "identity" in github ? github.identity : null,
+        keep_old_for_s: KEEP_OLD[keep].s,
+      });
       setSecret(r.client_secret ?? null);
       setOpen(false);
       setKey("");
@@ -121,13 +131,24 @@ function RotateClient({ client, refresh }: { client: MachineClient; refresh: () 
     );
   return (
     <span className="rise flex min-w-0 flex-1 flex-wrap items-center gap-2">
-      {client.signs_with_key && (
+      <select value={to} onChange={(e) => setTo(e.target.value as typeof to)} aria-label="Rotate to" className={`${input} text-[12px]`}>
+        <option value="github">To GitHub Actions</option>
+        <option value="key">To a new key</option>
+        <option value="secret">To a new secret</option>
+      </select>
+      {to === "github" && (
+        <>
+          <input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="owner/repo" spellCheck={false} className={`${input} w-40 font-mono text-[12px]`} />
+          <input value={ref} onChange={(e) => setRef(e.target.value)} placeholder="any ref" spellCheck={false} className={`${input} w-40 font-mono text-[12px]`} />
+        </>
+      )}
+      {to === "key" && (
         <textarea
           value={key}
           onChange={(e) => setKey(e.target.value)}
           rows={1}
           spellCheck={false}
-          placeholder="The new public key (PEM or JWK); empty: switch to a secret"
+          placeholder="The new public key (PEM or JWK)"
           className={`${input} min-w-64 flex-1 resize-y font-mono text-[12px]`}
         />
       )}
@@ -141,13 +162,13 @@ function RotateClient({ client, refresh }: { client: MachineClient; refresh: () 
           ))}
         </select>
       </label>
-      <button onClick={rotate} disabled={!!parsed && "problem" in parsed} className={btn}>
-        {parsed && "jwk" in parsed ? "Use this key" : "New secret"}
+      <button onClick={rotate} disabled={!!problem} className={btn}>
+        Rotate
       </button>
       <button onClick={() => setOpen(false)} className="text-muted hover:text-fg">
         Cancel
       </button>
-      {parsed && "problem" in parsed && <span className="text-subtle">{parsed.problem}</span>}
+      {problem && <span className="text-subtle">{problem}</span>}
       {error && <span className="text-danger">{error}</span>}
     </span>
   );
