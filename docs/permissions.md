@@ -636,6 +636,16 @@ page's "Once ▾", `roll mcp approve --remember 1h`):
   (`DELETE /v1/access/tokens/{id}/temporary/{approval}`), and with it
   the approval when its request hasn't used it (the rule may have run that request instead).
 
+### What a product is told about an approval
+
+A request that runs because of an approval carries `roll_auth::Approved {id, by, until}` beside its
+`Grant`, so the product's own audit can say "revealed by token X, approved by Y" (roll secrets'
+audit and timeline do). `until` is `None` when the approval let this one request run, and when a
+rule remembered for a while allowed it, it's when that rule lapses (the longest-lasting one that
+covers it). A rule remembered for good is one of the grant's rules, so it names no approval; its
+change is in the access audit. The gate's own audit row names the approval either way. Only the
+node that decided sets it: a request forwarded to an owner after the decision doesn't carry it.
+
 ### Approvals in chat
 
 Approvals can also go to a Slack or Discord channel, through roll code's chat ops

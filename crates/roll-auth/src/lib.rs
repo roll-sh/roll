@@ -156,6 +156,26 @@ impl fmt::Debug for Grant {
     }
 }
 
+/// In a grant's request when a person's approval is what let it run: this one request approved
+/// (`until: None`), or a rule an approval allowed for a while (`until`: when that rule lapses). A
+/// product's audit names it ("revealed by token X, approved by Y"). Set only by the gate, on the
+/// node that decided: a request forwarded to an owner after the decision doesn't carry it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Approved {
+    /// `apr_…`
+    pub id: Arc<str>,
+    /// Who decided it, as the approvals page names them (`operator`, a person's `usr_…`).
+    pub by: Option<Arc<str>>,
+    /// Unix ms: the remembered rule that allowed it lasts until then. `None`: this request alone.
+    pub until: Option<i64>,
+}
+
+impl Approved {
+    pub fn on(extensions: &axum::http::Extensions) -> Option<&Approved> {
+        extensions.get::<Approved>()
+    }
+}
+
 /// In an allowed grant's request: the client's address as the gate saw it. Requests a product
 /// makes on the caller's behalf (roll code's agents relay) carry it on, so an IP allowlist holds
 /// for them too. Set only by the gate: extensions never come from the wire.

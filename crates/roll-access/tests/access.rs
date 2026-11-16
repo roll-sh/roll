@@ -86,7 +86,8 @@ struct Daemon {
 
 /// What the stand-in products saw: the operator's marker and a grant.
 fn seen(ext: &axum::http::Extensions) -> Value {
-    json!({ "operator": roll_auth::Operator::on(ext), "grant": roll_auth::Grant::on(ext).map(|g| g.id.to_string()) })
+    let approved = roll_auth::Approved::on(ext).map(|a| json!({ "id": &*a.id, "by": a.by.as_deref(), "until": a.until }));
+    json!({ "operator": roll_auth::Operator::on(ext), "grant": roll_auth::Grant::on(ext).map(|g| g.id.to_string()), "approved": approved })
 }
 
 fn postgres() -> Router {
@@ -1285,11 +1286,21 @@ async fn approvals_can_be_remembered() {
     };
     assert_eq!(approve(apr.clone(), json!("forever")).await.0, StatusCode::BAD_REQUEST, "nothing is decided");
     assert_eq!(approve(apr.clone(), json!("1h")).await.0, StatusCode::OK);
-    assert_eq!(d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await.0, StatusCode::OK);
+    // The product is told which approval let the request run, who decided it and, for a
+    // remembered rule, until when (its audit names them).
+    let (s, ran) = d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await;
+    assert_eq!((s, ran["approved"]["id"].as_str(), ran["approved"]["by"].as_str()), (StatusCode::OK, Some(apr.as_str()), Some("operator")), "{ran}");
     let hour = apr.clone();
     // For an hour: the same request runs without asking; another project still asks.
-    assert_eq!(ask("pa").await.0, StatusCode::OK);
-    assert_eq!(ask("pb").await.1["code"], "approval_pending");
+    let (s, ran) = ask("pa").await;
+    assert_eq!((s, ran["approved"]["id"].as_str(), ran["approved"]["until"].is_i64()), (StatusCode::OK, Some(hour.as_str()), true), "{ran}");
+    let (_, pending) = ask("pb").await;
+    assert_eq!(pending["code"], "approval_pending");
+    // Approved once: that request alone (no until).
+    let once = pending["approval"].as_str().unwrap().to_string();
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{once}/approve"), Some(json!({}))).await.0, StatusCode::OK);
+    let (s, ran) = d.send(&token, Method::DELETE, "/v1/projects/pb", None, &[("x-roll-approval", &once)]).await;
+    assert_eq!((s, ran["approved"]["id"].as_str(), ran["approved"]["until"].is_null()), (StatusCode::OK, Some(once.as_str()), true), "{ran}");
     // A while never becomes for good through a token it makes.
     let child = json!({ "name": "child", "rules": [{ "product": "postgres", "resources": [{ "id": "pa" }], "actions": { "delete": "allow" } }] });
     assert_eq!(d.call(&token, Method::POST, "/v1/access/tokens", Some(child)).await.0, StatusCode::FORBIDDEN);
