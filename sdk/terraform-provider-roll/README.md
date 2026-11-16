@@ -61,6 +61,7 @@ data "roll_secrets_values" "production" {
 resource "roll_app_service" "web" {
   name          = "web"
   git_url       = "https://github.com/acme/web"   # or image, or repo (roll code); none: roll up
+  # git_username = "deploy"; git_token = var.gitlab_token   # a private repository's login
   max_instances = 3
 }
 

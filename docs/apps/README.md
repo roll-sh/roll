@@ -1340,8 +1340,8 @@ the rest of a public repository's checks is unauthenticated and rate-limited per
 
 `sdk/terraform-provider-roll` (roll secrets' provider) has roll apps' resources too
 (Render's, Heroku's and Vercel's providers): `roll_app_service` (a name, an image, a roll code
-repo or a Git URL, its root and branch, its type, port, start command and size; importable by
-id), `roll_app_variable` (sensitive, `sealed` replaces it, never read back) and `roll_app_domain`
+repo or a Git URL, its root and branch, its type, port, start command and size, and a private
+repository's `git_username` and sensitive `git_token`, never read back; importable by id), `roll_app_variable` (sensitive, `sealed` replaces it, never read back) and `roll_app_domain`
 (its `target` to point a CNAME at; importable as `svc_…/<env>/<host>`), `roll_app_environment`
 (another environment: its branch, wait for CI, variables copied from another when it's made;
 `svc_…/<name>`), `roll_app_link` (a resource's connection variables; the prefix changes in place

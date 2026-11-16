@@ -26,6 +26,7 @@ type fakeApps struct {
 	envs     map[string]map[string]any // svc/env → Environment (not production)
 	links    map[string]map[string]any // svc/kind/ref → Link
 	notify   map[string]map[string]any // id → NotifyTarget (+ url)
+	logins   map[string]string         // svc → "user:token"
 }
 
 // project answers /v1/apps/projects/prj_a/…: its services and notification targets.
@@ -123,6 +124,9 @@ func (f *fakeApps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s := map[string]any{"id": id, "project": body["project"], "name": body["name"], "source": body["source"], "run": run, "environments": []any{map[string]any{"name": "production", "url": fmt.Sprintf("https://%s.up.roll.site", body["name"])}}}
 		f.services[id] = s
+		if l, ok := body["git_login"].(map[string]any); ok {
+			f.logins[id] = fmt.Sprintf("%s:%s", l["username"], l["password"])
+		}
 		write(201, s)
 		return
 	}
@@ -140,8 +144,18 @@ func (f *fakeApps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		case http.MethodDelete:
 			delete(f.services, parts[0])
+			delete(f.logins, parts[0])
 			write(204, nil)
 			return
+		}
+		write(200, s)
+		return
+	}
+	if parts[1] == "git-login" {
+		if r.Method == http.MethodDelete {
+			delete(f.logins, parts[0])
+		} else {
+			f.logins[parts[0]] = fmt.Sprintf("%s:%s", body["username"], body["password"])
 		}
 		write(200, s)
 		return
@@ -259,9 +273,16 @@ func asList(v any) []string {
 	return out
 }
 
-// The environment, link, notification target and data source each step adds: the branch, the
-// link's prefix line, the target's filter line, and how the data source names the service.
+// The private Git service, environment, link, notification target and data source each step
+// adds: the Git token, the branch, the link's prefix line, the target's filter line, and how the
+// data source names the service.
 const more = `
+resource "roll_app_service" "site" {
+  name         = "site"
+  git_url      = "https://gitlab.example.com/acme/site"
+  git_username = "deploy"
+  git_token    = %q
+}
 resource "roll_app_environment" "staging" {
   service = roll_app_service.web.id
   name    = "staging"
@@ -283,6 +304,18 @@ data "roll_app_service" "web" {
 }
 `
 
+// loginIs checks the Git login the fake keeps for the service named `name`.
+func loginIs(f *fakeApps, name, want string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for id, s := range f.services {
+		if s["name"] == name && f.logins[id] == want {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s's login isn't %s: %v", name, want, f.logins)
+}
+
 func idOf(name string) resource.ImportStateIdFunc {
 	return func(s *terraform.State) (string, error) {
 		return s.RootModule().Resources[name].Primary.Attributes["id"], nil
@@ -290,7 +323,7 @@ func idOf(name string) resource.ImportStateIdFunc {
 }
 
 func TestAppsAsCode(t *testing.T) {
-	f := &fakeApps{services: map[string]map[string]any{}, vars: map[string]map[string]any{}, domains: map[string]map[string]any{}, envs: map[string]map[string]any{}, links: map[string]map[string]any{}, notify: map[string]map[string]any{}}
+	f := &fakeApps{services: map[string]map[string]any{}, vars: map[string]map[string]any{}, domains: map[string]map[string]any{}, envs: map[string]map[string]any{}, links: map[string]map[string]any{}, notify: map[string]map[string]any{}, logins: map[string]string{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
 	config := func(max int, level string, more string) string {
@@ -338,7 +371,7 @@ resource "roll_app_domain" "www" {
 		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){"roll": providerserver.NewProtocol6WithError(New("test")())},
 		Steps: []resource.TestStep{
 			{
-				Config: config(2, "info", fmt.Sprintf(more, "main", `prefix = "ORDERS"`, `events = ["deploy.failed"]`, "id = roll_app_service.web.id")),
+				Config: config(2, "info", fmt.Sprintf(more, "glpat-1", "main", `prefix = "ORDERS"`, `events = ["deploy.failed"]`, "id = roll_app_service.web.id")),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("roll_app_service.web", "url", "https://web.up.roll.site"),
 					resource.TestCheckResourceAttr("roll_app_service.web", "max_instances", "2"),
@@ -347,6 +380,7 @@ resource "roll_app_domain" "www" {
 					resource.TestCheckResourceAttr("roll_app_domain.www", "target", "edge.up.roll.site"),
 					resource.TestCheckResourceAttr("roll_app_environment.staging", "url", "https://web-staging.up.roll.site"),
 					resource.TestCheckResourceAttr("roll_app_environment.staging", "branch", "main"),
+					func(*terraform.State) error { return loginIs(f, "site", "deploy:glpat-1") },
 					resource.TestCheckResourceAttr("roll_app_link.orders", "vars.0", "ORDERS_DATABASE_URL"),
 					resource.TestCheckResourceAttr("roll_app_notification.hook", "secret", "whsec_1"),
 					resource.TestCheckResourceAttr("roll_app_notification.hook", "events.#", "1"),
@@ -361,10 +395,11 @@ resource "roll_app_domain" "www" {
 			},
 			{
 				// Changed in place: the service's size, the variable's value, the environment's branch, the link's prefix and the target's filters (its secret stays).
-				Config: config(3, "debug", fmt.Sprintf(more, "develop", `prefix = "SHOP"`, `environments = ["production"]`, `name = "web"`)),
+				Config: config(3, "debug", fmt.Sprintf(more, "glpat-2", "develop", `prefix = "SHOP"`, `environments = ["production"]`, `name = "web"`)),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("roll_app_service.web", "max_instances", "3"),
 					resource.TestCheckResourceAttr("roll_app_environment.staging", "branch", "develop"),
+					func(*terraform.State) error { return loginIs(f, "site", "deploy:glpat-2") },
 					resource.TestCheckResourceAttr("roll_app_link.orders", "vars.0", "SHOP_DATABASE_URL"),
 					resource.TestCheckResourceAttr("roll_app_notification.hook", "environments.0", "production"),
 					resource.TestCheckResourceAttr("roll_app_notification.hook", "events.#", "2"),
@@ -397,7 +432,7 @@ resource "roll_app_domain" "www" {
 		CheckDestroy: func(*terraform.State) error {
 			f.mu.Lock()
 			defer f.mu.Unlock()
-			if len(f.services)+len(f.vars)+len(f.domains)+len(f.envs)+len(f.links)+len(f.notify) != 0 {
+			if len(f.services)+len(f.vars)+len(f.domains)+len(f.envs)+len(f.links)+len(f.notify)+len(f.logins) != 0 {
 				return fmt.Errorf("left behind: %v %v %v %v %v %v", f.services, f.vars, f.domains, f.envs, f.links, f.notify)
 			}
 			return nil
