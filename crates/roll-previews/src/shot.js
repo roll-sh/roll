@@ -520,6 +520,48 @@ const moves = async (sessionId, first) => {
     }
   } catch {}
   fs.writeFileSync(process.env.OUT + ".pages.json", JSON.stringify(pages));
+  // The open notes' elements ($CROPS: [{note, path, selector}], checked by roll), each found by
+  // its selector in roll's world on its page at the desktop width, scrolled into view and cropped
+  // with a margin, to $OUT.crop.<n>.png; which note each is to $OUT.crops.json. A selector that
+  // finds nothing, or nothing visible, is left out. Best effort, as the pages are.
+  const crops = [];
+  try {
+    const asked = JSON.parse(process.env.CROPS || "[]").filter((c) => c && typeof c.note === "string" && typeof c.path === "string" && typeof c.selector === "string").slice(0, 10);
+    await send("Emulation.clearDeviceMetricsOverride", {}, sessionId);
+    for (const c of asked) {
+      if (!/^\/(?!\/)[^\s#"'`\\]{0,199}$/.test(c.path)) continue;
+      const done = once("Page.loadEventFired");
+      await send("Page.navigate", { url: new URL(c.path, process.env.URL).href }, sessionId);
+      await Promise.race([done, sleep(10000)]);
+      await sleep(300);
+      await still(sessionId);
+      const r = await Promise.race([
+        check(
+          {
+            expression: `JSON.stringify((() => { const el = document.querySelector(${JSON.stringify(c.selector)}); if (!el) return null; el.scrollIntoView({ block: "center", inline: "center" }); const b = el.getBoundingClientRect(); return b.width > 0 && b.height > 0 ? { x: b.left + scrollX, y: b.top + scrollY, w: b.width, h: b.height } : null; })())`,
+            returnByValue: true,
+          },
+          sessionId,
+        ),
+        sleep(5000).then(() => null),
+      ]);
+      let box = null;
+      try {
+        box = JSON.parse(r?.result?.value || "null");
+      } catch {}
+      if (!box || ![box.x, box.y, box.w, box.h].every(Number.isFinite)) continue;
+      await sleep(150);
+      // A margin around it, at most 1280 by 800 (a huge element is cropped to its top left).
+      const m = 24;
+      const x = Math.max(0, box.x - m), y = Math.max(0, box.y - m);
+      const clip = { x, y, width: Math.min(box.w + 2 * m, 1280), height: Math.min(box.h + 2 * m, 800), scale: 1 };
+      const shot = await send("Page.captureScreenshot", { format: "png", clip, captureBeyondViewport: true }, sessionId).catch(() => null);
+      if (!shot) continue;
+      fs.writeFileSync(`${process.env.OUT}.crop.${crops.length}.png`, Buffer.from(shot.data, "base64"));
+      crops.push({ note: c.note, n: crops.length });
+    }
+  } catch {}
+  fs.writeFileSync(process.env.OUT + ".crops.json", JSON.stringify(crops));
   chrome.kill();
   process.exit(0);
 })().catch((e) => {

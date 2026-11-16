@@ -405,6 +405,16 @@ export async function qrUrl(id: string, service?: string): Promise<string> {
   return URL.createObjectURL(await res.blob());
 }
 
+/** A picture of a note's element, as a screenshot run cropped it (an object URL; revoke it when
+ * done), or `null` while it has none. */
+export async function noteCropUrl(id: string, note: string): Promise<string | null> {
+  const res = await fetch(`${ROLL_API}${one(id)}/notes/${encodeURIComponent(note)}/crop`, { headers: apiHeaders(), cache: "no-store" });
+  onApiStatus(res.status);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
+  return URL.createObjectURL(await res.blob());
+}
+
 export async function screenshotUrl(id: string, previous = false, phone = false, base = false, page?: string, diff?: "base" | "previous"): Promise<string> {
   const q = [previous ? "previous=1" : "", phone ? "view=phone" : "", base ? "base=1" : "", page ? `page=${encodeURIComponent(page)}` : "", diff ? `diff=${diff}` : ""].filter(Boolean).join("&");
   const res = await fetch(`${ROLL_API}${one(id)}/screenshot${q ? `?${q}` : ""}`, { headers: apiHeaders(), cache: "no-store" });
