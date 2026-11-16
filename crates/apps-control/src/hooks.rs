@@ -61,6 +61,19 @@ impl Apps {
                 Push::Ping => return Ok(HookOutcome::Ignored("pong".into())),
                 Push::Plain => {}
                 Push::Ignored(why) => return Ok(HookOutcome::Ignored(why)),
+                Push::Pull(pull) => {
+                    let Source::Git { url, .. } = &svc.source else { unreachable!("matched above") };
+                    let Some(pushes) = self.pushes.get().filter(|p| p.takes_pulls()) else { return Ok(HookOutcome::Ignored(format!("pull request {}: roll previews here doesn't take pull requests", pull.number))) };
+                    // A same-repository one from a branch an environment follows is that
+                    // environment's: no second, preview copy of it.
+                    if !pull.fork {
+                        let (sid, b) = (service.to_string(), pull.branch.clone());
+                        if self.db(move |s| Ok(s.environments(&sid)?.iter().any(|e| !e.ephemeral && e.branch.as_deref() == Some(b.as_str())))).await? {
+                            return Ok(HookOutcome::Ignored(format!("pull request {}: {} is an environment's branch", pull.number, pull.branch)));
+                        }
+                    }
+                    return Ok(HookOutcome::Ignored(self.hand_pull_to_previews(pushes.clone(), service, url, pull).await));
+                }
                 Push::Branches(moved) => {
                     let Source::Git { url, .. } = &svc.source else { unreachable!("matched above") };
                     // One webhook for every environment (Render's, Railway's): each branch the push
@@ -198,9 +211,50 @@ impl Apps {
             return format!("a push to {branch}, but the repository has it {}", now.map_or("deleted".to_string(), |s| format!("at {}", &s[..12.min(s.len())])));
         }
         let what = if sha.is_some() { "for its preview" } else { "deleted: its preview goes" };
-        pushes.pushed(crate::integrations::GitPush { service: service.to_string(), url: url.to_string(), branch: branch.clone(), sha, message }).await;
+        pushes.pushed(crate::integrations::GitPush { service: service.to_string(), url: url.to_string(), branch: branch.clone(), sha, message, pull: None }).await;
         format!("a push to {branch}, handed to roll previews {what}")
     }
+
+    /// A pull request opened, moved or closed, for roll previews: its head checked against the
+    /// repository (a same-repository one's branch, a fork's `refs/pull/N/head` or GitLab's
+    /// `refs/merge-requests/N/head`), so a body can't name a commit that isn't its head, and a
+    /// forged `fork: false` can't pass a fork's commit off as a branch's. A close isn't checked
+    /// (the head ref stays): at worst a forged one takes a preview down, as a forged branch
+    /// deletion would. What the hook answers.
+    async fn hand_pull_to_previews(self: &Arc<Self>, pushes: Arc<dyn crate::integrations::GitPushes>, service: &str, url: &str, p: PullEvent) -> String {
+        let PullEvent { number, title, branch, sha, fork, gitlab } = p;
+        let page = format!("{}{}{number}", url.trim_end_matches('/').trim_end_matches(".git"), if gitlab { "/-/merge_requests/" } else { "/pull/" });
+        let branch = if fork { format!("pull/{number}") } else { branch };
+        if let Some(sha) = &sha {
+            let head = if !fork {
+                format!("refs/heads/{branch}")
+            } else if gitlab {
+                format!("refs/merge-requests/{number}/head")
+            } else {
+                format!("refs/pull/{number}/head")
+            };
+            match self.git_remote(service, url).await.ref_at(&head).await {
+                Ok(Some(now)) if now == *sha => {}
+                Ok(now) => return format!("pull request {number}: the repository has {head} {}, not {}", now.map_or("missing".to_string(), |n| format!("at {}", &n[..12])), &sha[..12]),
+                Err(e) => return format!("pull request {number}: the repository didn't answer ({e:#})"),
+            }
+        }
+        let what = if sha.is_some() { "for its preview" } else { "closed: its preview goes" };
+        let pull = crate::integrations::GitPull { number, title: title.chars().take(200).collect(), url: page, fork };
+        pushes.pushed(crate::integrations::GitPush { service: service.to_string(), url: url.to_string(), branch, sha, message: String::new(), pull: Some(pull) }).await;
+        format!("pull request {number}, handed to roll previews {what}")
+    }
+}
+
+/// A pull request's (GitHub) or merge request's (GitLab) event: its head now (none: closed).
+struct PullEvent {
+    number: u64,
+    title: String,
+    /// Its head's branch (in the fork, for a fork's).
+    branch: String,
+    sha: Option<String>,
+    fork: bool,
+    gitlab: bool,
 }
 
 /// A branch a push moved to `sha` (none: it was deleted).
@@ -212,6 +266,8 @@ struct BranchPush {
 
 enum Push {
     Ping,
+    /// A pull request opened, moved, reopened or closed.
+    Pull(PullEvent),
     /// The branches it moved (one, but for Bitbucket's that move several).
     Branches(Vec<BranchPush>),
     /// An empty body (CI's POST): a plain deploy.
@@ -224,6 +280,9 @@ fn push_of(w: &Webhook) -> Push {
     let p = &w.body;
     if w.event.as_deref() == Some("ping") || (p.get("zen").is_some() && p.get("hook_id").is_some()) {
         return Push::Ping;
+    }
+    if let Some(pull) = pull_of(w) {
+        return pull;
     }
     if let Some(e) = w.event.as_deref().filter(|e| !matches!(*e, "push" | "Push Hook" | "repo:push")) {
         return Push::Ignored(format!("a {e} event isn't a push"));
@@ -253,6 +312,38 @@ fn push_of(w: &Webhook) -> Push {
     let sha = p["after"].as_str().or(p["checkout_sha"].as_str()).filter(|s| hex(s));
     let message = p["head_commit"]["message"].as_str().or_else(|| p["commits"].as_array().and_then(|c| c.last()).and_then(|c| c["message"].as_str())).unwrap_or("");
     Push::Branches(vec![BranchPush { branch: branch.to_string(), sha: sha.map(str::to_ascii_lowercase), message: message.to_string() }])
+}
+
+/// GitHub's `pull_request` or GitLab's `Merge Request Hook` event as a [`Push::Pull`]; None
+/// for any other event. Fork or not is the head's repository against the base's, by id.
+fn pull_of(w: &Webhook) -> Option<Push> {
+    let p = &w.body;
+    let hex = |s: &str| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    let (number, title, branch, sha, fork, gitlab, action) = match w.event.as_deref()? {
+        "pull_request" => {
+            let pr = &p["pull_request"];
+            let fork = pr["head"]["repo"]["id"].as_u64().is_none() || pr["head"]["repo"]["id"] != pr["base"]["repo"]["id"];
+            (pr["number"].as_u64().or(p["number"].as_u64()), pr["title"].as_str(), pr["head"]["ref"].as_str(), pr["head"]["sha"].as_str(), fork, false, p["action"].as_str().unwrap_or(""))
+        }
+        "Merge Request Hook" => {
+            let mr = &p["object_attributes"];
+            let fork = mr["source_project_id"].as_u64().is_none() || mr["source_project_id"] != mr["target_project_id"];
+            (mr["iid"].as_u64(), mr["title"].as_str(), mr["source_branch"].as_str(), mr["last_commit"]["id"].as_str(), fork, true, mr["action"].as_str().unwrap_or(""))
+        }
+        _ => return None,
+    };
+    let (Some(number), Some(branch)) = (number, branch.filter(|b| !b.is_empty() && b.len() <= 255)) else { return Some(Push::Ignored("a pull request without its number or branch".into())) };
+    let open = matches!(action, "opened" | "synchronize" | "reopened" | "open" | "update" | "reopen");
+    let closed = matches!(action, "closed" | "close" | "merge");
+    if !open && !closed {
+        return Some(Push::Ignored(format!("pull request {number} {action}: nothing to deploy")));
+    }
+    let sha = match (open, sha.filter(|s| hex(s))) {
+        (true, Some(s)) => Some(s.to_ascii_lowercase()),
+        (true, None) => return Some(Push::Ignored(format!("pull request {number} names no head commit"))),
+        (false, _) => None,
+    };
+    Some(Push::Pull(PullEvent { number, title: title.unwrap_or("").to_string(), branch: branch.to_string(), sha, fork, gitlab }))
 }
 
 /// A hook's token: `rlk_`, 34 random characters of lowercase base32 and 6 of CRC-32, as roll's
