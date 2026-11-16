@@ -48,13 +48,9 @@ export function MachineClients({ clients, refresh }: { clients: MachineClient[];
       <ul className="divide-y divide-line">
         {live.map((c) => (
           <li key={c.client_id}>
-            <div className="flex items-center gap-2 px-5 pt-3 text-[12px] text-subtle">
-              <span className="font-mono">{c.client_id}</span>
-              <span>·</span>
-              <span>{c.signs_with_key ? "signs with a key" : "a secret"}</span>
-            </div>
+            <div className="px-5 pt-3 font-mono text-[12px] text-subtle">{c.client_id}</div>
             <ul>
-              <GrantRow g={c.grant} refresh={refresh} />
+              <GrantRow g={c.grant} refresh={refresh} kindLabel={c.signs_with_key ? "signs with a key" : "signs with a secret"} />
             </ul>
           </li>
         ))}

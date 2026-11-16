@@ -377,7 +377,7 @@ const REACH_TONE: Record<ReturnType<typeof reach>, string> = {
 let me: Promise<{ kind: string }> | null = null;
 const meOnce = () => (me ??= accessApi.me().catch(() => ({ kind: "unknown" })));
 
-export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () => Promise<void>; linked?: boolean }) {
+export function GrantRow({ g, refresh, linked = true, kindLabel }: { g: Grant; refresh: () => Promise<void>; linked?: boolean; kindLabel?: string }) {
   const ws = useWorkspace();
   const projectName = (id: string) => ws.projects.find((p) => p.id === id)?.name ?? id;
   const [open, setOpen] = useState(false);
@@ -451,7 +451,7 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
             ) : (
               <span className="truncate text-[14px] font-medium">{g.name}</span>
             )}
-            <span className="rounded border border-line px-1.5 text-[11px] text-subtle">{g.kind === "oauth" ? (g.client?.name ?? "OAuth") : g.kind}</span>
+            <span className="rounded border border-line px-1.5 text-[11px] text-subtle">{kindLabel ?? (g.kind === "oauth" ? (g.client?.name ?? "OAuth") : g.kind)}</span>
             {g.pending && status === "active" && <span className="rounded border border-accent/50 px-1.5 text-[11px] text-accent">waits for an admin</span>}
             {g.pending && admin && status === "active" && (
               <span className="flex items-center gap-1.5">
