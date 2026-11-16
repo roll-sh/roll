@@ -1468,6 +1468,68 @@ async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
     assert_eq!(search(signed["access_token"].as_str().unwrap().to_string()).await, StatusCode::UNAUTHORIZED);
 }
 
+/// A machine client can trust CI's own OIDC token instead of holding a credential (trusted
+/// publishing): a token from its repository and branch signs in for an hour's token within its
+/// rules; anyone else's, another audience, an expired one or one another key signed doesn't, and a
+/// shared issuer's identity must name one repository.
+#[tokio::test]
+async fn a_ci_job_signs_in_with_its_own_oidc_token() {
+    use base64::Engine;
+    use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+    let d = Daemon::new(50);
+    let rng = ring::rand::SystemRandom::new();
+    let pair = |rng: &ring::rand::SystemRandom| {
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, rng).unwrap();
+        let point = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), rng).unwrap().public_key().as_ref().to_vec();
+        (pkcs8.as_ref().to_vec(), point)
+    };
+    let (ci_key, ci_point) = pair(&rng);
+    let (other_key, _) = pair(&rng);
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    // GitHub's issuer, its keys pinned (no fetch in a test).
+    let jwks = json!({ "keys": [{ "kty": "EC", "crv": "P-256", "kid": "gh1", "x": b64(&ci_point[1..33]), "y": b64(&ci_point[33..]) }] }).to_string();
+    let gh = "https://token.actions.githubusercontent.com";
+    let rules = json!([{ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "read": "allow" } }]);
+    let open = json!({ "name": "deploy", "rules": rules, "oidc": { "issuer": gh, "subject": "repo:*", "jwks": jwks } });
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/clients", Some(open)).await.0, StatusCode::BAD_REQUEST, "a shared issuer's identity names one repository");
+    let body = json!({ "name": "deploy", "rules": rules, "oidc": { "issuer": gh, "subject": "repo:acme/web:ref:refs/heads/main", "claims": { "repository_owner_id": "42" }, "jwks": jwks } });
+    let (s, made) = d.call(OPERATOR, Method::POST, "/v1/access/clients", Some(body)).await;
+    assert!(s == StatusCode::CREATED && made.get("client_secret").is_none(), "{made}");
+    let id = made["client_id"].as_str().unwrap().to_string();
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/clients", None).await;
+    let trusts = &list.as_array().unwrap().iter().find(|c| c["client_id"] == id.as_str()).unwrap()["trusts"];
+    assert_eq!((trusts["subject"].as_str(), trusts["pinned_keys"].as_u64()), (Some("repo:acme/web:ref:refs/heads/main"), Some(1)), "{trusts}");
+    let aud = trusts["audience"].as_str().unwrap().to_string();
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let mint = |key: &[u8], claims: Value| {
+        let mut h = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        h.kid = Some("gh1".into());
+        jsonwebtoken::encode(&h, &claims, &jsonwebtoken::EncodingKey::from_ec_der(key)).unwrap()
+    };
+    let claims = |sub: &str, aud: &str, exp: i64| json!({ "iss": gh, "sub": sub, "aud": aud, "exp": exp, "iat": now, "repository_owner_id": "42" });
+    let sign_in = |jwt: String| {
+        let (d, id) = (&d, id.clone());
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("client_id", &id), ("assertion", &jwt)]).await }
+    };
+    let (s, got) = sign_in(mint(&ci_key, claims("repo:acme/web:ref:refs/heads/main", &aud, now + 300))).await;
+    assert_eq!(s, StatusCode::OK, "{got}");
+    let token = got["access_token"].as_str().unwrap().to_string();
+    assert_eq!(d.call(&token, Method::POST, "/v1/search/clusters/cl_1/indices/logs/search", Some(json!({}))).await.0, StatusCode::OK);
+    assert_eq!(d.call(&token, Method::GET, "/v1/secrets/projects/prj_a/transit", None).await.0, StatusCode::FORBIDDEN, "only what its rules allow");
+
+    for (why, jwt) in [
+        ("another repository", mint(&ci_key, claims("repo:evil/web:ref:refs/heads/main", &aud, now + 300))),
+        ("another branch", mint(&ci_key, claims("repo:acme/web:ref:refs/heads/dev", &aud, now + 300))),
+        ("another audience", mint(&ci_key, claims("repo:acme/web:ref:refs/heads/main", "https://elsewhere.example", now + 300))),
+        ("expired", mint(&ci_key, claims("repo:acme/web:ref:refs/heads/main", &aud, now - 600))),
+        ("another key", mint(&other_key, claims("repo:acme/web:ref:refs/heads/main", &aud, now + 300))),
+    ] {
+        let (s, e) = sign_in(jwt).await;
+        assert_eq!((s, e["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{why}: {e}");
+    }
+}
+
 /// A person's own machine client acts as them, as their tokens do: within their account's reach,
 /// theirs alone to see and revoke, past the policy only once an admin approves, and it stops when
 /// they can't sign in.

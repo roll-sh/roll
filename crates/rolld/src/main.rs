@@ -586,6 +586,8 @@ async fn run() -> anyhow::Result<()> {
     }
     // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
     access::sinks(&access);
+    // Trusted machine clients' issuers' keys: the guarded client roll secrets' identities use.
+    let _ = access.oidc_fetch.set(secrets::oidc_fetch(&args, !auth.enforcing()));
     // Approvals can be posted to a Slack channel through roll code's chat ops.
     if let Some(c) = &code {
         access::chat(&access, &c.code);

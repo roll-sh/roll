@@ -522,6 +522,13 @@ pub struct Access {
     pub(crate) github_keys: leaks::GithubKeys,
     /// OAuth registrations lately, per network (open registration's limit).
     pub(crate) registrations: std::sync::Mutex<Window>,
+    /// How OIDC issuers' keys are fetched for trusted machine clients: rolld's guarded client.
+    /// Unset: only clients with pinned keys sign in that way.
+    pub oidc_fetch: std::sync::OnceLock<Arc<dyn roll_oidc::Fetch + Send + Sync>>,
+    /// Issuers' keys, cached (roll-oidc's rules).
+    pub(crate) oidc_keys: roll_oidc::Keys,
+    /// Trusted clients' sign-ins lately, per client (a cap on work, per node).
+    pub(crate) oidc_logins: roll_oidc::Window,
     /// Device requests lately, per network (RFC 8628's device authorization is open too).
     pub(crate) device_starts: std::sync::Mutex<Window>,
     /// Wrong device codes entered lately, per caller: a user code is short, so guessing is bounded.
@@ -545,7 +552,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), oidc_logins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.

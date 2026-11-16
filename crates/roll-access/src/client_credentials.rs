@@ -7,6 +7,11 @@
 //!
 //! Every failure to authenticate answers the same `invalid_client`, so nothing tells an unknown
 //! client from a wrong credential.
+//!
+//! A client that trusts an identity instead signs in with RFC 7523's `jwt-bearer` grant: its CI's
+//! own OIDC token as the `assertion`, and its `client_id` (a shared issuer's token names no roll
+//! client). The token is checked by roll-oidc, as roll secrets' workload identities' are, then
+//! against the client's subject and claims ([`federated`]).
 
 use crate::{Access, Error, hash};
 use axum::http::HeaderMap;
@@ -14,6 +19,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub const GRANT: &str = "client_credentials";
+/// RFC 7523 §2.1: a JWT (here, CI's OIDC token) as an authorization grant.
+pub const JWT_GRANT: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
+/// A trusted client's sign-ins a minute, per node: a cap on work (fetching and verifying).
+const SIGN_INS_PER_MINUTE: u32 = 120;
 pub const JWT_BEARER: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 /// The signature algorithms a machine client's key may use.
 pub const ALGS: [&str; 3] = ["EdDSA", "ES256", "RS256"];
@@ -41,13 +50,7 @@ fn same(a: &str, b: &str) -> bool {
 /// The token for a machine client's request, or why not.
 pub async fn token(a: Arc<Access>, headers: &HeaderMap, f: &HashMap<String, String>) -> Result<(crate::store::Grant, String), Error> {
     let get = |k: &str| f.get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-    let api = a.config.api_url.trim_end_matches('/').to_string();
-    if let Some(r) = get("resource")
-        && r.trim_end_matches('/') != api
-        && r.trim_end_matches('/') != format!("{api}/v1/mcp")
-    {
-        return Err(Error::OAuth("invalid_target", "resource is roll's API or its MCP server".into()));
-    }
+    let api = check_resource(&a, f)?;
     let (client_id, assertion) = if let Some((id, secret)) = basic(headers).or_else(|| Some((get("client_id")?, get("client_secret")?))) {
         (id, Err(secret))
     } else if let (Some(kind), Some(jwt)) = (get("client_assertion_type"), get("client_assertion")) {
@@ -130,4 +133,67 @@ fn verify(jwt: &str, jwk: &str, client_id: &str, api: &str) -> Result<(String, i
     }
     let jti = data.claims["jti"].as_str().filter(|j| !j.is_empty() && j.len() <= 200).ok_or_else(|| bad("has no jti"))?;
     Ok((jti.to_string(), exp))
+}
+
+/// `resource`, if given, is roll's API or its MCP server: roll's API URL.
+fn check_resource(a: &Access, f: &HashMap<String, String>) -> Result<String, Error> {
+    let api = a.config.api_url.trim_end_matches('/').to_string();
+    if let Some(r) = f.get("resource").map(|v| v.trim()).filter(|v| !v.is_empty())
+        && r.trim_end_matches('/') != api
+        && r.trim_end_matches('/') != format!("{api}/v1/mcp")
+    {
+        return Err(Error::OAuth("invalid_target", "resource is roll's API or its MCP server".into()));
+    }
+    Ok(api)
+}
+
+/// The token for a trusted machine client's `jwt-bearer` grant: its CI's OIDC token checked
+/// against the identity it trusts (or, after a rotation that kept it, the one before).
+pub async fn federated(a: Arc<Access>, f: &HashMap<String, String>) -> Result<(crate::store::Grant, String), Error> {
+    check_resource(&a, f)?;
+    let get = |k: &str| f.get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let client_id = get("client_id").ok_or_else(|| Error::OAuth("invalid_request", "client_id names the machine client this token signs in as".into()))?;
+    let assertion = get("assertion").ok_or_else(|| Error::OAuth("invalid_request", "assertion is the CI's OIDC token".into()))?;
+    tokio::task::spawn_blocking(move || {
+        let refused = |why: String| Error::OAuth("invalid_grant", why);
+        let client = a.store.machine_client(&client_id)?.ok_or_else(|| refused("no machine client trusts this token".into()))?;
+        let identities: Vec<crate::store::TrustedIdentity> = [&client.oidc, &client.old_oidc].into_iter().flatten().filter_map(|o| serde_json::from_str(o).ok()).collect();
+        if identities.is_empty() {
+            return Err(refused("no machine client trusts this token".into()));
+        }
+        if !a.oidc_logins.allow(&client_id, SIGN_INS_PER_MINUTE) {
+            return Err(Error::TooMany(format!("at most {SIGN_INS_PER_MINUTE} sign-ins a minute for one machine client")));
+        }
+        let jwt = roll_oidc::Jwt::parse(&assertion).map_err(|e| refused(e.to_string()))?;
+        let now_s = code_sql::now_ms() / 1000;
+        let fetch = a.oidc_fetch.get().map(|f| f.as_ref() as &dyn roll_oidc::Fetch);
+        let mut why = String::new();
+        for i in &identities {
+            match a.oidc_keys.verify(fetch, i.jwks.as_deref(), &jwt, &i.issuer, &i.audience, now_s) {
+                Ok(()) => {}
+                // The issuer's keys couldn't be had: say so, it's not the token's fault.
+                Err(e @ (roll_oidc::Error::Unavailable(_) | roll_oidc::Error::Fetch(_) | roll_oidc::Error::Off)) => {
+                    why = format!("its issuer's keys couldn't be checked: {e}");
+                    continue;
+                }
+                Err(e) => {
+                    why = e.to_string();
+                    continue;
+                }
+            }
+            let sub = jwt.str("sub").unwrap_or_default();
+            if !roll_oidc::wildcard(&i.subject, sub) {
+                why = "the token's subject isn't the one this client trusts".into();
+                continue;
+            }
+            if let Some((k, _)) = i.claims.iter().find(|(k, want)| !jwt.str(k).is_some_and(|have| roll_oidc::wildcard(want, have))) {
+                why = format!("the token's {k} isn't the one this client trusts");
+                continue;
+            }
+            return a.store.issue_client_access(&client.grant_id, &client_id);
+        }
+        Err(refused(why))
+    })
+    .await
+    .map_err(|e| Error::Internal(e.to_string()))?
 }

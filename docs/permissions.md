@@ -147,6 +147,28 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
   - **`client_secret_basic` or `client_secret_post`:** a secret roll makes (`rlc_…`, shown once,
     stored as its hash, with a checksum, so a leaked one is found and revokes its client, as a
     leaked token does).
+  - **A trusted identity** (trusted publishing, as PyPI's and npm's; AWS's and GCP's workload
+    federation): CI's own OIDC token, so nothing is stored or held anywhere.
+    - **Making one:** `oidc: {issuer, audience?, subject, claims?, jwks?}` in place of a key or a
+      secret. The audience defaults to roll's API. `subject` is the token's `sub` or a pattern with
+      `*`. A shared issuer (GitHub Actions, GitLab.com, Terraform Cloud, Buildkite, Google) must
+      name one tenant literally (`repo:acme/web:…`), or anyone's job could sign in, and that rule is
+      never optional. `claims` are up to ten others that must match (`repository_owner_id`, `ref`).
+      `jwks` pins the issuer's keys for one roll can't reach.
+    - **Signing in:** RFC 7523's grant,
+      `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&client_id=mcl_…&assertion=<the OIDC token>`.
+      The client id is named because a shared issuer's token says nothing about which roll client
+      it's for.
+    - **What's checked:** `crates/roll-oidc`, the same code roll secrets' workload identities use
+      (moved there with the secrets thread's review): RS256 or ES256, `iss` exactly, `aud`, `exp`
+      and `nbf` with 60 s of leeway, a lifetime of at most a day, then the subject and the claims.
+      Keys are fetched only from the issuer named, through rolld's guarded client (public
+      addresses, no redirects, bounded reads), cached an hour, and refetched early for a new key
+      id at most every 30 s. Sign-ins are capped at 120 a minute per client. A refusal is
+      `invalid_grant`, and its text never holds the token.
+    - **From the CLI:** `roll token client create ci --product apps --allow read,deploy --github
+      acme/web [--ref refs/heads/main | --environment production]` prints the workflow step that
+      trades the job's token and exports a masked `ROLL_TOKEN`.
 - **The request:** `grant_type=client_credentials`; its `resource`, if any, must be roll's API or
   MCP server. The answer has no refresh token: the client trades its credential again for the
   next one. Every failure to authenticate is the same `invalid_client`, so an unknown client and a
@@ -172,7 +194,9 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
   mint another kind of credential.
 - **Tests:** `roll-access/tests/access.rs::a_machine_client_trades_its_credential_for_a_token_its_rules_bound`
   (secret and key, rules bounding the token, a replayed assertion, a leaked secret, a revoked
-  client); `a_persons_machine_client_acts_as_them`; `roll-cli/tests/token.rs::a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules`.
+  client); `a_persons_machine_client_acts_as_them`; `a_ci_job_signs_in_with_its_own_oidc_token`
+  (the right repository and branch sign in, within the rules; another repository, branch, audience,
+  key or an expired token is `invalid_grant`; a shared issuer's wildcard tenant is refused); `roll-cli/tests/token.rs::a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules`.
 
 ## The grant
 

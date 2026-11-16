@@ -15,7 +15,7 @@ mod device;
 pub use device::{DEVICE_TTL_MS, DeviceRequest, normalize_user_code, show_user_code};
 mod tasks;
 mod machine;
-pub use machine::{CLIENT_SECRET_PREFIX, ClientKey, MachineClient};
+pub use machine::{CLIENT_SECRET_PREFIX, ClientKey, ListedClient, MachineClient, TrustedIdentity};
 pub use tasks::{McpTask, TASK_STALE_MS, TASK_TTL_MS, TASKS_PER_OWNER, TaskUpdate, iso};
 
 const SCHEMA: &str = "
@@ -788,6 +788,9 @@ impl Store {
         db.add_column("oauth_clients", "old_secret_hash", "TEXT")?;
         db.add_column("oauth_clients", "old_jwk", "TEXT")?;
         db.add_column("oauth_clients", "old_until", "INTEGER")?;
+        // A trusted identity (CI's own OIDC tokens), and the one before a rotation.
+        db.add_column("oauth_clients", "oidc", "TEXT")?;
+        db.add_column("oauth_clients", "old_oidc", "TEXT")?;
         // Where an approval's chat card is (`{install, channel, ts}`), once posted.
         if !db.has_column("approvals", "chat")? {
             db.add_column("approvals", "chat", "TEXT")?;

@@ -73,7 +73,7 @@ async fn server_metadata(State(a): S) -> Json<Value> {
         "device_authorization_endpoint": format!("{api}/v1/access/oauth/device_authorization"),
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
-        "grant_types_supported": ["authorization_code", "refresh_token", DEVICE_GRANT, crate::client_credentials::GRANT],
+        "grant_types_supported": ["authorization_code", "refresh_token", DEVICE_GRANT, crate::client_credentials::GRANT, crate::client_credentials::JWT_GRANT],
         "code_challenge_methods_supported": ["S256"],
         // Public clients (none); machine clients by secret or by a key they sign with.
         "token_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post", "private_key_jwt"],
@@ -400,8 +400,14 @@ fn token_answer(grant: &crate::store::Grant, access: String, refresh: String) ->
 async fn token(State(a): S, headers: HeaderMap, Form(f): Form<HashMap<String, String>>) -> Response {
     let get = |k: &str| f.get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     // A machine client, with no person (its id may be in a header or its assertion).
-    if get("grant_type").as_deref() == Some(crate::client_credentials::GRANT) {
-        return match crate::client_credentials::token(a, &headers, &f).await {
+    let grant = get("grant_type");
+    if matches!(grant.as_deref(), Some(crate::client_credentials::GRANT | crate::client_credentials::JWT_GRANT)) {
+        let made = if grant.as_deref() == Some(crate::client_credentials::JWT_GRANT) {
+            crate::client_credentials::federated(a, &f).await
+        } else {
+            crate::client_credentials::token(a, &headers, &f).await
+        };
+        return match made {
             // No refresh token: the client trades its credential again for the next one.
             Ok((_, access)) => (
                 [(header::CACHE_CONTROL, "no-store"), (header::PRAGMA, "no-cache")],

@@ -130,6 +130,14 @@ async fn a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its
 
     assert!(roll(&api, "", &["token", "client", "revoke", client_id]).status.success());
     assert!(!roll(&api, &token, &["db", "list"]).status.success());
+
+    // GitHub Actions as the credential: the step to paste, and the one repository and ref trusted.
+    let made = roll(&api, "", &["token", "client", "create", "ci", "--preset", "read-only", "--github", "acme/web", "--ref", "refs/heads/main"]);
+    let step = String::from_utf8_lossy(&made.stdout);
+    assert!(made.status.success() && step.contains("grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer") && step.contains("::add-mask::"), "{step}");
+    let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
+    assert_eq!(list[0]["trusts"]["subject"], "repo:acme/web:ref:refs/heads/main");
+    assert!(!roll(&api, "", &["token", "client", "create", "x", "--preset", "read-only", "--github", "acme"]).status.success(), "owner/repo");
 }
 
 /// `roll login` signs a person's CLI in through the browser: it registers itself, the consent

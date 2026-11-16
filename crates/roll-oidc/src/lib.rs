@@ -52,8 +52,11 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// How an issuer's discovery document and keys are fetched: the caller's guarded client (HTTPS,
-/// public addresses, no redirects), at most `limit` bytes.
+/// How an issuer's discovery document and keys are fetched: the caller's guarded client, at most
+/// `limit` bytes. An issuer is a URL a tenant chose, so this crate relies on its fetcher for SSRF
+/// safety: an implementation MUST refuse anything but public addresses (a resolver that drops
+/// private ones, and literal private hosts), MUST NOT follow redirects, and MUST stop reading at
+/// `limit`. rolld's guarded client (`roll_net::PublicOnly`) is the one both callers hand it.
 pub trait Fetch {
     fn get(&self, url: &str, limit: usize) -> std::result::Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>;
 }

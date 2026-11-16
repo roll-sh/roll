@@ -163,8 +163,18 @@ pub struct ClientCreate {
     #[arg(long, default_value = "30d")]
     expires: String,
     /// Its public key: a PEM file (Ed25519 or P-256) or a JWK (Ed25519, P-256 or RSA).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "github")]
     public_key: Option<std::path::PathBuf>,
+    /// Trust this repository's GitHub Actions instead: its jobs sign in with their own OIDC token
+    /// (`permissions: id-token: write`), so nothing is stored in GitHub (owner/repo).
+    #[arg(long)]
+    github: Option<String>,
+    /// With --github: only jobs on this ref (refs/heads/main).
+    #[arg(long, requires = "github", conflicts_with = "environment")]
+    r#ref: Option<String>,
+    /// With --github: only jobs in this GitHub environment (production).
+    #[arg(long, requires = "github")]
+    environment: Option<String>,
     /// Addresses its tokens may be used from (CIDRs), repeatable.
     #[arg(long = "ip", value_delimiter = ',')]
     ip_allow: Vec<String>,
@@ -198,6 +208,33 @@ fn public_jwk(text: &str) -> anyhow::Result<Value> {
     bail!("an Ed25519 or P-256 PEM public key (for RSA, give its JWK)")
 }
 
+/// GitHub Actions as a trusted identity: the repository's jobs (on a ref, or in an environment).
+fn github_identity(repo: &str, git_ref: Option<&str>, environment: Option<&str>) -> anyhow::Result<Value> {
+    let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    let Some((owner, name)) = repo.split_once('/').filter(|(o, n)| ok(o) && ok(n)) else {
+        bail!("--github is owner/repo");
+    };
+    // GitHub's `sub`: repo:<owner>/<repo>:ref:<ref>, or :environment:<name> for an environment's jobs.
+    let subject = match (git_ref, environment) {
+        (_, Some(env)) => format!("repo:{owner}/{name}:environment:{env}"),
+        (Some(r), None) => format!("repo:{owner}/{name}:ref:{r}"),
+        (None, None) => format!("repo:{owner}/{name}:*"),
+    };
+    Ok(json!({ "issuer": "https://token.actions.githubusercontent.com", "subject": subject }))
+}
+
+/// The workflow step that trades a job's OIDC token for a roll token, masked, as `ROLL_TOKEN`.
+fn github_step(client_id: &str, endpoint: &str, audience: &str) -> String {
+    format!(
+        "      - name: Sign in to roll\n\
+         \x20       run: |\n\
+         \x20         oidc=$(curl -sSf -H \"Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN\" \"$ACTIONS_ID_TOKEN_REQUEST_URL&audience={audience}\" | jq -r .value)\n\
+         \x20         token=$(curl -sSf {endpoint} -d grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer -d client_id={client_id} --data-urlencode \"assertion=$oidc\" | jq -r .access_token)\n\
+         \x20         echo \"::add-mask::$token\"\n\
+         \x20         echo \"ROLL_TOKEN=$token\" >> \"$GITHUB_ENV\""
+    )
+}
+
 async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<()> {
     match cmd {
         MachineCmd::Create(c) => {
@@ -205,7 +242,11 @@ async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<(
                 Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
                 None => None,
             };
-            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow, "rate_per_minute": c.rate, "public_jwk": jwk });
+            let oidc = match &c.github {
+                Some(repo) => Some(github_identity(repo, c.r#ref.as_deref(), c.environment.as_deref())?),
+                None => None,
+            };
+            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow, "rate_per_minute": c.rate, "public_jwk": jwk, "oidc": oidc });
             let made = api.post("/v1/access/clients", body).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&made)?);
@@ -213,7 +254,12 @@ async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<(
             }
             print_grant(&made["grant"]);
             println!("client_id:      {}\ntoken endpoint: {}", s(&made["client_id"]), s(&made["token_endpoint"]));
-            if let Some(secret) = made["client_secret"].as_str() {
+            if c.github.is_some() {
+                let endpoint = s(&made["token_endpoint"]);
+                let audience = endpoint.trim_end_matches("/v1/access/oauth/token");
+                eprintln!("Nothing to store in GitHub. In the workflow, give the job `permissions: id-token: write`, then:\n");
+                println!("{}", github_step(&s(&made["client_id"]), &endpoint, audience));
+            } else if let Some(secret) = made["client_secret"].as_str() {
                 println!("\n{secret}\n");
                 eprintln!("Copy the secret now: it isn't shown again. Trade it for a token with grant_type=client_credentials (client_secret_basic or client_secret_post).");
             } else {
