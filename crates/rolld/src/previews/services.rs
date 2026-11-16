@@ -266,8 +266,17 @@ impl roll_previews::ports::Apps for RollApps {
     /// What the preview's environments' egress proxies refused, each host once: `<host>`, or
     /// `<host> private` for a listed one that resolves only to private addresses.
     async fn egress_refused(&self, preview: &str) -> Vec<String> {
-        let ids: Vec<String> = self.ids.lock().unwrap_or_else(|p| p.into_inner()).iter().filter(|((p, _), _)| p == preview).map(|(_, id)| id.clone()).collect();
+        // Every service with the preview's environment, as roll apps has them (not only those this
+        // process deployed: after a restart a preview that doesn't redeploy still says).
         let env = roll_previews::engine::env_name(preview);
+        let all = self.api.get("/v1/apps/services").await.unwrap_or(Value::Null);
+        let ids: Vec<String> = all
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|x| x["environments"].as_array().is_some_and(|e| e.iter().any(|e| e["name"] == env.as_str())))
+            .filter_map(|x| s(&x["id"]))
+            .collect();
         let mut out: Vec<String> = Vec::new();
         for id in ids {
             let Ok(e) = self.api.get(&Self::env_path(&id, &env)).await else { continue };
