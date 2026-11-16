@@ -3381,7 +3381,7 @@
         "x-roll-action": "operator only"
       },
       "put": {
-        "description": "Answers `Service` (a Git URL service on roll's GitHub App's host connected to the installation that sees its repository: fetches use the installation's short-lived tokens, deploys post commit statuses; 409 without the App or when no installation sees the repository; dropped when the source moves to another repository).",
+        "description": "Answers `Service` (a Git URL service on roll's GitHub App's host connected to the installation that sees its repository: fetches use the installation's short-lived tokens, deploys post commit statuses and GitHub Deployments; 409 without the App or when no installation sees the repository; dropped when the source moves to another repository).",
         "operationId": "putServicesIdGithub",
         "parameters": [
           {
@@ -3395,7 +3395,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`Service` (a Git URL service on roll's GitHub App's host connected to the installation that sees its repository: fetches use the installation's short-lived tokens, deploys post commit statuses; 409 without the App or when no installation sees the repository; dropped when the source moves to another repository)"
+            "description": "`Service` (a Git URL service on roll's GitHub App's host connected to the installation that sees its repository: fetches use the installation's short-lived tokens, deploys post commit statuses and GitHub Deployments; 409 without the App or when no installation sees the repository; dropped when the source moves to another repository)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

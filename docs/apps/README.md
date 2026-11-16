@@ -1791,7 +1791,10 @@ app installed and no roll code mirror. `git_source.rs` is the whole of it:
   Settings' "GitHub App" connects a Git URL service on the App's host to the installation that
   sees its repository. Then every fetch uses a short-lived installation token (no personal token
   held), and its deploys post commit statuses (`roll/apps/<service>/<env>`, as a roll code repo's
-  do). Installations span tenants (an installation's token reads any repository it sees), so the
+  do) and GitHub Deployments of each environment (Vercel's: made when a deploy starts,
+  `in_progress`, then `success` with the environment's URL or `failure`; production is GitHub's
+  production environment, none is transient; the id is kept per deployment,
+  `github_deployments`). Installations span tenants (an installation's token reads any repository it sees), so the
   route is operator-only in the permissions catalogue (`OPERATOR_ONLY`), as connecting a repo is
   roll code's admin token's. That keeps grants out; sessions are kept out by rolld's gate, which
   gives signed-in people no `/v1/apps` route (an admin's session carries `Operator`). If roll apps
@@ -2266,8 +2269,8 @@ put items 1–11 first. A second review that day (after #78, against the same si
    doesn't follow and every pull request (`GitPush`, `GitPull`), each checked against the
    repository's refs; previews builds the environments, comments and gates forks behind a
    writer's approval (its side is the previews thread's, stacked on this).
-2. **The rest of GitHub's App on a Git URL service** (connecting, installation tokens and commit
-   statuses are done): GitHub Deployments per environment (Vercel's), pushes and pull requests
+2. **The rest of GitHub's App on a Git URL service** (connecting, installation tokens, commit
+   statuses and Deployments are done): pushes and pull requests
    from the App's own webhook (`X-Hub-Signature-256`) routed from roll code to the service, so no
    per-environment hook is needed, and roll previews' `GitReport` posting `roll/preview` through
    the same port. Or, without roll code: `git_login` reading a secrets key (secrets' #73 issues

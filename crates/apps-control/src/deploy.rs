@@ -593,12 +593,39 @@ impl Apps {
             description: what.chars().take(140).collect(),
             target_url: Some(self.url(&env.slug)),
         };
-        // A Git URL service connected to roll's GitHub App: through its installation.
+        // A Git URL service connected to roll's GitHub App: through its installation, a commit
+        // status and a GitHub Deployment of the environment (made when it starts, then its state).
         if let Source::Git { url, .. } = &svc.source {
-            if let Some((app, installation, owner, repo)) = self.github_for(&svc.id, url).await
-                && let Err(err) = app.status(installation, &owner, &repo, &rev, &status).await
-            {
+            let Some((app, installation, owner, repo)) = self.github_for(&svc.id, url).await else { return };
+            if let Err(err) = app.status(installation, &owner, &repo, &rev, &status).await {
                 warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a deploy's commit status didn't post");
+            }
+            let did = d.id.clone();
+            let known = self.db(move |s| s.github_deployment(&did)).await.ok().flatten();
+            let github = match known {
+                Some(g) => Some(g),
+                None if state == "pending" => match app.deployment(installation, &owner, &repo, &rev, &d.environment, d.environment == crate::model::PRODUCTION).await {
+                    Ok(g) => {
+                        let did = d.id.clone();
+                        let _ = self.db(move |s| s.set_github_deployment(&did, g)).await;
+                        Some(g)
+                    }
+                    Err(err) => {
+                        warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a GitHub Deployment wasn't made");
+                        None
+                    }
+                },
+                None => None,
+            };
+            if let Some(g) = github {
+                let gh_state = match state {
+                    "pending" => "in_progress",
+                    s => s,
+                };
+                let url = (state == "success").then(|| self.url(&env.slug));
+                if let Err(err) = app.deployment_status(installation, &owner, &repo, g, gh_state, url.as_deref(), &status.description).await {
+                    warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a GitHub Deployment's state didn't post");
+                }
             }
             return;
         }

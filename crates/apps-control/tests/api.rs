@@ -4000,6 +4000,9 @@ async fn a_private_git_url_fetches_with_its_login() {
 struct FakeGitHub {
     host: String,
     statuses: Mutex<Vec<(u64, String, String, String)>>,
+    /// Deployments made (id, environment, production), then each state posted (id, state, url).
+    deployments: Mutex<Vec<(u64, String, bool)>>,
+    deployment_states: Mutex<Vec<(u64, String, Option<String>)>>,
 }
 
 #[async_trait]
@@ -4016,6 +4019,16 @@ impl apps_control::integrations::GitHubApp for FakeGitHub {
     }
     async fn status(&self, installation: u64, owner: &str, repo: &str, _sha: &str, s: &apps_control::integrations::CommitStatus) -> anyhow::Result<()> {
         self.statuses.lock().push((installation, format!("{owner}/{repo}"), s.context.clone(), s.state.to_string()));
+        Ok(())
+    }
+    async fn deployment(&self, _installation: u64, _owner: &str, _repo: &str, _sha: &str, environment: &str, production: bool) -> anyhow::Result<u64> {
+        let mut d = self.deployments.lock();
+        let id = d.len() as u64 + 1;
+        d.push((id, environment.to_string(), production));
+        Ok(d.len() as u64)
+    }
+    async fn deployment_status(&self, _installation: u64, _owner: &str, _repo: &str, deployment: u64, state: &str, url: Option<&str>, _description: &str) -> anyhow::Result<()> {
+        self.deployment_states.lock().push((deployment, state.to_string(), url.map(str::to_string)));
         Ok(())
     }
 }
@@ -4042,7 +4055,7 @@ async fn a_git_url_service_connects_to_rolls_github_app() {
         }
     });
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let gh = Arc::new(FakeGitHub { host: host.clone(), statuses: Mutex::new(Vec::new()) });
+    let gh = Arc::new(FakeGitHub { host: host.clone(), statuses: Mutex::new(Vec::new()), deployments: Mutex::new(Vec::new()), deployment_states: Mutex::new(Vec::new()) });
     w.apps.set_github_app(gh.clone());
     let make = |name: &str, repo: &str| json!({ "project": w.project, "name": name, "source": {"kind": "git", "url": format!("http://{host}/acme/{repo}")} });
     let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(make("site", "site"))).await;
@@ -4061,6 +4074,16 @@ async fn a_git_url_service_connects_to_rolls_github_app() {
     assert_eq!((d["status"].as_str(), d["revision"].as_str()), (Some("active"), Some(first.as_str())), "{d}");
     let posted = gh.statuses.lock().clone();
     assert!(posted.iter().any(|(i, r, c, s)| (*i, r.as_str(), c.as_str(), s.as_str()) == (42, "acme/site", "roll/apps/site/production", "success")), "{posted:?}");
+    // And a GitHub Deployment of production: in progress, then live at its URL.
+    assert_eq!(*gh.deployments.lock(), vec![(1, "production".to_string(), true)]);
+    for _ in 0..100 {
+        if gh.deployment_states.lock().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let states: Vec<_> = gh.deployment_states.lock().iter().map(|(id, s, u)| (*id, s.clone(), u.is_some())).collect();
+    assert_eq!(states, vec![(1, "in_progress".to_string(), false), (1, "success".to_string(), true)]);
     // Disconnected: no token, so the private repository can't be read.
     call(&w.api, "DELETE", &format!("/v1/apps/services/{id}/github"), None).await;
     let (st, v) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), Some(json!({}))).await;

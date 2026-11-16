@@ -66,6 +66,10 @@ CREATE TABLE IF NOT EXISTS registry_auth (
     username TEXT NOT NULL,
     sealed TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS github_deployments (
+    deployment TEXT PRIMARY KEY,
+    github INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS git_github (
     service TEXT PRIMARY KEY,
     installation INTEGER NOT NULL,
@@ -1811,6 +1815,16 @@ impl Store {
     pub fn delete_git_github(&self, service: &str) -> Result<()> {
         self.db.execute("DELETE FROM git_github WHERE service = ?", [service])?;
         Ok(())
+    }
+
+    /// The GitHub Deployment a deployment posted (`report`), so its later states go to it.
+    pub fn set_github_deployment(&self, deployment: &str, github: u64) -> Result<()> {
+        self.db.execute("INSERT INTO github_deployments (deployment, github) VALUES (?, ?) ON CONFLICT (deployment) DO NOTHING", params![deployment, github as i64])?;
+        Ok(())
+    }
+
+    pub fn github_deployment(&self, deployment: &str) -> Result<Option<u64>> {
+        Ok(self.db.query_row("SELECT github FROM github_deployments WHERE deployment = ?", [deployment], |r| r.get::<_, i64>(0)).optional()?.map(|g| g as u64))
     }
 
     pub fn git_github(&self, service: &str) -> Result<Option<GitHubLink>> {

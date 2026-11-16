@@ -152,6 +152,12 @@ impl apps_control::integrations::GitHubApp for CodeGitHub {
     async fn status(&self, installation: u64, owner: &str, repo: &str, sha: &str, s: &apps_control::integrations::CommitStatus) -> anyhow::Result<()> {
         Ok(self.0.github_commit_status(installation, owner, repo, sha, s.state, &s.context, &s.description, s.target_url.as_deref()).await?)
     }
+    async fn deployment(&self, installation: u64, owner: &str, repo: &str, sha: &str, environment: &str, production: bool) -> anyhow::Result<u64> {
+        Ok(self.0.github_deployment(installation, owner, repo, sha, environment, "roll apps", production).await?)
+    }
+    async fn deployment_status(&self, installation: u64, owner: &str, repo: &str, deployment: u64, state: &str, url: Option<&str>, description: &str) -> anyhow::Result<()> {
+        Ok(self.0.github_deployment_status(installation, owner, repo, deployment, state, url, description).await?)
+    }
 }
 
 /// roll code as roll apps' source of trees and landings.
