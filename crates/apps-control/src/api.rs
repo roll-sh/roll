@@ -896,8 +896,13 @@ async fn hook_on_owner(State(apps): S, req: Request, next: Next) -> Response {
     cluster.dispatch(&lease_key(&id), req, |req, _guard| next.run(req)).await
 }
 
-async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, String)>, Query(q): Query<HookQuery>, ext: Extensions) -> R {
-    let d = apps.run_hook(&id, &env, &token, q.image).await?;
+async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, String)>, Query(q): Query<HookQuery>, ext: Extensions, b: Bytes) -> R {
+    // A JSON body is a repository's push webhook (anything else: a plain deploy).
+    let payload = serde_json::from_slice::<Value>(&b).ok().filter(Value::is_object);
+    let d = match apps.run_hook(&id, &env, &token, q.image, payload).await? {
+        crate::hooks::HookOutcome::Deployed(d) => *d,
+        crate::hooks::HookOutcome::Ignored(why) => return ok(json!({ "ignored": why })),
+    };
     // The gate never saw it: who called is in the service's activity.
     let address = ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_string());
     apps.audit("hook.deployed", &id, &env, Some("deploy hook".into()), json!({ "deployment": d.id, "address": address })).await;

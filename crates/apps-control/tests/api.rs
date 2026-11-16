@@ -3763,6 +3763,20 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let d2 = settled(&w, &id, "production", &started[0]).await;
     assert_eq!((d2["status"].as_str(), d2["revision"].as_str(), d2["trigger"].as_str()), (Some("active"), Some(second.as_str()), Some("push")), "{d2}");
     assert!(w.apps.watch_git().await.is_empty(), "deployed: nothing more to do");
+    // Its hook is the repository's push webhook: a push to main deploys that commit at once,
+    // once however often it's delivered; another branch and GitHub's ping deploy nothing.
+    let (_, h) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/hook"), None).await;
+    let hook = h["path"].as_str().unwrap().to_string();
+    let third = git.commit(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v3")]);
+    let push = json!({ "ref": "refs/heads/main", "after": third, "head_commit": { "message": "fix the header\n\nlonger text" } });
+    let (st, d3) = call(&w.api, "POST", &hook, Some(push.clone())).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d3}");
+    assert_eq!((d3["revision"].as_str(), d3["message"].as_str(), d3["trigger"].as_str()), (Some(third.as_str()), Some("fix the header"), Some("push")), "{d3}");
+    assert_eq!(call(&w.api, "POST", &hook, Some(push)).await.1["id"], d3["id"], "a redelivery is the same deploy");
+    let (st, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": third }))).await;
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("follows main"), "{v}");
+    assert_eq!(call(&w.api, "POST", &hook, Some(json!({ "zen": "Keep it logically awesome.", "hook_id": 1 }))).await.1["ignored"], "pong");
+    assert_eq!(settled(&w, &id, "production", d3["id"].as_str().unwrap()).await["status"], "active");
 }
 
 /// The dashboard's starter templates (apps/dashboard/src/lib/templates) read as the import reads

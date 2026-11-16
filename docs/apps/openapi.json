@@ -75,7 +75,7 @@
     },
     "/v1/apps/hooks/{id}/{env}/{token}": {
       "post": {
-        "description": "Answers 202 `Deployment` (actor `deploy hook`); `image`: another tag or digest of an image service's own repository, else 400; any token that isn't the live hook's is a 404. No API token: the URL is the secret (rolld's `RULES` let it through to the hook's own check; access lines log the route pattern, never the token). Each deploy is `audit.hook.deployed` in the activity, with the caller's address.",
+        "description": "Answers 202 `Deployment` (actor `deploy hook`); for a Git URL service a push to the environment's branch deploys that commit (trigger `push`, the commit's subject as its message, keyed by the commit so a redelivery is the same deploy), and another branch, a deleted branch, a `[skip ci]` commit or GitHub's ping is 200 `{ ignored }`; `image`: another tag or digest of an image service's own repository, else 400; any token that isn't the live hook's is a 404. No API token: the URL is the secret (rolld's `RULES` let it through to the hook's own check; access lines log the route pattern, never the token). Each deploy is `audit.hook.deployed` in the activity, with the caller's address.",
         "operationId": "postHooksIdEnvToken",
         "parameters": [
           {
@@ -103,9 +103,19 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "none, or a repository's push webhook (GitHub's or GitLab's `push` JSON)"
+        },
         "responses": {
           "202": {
-            "description": "202 `Deployment` (actor `deploy hook`); `image`: another tag or digest of an image service's own repository, else 400; any token that isn't the live hook's is a 404. No API token: the URL is the secret (rolld's `RULES` let it through to the hook's own check; access lines log the route pattern, never the token). Each deploy is `audit.hook.deployed` in the activity, with the caller's address"
+            "description": "202 `Deployment` (actor `deploy hook`); for a Git URL service a push to the environment's branch deploys that commit (trigger `push`, the commit's subject as its message, keyed by the commit so a redelivery is the same deploy), and another branch, a deleted branch, a `[skip ci]` commit or GitHub's ping is 200 `{ ignored }`; `image`: another tag or digest of an image service's own repository, else 400; any token that isn't the live hook's is a 404. No API token: the URL is the secret (rolld's `RULES` let it through to the hook's own check; access lines log the route pattern, never the token). Each deploy is `audit.hook.deployed` in the activity, with the caller's address"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
