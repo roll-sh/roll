@@ -2790,19 +2790,20 @@ windows), #87 (encryption keys by name), #88 (password policies), #92 (SaaS rota
 credential checked at registration), #97 (search keys say `access: data`), #102 (Kubernetes
 service-account tokens), #105 (Java), #110 (.NET with `IConfiguration`), #113 (an AWS Lambda
 extension that logs in with the function's role), #117 (an Ansible collection), #132 (LDAP and
-Active Directory) and #136 (Snowflake, on #132).
+Active Directory), #136 (Snowflake, on #132) and #144 (ACME on project CAs).
 
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
 2. **Landing the stacks together where it saves a lock cycle** (#128 on #105, #124 on #102, #95 on
    #79, #117 on #121, #136 on #132), and the Spring integration's first CI run (#128).
-3. **ACME on project CAs** (building: `feature/roll-secrets-acme`), as Vault's PKI and step-ca
-   serve it: cert-manager, certbot, Caddy and lego get certificates from a project's CA with no roll
-   client. Accounts always bind an EAB key a CA's admin makes (revoked at once, looked up on every
-   request); `dns-01` through public DNS and `http-01` through the guarded client; names a binding
-   pre-authorizes for clusters whose names roll can't reach (off by default, the EAB key then the
-   whole proof). Nonces and orders in the database, so any node answers.
+3. **ACME on project CAs** (#144), as Vault's PKI and step-ca serve it: cert-manager, certbot,
+   Caddy and lego get certificates from a project's CA with no roll client (lego and certbot checked
+   against a local rolld). Accounts always bind an EAB key (looked up on every request, ended with
+   its maker's reach); `dns-01` through public DNS, `http-01` through the guarded client, and
+   pre-authorized names for clusters roll can't reach (off by default). Next on it: `tls-alpn-01`,
+   reusing valid authorizations across orders, and checking pre-authorized names through a gateway
+   (item 6) once that's built.
 4. **Active Directory, done against Samba AD** (#132): every step run against a real domain
    controller with a delegated bind account. It found AD's hour-long acceptance of a reset account's
    previous password, now closed by a throwaway reset first; logins also hand out the UPN and
