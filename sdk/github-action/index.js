@@ -161,7 +161,7 @@ async function run(env, out, fetchFn = fetch) {
     if (!environment && !scanning) {
       if (!env.GITHUB_ENV) throw new Error("GITHUB_ENV isn't set");
       const d = delimiter(token);
-      fs.appendFileSync(env.GITHUB_ENV, `ROLL_TOKEN<<${d}\n${token}\n${d}\n`, { mode: 0o600 });
+      fs.appendFileSync(env.GITHUB_ENV, `ROLL_TOKEN<<${d}\n${token}\n${d}\n`);
       out.write(`roll: signed in as ${clientId}; later steps have ROLL_TOKEN\n`);
       return [];
     }

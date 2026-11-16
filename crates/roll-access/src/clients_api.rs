@@ -205,7 +205,7 @@ struct Rotate {
 pub(crate) async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
     let person = owner(&a, &ext, "rotate machine clients")?;
     let body: Rotate = if body.iter().all(u8::is_ascii_whitespace) { Rotate::default() } else { serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))? };
-    if body.keep_old_for_s.is_some_and(|s| s < 0 || s * 1000 > crate::store::MAX_KEEP_OLD_MS) {
+    if body.keep_old_for_s.is_some_and(|s| !(0..=crate::store::MAX_KEEP_OLD_MS / 1000).contains(&s)) {
         return Err(Error::BadRequest("keep_old_for_s is 0 to 604800 (a week)".into()));
     }
     let key = credential(&a, body.public_jwk.as_ref(), body.oidc)?;

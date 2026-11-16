@@ -21,13 +21,17 @@ use std::sync::Arc;
 pub const GRANT: &str = "client_credentials";
 /// RFC 7523 §2.1: a JWT (here, CI's OIDC token) as an authorization grant.
 pub const JWT_GRANT: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
-/// A trusted client's sign-ins a minute, per node: a cap on work (fetching and verifying).
+/// A trusted client's sign-ins a minute, per node, counted once a token checks out (key fetches
+/// are roll-oidc's own: at most one per issuer each 30 s).
 const SIGN_INS_PER_MINUTE: u32 = 120;
 pub const JWT_BEARER: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 /// The signature algorithms a machine client's key may use.
 pub const ALGS: [&str; 3] = ["EdDSA", "ES256", "RS256"];
 /// An assertion lives at most this long.
 const MAX_ASSERTION_MS: i64 = 5 * 60 * 1000;
+/// Clock skew an assertion's `exp` is given (jsonwebtoken's leeway): its `jti` is kept that much
+/// longer too, or a replay would pass in the gap.
+const LEEWAY_S: u64 = 30;
 
 fn unknown() -> Error {
     Error::OAuth("invalid_client", "the client's credentials didn't check out".into())
@@ -89,13 +93,14 @@ pub async fn token(a: Arc<Access>, headers: &HeaderMap, f: &HashMap<String, Stri
             let (jti, exp) = checked?;
             let a2 = a.clone();
             let id = client_id.clone();
-            if !tokio::task::spawn_blocking(move || a2.store.first_jti(&id, &jti, exp)).await.map_err(|e| Error::Internal(e.to_string()))?? {
+            let kept_until = exp + LEEWAY_S as i64 * 1000;
+            if !tokio::task::spawn_blocking(move || a2.store.first_jti(&id, &jti, kept_until)).await.map_err(|e| Error::Internal(e.to_string()))?? {
                 return Err(Error::OAuth("invalid_client", "that assertion was used already: sign a new one (a new jti)".into()));
             }
         }
     }
-    let grant_id = client.grant_id.clone();
-    tokio::task::spawn_blocking(move || a.store.issue_client_access(&grant_id, &client_id)).await.map_err(|e| Error::Internal(e.to_string()))?
+    let (grant_id, generation) = (client.grant_id.clone(), client.generation);
+    tokio::task::spawn_blocking(move || a.store.issue_client_access(&grant_id, &client_id, generation)).await.map_err(|e| Error::Internal(e.to_string()))?
 }
 
 /// The `sub` of a JWT, before it's verified: only to find whose key verifies it.
@@ -111,13 +116,12 @@ fn unverified_sub(jwt: &str) -> Option<String> {
 fn verify(jwt: &str, jwk: &str, client_id: &str, api: &str) -> Result<(String, i64), Error> {
     use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
     let bad = |why: &str| Error::OAuth("invalid_client", format!("the client assertion {why}"));
-    let header = decode_header(jwt).map_err(|_| bad("isn't a JWT"))?;
-    let alg = match header.alg {
-        Algorithm::EdDSA => "EdDSA",
-        Algorithm::ES256 => "ES256",
-        Algorithm::RS256 => "RS256",
-        _ => return Err(bad(&format!("is signed with an algorithm roll doesn't take (one of {})", ALGS.join(", ")))),
-    };
+    // Until the signature checks out, every refusal is the same `invalid_client` an unknown client
+    // gets: nothing tells a client that signs with a key (or its kind) from one that doesn't exist.
+    let header = decode_header(jwt).map_err(|_| unknown())?;
+    if !matches!(header.alg, Algorithm::EdDSA | Algorithm::ES256 | Algorithm::RS256) {
+        return Err(unknown());
+    }
     let jwk: jsonwebtoken::jwk::Jwk = serde_json::from_str(jwk).map_err(|_| unknown())?;
     let key = DecodingKey::from_jwk(&jwk).map_err(|_| unknown())?;
     let mut v = Validation::new(header.alg);
@@ -125,9 +129,9 @@ fn verify(jwt: &str, jwk: &str, client_id: &str, api: &str) -> Result<(String, i
     v.set_issuer(&[client_id]);
     v.sub = Some(client_id.to_string());
     v.set_required_spec_claims(&["exp", "iss", "sub", "aud"]);
-    v.leeway = 30;
-    let data = decode::<serde_json::Value>(jwt, &key, &v).map_err(|e| bad(&format!("didn't verify ({alg}): {e}")))?;
-    let exp = data.claims["exp"].as_i64().ok_or_else(|| bad("has no exp"))? * 1000;
+    v.leeway = LEEWAY_S;
+    let data = decode::<serde_json::Value>(jwt, &key, &v).map_err(|_| unknown())?;
+    let exp = data.claims["exp"].as_i64().and_then(|s| s.checked_mul(1000)).ok_or_else(|| bad("has no exp a time can hold"))?;
     if exp - code_sql::now_ms() > MAX_ASSERTION_MS {
         return Err(bad("lives longer than five minutes"));
     }
@@ -161,9 +165,6 @@ pub async fn federated(a: Arc<Access>, f: &HashMap<String, String>) -> Result<(c
         if identities.is_empty() {
             return Err(refused("no machine client trusts this token".into()));
         }
-        if !a.oidc_logins.allow(&client_id, SIGN_INS_PER_MINUTE) {
-            return Err(Error::TooMany(format!("at most {SIGN_INS_PER_MINUTE} sign-ins a minute for one machine client")));
-        }
         let jwt = roll_oidc::Jwt::parse(&assertion).map_err(|e| refused(e.to_string()))?;
         let now_s = code_sql::now_ms() / 1000;
         let fetch = a.oidc_fetch.get().map(|f| f.as_ref() as &dyn roll_oidc::Fetch);
@@ -190,7 +191,12 @@ pub async fn federated(a: Arc<Access>, f: &HashMap<String, String>) -> Result<(c
                 why = format!("the token's {k} isn't the one this client trusts");
                 continue;
             }
-            return a.store.issue_client_access(&client.grant_id, &client_id);
+            // Counted only once a token checks out: anyone can send junk naming a client, and
+            // that mustn't lock its CI out. This caps what a valid identity mints.
+            if !a.oidc_logins.allow(&client_id, SIGN_INS_PER_MINUTE) {
+                return Err(Error::TooMany(format!("at most {SIGN_INS_PER_MINUTE} sign-ins a minute for one machine client")));
+            }
+            return a.store.issue_client_access(&client.grant_id, &client_id, client.generation);
         }
         Err(refused(why))
     })

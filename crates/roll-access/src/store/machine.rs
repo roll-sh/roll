@@ -55,6 +55,9 @@ pub struct TrustedIdentity {
 /// rotation while that one still works.
 pub struct MachineClient {
     pub grant_id: String,
+    /// Its credential's rotation count: [`Store::issue_client_access`] issues only if it's still
+    /// this (a token checked against a credential rotated away meanwhile gets nothing).
+    pub generation: i64,
     pub secret_hash: Option<String>,
     pub jwk: Option<String>,
     pub old_secret_hash: Option<String>,
@@ -72,6 +75,12 @@ pub struct ListedClient {
     pub trusts: Option<TrustedIdentity>,
 }
 
+/// A live machine client and its own grant, by `client_id` (`?`) at `now` (`?`, twice): not
+/// revoked, not expired, not waiting for an admin, started.
+const LIVE: &str = "FROM oauth_clients o JOIN grants g ON g.id = o.grant_id \
+     WHERE o.id = ? AND o.confidential = 1 AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at > ?) \
+     AND (g.pending IS NULL OR g.pending = 0) AND (g.not_before IS NULL OR g.not_before <= ?)";
+
 /// A machine client's secret prefix (with a checksum, as every roll secret has).
 pub const CLIENT_SECRET_PREFIX: &str = "rlc_";
 
@@ -87,7 +96,7 @@ impl Store {
         let now = code_sql::now_ms();
         self.db.write(|c| {
             insert_oauth_grant(c, &grant_id, &client, new, by, now)?;
-            c.execute("UPDATE oauth_clients SET confidential = 1, secret_hash = ?, jwk = ?, oidc = ? WHERE id = ?", params![secret_hash, jwk, oidc, client_id])?;
+            c.execute("UPDATE oauth_clients SET confidential = 1, grant_id = ?, secret_hash = ?, jwk = ?, oidc = ? WHERE id = ?", params![grant_id, secret_hash, jwk, oidc, client_id])?;
             Ok::<_, Error>(())
         })?;
         Ok((client_id, self.get(&grant_id)?, secret))
@@ -99,13 +108,12 @@ impl Store {
         let now = code_sql::now_ms();
         Ok(self.db.read(|c| {
             c.query_row(
-                "SELECT g.id, o.secret_hash, o.jwk, CASE WHEN o.old_until > ? THEN o.old_secret_hash END, CASE WHEN o.old_until > ? THEN o.old_jwk END, \
-                 o.oidc, CASE WHEN o.old_until > ? THEN o.old_oidc END \
-                 FROM oauth_clients o JOIN grants g ON g.client_id = o.id \
-                 WHERE o.id = ? AND o.confidential = 1 AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at > ?) \
-                 AND (g.pending IS NULL OR g.pending = 0)",
-                params![now, now, now, client_id, now],
-                |r| Ok(MachineClient { grant_id: r.get(0)?, secret_hash: r.get(1)?, jwk: r.get(2)?, old_secret_hash: r.get(3)?, old_jwk: r.get(4)?, oidc: r.get(5)?, old_oidc: r.get(6)? }),
+                &format!(
+                    "SELECT g.id, o.generation, o.secret_hash, o.jwk, CASE WHEN o.old_until > ? THEN o.old_secret_hash END, CASE WHEN o.old_until > ? THEN o.old_jwk END, \
+                     o.oidc, CASE WHEN o.old_until > ? THEN o.old_oidc END {LIVE}"
+                ),
+                params![now, now, now, client_id, now, now],
+                |r| Ok(MachineClient { grant_id: r.get(0)?, generation: r.get(1)?, secret_hash: r.get(2)?, jwk: r.get(3)?, old_secret_hash: r.get(4)?, old_jwk: r.get(5)?, oidc: r.get(6)?, old_oidc: r.get(7)? }),
             )
             .optional()
         })?)
@@ -119,18 +127,18 @@ impl Store {
         let now = code_sql::now_ms();
         let keep = keep_old_ms.filter(|ms| *ms > 0).map(|ms| ms.min(MAX_KEEP_OLD_MS));
         self.db.write(|c| {
-            let grant: Option<String> = c.query_row("SELECT g.id FROM oauth_clients o JOIN grants g ON g.client_id = o.id WHERE o.id = ? AND o.confidential = 1", [client_id], |r| r.get(0)).optional()?;
+            let grant: Option<String> = c.query_row("SELECT grant_id FROM oauth_clients WHERE id = ? AND confidential = 1 AND grant_id IS NOT NULL", [client_id], |r| r.get(0)).optional()?;
             let Some(grant) = grant else { return Err(Error::NotFound(format!("machine client {client_id}"))) };
             match keep {
                 Some(ms) => c.execute(
-                    "UPDATE oauth_clients SET old_secret_hash = secret_hash, old_jwk = jwk, old_oidc = oidc, old_until = ?, secret_hash = ?, jwk = ?, oidc = ? WHERE id = ?",
+                    "UPDATE oauth_clients SET old_secret_hash = secret_hash, old_jwk = jwk, old_oidc = oidc, old_until = ?, secret_hash = ?, jwk = ?, oidc = ?, generation = generation + 1 WHERE id = ?",
                     params![now + ms, secret_hash, jwk, oidc, client_id],
                 )?,
                 None => {
                     // A credential rotated because it may be out: what it got stops too.
                     c.execute("DELETE FROM grant_secrets WHERE grant_id = ? AND kind = 'access'", [&grant])?;
                     c.execute(
-                        "UPDATE oauth_clients SET old_secret_hash = NULL, old_jwk = NULL, old_oidc = NULL, old_until = NULL, secret_hash = ?, jwk = ?, oidc = ? WHERE id = ?",
+                        "UPDATE oauth_clients SET old_secret_hash = NULL, old_jwk = NULL, old_oidc = NULL, old_until = NULL, secret_hash = ?, jwk = ?, oidc = ?, generation = generation + 1 WHERE id = ?",
                         params![secret_hash, jwk, oidc, client_id],
                     )?
                 }
@@ -140,11 +148,17 @@ impl Store {
         Ok(secret)
     }
 
-    /// An hour's access token on a machine client's grant.
-    pub fn issue_client_access(&self, grant_id: &str, client_id: &str) -> Result<(Grant, String)> {
+    /// An hour's access token on a machine client's grant, if the client is still live and its
+    /// credential still the one checked (`generation`): checked and issued in one write, so a
+    /// rotation or a revocation while a sign-in was being checked leaves it with nothing.
+    pub fn issue_client_access(&self, grant_id: &str, client_id: &str, generation: i64) -> Result<(Grant, String)> {
         let access = new_secret(ACCESS_PREFIX);
         let now = code_sql::now_ms();
         self.db.write(|c| {
+            let current: Option<(String, i64)> = c.query_row(&format!("SELECT g.id, o.generation {LIVE}"), params![client_id, now, now], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            if current.as_ref() != Some(&(grant_id.to_string(), generation)) {
+                return Err(Error::OAuth("invalid_client", "the client's credentials didn't check out".into()));
+            }
             c.execute("DELETE FROM grant_secrets WHERE grant_id = ? AND kind = 'access' AND expires_at < ?", params![grant_id, now])?;
             c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'access', ?, ?)", params![hash(&access), grant_id, now + ACCESS_TTL_MS, now])?;
             c.execute("UPDATE oauth_clients SET last_used_at = ? WHERE id = ?", params![now, client_id])?;
@@ -168,7 +182,7 @@ impl Store {
     pub fn machine_clients(&self) -> Result<Vec<ListedClient>> {
         let rows: Vec<(String, String, bool, Option<String>)> = self.db.read(|c| {
             c.query(
-                "SELECT o.id, g.id, o.jwk IS NOT NULL, o.oidc FROM oauth_clients o JOIN grants g ON g.client_id = o.id WHERE o.confidential = 1 ORDER BY o.created_at DESC",
+                "SELECT o.id, g.id, o.jwk IS NOT NULL, o.oidc FROM oauth_clients o JOIN grants g ON g.id = o.grant_id WHERE o.confidential = 1 ORDER BY o.created_at DESC",
                 (),
                 |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0, r.get(3)?)),
             )
