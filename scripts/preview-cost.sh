@@ -470,7 +470,13 @@ BUILD=$(api GET "/v1/previews/$PV" | jq_ "d['head']")
 api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"Docs","files":{"index.html":{"content":"preview of change 1, again"},"docs/setup.md":{"content":"how to run it"},'"$OPENAPI_CHG"'}}' >/dev/null
 DOCS_HEAD=$(api GET "/v1/code/changes/$CHG" | jq_ "d['head']")
 until_head "$DOCS_HEAD"
-RUNS=$(api GET "/v1/previews/$PV" | jq_ "d.get('runs') or ''")
+# (What it runs is set by the converge just after it reports the new head: waited for.)
+RUNS=""
+for _ in $(seq 1 120); do
+  RUNS=$(api GET "/v1/previews/$PV" | jq_ "d.get('runs') or ''")
+  [ -n "$RUNS" ] && break
+  sleep 0.5
+done
 [ "$(bare "$RUNS")" = "$(bare "$BUILD")" ] || { echo "a docs-only push should keep the services on $BUILD, not $RUNS"; exit 1; }
 WAITED2=$(ROLL_API_URL="http://$API" "$ROLL_CLI" preview wait --change "$CHG" --timeout 30) || { echo "roll preview wait should pass for the docs-only head"; exit 1; }
 # This one's page logs an error, which its screenshot's load must catch.
