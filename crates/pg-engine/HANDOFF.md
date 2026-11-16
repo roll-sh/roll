@@ -8144,7 +8144,8 @@ container name: pick your own).
 ## Conventions
 
 - **Builds for comparisons with PostgreSQL use `--profile dist`** (root `Cargo.toml`: release
-  with fat LTO and one codegen unit). It costs 15-25% less CPU per transaction than `release`
+  with fat LTO and one codegen unit), built with `tools/dist.sh` (or `tools/dist-pgo.sh`), which
+  add the shipped build flags (JCC-erratum padding, "Build flags"). It costs 15-25% less CPU per transaction than `release`
   (BENCH.md "Build profile: dist"), so a `release` engine understates the engine against
   PostgreSQL. It takes about twice as long to build, so tests and before/after comparisons of
   two engine revisions stay on `release` (both sides on the same profile).
@@ -9475,6 +9476,100 @@ pgbench's CPU are at it.
   `KeyMap::key` / `Heap::key_at` to stop lending `&[u8]`. Page counts at 10M rows wait for the
   lift; lineitem's index-only `count(*)` too.
 
+## Size models, round 9: estimates past the model kept across restarts and crashes (agent 241)
+
+Follow-up of agent 237's round 8. BENCH.md "Size models, round 9" has the numbers.
+
+**Verification train on 237's head.** `tools/verification-train.sh` on `bf9366246` (237's pushed head,
+`TRAIN_NO_CHECKOUT=1`; the first run died with the disk full at 98% and was run again): release
+crate tests pass (`pgvector_hnsw` too, this time); Clippy 20 warnings; crash_random seeds 1-30 x
+4; the power stage (power_cut 4 passed, seeds 1-30 x 4 with `CRASH_POWER=1`, with and without
+`CRASH_ASYNC=1`); debug crate tests pass; regress 51,148 / 51,150, 0 newly differing units;
+isolation 1647 / 1648 permutations; pg_dump_tap 14,609 passed, 0 failed. Nothing failed
+because of 237's change.
+
+**The `pgvector_hnsw` checksum error at reopen** (`truncate_reindex_and_reopen`). Reproduced:
+release, pinned to the build CPUs (0-5,18-23) under the builds' load, 17 of 300 runs failed on
+`bf9366246` and 18 of 300 on `af42e8495` (before 237): every failure at the second
+`Store::open` of the directory or right after it: `checksum mismatch in .../000000000000000d.sst
+block 0` (3), `I/O error: No such file or directory` (29), `hnsw: missing element record` (4).
+Cause: two live stores of one process on one directory. The test drops its session without
+`Store::close`; the first store stays open, because `ext/vector/hnsw`'s process-wide graph cache
+(`cache()`, keyed by database instance) holds the index's `AmStore` and through it the `Store`, and
+its background flush / compaction (`schedule_background`) goes on writing while the second store
+opens: the new store reads the manifest the old one then replaces, deletes the SSTs the old one has
+just written (not in the manifest it read), and both hand out the same file ids (two writers of
+one `<id>.sst`: the checksum error). Not a missing fsync, rename ordering or block cache key clash
+(each store has its own cache), and not in the file format: it is the store's lifetime in
+`Store::open`, which agent 239's format v2 doesn't change. Fix (`storage/dirlock.rs`, three lines
+in `Store::open`): a store opened on a directory another open store of the process has closes that
+one first (`close` waits for its running background work and stops the rest, as the engine's idle
+close does before a reopen). A wait for the old store to go instead never ended (60 s: the cache
+keeps it). After the fix: 0 / 500 runs failed, and 0 / 300 with
+this agent's dist build compiling on the same CPUs.
+Left (not this agent's area): the hnsw graph cache (and ivfflat's, `ivfflat/page.rs`) keep a
+database's store and graphs after the engine closes the database idle: memory held per close,
+evicted only when an index of it is loaded or built again.
+
+**Estimates past the model kept across restarts and crashes** (`exec/sizing/estkeep.rs`).
+237's places of versions, fill and fresh pages and btree leaf summaries lived in memory: after a
+restart a big table's sizes were its last measure, its rows came as stored (order, float sums) and
+its btrees were their build's size. Now:
+- A table's estimate is kept as records in the store (engine records, no store format change):
+  in full under the key its heap pages were kept under before (`[0;7] 0x22 ++ oid`; a build before
+  this reads it as no record), then one record of changes per commit (`++ seq`): the places set
+  since (`EstHeap::log`), the runs begun, the btrees' leaves changed (`BtEst::dirty`), the scalars.
+- A commit takes every estimate changed since the last one (`estkeep::take`, from the commit's
+  `check` under the store's commit lock): the records commit with it, in commit order, durable with
+  it; a crash leaves the estimate as of the last commit (what an uncommitted transaction placed goes
+  with the next commit, as PostgreSQL's file keeps an aborted transaction's tuples). Commits that
+  touch no estimate pay one atomic load.
+- The change records are folded into a new full record when they outgrow it (or after 256), and at
+  the database's close (`persist_estimates`).
+- `ensure` restores a table's estimate from its records before the relstats or legacy paths, when
+  they are of its relfilenode and it is still too big under today's limit (kept per estimate:
+  `EstHeap::limit`, the limit it went past, not the closing thread's). Temporary and unlogged
+  tables keep none; a dropped, truncated or rewritten table's records go with the next commit.
+- `key_hash` (the places' key) was `fasthash`'s, seeded per process: no place matched after a
+  restart. It has a fixed hash of its own now.
+Test: `big_tables::sizes_and_heap_order_past_the_model` runs its PostgreSQL 18.6 checks (sizes,
+pg_class, serial sum, first rows, row order md5, plan) before a restart, after a clean restart and
+after `kill -9` (`past_model_crash_child`), and an UPDATE after each leaves the same sizes, order
+and sum.
+
+**Write cost.** BENCH.md "Size models, round 9" has the table (lane C, 5 alternating
+pairs, plain dist; counts repeat within 0.3%, but lane C had 1-4 foreign cores from other
+sessions' unpinned builds in nearly every run). The bulk UPDATE of half the rows: base
+`af42e8495` 13.43 G, round 8 with this round's persistence 14.76 G, now 12.75 G (-5.0% under
+base, -13.5% under round 8). The instruction-sampled profile of round 8's UPDATE put 9.9% (plus
+the memcmp under it) in `Txn::buf_get` from `written_by`: three lookups of the transaction's
+write buffer per row. `UpdateNode` now looks once: the lock right after `self_modified` doesn't
+look again (`lock_row_with(.., later = false)`: nothing ran between), and the second
+`self_modified` (after the new values and BEFORE triggers) is skipped when no BEFORE row
+trigger runs and no assignment is volatile (`UpdateNode::quiet`, the reasoning
+`DeleteNode::defers_entries` uses). A bulk load's rows past the model no longer look up the
+load's state on the page it took (`EstHeap::fill_owner`): COPY -0.3%. Still over base: COPY in
++1.5%, CREATE UNIQUE INDEX +1.3 to +2.1%, INSERT ... SELECT +0.5 to +1.2% (round 8's estimate
+upkeep: the places of rows past the model, the leaf summary build); DELETE -0.7 to -8.2%.
+Scans, VACUUM, ANALYZE unchanged (count(*), sum(a): round 8's plan). Measured before the rebase
+onto `c4c0db709` (format v2, build flags): the gates compare builds of one base. Not
+re-measured: lane A and TPC-H q01 / q06 (no read path changed: a read-only commit returns before
+`check`, `dirlock` runs at open; heap-order scans of tables past the model use the new
+`key_hash`, measured in the bulk script's scans).
+
+TRAIN_FINAL
+
+**Left.** 1. COPY / CREATE UNIQUE INDEX / INSERT ... SELECT past the model, +1.1 to +1.9% over
+   `af42e8495`: the profiles lost samples unevenly and didn't place it; per row it is the estimate's
+   `add_in` / `placed` / dirty mark (COPY, INSERT ... SELECT), per tuple `EstBuilder::push` and
+   `posting_split` (the index build's summary).
+2. `minmax_a` warm (`minmax2`): 0.007 G against 0.018 in one run each, same plan: not looked at.
+3. 237's list items 1-3, 5 and 7 stand (a second UPDATE's placement in key order, HOT on pages
+   with room, inserts into space VACUUM freed, TRUNCATE + COPY into an index of repeating values,
+   `ctid` past the model): not worked on this round. Item 4 (restart) is done; item 6 (write cost)
+   in part, as above.
+4. The hnsw (and ivfflat) graph caches keep a closed database's store and graphs (above).
+
 ## Size models, round 8: btrees and heap order past the model (agent 237)
 
 BENCH.md "Size models, round 8" has the numbers. Agent 234 found two differences on the
@@ -10057,6 +10152,97 @@ when it loses; an index none of whose key columns a clause reads still runs
 `Planner::endpoint`'s reverse scan expands a whole SST block (0.4%); Describe at Bind
 (`describe_here`, 1.1%) is per-Bind work outside planning.
 
+## Build flags (agent 236)
+
+BENCH.md "Build flags" has the tables. **The shipped builds now pad branches for Intel's JCC
+erratum**: `-Cllvm-args=-x86-branches-within-32B-boundaries` on x86-64, so that no jump crosses
+or ends on a 32-byte boundary. The flags live in `tools/dist-flags.sh` (sourced; empty on other
+architectures). `tools/dist.sh` is the plain dist build with them. `tools/dist-pgo.sh` puts them
+on both its builds, and the train's PGO crash builds take them too. Release and debug builds
+(tests) are unchanged.
+
+```sh
+crates/pg-engine/tools/dist.sh                       # plain dist: <target>/dist/roll-engine (heavy.sh, ~30 min)
+crates/pg-engine/tools/dist-pgo.sh --out <dir>       # PGO, as before, now padded
+```
+
+**Why.** On Skylake to Cascade Lake cores (this host's Xeon W-2295; also AWS c5 / m5 / r5),
+the microcode fix for erratum SKX102 keeps a 32-byte window's code out of the decoded-uop cache
+when a jump crosses or ends on its boundary. A hot loop that happens to sit across one runs from
+the legacy decoders. Agent 234 saw unchanged q01 / q06 code lose 4-10% cycles only because its
+loop moved. With the padding, placement no longer decides that.
+
+**Measured** (pairs and an interleaved design, both builds, every class; user cycles):
+- PGO: TPC-H SF1 -4.6%, -6.9% (pairs) and -5.2% (interleaved), every pair and rep negative
+  (q01 -15%, q06 -21%, q12 -15%, q15 -17%). Range reads -2.8 / -2.3 / -0.9% at 1 / 8 / 32
+  clients (quiet lane, 5 pairs). Point reads and short transactions within their noise, with medians
+  of both signs across runs (-3% to +5%; the CPU-bound short-transaction diagnostic -1.2 / -0.2%). Bulk script
+  neutral (-1.7% over 17 runs, nearly all flagged; the 2 clean runs +2.0 / +0.7%).
+- Plain dist: TPC-H -3.0% (interleaved, every rep; -1.4 / -2.4% in pairs), bulk -3.5% (4
+  clean pairs), range reads -0.6 / -0.7% at 8 / 32 (every pair at 32), point reads -0.1 / -0.2%,
+  short transactions -0.4% (7 clean turns). The one number against: the CPU-bound diagnostic
+  (`short_txn` with `synchronous_commit = off`) +1.3% (10 turns) and +3.6% (6).
+- Cost: `.text` +2.45% (plain), +2.76% (PGO), the stripped binary +1.45%, instructions per
+  operation +2-4% (nops and prefixes, by design), no memory difference measured (fresh server
+  8.2 MB both; TPC-H peak and post-run memory within the spread; 100 idle sessions 37.5 MB plain and 46.9 MB PGO, padded or not).
+
+**CPUs without the erratum** (Ice Lake and later Intel, every AMD Zen: AWS c6i / m6i / c7i,
+c5a / m6a / c7a). There was no such CPU here to measure on, so this is an estimate from the
+counts. The padding is NOPs and redundant prefixes: the same +2.0-4.3% retired instructions on
+any x86-64 (instruction counts don't depend on the CPU), and +2.5% code size for the i-cache and
+iTLB. A core without the erratum gains nothing in its uop cache. It pays for decoding and retiring
+the filler, which takes issue slots but no execution units. At this engine's IPC (1.2-1.3 on
+TPC-H, 0.4-0.65 on OLTP) a few percent more cheap instructions cost at most about the instruction
+increase, so expect 0-2% more cycles on TPC-H-like loops and about 0% on OLTP, whose cycles go
+mostly to cache misses. Recheck this before relying on it on such a CPU: build `tools/dist.sh`
+with and without `DIST_RUSTFLAGS` and compare TPC-H cycles.
+
+**Measured and not kept** (BENCH.md has the numbers; the flags are in
+`~/.cache/a236/patches/flags.txt`):
+- `-Ctarget-cpu=x86-64-v2`: TPC-H +3.7% cycles at equal instructions. No gain.
+- `-Ctarget-cpu=x86-64-v3`: TPC-H -1.25% cycles (every pair), -0.6% instructions. Too small to
+  require AVX2 of every production CPU: a v3 binary dies with SIGILL on a CPU without it.
+- Padding only conditional and fused jumps (`-x86-align-branch=fused+jcc`): about the same as
+  the full set (TPC-H -3.2%), only 0.13 MB less code.
+- `-align-loops=32`: TPC-H -0.7% (+-6%), bulk +7.9% in both clean pairs, +0.9 MB of code.
+- `-align-all-functions=5`: TPC-H +0.0%, bulk -1.4% (pairs from +8.5 to -11.3).
+- mimalloc `purge_delay` 100 ms (`MIMALLOC_PURGE_DELAY`, default 10): TPC-H -2.5% (2 clean
+  pairs) but +11 / +16 MB after short transactions at 8 / 32 clients.
+- `codegen-units = 1` and fat LTO stay as they were (already the dist profile, not re-measured).
+
+**How performance agents measure from now on.**
+- "Plain dist" is `tools/dist.sh`. A bare `cargo build --profile dist` has no padding, so its
+  hot loops sit wherever the last change put them. Keep comparing builds of the same kind.
+- Interleave the arms when the lanes are busy: both servers up at once on the lane's CPUs,
+  alternating a b b a run by run (`~/.cache/a236/h/ilv.sh` for lane A, `ilvc.sh` for TPC-H and
+  bulk on lane C, `isum.py` / `sum.py` for the tables). Pass-by-pass pairs 5-6 minutes apart
+  scattered 10-20% in OLTP cycles on lane A under 1-3 foreign cores. Interleaving cut that to
+  a few percent when the load drifted slowly. Bursty load still flags turns.
+- At 1 client, cycles per transaction rise with throughput (waits and spins), so judge 1 client by
+  throughput. Socket polling is under 1% of connection-thread cycles (measured), not the cause.
+- With fsync on, short transactions measure the shared disk as much as the code.
+  `synchronous_commit = off` (`ALTER DATABASE bench SET ...`) gives a CPU-bound view of the same
+  code path. Report it as a diagnostic next to the real class, not instead of it.
+
+**Left:**
+1. Pad the C code too (mimalloc, zstd, lz4, SQLite): `CFLAGS="-O3 -Wa,-mbranches-within-32B-boundaries"`
+   for the cc builds. Built (`djc`, with dj's Rust flags), not measured. mimalloc's malloc /
+   free are 5-8% of point-read cycles.
+2. Measure on a CPU without the erratum (see above) before choosing per-CPU builds.
+3. BOLT (agent 225: not in the toolchain) would place hot code by profile and make most of this moot.
+
+Verification: the verification train on the rebased head (`d64a27697` on origin's `bf9366246`,
+`TRAIN_NO_CHECKOUT=1`) with `TRAIN_ENGINE_BIN` / `TRAIN_PGO_PROFDATA` from `tools/dist-pgo.sh` of
+that head (the padded PGO build, binary `66a5e67e`): release crate tests pass; Clippy 20 warnings
+(as before); crash_random seeds 1-30 x 4 and the power stage (power_cut 4 passed, seeds 1-30 x 4
+with `CRASH_POWER=1`, with and without `CRASH_ASYNC=1`) built `--profile dist` with that profile
+and the padding (the flag on rustc's command line); regress against the padded PGO binary
+51,148 / 51,150 units, 0 newly differing; isolation 1647 / 1648 permutations; pg_dump_tap 14,609
+passed, 0 failed. Debug crate tests: all pass except `wire::big_bytea_values_go_out_in_linear_time`,
+21.9 s against its 20 s wall-clock bound at a load of 30-40 (debug builds take none of these
+flags; earlier trains overran it the same way, see above); alone at a load of 33 it passes. Pushed rebased again onto `c25ffbd79` (agent 239's storage
+format v2, none of whose files these commits touch) as `cf7c56ba2`; not trained a second time.
+
 ## Profile-guided build (agent 225)
 
 BENCH.md "Profile-guided build" has the tables. A profile-guided (PGO) build of roll-engine is
@@ -10088,7 +10274,8 @@ crates/pg-engine/tools/dist-pgo.sh --profdata <file> --out <dir>   # reuse a pro
 ```
 
 Plain `cargo build --profile dist` is unchanged (no `.cargo/config`, no profile rustflags: the
-flags exist only in these builds' RUSTFLAGS). `target-cpu` is not set (the x86-64 baseline, as
+flags exist only in these builds' RUSTFLAGS). (Since agent 236 both builds also take
+`tools/dist-flags.sh`, the JCC-erratum padding, as `tools/dist.sh` does: "Build flags".) `target-cpu` is not set (the x86-64 baseline, as
 plain dist); `codegen-units = 1` and fat LTO were already the dist profile's. BOLT not tried:
 `llvm-bolt` is not in the toolchain's `llvm-tools` nor on the host, and it needs `--emit-relocs`
 and LBR profiles of the running server: not simple or reproducible here.
@@ -10166,6 +10353,291 @@ and confirm on PGO:
 
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
+
+## Storage format v2: design (agent 231)
+
+**Measured first**, offline, by `storage::sst::study` (an ignored test: `FMT_DIR=<a store's
+directory> cargo test --release --lib storage::sst::study -- --ignored --nocapture`,
+`FMT_ONLY=codecs,cols,seek`), over the files as builds wrote them: the bulk script's table and
+indexes after the compaction that follows its DELETE (the base binary, `248f9f8fa`, a run of
+`bulk2.sh` with `keep` steps) and TPC-H SF1 (agent 227's pristine data directory). One CPU of
+lane B, single-threaded; times are wall on a loaded host, compared within one run.
+
+Bytes by component (format 1, the file form decompressed):
+
+| relation | raw MB | header % | key % (of it the version) | value % | the value's duplicated row key % | cache form MB |
+|---|---|---|---|---|---|---|
+| bulk table (750k rows, 4 cols) | 41.0 | 5.2 | 17.5 (14.0) | 77.3 | 0 | 38.3 (-7%) |
+| bulk index on a | 23.6 | 9.1 | 39.5 (24.2) | 51.4 | 51.4 | 6.1 (-74%) |
+| bulk unique index on id | 27.9 | 7.7 | 48.8 (20.5) | 43.6 | 43.6 | 10.4 (-63%) |
+| TPC-H lineitem rows (16 cols) | 831.6 | 2.5 | 7.0 (5.5) | 90.5 | 0 | 789.8 (-5%) |
+| TPC-H lineitem's three indexes | 614.6 | 7-10 | 37-52 (19-25) | 41-54 | 41-54 | 195.5 (-68%) |
+| TPC-H orders rows (9 cols) | 189.1 | 2.5 | 7.6 (6.1) | 89.9 | 0 | 178.6 (-6%) |
+| TPC-H all | 2,046 | | | | | 1,412 (-31%) |
+
+The cache form (`Block`, what `Block::decode` makes of every block read) already leaves out an
+index entry's row key and the block's version; every block in these files has keys of one length.
+`Block::decode` costs 7-8 µs a row block and 13-24 µs an index block (TPC-H: 1.35 s for all 2 GB,
+half of what zstd's decompression of them costs).
+
+Codecs (MB written, compress / decompress MB/s of the raw input; zstd contexts kept):
+
+| data | form | zstd 1 (today) | zstd -1 | zstd -2 | zstd -3 | zstd 3 | lz4 |
+|---|---|---|---|---|---|---|---|
+| TPC-H all | file (format 1) | **621** 326/905 | 684 | 717 | 773 | 594 | 844 |
+| TPC-H all | cache form | 530 248/702 | **593** 320/964 | 615 338/984 | 661 | 498 | 701 523/2184 |
+| bulk table + indexes after DELETE | file | **19.8** | 22.3 | | | 18.2 | 33.5 |
+| bulk table + indexes after DELETE | cache form | 15.7 | **18.7** | 20.1 | 21.8 | 13.8 | 23.9 |
+
+In time, for TPC-H: compressing today's form 6.3 s, the cache form at zstd -1 4.4 s (-30%); a
+cold read (decompress and decode) 3.6 s against 1.5 s (-60%). For the bulk files: compression
+0.252 -> 0.158 s (-37%). LZ4 halves compression again but writes 13% (TPC-H) to 21% (bulk) more
+than today; zstd -2 already writes more than today on the bulk files.
+
+Column decode (`cols::decode_cols` over cached blocks, ns a row; a PAX block's typed columns
+copied out instead; a whole row rebuilt from PAX columns):
+
+| table | columns read | decode_cols | PAX columns | PAX bytes / row bytes | whole row from PAX |
+|---|---|---|---|---|---|
+| lineitem | q01's 7 | 75.7 | 7.9 | 0.83 | 241 |
+| lineitem | q06's 4 | 64.5 | 6.0 | | |
+| orders | all 9 | 54.8 | 13.7 | 0.91 | 97 |
+| bulk table | all 4 | 29.8 | 5.2 | 0.84 | 33 |
+
+In-block search (`Block::seek` of a key the block holds; cold: random blocks of a 16k-block
+working set): 200-430 ns warm, 560-1,180 ns cold, of which `first_restart` (the restart words'
+search) 30-560 ns and `find_block` 30-430 ns. Restarts every 8 or 4 entries instead of 16: warm
+seeks 0-40% cheaper, cold ones no cheaper (more restart words to search: more misses), and index
+entries take 11-75% more cache bytes (9.1 -> 15.4 bytes an entry for the bulk index on a).
+
+**Design**, each choice with its expected effect on the three goals (bulk DELETE + compaction;
+analytic scans; point reads), bytes written, data-dir size, peak memory:
+
+1. **The file form is the cache form** (format 2, `sst.rs`'s module comment): entries as
+   `Block` holds them (the version left out when it is the block's, an index entry's row key
+   derived from its key, keys before values), the restart words and value offsets stored after
+   them, so a block read is decompressed and used: no decode (its entries copied once into an
+   allocation of their size, as the decode's output was, so the cache holds what it held). A
+   block holds exactly the
+   entries format 1's did (it ends where format 1's 16 kB would), so the cache holds the same
+   bytes block for block and every read of a cached block runs the same code on the same bytes.
+   Effects: (1) compaction compresses 31% fewer bytes (index files 63-78% fewer) and reads its
+   format 2 inputs without decoding; (2) a miss costs the decompression alone (half of it went
+   to `Block::decode`); (3) none: cached blocks are unchanged. Bytes, size, memory: below.
+2. **zstd level 1 for format 2's blocks** (`sst::ZSTD_LEVEL`). Level -1 was the plan (the
+   cheapest level writing no more than today on TPC-H and the bulk files: 593 against 621 MB,
+   18.7 against 19.8) and was built and measured (`s001`), but the OLTP benchmark's accounts table
+   (100,000 rows with a text note) then took 2.32 MB against 1.82 (the store 14% more): its rows
+   compress worse at every negative level, in either form. At level 1 the compact form writes
+   less than today everywhere measured (TPC-H 530 against 621 MB, bulk 15.7 against 19.8,
+   accounts 2.68 against 2.82): compression -9 to -15% (fewer bytes, but each costs more),
+   decompression -10%, the decode gone. LZ4: more bytes than today everywhere it was measured.
+   Also in format 2: the bloom filter's hash taken 8 bytes at a time (`sst::hash64_2`; FNV-1a a
+   byte at a time was a fifth of `SstWriter::add`, which is 12-16% of the compaction after the
+   bulk DELETE, and a point read hashes its key once per file), and the writer's shared-prefix
+   count 8 bytes at a time (another fifth of `add`; files byte for byte as before).
+3. **Restart interval per block** (flag bits of the trailer, `Block::rlog`; written as 16): the
+   format can change it per file kind without a version. Not changed: the numbers above show it
+   is not the lever; cold seeks are cache misses (restart words in their own allocation, then the
+   entries), which a layout with the words next to the entries or a two-level word search could
+   cut. That is agent 230's lead (in-block search, block cache read path); format 2 leaves room
+   for it (flags, entry counts per block in the index).
+4. **No PAX on disk.** Typed columns would cut scans' decode 8-10x (75.7 -> 7.9 ns a lineitem
+   row for q01), but every row-path reader (point gets, index fetches, `LazyBuf`) would rebuild
+   rows (241 ns a lineitem row: q18's 6 M fetches alone +1.4 s of CPU). The hybrid worth building
+   is in memory: typed columns of a cached block made at its first column-subset decode and
+   charged to the block cache. It needs no format change (format 2 changes nothing it needs) and
+   costs memory a 2 GB cache has room for (peak +240 MB on TPC-H for lineitem's q01 columns), so
+   it fails the peak-memory gate as long as the cache isn't full: measure it against a cache
+   sized to the data (next lead, with the executor agent: `decode_cols` is the seam).
+5. **Deletion vectors: designed, not built this round.** A bulk DELETE would write, per L1 file,
+   a bitmap of the entries it deletes at its commit ts (positions: block entry counts are in
+   format 2's index for this) instead of 2.25 M tombstones, and the compaction after it (7.2 G
+   instructions) would not be due. What it costs: point reads and scans check the bitmaps of the
+   file they read (a version a bitmap names reads as a tombstone at the bitmap's ts); logical
+   decoding (`repl::decode`) reads deletions from tombstones today; conflict checks and the
+   spill path see tombstones; the bitmaps must commit atomically with the WAL record. Space: a
+   deleted row stays in the file until a compaction rewrites it (a threshold: half dead).
+   Highest gain for goal 1 (DELETE 6.2 G -> ~2, its compaction 7.2 G -> 0) and the highest risk.
+6. **Copying unchanged compressed blocks in compaction**: format 2 makes a block's stored bytes
+   what its output would be. It pays where an L0 file meets a big L1 file in few blocks (a tiny
+   commit over a big table: `compact_within`), not after a bulk DELETE (every block has a deleted
+   row). Next after 1-2.
+
+**Versioning**: the manifest has `format` (absent: 1); a build refuses a manifest of a format past
+its own (`sst::FORMAT`) and a file whose footer says so, with an error naming both. Format 2's
+footer ends with its format and the magic `rollsst2`: a build before format 2 refuses such a file
+at open ("bad footer"), so it never misreads one. Format 1 is read forever (its decode is the code
+every store used until now) and **migrated lazily**: every file a flush, a compaction, a range
+deletion's rewrite or the close's rewrite of linked runs writes is format 2; files nobody
+rewrites stay format 1 and cost what they cost before. No up-front rewrite (a big store would
+spend its first minutes rewriting files it reads as well as it did), and no new crash window: a
+migration is a compaction. A transaction's runs stay format 1 (their values carry the run's tags,
+`Block::decode_linked` takes them off as it reads): a linked run at L1 is format 1 until a
+compaction or a clean close rewrites it. Tests: `storage::tests::format_1_files_read_beside_format_2`
+(a store written by the pinned format 1 encoder, `StoreOptions::format = 1`, read at every
+snapshot beside format 2 L0 files, then mixed L1, reopened; a newer manifest refused),
+`sst::tests::format2_reads_as_format1` (every codec; the same blocks, byte for byte in cache
+form), `tests/block_format.rs` (`tests/data/storage_format1.tar.gz`, written by `248f9f8fa`:
+read, written, reopened; a kill -9 during the compactions that turn its files into format 2).
+
+**Steps**, by measured gain per risk: (1) items 1+2, gated as one; (2) block copy in compaction;
+(3) the in-memory column cache (with the executor agent); (4) deletion vectors.
+
+## Storage format v2, round 1 (agent 231)
+
+BENCH.md "Storage format v2, round 1" has the gates and the same-day tables. What landed (two
+commits, gated together as `s003`):
+
+- **Block format 2** (`storage/sst.rs`, module comment): `SstWriter::put2` writes an entry as
+  `Block` holds it (`shared | unshared << 2 | F_TS | F_DERIVED`, the value field, the key's bytes;
+  values after all the entries), `body2` appends the restart words and value offsets, the block's
+  version, entry and restart counts, `common` and flags (bit 0 derived values, bits 4-7 the
+  restart interval's log), and `Block::load` reads them back (no `decode_with` pass; the entries
+  and values copied into an allocation of their own size, as `decode_with`'s output is: a slice
+  kept the trailer and the read's frame, TPC-H's peak +12-20 MB). A block ends where format 1's
+  would (`raw1`, what format 1 would have written), so the cache holds the same bytes, block for
+  block (`format2_reads_as_format1` compares every block's cache form with format 1's).
+  The index gains each block's entry count (for count-only scans and deletion vectors later),
+  the footer the format; the bloom filter hashes a key 8 bytes at a time (`hash64_2`) and the
+  writer counts shared prefixes 8 bytes at a time (`common_prefix`: format 1's files are byte for
+  byte as before). Codec byte 2 is LZ4 (readers take it; nothing writes it: more bytes than zstd
+  everywhere measured).
+- **Versions**: `Manifest::format` and the footer's; a newer one is refused with an error naming
+  both (`newer_formats_are_refused`, `format_1_files_read_beside_format_2`). Builds before format 2
+  refuse its files at open ("bad footer"): no silent misread. `StoreOptions::format = 1` writes
+  format 1 as `248f9f8fa` did (the tests' pinned old encoder).
+- **Migration**: lazy. Flushes, ingests, compactions, range deletions' rewrites and the close's
+  rewrite of linked runs write format 2; format 1 files are read as before until one of those
+  rewrites them. A transaction's runs (`txn::spill`) stay format 1 (their values carry tags that
+  `Block::decode_linked` takes off): a linked run at L1 is format 1 until compaction or a clean
+  close. Making runs format 2 was estimated (the decode of linked runs: about 1% of the bulk
+  script, 11% of the compaction after its DELETE) and not done: their tags would have to move
+  into the entry header or a side array, and a transaction's own reads of its runs would then
+  rebuild tagged values.
+- **zstd level**: 1, as before (level -1 measured as `s001`: compaction -10%, VACUUM -16%, but
+  the OLTP accounts' rows take 28% more bytes stored).
+- Tests: `sst::tests::format2_reads_as_format1` (every codec, every block's cache form equal to
+  format 1's, another restart interval), `newer_formats_are_refused`, `common_prefix_and_hash64_2`;
+  `storage::tests::format_1_files_read_beside_format_2` (a store of format 1 read at every
+  snapshot by this build, then format 2 L0 over format 1 L1, then mixed L1, reopened, a newer
+  manifest refused); `tests/block_format.rs`: `format_1_store_reads_and_upgrades` (the fixture
+  `tests/data/storage_format1.tar.gz`, written by `248f9f8fa` from `storage_format1.sql`: read
+  as written, then writes, an index build, updates, deletes, VACUUM; mixed formats on disk; read
+  after a restart and after every row is rewritten), `kill_during_upgrade_compactions` (kill -9
+  while compactions turn the fixture's files into format 2, three rounds).
+- `storage::sst::study` (an ignored test) is the measuring tool of the design section; run it on
+  any store directory.
+
+**What the executor can take from format 2** (not wired; for the next executor agent): each
+block's entry count is in the file's index (`SstWriter::finish`, read and dropped by
+`SstReader::open` now): a count-only scan of a range whose L1 blocks have one version per key, no
+tombstone and no newer source in their range can count from the index without reading the
+blocks (count(*) is 2.7x PostgreSQL, 7.9x pgrust in the bulk script). A column-subset reader
+needs no format change: `cols::decode_cols` is the seam, and the measured lever is typed columns
+kept per cached block (design item 4).
+
+**Next**, by size: (0) **a small cache** (BENCH "Storage format v2, round 1", same day): at
+256 MB roll's TPC-H takes 52 s (131 s of CPU) against PostgreSQL's 29 (70) and pgrust's 25 (38),
+almost all in the index-join queries (q07, q09, q17, q08, q02, q20): every probe or heap fetch
+that misses decompresses a whole 16 kB block for one entry, where PostgreSQL copies one 8 kB page
+from the OS page cache. Format 2 took 14% off; what remains wants either index and heap blocks
+left uncompressed where they are read by point lookups (the OS page cache then holds them, and
+a pread of one block replaces the decompression; bytes written and the data dir rise, so it has
+to be paid for elsewhere: format 2's -15% is the room), or a second cache tier of compressed
+blocks, or smaller blocks for point-read files (the restart interval and block size are now
+per block / per writer); (1) deletion vectors (design item 5: DELETE 6.2 G and its compaction 6.4 G
+against PostgreSQL's 1.7 G for both); (2) the compaction's own work (`SstWriter::add` 12-16% of
+it, the merge's `Cursor::head` / `Merge::min` / `Block::read` 15%, format 1 inputs' decode 11%);
+(3) cold in-block seeks (agent 230's lead: restart words in their own allocation, then the
+entries; the format can now change the restart interval per block, but the study shows the
+misses, not the interval, are the cost); (4) the in-memory column cache (design item 4) against
+a cache sized to the data.
+
+## Storage format v2 landed: review and gates on the rebased head (agent 239)
+
+Agent 231 stopped before pushing; agent 239 took its three commits over (`wip/a231-takeover`),
+rebased them on `bf9366246`, reviewed them, re-ran the gates and the train, and pushed them.
+BENCH "Storage format v2, re-confirmed (agent 239)" has the numbers.
+
+**The upgrade is one-way for data directories.** The first manifest a format 2 build writes
+records `format: 2`, and from then on the store's flushes and compactions write format 2 files.
+A build from before format 2 (anything before this push) cannot read such a store: a client
+connecting to an upgraded database gets `ERROR: sst …/<id>.sst has a bad footer`. There is no
+downgrade tool. Format 1 files are read forever and rewritten lazily; a store stays readable by
+older builds only until a format 2 build writes a file in it (a flush, the flush of WAL replayed
+at open, a compaction): older builds ignore the manifest's `format` and fail on the first file.
+
+- **Train 4's `debug 101`** (agent 231's last train, `1d0dc6602`) was the two load-sensitive wire
+  tests, not the format work: `big_bytea_values_go_out_in_linear_time` (20.23 s against its
+  20 s bound) and `parallel_workers_seen_by_others` (`wait_event` NULL where it waits for
+  PgSleep). On the rebased tree every debug crate test passed, `wire` included.
+- **The 4 kB target fix** of `format_1_files_read_beside_format_2` (231's notes) is in
+  `1d021ce69` (`target_file_bytes: 4 << 10`).
+- **Review** (second pair of eyes on the on-disk change; nothing needed fixing):
+  - Crash safety: a format 2 file is fsynced before its rename, the directory before the
+    manifest's replace (as format 1). The manifest's format is raised in memory at open
+    (`max(manifest, StoreOptions::format)`), so every manifest written after it, the first one
+    naming a format 2 file included, says 2; a crash before that leaves the new files unnamed,
+    and the next open deletes them.
+  - Mixed stores: the reader decides per file, from its footer (format 1's six words or format
+    2's seven), and the bloom hash per file (`hash64` / `hash64_2`) on both the write and the
+    read side; no hash is computed once for several files. Linked runs (`txn::spill`,
+    `create_run`) stay format 1, and a format 2 file with a `commit_ts` is refused at open.
+  - Lazy migration under concurrent compaction: the writer's format comes from
+    `StoreOptions::format`, a constant, not from the inputs, so a compaction of mixed inputs
+    writes format 2 whatever it merges; `block_format.rs`'s `kill_during_upgrade_compactions`
+    (kill -9 during them, three rounds) and the train's crash and power-cut stages cover it.
+  - An old binary on a new store, checked by hand (`~/.cache/a239/scripts/oldbin.sh`): a
+    data directory written and cleanly closed by the head (`format: 2` in every manifest), then
+    `5526bfef4` started on it: it starts, a connection to the database fails with "bad footer",
+    every store file is byte for byte unchanged (only `databases.json`'s LSN counters advance,
+    as at every start), and the head then reads all 171,429 rows with the same checksum. The
+    refusal happens at `SstReader::open`, before WAL replay or any write: nothing is lost.
+  - Corruption: format 2 blocks keep format 1's crc32 over the stored bytes (checked at every
+    read, XX001 `checksum mismatch`). The index, the bloom filter and the footer have no
+    checksum, in either format. `Block::load` trusts a body whose crc holds but still checks the
+    trailer (restart log, restart count, offsets in range); the store code has no `unsafe`, so a
+    body that passed the crc yet is wrong would panic, not read out of bounds. No test covered a
+    corrupted block in either format: added `sst::tests::corrupted_format2_blocks_are_refused`
+    (a flipped byte, raw and zstd: XX001; a zeroed restart log with its crc redone: "bad sst
+    block").
+  - Backup and restore: nothing outside `storage/` parses store files (`pg_backup_start` /
+    `pg_backup_stop`, `CREATE DATABASE`'s template copy `engine::copy_dir` and pg-control's
+    reflink clone of a stopped branch take the files as they are), so they need no change; a
+    restored or cloned upgraded directory is format 2 like its source.
+- **Gates** on plain dist builds of `5526bfef4` (`b239`) and the head (`h239`): bulk -2.0%
+  instructions in every round (compaction after the DELETE -8.2%, VACUUM -10.6%, MB written
+  -4.1%, no step up); TPC-H SF1 at 2 GB level (+0.11 / -0.02 / +0.03%, cycles -2 to -3%), at
+  256 MB -14.3 to -14.8% in all seven rounds (wall 44.4 -> 38.8 s); the data directory after the
+  TPC-H load 638 -> 561 MB; point and range reads and short transactions level (cached reads run
+  the same code on the same bytes; in-process point reads -1.5%, every pair lower; over the wire
+  point select +0.5 / +0.6% at 8 / 32 clients, inside its pairs' spread, and an instruction
+  profile of each server shows no storage symbol among the differences). One figure to watch: the 256 MB pass's VmHWM, median 616 -> 631 MB over seven
+  rounds with overlapping ranges (598-648 against 600-645): no mechanism found (the cache holds
+  the same bytes in exact-size allocations in both); 2 GB, bulk and idle memory are equal.
+- **Verification train** on `63814fb0e` (these commits on `bf9366246`): release, clippy (20
+  warnings), crash, power-cut (4), crash-power (sync and async) 0; regress 51,148 of 51,150,
+  newly differing 0; isolation 1647/1648; pg_dump 14,609 passed; debug 101, only
+  `wire::big_bytea_values_go_out_in_linear_time` (41.0 s against its 20 s bound at load 50-99;
+  25 / 43 / 43 s run alone at load 99; it selects a 64 MB parameter and a decoded literal, no
+  table, so no store file is read). An earlier train of these commits ran the disk out
+  ("No space left on device" from LLVM at 23:00, 2026-11-15) and was run again.
+- **Dropped**: nothing.
+- **Left**: 231's "Next" list above, item 0 (the small cache) first; then the bulk DELETE and
+  its compaction (13.5 G user instructions against PostgreSQL's 1.7 G on the 1M-row script).
+  Item 0 measured on h239 (TPC-H SF1, 256 MB cache, lane C, `perf record -F 999` of the engine
+  over two runs each of q07 and q09): zstd is 58-60% of the samples of both. 45% is
+  `ZSTD_decompressSequences` (a whole 16 kB block decompressed for the entry or two a probe
+  wants), about 12% the entropy tables each block's header makes a fresh decoder build
+  (`ZSTD_buildFSETable` 5.3-5.4%, `HUF_readDTableX1` 2.4-2.9%, `FSE_readNCount` 1.4%,
+  `FSE_decompress_wksp` 1.4-1.6%, `HUF_readStats` 0.9-1.1%); creating the decompression
+  context per block (`zstd::bulk::decompress`) does not show (no symbol of it at 0.5%), so a
+  reused context alone is not the lever. The levers by that profile: a zstd dictionary per file
+  (its prebuilt tables replace the per-block builds, and 16 kB blocks compress better with one),
+  smaller blocks or none compressed for the files point probes read (the pread then copies what
+  the probe needs from the OS page cache, as PostgreSQL's 8 kB page), each a format change for
+  its own round.
 
 ## Analytic path against pgrust (agent 220)
 
