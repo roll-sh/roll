@@ -122,6 +122,21 @@ pub async fn running(name: &str) -> bool {
     docker(&["inspect", "-f", "{{.State.Running}}", name]).await.is_ok_and(|s| s == "true")
 }
 
+/// A container's address when it publishes no port and sits on one network other than Docker's
+/// default ones ([`crate::isolation::Job::network`]).
+async fn own_network_address(name: &str) -> Option<std::net::IpAddr> {
+    let out = docker(&["inspect", "-f", "{{len .HostConfig.PortBindings}} {{range $n, $c := .NetworkSettings.Networks}}{{$n}}={{$c.IPAddress}} {{end}}", name]).await.ok()?;
+    let mut parts = out.split_whitespace();
+    if parts.next()? != "0" {
+        return None;
+    }
+    let nets: Vec<(&str, &str)> = parts.filter_map(|p| p.split_once('=')).filter(|(n, _)| !["bridge", "host", "none"].contains(n)).collect();
+    match nets.as_slice() {
+        [(_, ip)] => ip.parse().ok(),
+        _ => None,
+    }
+}
+
 /// The host port a container's `port/tcp` is published on. A container that already stopped
 /// (its command exited at once) publishes nothing: that's said, with its exit code, rather than
 /// Docker's "no public port".
@@ -285,10 +300,17 @@ impl Isolation for Docker {
         if let Some(h) = home_label() {
             args.extend(["--label".into(), h]);
         }
-        if let (Kind::Preview, Some(port)) = (job.kind, job.port) {
-            args.extend(["--publish".into(), format!("127.0.0.1::{port}")]);
+        match &job.network {
+            // Its own network, no route out: nothing published (the host reaches it at its
+            // address there), roll's products at the network's gateway.
+            Some(n) => args.extend(["--network".into(), n.name.clone(), "--workdir".into(), workdir.into(), "--add-host".into(), format!("host.docker.internal:{}", n.gateway)]),
+            None => {
+                if let (Kind::Preview, Some(port)) = (job.kind, job.port) {
+                    args.extend(["--publish".into(), format!("127.0.0.1::{port}")]);
+                }
+                args.extend(["--workdir".into(), workdir.into(), "--add-host".into(), "host.docker.internal:host-gateway".into()]);
+            }
         }
-        args.extend(["--workdir".into(), workdir.into(), "--add-host".into(), "host.docker.internal:host-gateway".into()]);
         args.extend(limits(job.memory_mb, job.cpus));
         let mut env: Vec<(String, String)> = Vec::new();
         if let Some(cache) = &job.cache {
@@ -339,6 +361,10 @@ impl Isolation for Docker {
 
     async fn start(&self, name: &str, port: u16) -> anyhow::Result<SocketAddr> {
         docker(&["start", name]).await?;
+        // On a network of its own nothing is published: its address there.
+        if let Some(ip) = own_network_address(name).await {
+            return Ok(SocketAddr::new(ip, port));
+        }
         Ok(SocketAddr::from(([127, 0, 0, 1], host_port(name, port).await?)))
     }
 
