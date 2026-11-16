@@ -319,6 +319,12 @@ impl Apps for FakeApps {
     fn status(&self, p: &str, s: &str) -> Option<ServiceState> {
         self.running.lock().contains(&(p.to_string(), s.to_string())).then_some(ServiceState::Running)
     }
+    fn warm(&self, _: &str, _: &str) -> bool {
+        false
+    }
+    async fn egress_refused(&self, _: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// roll secrets as previews see it: every `ensure` (environment, trusted). With `dynamic`, each

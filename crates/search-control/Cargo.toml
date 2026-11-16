@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 code-sql.workspace = true
 futures.workspace = true
+roll-auth.workspace = true
 roll-cluster.workspace = true
 urlencoding.workspace = true
 search-es.workspace = true

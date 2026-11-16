@@ -386,6 +386,30 @@ a search application's `_search`, with the searches it makes), anything else fai
 `role_restriction_exception` ("access restricted by workflow"), `_authenticate` included. A search with `ignore_unavailable`
 leaves out the explicitly named indices its user may not read (without it they are refused);
 ES|QL and SQL name their indices strictly either way.
+Background jobs run as the user or API key that set them up, and roll checks that user or key
+again before each run (`internal::principal_problem`, with the lookups that authenticate
+requests). Elasticsearch doesn't: it runs a job with the authentication it stored, and never
+authenticates that again. Checked on 9.5.5: after its API key was invalidated, a continuous
+transform still wrote its next checkpoint and a watch still indexed every second. roll differs
+on purpose, so that revoking a
+leaked key or deleting a user stops everything they left behind. The check fails when an API key
+is gone, invalidated or expired, or when a file, native or reserved user (an internal user, on
+the OpenSearch dialect) is gone or disabled. Service accounts pass, and so do roll's index
+scopes. Then the job runs nothing and fails as its type does. The reason names the user or key,
+never a secret:
+- a transform goes to `failed` at once, also when it is `unattended`, with "task encountered
+  irrecoverable failure: …";
+- an ILM step moves to `ERROR` with the reason in `step_info`, and doesn't retry while the
+  principal can't act;
+- an SLM run records a failure in `last_failure` and in the SLM history;
+- a watch's execution is `failed`, with a `security_exception` in the record;
+- a rollup job is `stopped`, counts a search failure and shows the reason as `status.reason`,
+  which Elasticsearch's status doesn't have. Starting the job again clears it.
+
+A refused transform or rollup job stays stopped. Watches and SLM policies are checked again on
+every run, and ILM steps retry, so they resume when a disabled user is enabled again. An
+invalidated key never acts again: its jobs need setting up again by a user who can act (a
+transform `_update`, a policy or watch `PUT`, a new rollup job).
 The `watcher` suite's webhooks and `http` inputs call the node itself: its test cluster sets
 `roll.watcher.allow_private_hosts` (a roll-only option in `extended.txt`), which nothing else does.
 
