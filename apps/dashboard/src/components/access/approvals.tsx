@@ -70,11 +70,13 @@ function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refre
   const [denying, setDenying] = useState(false);
   const [remember, setRemember] = useState<Remember>("once");
   const [error, setError] = useState<string | null>(null);
+  // Approved here, and roll's policy asks someone else too: this person's part is done.
+  const [approvedHere, setApprovedHere] = useState(false);
   const decide = async (approve: boolean) => {
     setBusy(approve ? "approve" : "deny");
     setError(null);
     try {
-      if (approve) await accessApi.approve(a.id, remember);
+      if (approve) setApprovedHere((await accessApi.approve(a.id, remember)).state === "pending");
       else await accessApi.deny(a.id, reason.trim() || undefined);
       await refresh();
     } catch (e) {
@@ -105,7 +107,12 @@ function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refre
           <p className="mt-1 font-mono text-[11px] text-subtle">
             {a.method} {a.route} · asked {relative(a.created_at)} · expires {relative(a.expires_at)}
           </p>
-          {gateProgress(a) && <p className="mt-1 text-[12px] text-accent">{gateProgress(a)}</p>}
+          {gateProgress(a) && (
+            <p className="mt-1 text-[12px] text-accent">
+              {gateProgress(a)}
+              {approvedHere && <span className="text-muted"> · you've approved: it waits for someone else</span>}
+            </p>
+          )}
         </div>
         <div className="flex shrink-0 gap-2">
           {rememberable(a) && (
@@ -123,7 +130,7 @@ function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refre
               ))}
             </select>
           )}
-          <button onClick={() => decide(true)} disabled={busy !== null} className={destructive ? danger : primary}>
+          <button onClick={() => decide(true)} disabled={busy !== null || approvedHere} className={destructive ? danger : primary}>
             {busy === "approve" ? <span className="shimmer">Approving…</span> : "Approve"}
           </button>
           <button onClick={() => (denying ? decide(false) : setDenying(true))} disabled={busy !== null} className={btn}>
