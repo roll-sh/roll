@@ -192,9 +192,13 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
             <div>
               <p className="text-[13px] font-medium">Deploy hook</p>
               <p className="mt-1 text-[12px] text-muted">
-                {env.hook
-                  ? `A POST to its URL deploys ${env.name}, from CI or a registry's webhook${service.source.kind === "image" ? " (?image= another tag of the same image)" : ""}.`
-                  : "A secret URL that deploys this environment, without an API token."}
+                {service.source.kind === "git"
+                  ? env.hook
+                    ? `Add its URL as the repository's push webhook (GitHub: Settings → Webhooks, content type application/json; GitLab: Webhooks, push events): a push to ${env.branch ?? "its branch"} deploys ${env.name} at once instead of within five minutes.`
+                    : "A secret URL for the repository's push webhook: pushes deploy at once instead of within five minutes."
+                  : env.hook
+                    ? `A POST to its URL deploys ${env.name}, from CI or a registry's webhook${service.source.kind === "image" ? " (?image= another tag of the same image)" : ""}.`
+                    : "A secret URL that deploys this environment, without an API token."}
               </p>
             </div>
             <div className="flex gap-2">

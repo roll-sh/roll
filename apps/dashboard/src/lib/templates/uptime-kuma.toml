@@ -1,0 +1,8 @@
+# Uptime Kuma: uptime monitoring and status pages (uptime.kuma.pet). Its monitors and history
+# live on the volume. It keeps checking only while it runs, so it stays up (min_instances = 1).
+[apps.uptime-kuma]
+image = "louislam/uptime-kuma:1"
+port = 3001
+[apps.uptime-kuma.run]
+volume = { mount = "/app/data", size_gb = 1 }
+min_instances = 1
