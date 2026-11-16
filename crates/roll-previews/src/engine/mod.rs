@@ -497,7 +497,8 @@ impl Engine {
                 held.insert(l.preview.clone(), if local { self.store.row(&l.preview).ok() } else { None });
             }
             let Some(Some(r)) = held.get(&l.preview) else { continue };
-            let running = matches!(self.apps.status(&l.preview, &l.service), Some(ServiceState::Running | ServiceState::Deploying));
+            // Frozen counts: its process keeps the credential and is back on the next request.
+            let running = matches!(self.apps.status(&l.preview, &l.service), Some(ServiceState::Running | ServiceState::Deploying)) || self.apps.warm(&l.preview, &l.service);
             if !running || r.desired == Desired::Deleted {
                 self.revoke_lease(&r.project_id, &l).await;
                 continue;

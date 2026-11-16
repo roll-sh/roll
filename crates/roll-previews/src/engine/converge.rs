@@ -610,7 +610,10 @@ impl Engine {
         // their own), each a page of its own.
         let own_keys: Vec<String> = states.iter().map(|s| format!("state:{}", s.name)).chain(browsers.iter().map(|b| format!("browser:{b}"))).collect();
         first_paths.extend(own_keys.iter().filter(|k| k.starts_with("state:")).cloned());
-        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers };
+        // The open notes' elements not cropped yet, on the first service's pages (a note's link
+        // is the preview's first URL and its path): what each note is about, as a picture.
+        let crops = self.crops_wanted(r).await;
+        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops };
         let started = std::time::Instant::now();
         match self.apps.screenshot(&r.id, &first.name, &opts).await {
             Ok(Some(shot)) => {
@@ -639,6 +642,11 @@ impl Engine {
                 // no older picture behind to be compared and reviewed as this head's.
                 let took = |k: &String| !k.starts_with("browser:") || pages.iter().any(|p| p.path == *k);
                 let wanted: Vec<String> = entries.iter().cloned().chain(width_keys.iter().cloned()).chain(own_keys.iter().filter(|k| took(k)).cloned()).collect();
+                for (note, png) in &shot.crops {
+                    if let Err(e) = self.store.set_note_crop(&r.id, note, png) {
+                        warn!(preview = %r.id, error = %e, "previews: keeping a note's crop");
+                    }
+                }
                 let (store, id, head) = (self.store.clone(), r.id.clone(), r.build().to_string());
                 let kept = tokio::task::spawn_blocking(move || {
                     store.set_screenshot(&id, &head, &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok()
@@ -686,6 +694,27 @@ impl Engine {
         }
     }
 
+    /// The open notes of a change's preview without a crop, whose page and selector pass roll's
+    /// checks (they come from the preview's code), at most [`crate::store::CROPS_PER_RUN`].
+    async fn crops_wanted(&self, r: &Row) -> Vec<crate::ports::CropAsk> {
+        if r.change_id.is_none() {
+            return Vec::new();
+        }
+        let notes = match self.open_notes(&r.id).await {
+            Ok(n) => n,
+            Err(e) => {
+                warn!(preview = %r.id, error = %e, "previews: reading the notes to crop");
+                return Vec::new();
+            }
+        };
+        notes
+            .into_iter()
+            .filter(|n| !n.crop && crate::settings::page_path_ok(&n.path) && crate::settings::selector_ok(&n.selector))
+            .take(crate::store::CROPS_PER_RUN)
+            .map(|n| crate::ports::CropAsk { note: n.id, path: n.path, selector: n.selector })
+            .collect()
+    }
+
     /// The pages `github.pages` names on the preview's other services (`admin:/`, `admin:/users`),
     /// a screenshot run per service in that service's own network. Best effort: a service that
     /// can't be taken is logged and its pages wait for the next head.
@@ -702,7 +731,7 @@ impl Engine {
             if !services.iter().any(|s| s.name == svc) {
                 continue;
             }
-            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), openapi: None, endpoints: Vec::new(), states: Vec::new(), browsers: Vec::new() };
+            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), ..Default::default() };
             match self.apps.screenshot(&r.id, svc, &opts).await {
                 Ok(Some(shot)) => {
                     if paths.contains(&"/") {
@@ -746,12 +775,21 @@ impl Engine {
     /// branch yet (their screenshots came first, as a new baseline's does) are now, and say so.
     async fn compare_waiting(&self, b: &Row) {
         let Ok(rows) = self.store.rows(Some(&b.project_id)) else { return };
+        // Every change again, not only those not compared yet: a change's screenshot run may
+        // have compared it while this baseline's was half kept (its first page in, its other
+        // pages not yet: screenshots run side by side), leaving pages uncompared for good. At the
+        // same merge base the answer is the same, so only a change whose comparison moved is
+        // reported.
+        let compared = |id: &str| {
+            self.store.row(id).and_then(|r| self.store.view(r)).ok().map(|p| {
+                let pages: Vec<(String, Option<f64>)> = p.pages.iter().map(|x| (x.path.clone(), x.base_percent)).collect();
+                serde_json::to_string(&(&p.base_change, pages)).unwrap_or_default()
+            })
+        };
         for r in rows.into_iter().filter(|x| x.change_id.is_some() && x.desired == Desired::Active) {
-            if !matches!(self.store.base_change(&r.id), Ok(None)) {
-                continue;
-            }
+            let before = compared(&r.id);
             self.compare_with_default_branch(&r).await;
-            if matches!(self.store.base_change(&r.id), Ok(Some(_))) {
+            if compared(&r.id) != before {
                 self.report(r).await;
             }
         }
@@ -966,7 +1004,17 @@ impl Engine {
 
     pub(super) async fn report(&self, row: Row) {
         let Ok(s) = self.store.settings(&row.project_id) else { return };
-        if let Ok(p) = self.store.view(row) {
+        if let Ok(mut p) = self.store.view(row) {
+            // The open notes, newest first (a few), for the pull request's comment.
+            if p.change.is_some() {
+                let mut notes = self.open_notes(&p.id).await.unwrap_or_default();
+                notes.reverse();
+                notes.truncate(10);
+                p.notes = notes.into_iter().map(|n| {
+                    let link = if n.crop { self.store.note_crop_link(&p.id, &n.id).ok().flatten() } else { None };
+                    (n, link)
+                }).collect();
+            }
             self.source.report(&p, &s).await;
         }
     }

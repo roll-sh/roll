@@ -32,8 +32,9 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   each one branches; search joins when it lands). A branch of a 100 GB project starts in
   seconds and stores only what the preview writes, except where the table below says
   otherwise.
-- **Put the whole preview to sleep, not just the app.** Services stop after `sleep_after`
-  without a request. Postgres computes, Redis, NoSQL, queues and search unload on their own
+- **Put the whole preview to sleep, not just the app.** Services freeze after `sleep_after`
+  without a request (paused, so the next visit is back in tens of milliseconds), and stop
+  for good half an hour later. Postgres computes, Redis, NoSQL, queues and search unload on their own
   after 5 minutes idle. A sleeping preview pays only for bytes. The first request to any of its
   URLs wakes it and waits for it.
 - **Use real data, safely.** Branches come from the resources in the project (production or
@@ -107,10 +108,19 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   doesn't wait for a cold start; they sleep again after `sleep_after` unused. Not a preview
   someone put to sleep, and only on the node that holds its lease. About $0.002 a push here;
   `warm: false` turns it off.
-- **Sleep**: a service with no requests for `sleep_after` (10 minutes by default) stops. A
-  request to any URL of the preview wakes it. The request is held for up to 60 s; after that the
-  visitor gets a "starting" page that refreshes. Data products sleep on their own and wake on
-  connect.
+- **Sleep**: a service with no requests for `sleep_after` (10 minutes by default) is frozen
+  first: its container is paused (`docker pause`), keeping its memory (12–22 MiB for the
+  measured service) and using no CPU, and it reads and costs as asleep. A visit in that window
+  thaws it: 48–72 ms to the first response on this machine, where a cold start is 3.3–3.9 s.
+  After `ROLL_PREVIEWS_WARM_MINUTES` (30; 0 stops at once, as before) it's stopped for good, and
+  a node keeps at most `ROLL_PREVIEWS_WARM_MAX` (32) frozen, stopping the oldest past it. A
+  request that lands just as a service freezes thaws it again at once. A frozen service keeps
+  its dynamic credentials renewed (its process comes back with them). Docker only: Fargate has
+  no pause, so services there stop. Sleep asked for (`roll preview sleep`, the sheet's Sleep)
+  stops at once. Otherwise a request to any URL of the preview wakes it. It's held for up to
+  60 s; after that the visitor gets a "starting" page that refreshes. Data products sleep on
+  their own and wake on connect. `scripts/preview-cost.sh` checks a frozen service thaws (the
+  same container, within 1.5 s).
 - **Reset**: `reset_every` (`0` off, or hours) re-branches every data resource from its parent's
   current state on a schedule. `POST /v1/previews/{id}/reset` does it now, for all resources or
   the ones named.
@@ -733,6 +743,21 @@ land on the change.
   dismissed; from a terminal `roll preview notes` lists the open ones and `--resolve <id>`
   resolves one), so the button stops listing it. The page holds no credential for this either
   (live: a resolved note folds away).
+- A note shows what it's about (Vercel's comments carry a picture): the next screenshot run of
+  the change's preview crops each open note's element from its page by its selector, in the
+  screenshot's own container at the desktop width (scrolled into view, a 24 px margin, at most
+  1280 by 800). The visitor's browser runs no capture code, so the page's code can't forge the
+  picture, and a selector roll refuses (`selector_ok`) is never sent. At most 10 notes a run,
+  each picture at most 512 KiB, 50 kept a preview; a note already cropped isn't asked again, and
+  one whose element isn't on the page has none. `GET …/notes/{note}/crop` serves it, the notes
+  list says `crop`, and the sheet shows it with the note.
+  `a_notes_element_is_cropped_by_the_next_screenshot`.
+- The open notes reach the pull request (Vercel's comments): the preview's own comment, updated
+  in place, lists them (newest first, at most 10), each with its page, who and what as plain
+  words (one line, markdown escaped: a note can't link, embed an image, mention or close
+  anything), and a public preview's signed link to its crop (`screenshot.png?note=<id>`, a
+  signature of its own per note, as the screenshot's). Resolved ones drop out on the comment's
+  next update. `the_pages_notes_are_listed_as_plain_words`.
 - A note is a thread (Vercel Comments' replies): its Reply opens roll (`?fb_reply=<review id>`)
   on the same view, the note with its replies, a reply box and Resolve. A reply is a `comment`
   review on the change starting "**Reply on the preview** · `<the note's id>`"
@@ -806,7 +831,8 @@ and admins see every project.
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each) | `{vars}`: the preview's own variables; its services redeploy with them |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
-| `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}]}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500) |
+| `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of its element is kept |
+| `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page; 404 until one has |
 | `POST /v1/previews/{id}/notes/{note}/resolve` | | `{resolved}`: a note on the preview's page (its review's id) resolved, so the page stops listing it; 404 for a note that isn't the change's |
 | `GET /v1/previews/{id}/mail` | | `{mail: [{id, at, from, to, subject, size}]}`: what its services sent, caught (newest first, the last 50) |
 | `GET /v1/previews/{id}/mail/{mail}` | | One caught message as sent, as `text/plain` (never rendered) |
@@ -1295,6 +1321,14 @@ Ranked by what a person notices first. Done so far:
   button on its environment;
 - alarms on previews' failures in the cloud stack (`preview-converge-failures`,
   `preview-screenshot-failures`: most of a quarter-hour's runs failing, never rolling a deploy back);
+- idle services frozen before they stop, so a visit in the next half hour is back in tens of
+  milliseconds instead of a 3–4 s cold start;
+- a picture of each note's element, cropped by the next screenshot run and shown with the note;
+- the sheet leads with what changed (a verdict strip: failed services, breaking API changes,
+  migration risks, new problems, pages to review, slower endpoints, pages that move by
+  themselves; most serious first, each jumping to its section; `lib/preview-verdict.ts`);
+- the page's open notes in the pull request's comment, with a signed picture of each one's
+  element for a public preview;
 - search masks on an index whose name has dots (`logs.2024`): split off at the longest index name
   the cluster has, for masking and for the check when set;
 - a tenth review (states, browsers, search masks) and its fixes: a dialog a state's step opens
@@ -1440,7 +1474,11 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
+1. **Only the pages a push can change are taken again** (Chromatic's TurboSnap): every push
+   takes every page; a push that changes only `docs/` (outside `ignore_paths`) or one service's
+   files still takes them all. Keep the previous push's pictures for pages whose service didn't
+   change (their revision is the same), and say "unchanged since" instead.
+2. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
    (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
@@ -1456,16 +1494,16 @@ Ranked by what a person notices first. Done so far:
    host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
    every product port (an image of its own, and roll code's runner changed); on the cloud fleet
    it's security groups, with the cloud thread.
-2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-3. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-4. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node
+5. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node
    they're done (`Reach` = roll apps' `Apps::reachable`; `scripts/preview-apps.sh`: the apps
    service screenshotted in its instance's network, main's baseline on roll apps, the feedback
    button on its environment). On a fleet an instance runs on its service's holder, and Fargate
@@ -1475,12 +1513,12 @@ Ranked by what a person notices first. Done so far:
    access link, in the browser container. Ranked lower: the cloud fleet runs instances on
    Fargate, where neither `reachable` nor rolld's Docker screenshot works (a browser task of its
    own, with the cloud thread).
-5. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+6. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-6. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

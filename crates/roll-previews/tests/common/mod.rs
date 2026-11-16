@@ -220,6 +220,8 @@ pub struct FakeApps {
     pub fail_remove: AtomicUsize,
     /// Runs inside a deploy (an API call landing while the reconciler works).
     pub on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// The notes each screenshot was asked to crop (a `#missing` selector finds nothing).
+    pub crops_asked: Mutex<Vec<String>>,
     /// Services the runtime says run on this node, and those put to sleep.
     pub running: Mutex<std::collections::HashSet<(String, String)>>,
     pub slept: Mutex<Vec<(String, String)>>,
@@ -307,7 +309,9 @@ impl Apps for FakeApps {
             .chain(opts.browsers.iter().filter(|_| !self.no_browsers.load(Ordering::SeqCst)).map(|b| format!("browser:{b}")))
             .map(|path| roll_previews::ports::PageShot { path, png: png.clone(), errors: 0, report: Default::default() })
             .collect();
-        Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None, api }))
+        self.crops_asked.lock().extend(opts.crops.iter().map(|c| c.note.clone()));
+        let crops = opts.crops.iter().filter(|c| c.selector != "#missing").map(|c| (c.note.clone(), png.clone())).collect();
+        Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None, api, crops }))
     }
     fn status(&self, p: &str, s: &str) -> Option<ServiceState> {
         self.running.lock().contains(&(p.to_string(), s.to_string())).then_some(ServiceState::Running)
