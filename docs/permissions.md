@@ -125,6 +125,55 @@ Data planes keep their own credentials (Postgres passwords, Redis users, S3 keys
 token never opens a data plane. It can be allowed to **reveal** those credentials, which is then
 an explicit action of its own.
 
+### Machine clients
+
+Automation with no person (CI, a scheduled agent) uses OAuth client credentials
+(`io.modelcontextprotocol/oauth-client-credentials`): it trades a credential at the token
+endpoint for an hour's access token, rather than holding a long-lived token in a header.
+
+- **Making one:** the operator, or a person signed in, calls `POST /v1/access/clients {name,
+  rules, expires_at?, public_jwk?}`. The rules are exactly a token's, and so is the token policy (maximum life, an
+  expiry it must have).
+- **What it is:** a confidential OAuth client plus one OAuth grant holding those rules. Each token
+  it gets is one more access secret on that grant, so revoking the client
+  (`DELETE /v1/access/clients/{id}`) ends them all, and grants are looked up per request as
+  always.
+- **How it proves itself:**
+  - **`private_key_jwt`** (preferred: nothing secret is stored): a JWT signed with the key whose
+    public half (`public_jwk`: Ed25519, P-256 or RSA of 2048 bits or more) was registered. It
+    needs `iss` = `sub` = the client id, `aud` the token endpoint or the issuer, at most five
+    minutes to live, and a `jti` never used before (a replay is refused). A JWK carrying private
+    material is refused.
+  - **`client_secret_basic` or `client_secret_post`:** a secret roll makes (`rlc_…`, shown once,
+    stored as its hash, with a checksum, so a leaked one is found and revokes its client, as a
+    leaked token does).
+- **The request:** `grant_type=client_credentials`; its `resource`, if any, must be roll's API or
+  MCP server. The answer has no refresh token: the client trades its credential again for the
+  next one. Every failure to authenticate is the same `invalid_client`, so an unknown client and a
+  wrong credential look alike.
+- **The metadata** lists `client_secret_basic`, `client_secret_post` and `private_key_jwt`, the
+  signature algorithms (`EdDSA`, `ES256`, `RS256`) and the grant type.
+- **Rotating one:** `POST /v1/access/clients/{id}/rotate {public_jwk?, keep_old_for_s?}` (or
+  `roll token client rotate <id> [--public-key f] [--keep-old 1h]`) gives it a new key, or a new
+  secret shown once, keeping its id and rules. The old credential stops at once, and so do the
+  tokens it got, unless `keep_old_for_s` (at most a week) keeps it working while the automation
+  moves over. A leaked old secret still revokes the client while it works.
+- **From the CLI:** `roll token client create <name> [rules] [--public-key ci.pub.pem]` (rules
+  as `roll token create` takes them; the key an openssl PEM, Ed25519 or P-256, or a JWK; without
+  one, roll makes a secret and shows it once), `roll token client list` and
+  `roll token client revoke <id>`.
+- **Who:** the operator makes, lists and revokes every machine client. A person signed in makes,
+  lists and revokes their own, which act as them, as their tokens do:
+  - within their account's reach;
+  - past the policy's `approve_people`, only once an admin approves (no token until then);
+  - stopping when they can't sign in.
+
+  They're mailed when one is added. A token never reaches these routes, so a credential can't
+  mint another kind of credential.
+- **Tests:** `roll-access/tests/access.rs::a_machine_client_trades_its_credential_for_a_token_its_rules_bound`
+  (secret and key, rules bounding the token, a replayed assertion, a leaked secret, a revoked
+  client); `a_persons_machine_client_acts_as_them`; `roll-cli/tests/token.rs::a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules`.
+
 ## The grant
 
 ```ts

@@ -33,6 +33,7 @@ import { useWorkspace } from "@/lib/workspace-store";
 import { Link } from "../link";
 import { btn, Connecting, CopyButton, danger, EmptyPanel, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 import { Builder } from "./builder";
+import { MachineClients } from "./machine-clients";
 import { AccessShell, relative, usePoll } from "./shell";
 
 /** `/dashboard/access`: how to connect a client, and every token and connection with what it may do. */
@@ -40,6 +41,10 @@ export function AccessOverview() {
   const { data: grants, error, refresh } = usePoll(() => accessApi.tokens(), 10_000);
   const { data: me } = usePoll(() => accessApi.me(), 60_000);
   const { data: checkup, refresh: recheck } = usePoll(() => accessApi.checkup(), 60_000);
+  // Machine clients: every one for the operator, a person's own for them (a token is refused: the
+  // panel stays hidden). Their grants are listed with them, not among the tokens.
+  const { data: machines, refresh: remachine } = usePoll(() => accessApi.machineClients().catch(() => null), 30_000);
+  const machineGrants = new Set((machines ?? []).map((c) => c.grant.id));
   return (
     <AccessShell tab="overview">
       <div className="space-y-6">
@@ -67,7 +72,15 @@ export function AccessOverview() {
             }}
           />
         )}
-        {grants === null && !error ? <Connecting /> : <Grants grants={grants ?? []} refresh={refresh} />}
+        {grants === null && !error ? <Connecting /> : <Grants grants={(grants ?? []).filter((g) => !machineGrants.has(g.id))} refresh={refresh} />}
+        {machines && (
+          <MachineClients
+            clients={machines}
+            refresh={async () => {
+              await Promise.all([refresh(), remachine()]);
+            }}
+          />
+        )}
         <Workloads />
       </div>
     </AccessShell>
@@ -364,7 +377,7 @@ const REACH_TONE: Record<ReturnType<typeof reach>, string> = {
 let me: Promise<{ kind: string }> | null = null;
 const meOnce = () => (me ??= accessApi.me().catch(() => ({ kind: "unknown" })));
 
-export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () => Promise<void>; linked?: boolean }) {
+export function GrantRow({ g, refresh, linked = true, kindLabel }: { g: Grant; refresh: () => Promise<void>; linked?: boolean; kindLabel?: string }) {
   const ws = useWorkspace();
   const projectName = (id: string) => ws.projects.find((p) => p.id === id)?.name ?? id;
   const [open, setOpen] = useState(false);
@@ -438,7 +451,7 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
             ) : (
               <span className="truncate text-[14px] font-medium">{g.name}</span>
             )}
-            <span className="rounded border border-line px-1.5 text-[11px] text-subtle">{g.kind === "oauth" ? (g.client?.name ?? "OAuth") : g.kind}</span>
+            <span className="rounded border border-line px-1.5 text-[11px] text-subtle">{kindLabel ?? (g.kind === "oauth" ? (g.client?.name ?? "OAuth") : g.kind)}</span>
             {g.pending && status === "active" && <span className="rounded border border-accent/50 px-1.5 text-[11px] text-accent">waits for an admin</span>}
             {g.pending && admin && status === "active" && (
               <span className="flex items-center gap-1.5">
