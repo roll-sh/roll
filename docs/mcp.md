@@ -706,21 +706,16 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Expiry reminders:** a person hears a week and a day before a token, a connection or a
-   machine client of theirs stops working (GitHub's and GitLab's mail before a personal access
-   token expires), the operator for theirs through the approvals channel; once per threshold
-   (a mark on the grant), never for a revoked or workload token. A sweep on the node that holds
-   the access lease; the mail names the token and how to extend it, never a secret.
-2. **Review secrets' #87 (transit keys by name):** its two lines in roll-auth's `Selector::matches`
+1. **Review secrets' #87 (transit keys by name):** its two lines in roll-auth's `Selector::matches`
    and the `filters_itself` catalogue marks, against the per-key rows #80 added.
-3. **Elicitation for a missing id:** a tool called without a required id it lists (a project, a
+2. **Elicitation for a missing id:** a tool called without a required id it lists (a project, a
    service) asks the person to pick one through MCP form elicitation, where the client declared it,
    from what the token may read (the completions' sources), instead of failing.
-4. **The merge queue, in turn:** #101 (machine clients), #104 (server card), #108 (skills, deploys
+3. **The merge queue, in turn:** #101 (machine clients), #104 (server card), #108 (skills, deploys
    and jobs waited on), #114 (trusted machine clients: after #101; the secrets thread reruns its
    tests on its head): each takes the lock, merges main, runs the full gate. #98's
    pre-gate runs while another thread holds the lock.
-5. **More MCP Apps views:**
+4. **More MCP Apps views:**
    - a preview's screenshot against its baseline;
    - a rollback button on a deploy (calling `apps_rollback` through the host, so through the gate,
      as deploy), once a host that renders views is confirmed (the review pack's decision 4): a
@@ -733,36 +728,31 @@ waits on a sibling PR reaching main is last.
    ChatGPT need a public HTTPS rolld and the user's account (the review pack's decisions);
    MCPJam's inspector (3.18) asks for an MCPJam account first.
 
-6. **Enterprise-managed authorization** (SEP-990): a company IdP's ID-JAG traded for a roll
+5. **Enterprise-managed authorization** (SEP-990): a company IdP's ID-JAG traded for a roll
    token. It needs accounts' SSO first.
-7. **Everyday routes with no tool:** tasks, streams, storage, queues, postgres, Redis and NoSQL have
+6. **Everyday routes with no tool:** tasks, streams, storage, queues, postgres, Redis and NoSQL have
    theirs (`tool-gaps.py origin/main <product>` lists what's left). What's left is mostly what only
    an operator does by hand: keys, passwords, accounts, IAM, roles, CDN, migrations, evict and
    unload, which stay without tools. Recheck each product after its thread lands new routes.
-8. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
+7. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
    automations that pick up issues and chat messages (the agents thread's call; tell it), and
    chat messages that reach an agent marked `outside` (an install's non-members can't drive
    roll, so mostly members' text).
-9. **More tools that wait:** `apps_wait_deploy` is in #108; branch backups and search reindexes
+8. **More tools that wait:** `apps_wait_deploy` is in #108; branch backups and search reindexes
    can use `until` once their routes answer a state to wait on (search's reindex is an
    Elasticsearch task today, with no roll route to watch). Recheck with `mcpc` (`~/.local/share/roll-mcp/live/mcpc-tasks.sh`), and with the
    TypeScript SDK's `client/ext/tasks` once it ships.
-10. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+9. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25; agreed conflicts resolved by `known-conflicts.py`), and
    compare each product's routes with its tools (an everyday route with no tool is a gap: apps'
    were found this way). #24 and #25 are on main, so `feature/mcp-on-landing` is retired:
    secrets' #64 lands on main directly.
-11. **Transit keys one at a time, end to end:** #80 names the key in each per-key row, but roll
-   secrets checked the project again inside each handler, so a key-limited token still got 403.
-   The secrets thread's `feature/roll-secrets-transit-by-key` adds `Caller::need_key`, a key-
-   filtered list marked `filters_itself`, and two lines in roll-auth's `Selector::matches`;
-   review the roll-auth part when it comes.
-12. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+10. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_`, `rlc_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-13. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+11. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset (see Toolsets: it would drop tools from connections that use them; search mode is opt-in); a connection narrowed to one project (Supabase's `project_ref`): their
