@@ -209,6 +209,15 @@ Three ways, as the best products offer:
   operator's identity, or another team's, reaches.
 - **Push (the `kubernetes` sync)**: roll writes a Secret with credentials for the cluster it holds,
   sealed. For clusters roll can reach and the operator can't run in.
+## AWS Lambda
+`sdk/lambda-extension` is a layer, as AWS's Parameters and Secrets Lambda Extension: it answers a
+function's values on `127.0.0.1:2773` (`GET /secrets?env=&path=` as JSON, `GET /secrets/{KEY}` as
+text, each with `X-Roll-Token: $AWS_SESSION_TOKEN`), loads `ROLL_PREFETCH` folders before the first
+invocation, and keeps them `ROLL_CACHE_TTL` (300 s), then revalidates with a 304; a folder with a
+dynamic credential is kept only within its lease. It logs in as a workload identity with a JWT STS
+signs for the function's own role (`GetWebIdentityToken`, IAM's outbound identity federation: the
+account's own issuer, `sub` the role's ARN), so neither the function nor its configuration holds a
+roll token; `ROLL_TOKEN` otherwise. Not yet run against a real account (its README, "Gaps").
 ## Customer-managed keys
 A project's data key can be wrapped once more by a KMS key in the customer's own AWS account, as
 Infisical's external KMS does (`PUT …/kms {key: "arn:aws:kms:…"}`, `roll secrets kms set ARN`;
@@ -2787,6 +2796,8 @@ rotating a database's admin password and editing registrations in place (#75), s
    Directory passwords (Vault, Infisical).
 9. **Java and .NET clients, a Pulumi provider, a Lambda extension and an Ansible lookup** (Spring,
    `IConfiguration`; AWS's Parameters and Secrets extension; Vault's and 1Password's Ansible).
+   The Lambda extension is built (`sdk/lambda-extension`, on `feature/roll-secrets-lambda`): values
+   on localhost from a cache, logged in through STS's `GetWebIdentityToken`.
 10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
    CAs**.
 11. *The user's call:* land the stack (#62, then #63–#73; roll search before #62).
