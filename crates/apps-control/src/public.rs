@@ -836,8 +836,9 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     if !gate.firewall.is_empty() && !gate.firewall_allows(req.method().as_str(), &crate::model::normal_path(req.uri().path()), &ua) {
         return by("firewall", page(StatusCode::FORBIDDEN, "Not allowed", "This service doesn't answer this request."));
     }
-    // Its rate limit per client, before anything wakes.
+    // Its rate limit per client, before anything wakes (a cache refresh is roll's, not a client's).
     if let Some(limit) = &gate.rate
+        && req.extensions().get::<crate::resp_cache::Refresh>().is_none()
         && let Err(wait) = apps.live(service, env).take_token(crate::live::client_ip(client.as_deref()), limit)
     {
         let mut r = page(StatusCode::TOO_MANY_REQUESTS, "Slow down", "Too many requests from your address. Try again in a moment.");
@@ -928,20 +929,29 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         && !rewritten
         && matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
         && !req.headers().contains_key(header::AUTHORIZATION)
-        && !is_upgrade(req.headers()))
+        && !is_upgrade(req.headers())
+        // A private environment's answers are its visitors' alone.
+        && matches!(apps.access(service, env).await, Ok(None)))
     .then(|| req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into()));
     let cache_env = crate::env_key(service, env);
+    let cache_host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     if let (Some(k), false) = (&cache_key, refreshing) {
         let head = req.method() == axum::http::Method::HEAD;
-        let hit = apps.responses.get(&cache_env, k, req.headers(), head);
-        let seen = || Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req) };
+        let hit = apps.responses.get(&cache_env, &cache_host, k, req.headers(), head);
+        // A cached answer is a request served: metered (its bytes, its status) and logged.
+        let served = |r: &Response| {
+            let bytes = r.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).unwrap_or(0);
+            let bytes = if head { 0 } else { bytes };
+            live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, r.status().as_u16(), bytes);
+            Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req) }.write_cached(r.status().as_u16(), began, bytes);
+        };
         match hit {
             Some(crate::resp_cache::Hit::Fresh(r)) => {
-                seen().write_by(r.status().as_u16(), began, "cache");
+                served(&r);
                 return r;
             }
             Some(crate::resp_cache::Hit::Stale { response, refresh }) => {
-                seen().write_by(response.status().as_u16(), began, "cache");
+                served(&response);
                 if refresh {
                     // Fetched again in the background, as this request was (its headers decide
                     // what it varies on; its client address passes the same allow list).
@@ -953,7 +963,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
                     if let Some(c) = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>() {
                         again.extensions_mut().insert(*c);
                     }
-                    tokio::spawn(refresh_cached(apps.clone(), service.to_string(), env.to_string(), again, k.clone()));
+                    tokio::spawn(refresh_cached(apps.clone(), service.to_string(), env.to_string(), again, cache_host.clone(), k.clone()));
                 }
                 return response;
             }
@@ -1231,7 +1241,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             Ok(c) => c.to_bytes(),
             Err(_) => return page(StatusCode::BAD_GATEWAY, "The service didn't answer", "Its answer broke off. Try again in a moment."),
         };
-        apps.responses.put(&cache_env, &k, &req_headers, &app_headers, bytes.clone(), pol);
+        apps.responses.put(&cache_env, (&cache_host, &k), &req_headers, &app_headers, bytes.clone(), pol);
         let mut r = Response::from_parts(parts, Body::from(bytes));
         r.headers_mut().insert(HeaderName::from_static("x-roll-cache"), HeaderValue::from_static("MISS"));
         return with_feedback(feedback, r);
@@ -1241,10 +1251,10 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
 
 /// A stale cached answer fetched again through the proxy (which keeps the new one), boxed: the
 /// proxy is what calls it.
-fn refresh_cached(apps: Arc<Apps>, service: String, env: String, req: Request, key: String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+fn refresh_cached(apps: Arc<Apps>, service: String, env: String, req: Request, host: String, key: String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async move {
         let _ = proxy(apps.clone(), &service, &env, None, req).await;
-        apps.responses.refresh_failed(&crate::env_key(&service, &env), &key);
+        apps.responses.refresh_failed(&crate::env_key(&service, &env), &host, &key);
     })
 }
 
@@ -1324,6 +1334,16 @@ impl Access {
             "method": s.method, "path": s.path, "status": status, "ms": began.elapsed().as_millis() as u64,
             "bytes": bytes, "instance": instance, "request_id": request_id, "cold": cold, "waited_ms": waited_ms,
             "ip": s.ip, "ua": s.ua, "host": s.host,
+        });
+        self.log.line(line.to_string());
+    }
+
+    /// An answer from the cache: no instance saw it, its bytes still went out.
+    fn write_cached(&self, status: u16, began: Instant, bytes: u64) {
+        let s = &self.seen;
+        let line = serde_json::json!({
+            "method": s.method, "path": s.path, "status": status, "ms": began.elapsed().as_millis() as u64,
+            "bytes": bytes, "by": "cache", "ip": s.ip, "ua": s.ua, "host": s.host,
         });
         self.log.line(line.to_string());
     }

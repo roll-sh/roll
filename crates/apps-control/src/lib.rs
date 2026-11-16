@@ -1675,6 +1675,7 @@ impl Apps {
 
     async fn teardown_live(&self, service: &str, env: &str) {
         self.cancel_jobs(service, env);
+        self.responses.clear(&env_key(service, env));
         let live = self.lives.lock().remove(&env_key(service, env));
         if let Some(l) = live {
             l.shutdown().await;

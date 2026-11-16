@@ -5,9 +5,10 @@
 //! pages asleep. `stale-while-revalidate` answers a stale one while it's fetched again in the
 //! background. Never kept: `private`, `no-store`, `no-cache`, `Vary: *`, an answer setting a
 //! cookie, a body over 1 MiB or of unknown length, anything but a 200. A request with
-//! `Authorization` neither reads nor fills it. Bounded (32 MiB and 2,000 answers an environment,
-//! the least recently used going first) and emptied whenever the environment's live deployment
-//! changes.
+//! `Authorization` neither reads nor fills it. Keyed by host, path and query (an environment's
+//! custom domains are apart). Bounded (32 MiB and 2,000 answers an environment, 256 MiB a node,
+//! headers counted; the least recently used going first) and emptied whenever the environment's
+//! live deployment changes or the service leaves this node.
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use bytes::Bytes;
@@ -16,6 +17,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const PER_ENV: usize = 32 << 20;
+const PER_NODE: usize = 256 << 20;
 pub const PER_BODY: usize = 1 << 20;
 const MAX_ENTRIES: usize = 2_000;
 
@@ -75,6 +77,8 @@ struct Entry {
     vary: Vec<(HeaderName, Option<HeaderValue>)>,
     used: u64,
     refreshing: bool,
+    /// What it costs: its body, key, headers and vary values.
+    size: usize,
 }
 
 #[derive(Default)]
@@ -82,6 +86,13 @@ struct EnvCache {
     entries: HashMap<String, Vec<Entry>>,
     bytes: usize,
     count: usize,
+}
+
+#[derive(Default)]
+struct Inner {
+    envs: HashMap<String, EnvCache>,
+    /// Every environment's, for the node's bound.
+    bytes: usize,
     tick: u64,
 }
 
@@ -95,7 +106,7 @@ pub enum Hit {
 
 #[derive(Default)]
 pub struct ResponseCache {
-    envs: Mutex<HashMap<String, EnvCache>>,
+    inner: Mutex<Inner>,
 }
 
 /// A request a stale answer's refresh makes (an extension, which no client can send): it skips
@@ -103,8 +114,54 @@ pub struct ResponseCache {
 #[derive(Clone, Copy, Debug)]
 pub struct Refresh;
 
-fn key(path_and_query: &str) -> String {
-    path_and_query.to_string()
+/// An answer's key: the host it was asked of, and its path and query.
+fn key(host: &str, path_and_query: &str) -> String {
+    format!("{}\u{1}{path_and_query}", host.to_ascii_lowercase())
+}
+
+/// A key's path (no host, no query).
+fn path_of(key: &str) -> &str {
+    let pq = key.split_once('\u{1}').map_or(key, |(_, pq)| pq);
+    pq.split('?').next().unwrap_or(pq)
+}
+
+fn headers_size(h: &HeaderMap) -> usize {
+    h.iter().map(|(n, v)| n.as_str().len() + v.len() + 4).sum()
+}
+
+impl Inner {
+    /// Drop one entry (the least recently used) of `env`, or of any environment: false when empty.
+    fn evict(&mut self, only: Option<&str>) -> bool {
+        let victim = self
+            .envs
+            .iter()
+            .filter(|(e, _)| only.is_none_or(|o| o == e.as_str()))
+            .flat_map(|(e, c)| c.entries.iter().flat_map(move |(k, l)| l.iter().enumerate().map(move |(i, x)| (e, k, i, x.used))))
+            .min_by_key(|(.., u)| *u)
+            .map(|(e, k, i, _)| (e.clone(), k.clone(), i));
+        let Some((e, k, i)) = victim else { return false };
+        if let Some(c) = self.envs.get_mut(&e) {
+            if let Some(l) = c.entries.get_mut(&k) {
+                let gone = l.remove(i);
+                c.bytes -= gone.size;
+                c.count -= 1;
+                self.bytes -= gone.size;
+                if l.is_empty() {
+                    c.entries.remove(&k);
+                }
+            }
+            if c.entries.is_empty() {
+                self.envs.remove(&e);
+            }
+        }
+        true
+    }
+
+    fn drop_env(&mut self, env: &str) {
+        if let Some(c) = self.envs.remove(env) {
+            self.bytes -= c.bytes;
+        }
+    }
 }
 
 fn matches(vary: &[(HeaderName, Option<HeaderValue>)], req: &HeaderMap) -> bool {
@@ -113,12 +170,12 @@ fn matches(vary: &[(HeaderName, Option<HeaderValue>)], req: &HeaderMap) -> bool 
 
 impl ResponseCache {
     /// The answer kept for this GET or HEAD in environment `env` (`service/env`), if any.
-    pub fn get(&self, env: &str, path_and_query: &str, req: &HeaderMap, head: bool) -> Option<Hit> {
-        let mut envs = self.envs.lock().unwrap_or_else(|p| p.into_inner());
-        let e = envs.get_mut(env)?;
-        e.tick += 1;
-        let tick = e.tick;
-        let found = e.entries.get_mut(&key(path_and_query))?.iter_mut().find(|x| matches(&x.vary, req))?;
+    pub fn get(&self, env: &str, host: &str, path_and_query: &str, req: &HeaderMap, head: bool) -> Option<Hit> {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.tick += 1;
+        let tick = inner.tick;
+        let e = inner.envs.get_mut(env)?;
+        let found = e.entries.get_mut(&key(host, path_and_query))?.iter_mut().find(|x| matches(&x.vary, req))?;
         let age = found.stored.elapsed();
         if age > found.policy.fresh + found.policy.stale {
             return None;
@@ -141,7 +198,9 @@ impl ResponseCache {
     }
 
     /// Keep a 200's answer (its app's own headers, before roll's cookies) for this request.
-    pub fn put(&self, env: &str, path_and_query: &str, req: &HeaderMap, headers: &HeaderMap, body: Bytes, policy: Policy) {
+    /// `at`: the host asked and the path and query.
+    pub fn put(&self, env: &str, at: (&str, &str), req: &HeaderMap, headers: &HeaderMap, body: Bytes, policy: Policy) {
+        let (host, path_and_query) = at;
         let status = StatusCode::OK;
         if body.len() > PER_BODY {
             return;
@@ -162,37 +221,36 @@ impl ResponseCache {
         for h in [header::SET_COOKIE, header::AGE, header::CONNECTION, header::TRANSFER_ENCODING] {
             kept.remove(h);
         }
-        let mut envs = self.envs.lock().unwrap_or_else(|p| p.into_inner());
-        let e = envs.entry(env.to_string()).or_default();
-        e.tick += 1;
-        let size = body.len() + path_and_query.len() + 256;
-        let list = e.entries.entry(key(path_and_query)).or_default();
+        let k = key(host, path_and_query);
+        let size = body.len() + k.len() + headers_size(&kept) + vary.iter().map(|(n, v)| n.as_str().len() + v.as_ref().map_or(0, |v| v.len())).sum::<usize>() + 64;
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.tick += 1;
+        let tick = inner.tick;
+        let e = inner.envs.entry(env.to_string()).or_default();
+        let list = e.entries.entry(k).or_default();
+        let mut freed = 0;
         if let Some(i) = list.iter().position(|x| x.vary == vary) {
             let old = list.remove(i);
-            e.bytes -= old.body.len() + path_and_query.len() + 256;
+            e.bytes -= old.size;
             e.count -= 1;
+            freed = old.size;
         }
-        list.push(Entry { status, headers: kept, body, stored: Instant::now(), policy, vary, used: e.tick, refreshing: false });
+        list.push(Entry { status, headers: kept, body, stored: Instant::now(), policy, vary, used: tick, refreshing: false, size });
         e.bytes += size;
         e.count += 1;
-        // Over its bounds: the least recently used go first.
-        while e.bytes > PER_ENV || e.count > MAX_ENTRIES {
-            let Some((k, i)) = e.entries.iter().flat_map(|(k, l)| l.iter().enumerate().map(move |(i, x)| (k, i, x.used))).min_by_key(|(_, _, u)| *u).map(|(k, i, _)| (k.clone(), i)) else { break };
-            if let Some(l) = e.entries.get_mut(&k) {
-                let gone = l.remove(i);
-                e.bytes -= gone.body.len() + k.len() + 256;
-                e.count -= 1;
-                if l.is_empty() {
-                    e.entries.remove(&k);
-                }
-            }
+        let over = e.bytes > PER_ENV || e.count > MAX_ENTRIES;
+        inner.bytes = inner.bytes - freed + size;
+        // Over its bounds, the environment's least recently used go first; over the node's, any.
+        if over {
+            while inner.envs.get(env).is_some_and(|e| e.bytes > PER_ENV || e.count > MAX_ENTRIES) && inner.evict(Some(env)) {}
         }
+        while inner.bytes > PER_NODE && inner.evict(None) {}
     }
 
     /// A refresh that didn't keep a new answer: the stale one may be refreshed again.
-    pub fn refresh_failed(&self, env: &str, path_and_query: &str) {
-        let mut envs = self.envs.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(list) = envs.get_mut(env).and_then(|e| e.entries.get_mut(&key(path_and_query))) {
+    pub fn refresh_failed(&self, env: &str, host: &str, path_and_query: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(list) = inner.envs.get_mut(env).and_then(|e| e.entries.get_mut(&key(host, path_and_query))) {
             for x in list {
                 x.refreshing = false;
             }
@@ -202,13 +260,14 @@ impl ResponseCache {
     /// Purge kept answers (on-demand revalidation): those of `paths` (a path with any query; one
     /// ending in `*` is a prefix), or everything. How many went.
     pub fn purge(&self, env: &str, paths: Option<&[String]>) -> usize {
-        let mut envs = self.envs.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(e) = envs.get_mut(env) else { return 0 };
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let inner = &mut *inner;
+        let Some(e) = inner.envs.get_mut(env) else { return 0 };
         let doomed: Vec<String> = e
             .entries
             .keys()
             .filter(|k| {
-                let path = k.split('?').next().unwrap_or(k);
+                let path = path_of(k);
                 paths.is_none_or(|ps| ps.iter().any(|p| match p.strip_suffix('*') {
                     Some(prefix) => path.starts_with(prefix),
                     None => path == p,
@@ -220,7 +279,8 @@ impl ResponseCache {
         for k in doomed {
             if let Some(list) = e.entries.remove(&k) {
                 for x in &list {
-                    e.bytes -= x.body.len() + k.len() + 256;
+                    e.bytes -= x.size;
+                    inner.bytes -= x.size;
                 }
                 e.count -= list.len();
                 n += list.len();
@@ -229,9 +289,18 @@ impl ResponseCache {
         n
     }
 
-    /// Everything kept for an environment goes (its live deployment changed).
+    /// Everything kept for an environment goes (its live deployment changed, it's gone).
     pub fn clear(&self, env: &str) {
-        self.envs.lock().unwrap_or_else(|p| p.into_inner()).remove(env);
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).drop_env(env);
+    }
+
+    /// Everything kept for a service goes (it left this node, or it's gone).
+    pub fn clear_service(&self, service: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let envs: Vec<String> = inner.envs.keys().filter(|k| k.starts_with(&format!("{service}/"))).cloned().collect();
+        for e in envs {
+            inner.drop_env(&e);
+        }
     }
 }
 
@@ -263,11 +332,15 @@ mod tests {
         let c = ResponseCache::default();
         let pol = Policy { fresh: Duration::from_secs(60), stale: Duration::ZERO };
         let resp = h(&[("cache-control", "s-maxage=60"), ("vary", "accept-language")]);
-        c.put("s/production", "/a?x=1", &h(&[("accept-language", "en")]), &resp, Bytes::from_static(b"en"), pol);
-        assert!(matches!(c.get("s/production", "/a?x=1", &h(&[("accept-language", "en")]), false), Some(Hit::Fresh(_))));
-        assert!(c.get("s/production", "/a?x=1", &h(&[("accept-language", "de")]), false).is_none());
-        assert!(c.get("s/production", "/a?x=2", &h(&[("accept-language", "en")]), false).is_none());
-        c.clear("s/production");
-        assert!(c.get("s/production", "/a?x=1", &h(&[("accept-language", "en")]), false).is_none());
+        c.put("s/production", ("a.example", "/a?x=1"), &h(&[("accept-language", "en")]), &resp, Bytes::from_static(b"en"), pol);
+        assert!(matches!(c.get("s/production", "A.example", "/a?x=1", &h(&[("accept-language", "en")]), false), Some(Hit::Fresh(_))));
+        assert!(c.get("s/production", "b.example", "/a?x=1", &h(&[("accept-language", "en")]), false).is_none(), "another domain's");
+        assert!(c.get("s/production", "a.example", "/a?x=1", &h(&[("accept-language", "de")]), false).is_none());
+        assert!(c.get("s/production", "a.example", "/a?x=2", &h(&[("accept-language", "en")]), false).is_none());
+        assert_eq!(c.purge("s/production", Some(&["/a".to_string()])), 1);
+        c.put("s/production", ("a.example", "/a"), &h(&[]), &resp, Bytes::from_static(b"x"), pol);
+        c.clear_service("s");
+        assert!(c.get("s/production", "a.example", "/a", &h(&[]), false).is_none());
+        assert_eq!(c.inner.lock().unwrap().bytes, 0, "every byte accounted for");
     }
 }

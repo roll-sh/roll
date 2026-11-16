@@ -1463,6 +1463,8 @@ impl Apps {
     }
 
     async fn release_service(self: &Arc<Self>, service: &str) {
+        // Its cached answers: the next owner's deploys never clear this node's.
+        self.responses.clear_service(service);
         // Another node owns it now: what this one cached may change there, and its shells go.
         {
             let mut cache = self.access.lock();
