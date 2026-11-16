@@ -153,11 +153,15 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
   wrong credential look alike.
 - **The metadata** lists `client_secret_basic`, `client_secret_post` and `private_key_jwt`, the
   signature algorithms (`EdDSA`, `ES256`, `RS256`) and the grant type.
+- **From the CLI:** `roll token client create <name> [rules] [--public-key ci.pub.pem]` (rules
+  as `roll token create` takes them; the key an openssl PEM, Ed25519 or P-256, or a JWK; without
+  one, roll makes a secret and shows it once), `roll token client list` and
+  `roll token client revoke <id>`.
 - **Who:** machine clients are the operator's to make, list and revoke (grants never reach these
   routes). A person's own, acting as them within their reach, comes later (docs/mcp.md, Next).
 - **Tests:** `roll-access/tests/access.rs::a_machine_client_trades_its_credential_for_a_token_its_rules_bound`
   (secret and key, rules bounding the token, a replayed assertion, a leaked secret, a revoked
-  client).
+  client); `roll-cli/tests/token.rs::a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules`.
 
 ## The grant
 
