@@ -185,11 +185,14 @@ impl Spawned {
     /// server that no longer accepts connections is dead: the shell gets a moment to exit with
     /// its status before the group is killed. A healthy server costs one connect. Whatever status
     /// other than our own SIGKILL the wait returns also counts as a crash.
-    pub async fn stop(mut self) -> Option<(std::process::ExitStatus, PathBuf)> {
+    /// Stops the process. `lost`: a request lost its connection to it, so it may be dying.
+    pub async fn stop(mut self, lost: bool) -> Option<(std::process::ExitStatus, PathBuf)> {
         let mut exited = self.child.try_wait().ok().flatten();
-        // A cluster that no longer accepts connections is going down: give its exit time to
-        // arrive (a loaded host takes seconds) before killing it would hide that it crashed.
-        if exited.is_none() && !self.accepts_connections().await {
+        // A cluster that lost a connection or no longer accepts them is going down: give its exit
+        // time to arrive (a loaded host takes seconds) before killing it would hide that it
+        // crashed. A request's lost connection counts even when the port still answers: on a busy
+        // host another program can be listening on it by then.
+        if exited.is_none() && (lost || !self.accepts_connections().await) {
             exited = tokio::time::timeout(Duration::from_secs(10), self.child.wait()).await.ok().and_then(Result::ok);
         }
         self.kill_group();
@@ -297,7 +300,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let log = p.log.clone();
-        let (status, kept) = p.stop().await.expect("reported as crashed");
+        let (status, kept) = p.stop(false).await.expect("reported as crashed");
         assert_eq!(status.code(), Some(3));
         assert!(std::fs::read_to_string(&kept).unwrap().contains("boom"));
         assert!(!log.exists());
@@ -306,7 +309,7 @@ mod tests {
         // A process still running when stopped was healthy: its log goes.
         let p = spawn_raw("sleep 30", "t-healthy");
         let log = p.log.clone();
-        assert!(p.stop().await.is_none());
+        assert!(p.stop(false).await.is_none());
         assert!(!log.exists());
     }
 
