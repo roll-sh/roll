@@ -159,7 +159,9 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
         compared = e.code.last_report("chg_1").base_change;
         // Main's screenshot may compare the change before the change's own report is in: the
         // change's own comparison, right after, has its API too.
-        if compared.as_ref().is_some_and(|c| c.api.is_some()) {
+        // Each page's own comparison lands with it, or a moment after.
+        let pages_compared = e.code.last_report("chg_1").pages.iter().all(|p| p.base_percent.is_some());
+        if compared.as_ref().is_some_and(|c| c.api.is_some()) && pages_compared {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

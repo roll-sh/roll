@@ -699,6 +699,7 @@ mod tests {
             github_url: None,
             trusted: true,
             run_approved: false,
+            outside: false,
             draft: false,
             labels: Vec::new(),
             checks: Vec::new(),

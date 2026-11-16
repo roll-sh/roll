@@ -169,6 +169,7 @@ Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, tit
            github_pr: number | null, github_url: string | null,
            trusted: bool /* false for a pull request from a fork: no automatic checks or preview */,
            run_approved: bool /* a writer approved running this untrusted change's current head */,
+           outside: bool /* !trusted: written by someone outside the repo; MCP's lockdown withholds its text */,
            draft: bool,
            labels: string[] /* a GitHub pull request's, or set with PATCH; roll previews reads "preview" and "no-preview" */,
            checks: Check[], preview: Preview | null,
@@ -257,6 +258,7 @@ own reviewer all leave the same records.
 Reviewer = {kind: "user" | "agent" | "app" | "roll", name, app: string | null /* the review app's id */}
 Review   = {id /* rv_… */, change, revision /* the change revision it reviewed */, head, reviewer: Reviewer,
             verdict: "approve" | "request_changes" | "comment", body, source: "roll" | "github", url: string | null,
+            outside: bool /* its author can't push to the repo (GitHub's author_association, or a roll caller without write access); MCP's lockdown withholds it */,
             stale: bool /* reviewed an older revision */, dismissed: bool, dismissed_by: string | null,
             dismiss_reason: string | null, created_at, updated_at,
             ai: null | ReviewAi /* roll's reviewer only, see "roll's reviewer" */,
@@ -267,7 +269,7 @@ Thread   = {id /* th_… */, change, review: string | null, path, side: "new" | 
             outdated: bool /* its lines changed in a later revision */, resolved: bool, resolved_by: string | null,
             resolved_at: number | null, source: "roll" | "github", created_at, updated_at, comments: Comment[]}
 Comment  = {id /* cm_… */, thread, author: Reviewer, body, suggestion: string | null /* a ```suggestion block's lines */,
-            source, created_at, updated_at,
+            source, outside: bool /* as on Review */, created_at, updated_at,
             finding: null | {severity, title, confidence: number | null} /* roll's finding comments, see "roll's reviewer" */}
 ReviewSummary = {state: "approved" | "changes_requested" | "pending" | "auto_approved", approvals /* that count */, required}
 ReviewStatus  = {state, required, approvals: [{reviewer, review, stale, counted: bool, reason: string | null}],
@@ -465,6 +467,7 @@ GET   /v1/code/owners/{owner}/usage?month=YYYY-MM → {owner, month,
 WorkItem = {id, repo_id, repo, number /* shares the per-repo counter with changes */, title, body, labels: string[],
             priority /* 0 = P0 … 3 */, state: "open" | "claimed" | "review" | "done" | "closed",
             source: "native" | "github#123", github_url: string | null,
+            outside: bool /* a GitHub issue whose author can't push (anyone could open it); MCP's lockdown withholds its text */,
             claimed_by: string | null, lease_until: number | null, changes: string[], created_at, updated_at}
 
 GET   /v1/code/repos/{owner}/{repo}/work?state=&label= → WorkItem[]

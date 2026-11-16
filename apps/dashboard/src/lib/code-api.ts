@@ -425,6 +425,8 @@ export interface Change {
   trusted?: boolean;
   /** A writer approved running this untrusted change's current head. */
   run_approved?: boolean;
+  /** `!trusted`: written by someone outside the repo (MCP's lockdown withholds its text). */
+  outside?: boolean;
   draft?: boolean;
   /** A GitHub pull request's labels, or set with `PATCH`; roll previews reads `preview` and `no-preview`. */
   labels?: string[];
@@ -573,6 +575,8 @@ export interface Review {
   source: ReviewSource;
   /** On GitHub, for ingested reviews. */
   url: string | null;
+  /** Its author can't push to the repo (MCP's lockdown withholds it). */
+  outside?: boolean;
   /** It reviewed an older revision. */
   stale: boolean;
   dismissed: boolean;
@@ -596,6 +600,8 @@ export interface ReviewComment {
   /** On comments roll wrote for a finding; null otherwise (and on older servers, absent). */
   finding?: CommentFinding | null;
   source: ReviewSource;
+  /** Its author can't push to the repo (MCP's lockdown withholds it). */
+  outside?: boolean;
   created_at: number;
   updated_at: number;
 }
@@ -1141,6 +1147,8 @@ export interface WorkItem {
   /** `native` or `github#123`. */
   source: string;
   github_url: string | null;
+  /** A GitHub issue whose author can't push to the repo: anyone could have opened it (MCP's lockdown withholds its text). */
+  outside?: boolean;
   claimed_by: string | null;
   lease_until: number | null;
   /** Change ids. */

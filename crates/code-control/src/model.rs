@@ -741,6 +741,9 @@ pub struct Change {
     pub trusted: bool,
     /// A writer approved running this untrusted change's current head (checks, preview, queue).
     pub run_approved: bool,
+    /// Written by someone outside the repo (`!trusted`): roll's MCP server in lockdown
+    /// (`?lockdown=1`) withholds its text from a model.
+    pub outside: bool,
     /// Not ready: it can't be queued or landed.
     pub draft: bool,
     /// Its labels (a GitHub pull request's, or set with `PATCH`); roll previews reads
@@ -802,6 +805,9 @@ pub struct WorkItem {
     pub state: WorkState,
     pub source: String,
     pub github_url: Option<String>,
+    /// Opened by someone who can't push to the repo (a GitHub issue anyone could open): roll's
+    /// MCP server in lockdown (`?lockdown=1`) withholds its text from a model.
+    pub outside: bool,
     pub claimed_by: Option<String>,
     pub lease_until: Option<i64>,
     pub changes: Vec<String>,

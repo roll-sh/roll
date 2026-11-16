@@ -106,7 +106,12 @@ describe("toolsets", () => {
     const read = [{ product: "workspace", resources: "*" as const, actions: { read: "allow" as const } }];
     expect([waitsForAdmin(person, read, false), waitsForAdmin(person, read, true), waitsForAdmin(person, [{ ...read[0], actions: { admin: "allow" as const } }], false), waitsForAdmin({ kind: "operator", locked: true }, read, true)]).toEqual([false, true, true, false]);
     expect(toolsetCost(costs, ["redis"], true)).toEqual({ tools: 7, tokens: 590 });
-    expect(withToolsets("https://api.roll.sh/v1/mcp", ["postgres"], true)).toBe("https://api.roll.sh/v1/mcp?toolsets=postgres&readonly=1");
+    expect(withToolsets("https://api.roll.sh/v1/mcp", ["postgres"], { readonly: true })).toBe("https://api.roll.sh/v1/mcp?toolsets=postgres&readonly=1");
+    // Search mode: the access tools and search mode's own, whatever products are picked.
+    const search = { tools: 3, read_only: 2, context_tokens: 900 };
+    expect(toolsetCost(costs, ["redis"], false, search)).toEqual({ tools: 8, tokens: 1300 });
+    expect(toolsetCost(costs, [], true, search)).toEqual({ tools: 5, tokens: 840 });
+    expect(withToolsets("https://api.roll.sh/v1/mcp", [], { search: true, lockdown: true })).toBe("https://api.roll.sh/v1/mcp?tools=search&lockdown=1");
   });
 });
 
