@@ -19,6 +19,7 @@ pub mod outside;
 pub mod aws;
 pub mod iam;
 pub mod rotators;
+pub mod saas;
 mod strength;
 mod audit;
 pub mod backup;
@@ -439,6 +440,7 @@ impl Secrets {
         db.ensure_schema(notices::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
+        db.ensure_schema(saas::SCHEMA)?;
         db.ensure_schema(transit::SCHEMA)?;
         db.ensure_schema(pki::SCHEMA)?;
         db.ensure_schema(ssh::SCHEMA)?;
@@ -462,6 +464,7 @@ impl Secrets {
         }
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone() }));
+            links.register(Arc::new(saas::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone() }));
         }
         // A project's CAs are roll secrets' own: nothing to reach outside.
         let public_api: Arc<std::sync::OnceLock<String>> = Default::default();
@@ -616,7 +619,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "aws_users", "aws_roles", "cloud_accounts", "cas", "ca_certs", "ssh_cas"];
+const REGISTRIES: &[&str] = &["rotators", "saas_rotators", "outside_dbs", "aws_users", "aws_roles", "cloud_accounts", "cas", "ca_certs", "ssh_cas"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked, and no
 /// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,

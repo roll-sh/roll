@@ -94,9 +94,20 @@ impl SyncTarget for FakeSync {
     }
 }
 
-/// Audit deliveries, kept instead of sent; and an OIDC issuer's keys, served.
+/// Audit deliveries, kept instead of sent; an OIDC issuer's keys, served; and vendors' APIs.
 #[derive(Default)]
-struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool);
+struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Vendors>);
+
+/// SendGrid and Twilio: the key ids each has live, and how many were ever made.
+#[derive(Default)]
+struct Vendors {
+    live: Vec<String>,
+    made: u32,
+}
+
+/// A made-up account SID, written in pieces: secret scanners take the whole shape for a real one.
+const TWILIO_SID: &str = concat!("AC", "0123456789abcdef", "0123456789abcdef");
+const TWILIO_KEYS: &str = concat!("https://api.twilio.com/2010-04-01/Accounts/", "AC", "0123456789abcdef", "0123456789abcdef", "/Keys");
 
 impl roll_secrets::Deliver for Sent {
     fn check(&self, url: &str) -> roll_secrets::Result<()> {
@@ -124,6 +135,38 @@ impl roll_secrets::Deliver for Sent {
         let n = sent.iter().filter(|b| b["action"] == "issue").count();
         let answer = if body["action"] == "issue" { json!({ "value": format!("vendor-key-{n}"), "handle": n }) } else { json!({}) };
         Ok(answer.to_string().into_bytes().into())
+    }
+    /// SendGrid's and Twilio's key APIs, matched on the URL, each taking only its credential.
+    fn request(&self, method: &str, url: &str, headers: &[(&str, &Secret)], body: Option<(&str, &Secret)>, _: usize) -> roll_secrets::Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        use base64::Engine;
+        let auth = headers.iter().find(|(h, _)| *h == "authorization").map(|(_, v)| v.expose().to_string()).unwrap_or_default();
+        let twilio_auth = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{TWILIO_SID}:twilio-token")));
+        let mut v = self.3.lock().unwrap();
+        let (status, answer) = match (method, url) {
+            ("POST", "https://api.sendgrid.com/v3/api_keys") if auth == "Bearer SG.admin" => {
+                let sent: Value = serde_json::from_str(body.unwrap().1.expose()).unwrap();
+                assert_eq!(sent["scopes"], json!(["mail.send"]));
+                v.made += 1;
+                let id = format!("sgk{}", v.made);
+                v.live.push(id.clone());
+                (201, json!({ "api_key": format!("SG.key-{}", v.made), "api_key_id": id, "name": sent["name"] }))
+            }
+            ("POST", u) if u == format!("{TWILIO_KEYS}.json") && auth == twilio_auth => {
+                assert!(body.unwrap().1.expose().starts_with("FriendlyName=roll%20secrets%20production%20TWILIO_API_"));
+                v.made += 1;
+                let sid = format!("SK{}", v.made);
+                v.live.push(sid.clone());
+                (201, json!({ "sid": sid, "secret": format!("twilio-secret-{}", v.made) }))
+            }
+            ("DELETE", u) if (u.starts_with("https://api.sendgrid.com/v3/api_keys/") && auth == "Bearer SG.admin") || (u.starts_with(TWILIO_KEYS) && auth == twilio_auth) => {
+                let id = u.rsplit('/').next().unwrap().trim_end_matches(".json").to_string();
+                let found = v.live.contains(&id);
+                v.live.retain(|k| *k != id);
+                (if found { 204 } else { 404 }, json!(null))
+            }
+            _ => (401, json!({ "errors": [{ "message": "authorization required" }] })),
+        };
+        Ok((status, answer.to_string().into_bytes().into()))
     }
 }
 
@@ -1289,6 +1332,44 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
     let revoked: Vec<Value> = api.sent.0.lock().unwrap().iter().filter(|b| b["action"] == "revoke").map(|b| b["handle"].clone()).collect();
     assert!(revoked.contains(&json!(2)), "the key in use when the project went is revoked: {revoked:?}");
     assert_eq!((count("rotators"), count("projects"), count("leases")), (0, 0, 0));
+}
+
+#[tokio::test]
+async fn a_saas_rotator_issues_and_revokes_vendor_keys() {
+    let api = Api::new().await;
+    let sg = api.ok(Method::POST, "/saas", Some(json!({ "name": "mail", "vendor": "sendgrid", "target": { "scopes": ["mail.send"] }, "credential": "SG.admin" }))).await;
+    let tw = api.ok(Method::POST, "/saas", Some(json!({ "name": "sms", "vendor": "twilio", "target": { "account_sid": TWILIO_SID }, "credential": "twilio-token" }))).await;
+    assert_eq!((sg["vendor"].as_str(), sg["target"].clone()), (Some("sendgrid"), json!({ "scopes": ["mail.send"] })), "{sg}");
+    let listed = api.ok(Method::GET, "/saas", None).await;
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    for shown in [&sg, &tw, &listed, &audit] {
+        assert!(!shown.to_string().contains("SG.admin") && !shown.to_string().contains("twilio-token"), "never the credential: {shown}");
+    }
+    let (s, _) = api.call(Method::POST, "/saas", Some(json!({ "name": "sso", "vendor": "okta", "target": { "domain": "10.0.0.1", "app_id": "0oa1" }, "credential": "t" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a tenant domain is a hostname");
+
+    // Linking issues a key; the id and the secret of one key share it.
+    let link = |r: &Value, field: &str| json!({ "link": { "kind": "saas", "ref": r["id"], "field": field, "mode": "managed" } });
+    api.ok(Method::PUT, "/environments/production/secrets/SENDGRID_API_KEY", Some(link(&sg, "secret"))).await;
+    api.ok(Method::PUT, "/environments/production/secrets/TWILIO_API_KEY", Some(link(&tw, "id"))).await;
+    api.ok(Method::PUT, "/environments/production/secrets/TWILIO_API_SECRET", Some(link(&tw, "secret"))).await;
+    let values = |v: Value| (v["values"]["SENDGRID_API_KEY"].clone(), v["values"]["TWILIO_API_KEY"].clone(), v["values"]["TWILIO_API_SECRET"].clone());
+    assert_eq!(values(api.values("production", "/").await), (json!("SG.key-1"), json!("SK2"), json!("twilio-secret-2")));
+
+    // Rotating issues a new one; the old one keeps working through the grace period.
+    api.ok(Method::POST, "/environments/production/secrets/SENDGRID_API_KEY/rotate", None).await;
+    api.ok(Method::POST, "/environments/production/secrets/TWILIO_API_SECRET/rotate", None).await;
+    assert_eq!(values(api.values("production", "/").await), (json!("SG.key-3"), json!("SK4"), json!("twilio-secret-4")));
+    assert_eq!(api.sent.3.lock().unwrap().live, ["sgk1", "SK2", "sgk3", "SK4"]);
+    let (s, _) = api.call(Method::DELETE, &format!("/saas/{}", sg["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "a key it issues keeps it");
+
+    // Once the grace period is over, the old keys are revoked at the vendor.
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    assert_eq!(api.sent.3.lock().unwrap().live, ["sgk3", "SK4"]);
 }
 
 #[tokio::test]

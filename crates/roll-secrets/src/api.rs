@@ -98,6 +98,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/aws-users/{{id}}"), axum::routing::delete(delete_aws_user))
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
+        .route(&format!("{P}/saas"), get(saas_rotators).post(add_saas_rotator))
+        .route(&format!("{P}/saas/{{id}}"), axum::routing::delete(delete_saas_rotator))
         .route(&format!("{P}/transit"), get(transit_keys).post(add_transit_key))
         .route(&format!("{P}/transit/{{name}}"), axum::routing::patch(config_transit_key).delete(delete_transit_key))
         .route(&format!("{P}/transit/{{name}}/rotate"), post(rotate_transit_key))
@@ -1039,6 +1041,20 @@ async fn add_rotator(State(s): S, Who(c): Who, Path(project): Path<String>, b: B
 
 async fn delete_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_rotator(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn saas_rotators(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.saas_rotators(&project, &c)).await?))
+}
+
+async fn add_saas_rotator(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::saas::NewSaasRotator = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_saas_rotator(&project, n, &c)).await?))
+}
+
+async fn delete_saas_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_saas_rotator(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

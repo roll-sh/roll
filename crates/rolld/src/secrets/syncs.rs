@@ -334,6 +334,37 @@ impl roll_secrets::Deliver for AuditDeliver {
         self.0.send_signed(&u, ("x-roll-rotator", id), &delivery, secret, body, Some(limit))
     }
 
+    /// A vendor's API (roll_secrets::saas): the same guards (HTTPS, public, no redirects, the
+    /// timeout), any status, at most `limit` bytes of answer. Headers, body and answer may hold
+    /// credentials: an error names the host and what failed, never them.
+    fn request(&self, method: &str, url: &str, headers: &[(&str, &Value)], body: Option<(&str, &Value)>, limit: usize) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        let u = self.0.url(url)?;
+        let host = u.host_str().unwrap_or_default().to_string();
+        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| Error::Internal(format!("{method} isn't an HTTP method")))?;
+        let mut req = self.0.client.request(method, u);
+        for (name, value) in headers {
+            let mut v = reqwest::header::HeaderValue::from_str(value.expose()).map_err(|_| bad(format!("a {name} header roll can't send to {host}")))?;
+            v.set_sensitive(true);
+            req = req.header(*name, v);
+        }
+        req = match body {
+            Some((content_type, b)) => req.header("content-type", content_type).body(b.expose().as_bytes().to_vec()),
+            None => req.header("content-length", "0"),
+        };
+        block_on(async {
+            let mut resp = req.send().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))?;
+            let status = resp.status().as_u16();
+            let mut out = zeroize::Zeroizing::new(Vec::new());
+            while let Some(c) = resp.chunk().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))? {
+                if out.len() + c.len() > limit {
+                    return Err(Error::Link(format!("{host}: an answer over {limit} bytes")));
+                }
+                out.extend_from_slice(&c);
+            }
+            Ok((status, out))
+        })
+    }
+
     /// An OIDC issuer's documents: the same guards, a 2xx only, at most `limit` bytes.
     fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>> {
         let u = self.0.url(url)?;

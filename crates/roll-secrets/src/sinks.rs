@@ -60,6 +60,14 @@ pub trait Deliver: Send + Sync {
         let _ = (url, id, secret, body, limit);
         Err(crate::Error::Link("calling out isn't on this server".into()))
     }
+    /// One request to a vendor's API (saas.rs): `url` HTTPS to a public address, no redirects, a
+    /// timeout, and the answer's status with at most `limit` bytes of it, whatever the status.
+    /// Headers and the body may hold a credential and the answer a value: never logged, never in
+    /// an error.
+    fn request(&self, method: &str, url: &str, headers: &[(&str, &Value)], body: Option<(&str, &Value)>, limit: usize) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        let _ = (method, url, headers, body, limit);
+        Err(crate::Error::Link("calling out isn't on this server".into()))
+    }
 }
 
 #[derive(Debug, Serialize)]
