@@ -16,6 +16,8 @@ mod alerts;
 pub mod api;
 pub mod health;
 pub mod outside;
+pub mod directories;
+mod turns;
 pub mod aws;
 pub mod iam;
 pub mod rotators;
@@ -327,6 +329,9 @@ pub struct Options {
     pub clouds: Option<clouds::Clouds>,
     /// Sets passwords on Postgres servers outside roll (outside.rs); `None`: not on this server.
     pub outside: Option<std::sync::Arc<dyn outside::OutsideDb>>,
+    /// Sets passwords and makes users on LDAP and Active Directory servers outside roll
+    /// (directories.rs); `None`: not on this server.
+    pub directory: Option<std::sync::Arc<dyn directories::Directory>>,
 }
 
 /// The secrets store.
@@ -348,6 +353,7 @@ pub struct Secrets {
     web_url: Option<String>,
     clouds: Option<clouds::Clouds>,
     outside: Option<Arc<dyn outside::OutsideDb>>,
+    directory: Option<Arc<dyn directories::Directory>>,
     /// OIDC issuers' public keys (identities.rs).
     oidc: oidc::Keys,
     /// Logins per identity and per client address in the last minute.
@@ -467,7 +473,11 @@ impl Secrets {
         if let (Some(outside), Ok(keys)) = (&opts.outside, &opts.keyring) {
             links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), outside: outside.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default() })
+        db.ensure_schema(directories::SCHEMA)?;
+        if let (Some(directory), Ok(keys)) = (&opts.directory, &opts.keyring) {
+            links.register(Arc::new(directories::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), directory: directory.clone() }));
+        }
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -609,7 +619,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "aws_users", "aws_roles", "cloud_accounts", "cas", "ca_certs", "ssh_cas"];
+const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "directories", "aws_users", "aws_roles", "cloud_accounts", "cas", "ca_certs", "ssh_cas"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked, and no
 /// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,

@@ -1205,6 +1205,7 @@ mod tests {
             kms: None,
             sts: None,
             outside: None,
+            directory: None,
             clouds: None,
             workloads: None,
         };
