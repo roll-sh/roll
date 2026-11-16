@@ -730,7 +730,7 @@ every deployment is immutable with instant rollback.
   setting the link's prefix again keeps the same credential. Unlinking, or deleting the service,
   revokes it (`Resources::unlink`; a revoke that fails is logged, and the link is gone either
   way). A link that can't be stored revokes what it just made. Kinds that don't (Postgres and
-  Redis today) read the resource's variables fresh at each deploy. A `search` link is one: it goes
+  Redis today) read the resource's variables fresh at each deploy. A `search` link makes its own: it goes
   through roll secrets' search provider like a bucket's (rolld's `secrets::Search`, through search's
   keys route with `access: "data"`): an API key with a data-only role, or on an OpenSearch-flavor
   cluster an internal user with a data-only role of its own. The keys route runs on the cluster's
@@ -2031,7 +2031,7 @@ a Dockerfile, each answering through roll (55 s for the three from a warm cache,
   be 0600). Builds' secrets a stopped node left in Secrets Manager are swept at start (two days
   old) and tasks' environment files every ten minutes (`Runtime::sweep`); the bucket's `builds/`
   zips, and every object's noncurrent versions, wait for the stack's lifecycle rule.
-- Links: Postgres, Redis and search are wired; buckets, streams, queues and NoSQL answer "not wired yet".
+- Links: Postgres, Redis, buckets, streams, NoSQL and search are wired; queues answer "not wired yet".
 - roll secrets isn't on main yet: `NoSecrets` stands in, and service variables are the env store.
 - Private networking is a Docker network per project and environment; it isn't reachable from
   the host's own roll databases on hosts whose firewall drops container-to-host traffic.
