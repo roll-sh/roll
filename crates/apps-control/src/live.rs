@@ -2141,6 +2141,7 @@ mod tests {
                 cpu: 0.5,
                 memory_mb: 512,
                 network: None,
+                closed: false,
                 aliases: vec![],
                 volume: None,
                 idle_stop_s: None,

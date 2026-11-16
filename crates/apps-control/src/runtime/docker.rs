@@ -115,6 +115,9 @@ pub struct Docker {
     /// with the daemon on this host, except on macOS (Docker Desktop's `host.docker.internal`
     /// reaches the host's loopback itself) or with `ROLL_APPS_LINK_RELAY=0`.
     links: Option<super::links::Links>,
+    /// Egress proxies for closed environments ([`super::egress`]), served to them through relays
+    /// as links are (so only where links are).
+    egress: Option<super::egress::Proxies>,
 }
 
 /// The sandbox holding `instance`'s network, its aliases and its published port.
@@ -136,7 +139,10 @@ impl Docker {
         let engine = Engine::local();
         let relay = engine.is_some() && !cfg!(target_os = "macos") && std::env::var("ROLL_APPS_LINK_RELAY").map_or(true, |v| v != "0");
         let links = relay.then(|| super::links::Links::new(scratch.with_file_name("links")));
-        Docker { known: Mutex::new(Known::default()), scratch, engine, netns, links }
+        // Listed hosts on private addresses too: local development and tests only.
+        let private = std::env::var("ROLL_APPS_EGRESS_ALLOW_PRIVATE").is_ok_and(|v| v == "1");
+        let egress = relay.then(|| super::egress::Proxies::new(scratch.with_file_name("egress"), private));
+        Docker { known: Mutex::new(Known::default()), scratch, engine, netns, links, egress }
     }
 
     /// With or without network sandboxes, whatever `ROLL_APPS_NETNS` says (a measurement
@@ -144,6 +150,20 @@ impl Docker {
     pub fn with_netns(mut self, on: bool) -> Docker {
         self.netns = on;
         self
+    }
+
+    /// Where a started instance answers: its published port on loopback, or a closed one's
+    /// address on its network (looked up at each start: it changes); none for a worker.
+    async fn address(&self, name: &str, host_port: Option<u16>) -> anyhow::Result<Option<SocketAddr>> {
+        if let Some(p) = host_port {
+            return Ok(Some(SocketAddr::from(([127, 0, 0, 1], p))));
+        }
+        if let Some(e) = &self.engine {
+            return Ok(e.inspect(name).await?.closed);
+        }
+        let out = docker(&["inspect", "-f", "{{index .Config.Labels \"sh.roll.apps.closed\"}} {{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", name]).await?;
+        let mut f = out.split_whitespace();
+        Ok(f.next().and_then(|p| p.parse::<u16>().ok()).and_then(|p| Some(SocketAddr::new(f.next()?.parse().ok()?, p))))
     }
 
     async fn id_and_port(&self, name: &str) -> anyhow::Result<(String, Option<u16>)> {
@@ -291,17 +311,28 @@ impl Docker {
 
 /// A link's relay for `port` on `network`, running (made, or started again after a stop).
 async fn ensure_relay(links: &super::links::Links, network: &str, port: u16) -> anyhow::Result<()> {
-    let name = super::links::relay_name(network, port);
-    match docker(&["inspect", "-f", "{{.State.Running}}", &name]).await {
+    let args = super::links::relay_args(network, port, &links.socket_dir(port));
+    run_relay(&super::links::relay_name(network, port), &args).await.map_err(|e| e.context(format!("the link relay for port {port}")))
+}
+
+/// Relay `name` running: made with `args`, or started again after a stop.
+async fn run_relay(name: &str, args: &[String]) -> anyhow::Result<()> {
+    match docker(&["inspect", "-f", "{{.State.Running}}", name]).await {
         Ok(r) if r.trim() == "true" => Ok(()),
-        Ok(_) => docker(&["start", &name]).await.map(drop),
-        Err(_) => match docker(&super::links::relay_args(network, port, &links.socket_dir(port)).iter().map(String::as_str).collect::<Vec<_>>()).await {
+        Ok(_) => docker(&["start", name]).await.map(drop),
+        Err(_) => match docker(&args.iter().map(String::as_str).collect::<Vec<_>>()).await {
             Ok(_) => Ok(()),
             // Another instance's create made it meanwhile.
             Err(e) if e.to_string().contains("already in use") => Ok(()),
-            Err(e) => Err(e.context(format!("the link relay for port {port}"))),
+            Err(e) => Err(e),
         },
     }
+}
+
+/// A network's gateway: where its containers reach the host (`host.docker.internal` on a closed
+/// network, which has no route to Docker's default one).
+async fn gateway(network: &str) -> Option<String> {
+    docker(&["network", "inspect", "-f", "{{range .IPAM.Config}}{{.Gateway}} {{end}}", network]).await.ok()?.split_whitespace().next().map(str::to_string)
 }
 
 /// Rewrite loopback hosts in a URL for a container (`host.docker.internal`).
@@ -396,13 +427,20 @@ impl Runtime for Docker {
                 ensure_relay(links, net, port).await?;
             }
         }
+        // A closed instance publishes nothing (Docker publishes no port from a network with no
+        // route out): it's reached at its address there, and the host at the network's gateway.
         let host_port = match spec.port {
-            Some(_) => Some(free_port()?),
-            None => None,
+            Some(_) if !spec.closed => Some(free_port()?),
+            _ => None,
+        };
+        let host_gateway = match (&spec.network, spec.closed) {
+            (Some(net), true) => gateway(net).await,
+            _ => Some("host-gateway".to_string()),
         };
         if let Some(engine) = &self.engine {
             // A web instance on a network: its network first, in a sandbox that runs from now on.
             if self.netns
+                && !spec.closed
                 && let (Some(_), Some(_)) = (spec.port, &spec.network)
             {
                 let sandbox = sandbox_name(&spec.name);
@@ -412,7 +450,7 @@ impl Runtime for Docker {
                 }
                 .await;
                 match made {
-                    Ok(()) => match engine.create(&spec.name, &joined(engine_config(spec, None)?, &sandbox)).await {
+                    Ok(()) => match engine.create(&spec.name, &joined(engine_config(spec, None, None)?, &sandbox)).await {
                         Ok(id) => {
                             self.known.lock().containers.insert(spec.name.clone(), (id, host_port, Some(nanos(spec.cpu))));
                             // Without a waker a stopped instance only wakes through rolld.
@@ -436,7 +474,7 @@ impl Runtime for Docker {
                     }
                 }
             }
-            match engine.create(&spec.name, &engine_config(spec, host_port)?).await {
+            match engine.create(&spec.name, &engine_config(spec, host_port, host_gateway.as_deref())?).await {
                 Ok(id) => {
                     self.known.lock().containers.insert(spec.name.clone(), (id, host_port, Some(nanos(spec.cpu))));
                     return Ok(());
@@ -474,11 +512,15 @@ impl Runtime for Docker {
             // A tiny init as PID 1: signals reach the app (a stop takes milliseconds, not the
             // grace period) and zombies are reaped.
             "--init".into(),
-            "--add-host".into(),
-            "host.docker.internal:host-gateway".into(),
             "--log-driver".into(),
             "local".into(),
         ];
+        if let Some(g) = &host_gateway {
+            args.extend(["--add-host".into(), format!("host.docker.internal:{g}")]);
+        }
+        if let (Some(p), true) = (spec.port, spec.closed) {
+            args.extend(["--label".into(), format!("{LABEL}.closed={p}")]);
+        }
         for c in CAP_DROP {
             args.extend(["--cap-drop".into(), c.into()]);
         }
@@ -527,14 +569,12 @@ impl Runtime for Docker {
             // Running: its own connections aren't callers; the next sleep marks it again.
             self.known.lock().marks.remove(name);
             engine.start(name).await?;
-            let (_, port) = self.id_and_port(name).await?;
-            self.follow_logs(name, now, o, e);
-            return Ok(port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))));
+        } else {
+            docker(&["start", name]).await?;
         }
-        docker(&["start", name]).await?;
         let (_, port) = self.id_and_port(name).await?;
         self.follow_logs(name, now, o, e);
-        Ok(port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))))
+        self.address(name, port).await
     }
 
     async fn adopt(&self, spec: &InstanceSpec, log: LogSink) -> Option<super::Adopted> {
@@ -547,8 +587,9 @@ impl Runtime for Docker {
             return None;
         }
         let (_, port) = self.id_and_port(&spec.name).await.ok()?;
+        let addr = self.address(&spec.name, port).await.ok()?;
         self.follow_logs(&spec.name, chrono::Utc::now(), log.stream(Stream::Stdout), log.stream(Stream::Stderr));
-        Some(super::Adopted { addr: port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))), paused })
+        Some(super::Adopted { addr, paused })
     }
 
     async fn settle(&self, name: &str) {
@@ -680,11 +721,17 @@ impl Runtime for Docker {
         docker(&["ps", "-a", "--filter", &filter, "--format", "{{.Names}}"]).await.map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()
     }
 
-    async fn ensure_network(&self, name: &str, service: &str) -> anyhow::Result<()> {
+    async fn ensure_network(&self, name: &str, service: &str, closed: bool) -> anyhow::Result<()> {
         if docker(&["network", "inspect", "-f", "{{.Name}}", name]).await.is_ok() {
             return Ok(());
         }
-        match docker(&["network", "create", "--label", &format!("{LABEL}={service}"), name]).await {
+        let label = format!("{LABEL}={service}");
+        let mut args = vec!["network", "create", "--label", &label];
+        if closed {
+            args.push("--internal");
+        }
+        args.push(name);
+        match docker(&args).await {
             Ok(_) => Ok(()),
             // Another wake made it meanwhile.
             Err(e) if e.to_string().contains("already exists") => Ok(()),
@@ -703,8 +750,8 @@ impl Runtime for Docker {
             return;
         }
         let Ok(on) = docker(&["ps", "-a", "--filter", &format!("network={name}"), "--format", "{{.Names}}"]).await else { return };
-        // Its link relays go with it: they serve only this network.
-        let (relays, others): (Vec<&str>, Vec<&str>) = on.lines().filter(|l| !l.trim().is_empty()).partition(|n| n.starts_with(super::links::NAME_PREFIX));
+        // Its link and egress relays go with it: they serve only this network.
+        let (relays, others): (Vec<&str>, Vec<&str>) = on.lines().filter(|l| !l.trim().is_empty()).partition(|n| n.starts_with(super::links::NAME_PREFIX) || n.starts_with(super::egress::NAME_PREFIX));
         if others.is_empty() {
             for r in relays {
                 let _ = docker(&["rm", "-f", r]).await;
@@ -803,6 +850,23 @@ impl Runtime for Docker {
         let out = child.wait_with_output().await?;
         anyhow::ensure!(out.status.success(), "the restore failed: {}", String::from_utf8_lossy(&out.stderr).trim());
         Ok(())
+    }
+
+    fn closes_egress(&self) -> bool {
+        self.egress.is_some()
+    }
+
+    async fn egress_proxy(&self, network: &str, _service: &str, hosts: &[String]) -> anyhow::Result<String> {
+        let Some(proxies) = &self.egress else { bail!("egress proxies need the Docker daemon on this host") };
+        let digest = proxies.serve(hosts)?;
+        let name = super::egress::relay_name(network, &digest);
+        let args = super::links::relay_args_as(&name, network, &super::egress::alias(&digest), super::egress::PORT, &proxies.socket_dir(&digest), "egress");
+        run_relay(&name, &args).await.map_err(|e| e.context("the egress proxy's relay"))?;
+        Ok(super::egress::proxy_url(hosts))
+    }
+
+    fn egress_refused(&self, hosts: &[String]) -> Vec<String> {
+        self.egress.as_ref().map(|p| p.refused(hosts)).unwrap_or_default()
     }
 
     fn reach(&self, url: &str) -> String {
@@ -925,7 +989,7 @@ fn joined(mut config: serde_json::Value, sandbox: &str) -> serde_json::Value {
     config
 }
 
-fn engine_config(spec: &InstanceSpec, host_port: Option<u16>) -> anyhow::Result<serde_json::Value> {
+fn engine_config(spec: &InstanceSpec, host_port: Option<u16>, host_gateway: Option<&str>) -> anyhow::Result<serde_json::Value> {
     use serde_json::json;
     let mut env = Vec::with_capacity(spec.vars.len());
     for (k, v) in &spec.vars {
@@ -943,7 +1007,7 @@ fn engine_config(spec: &InstanceSpec, host_port: Option<u16>) -> anyhow::Result<
         "CapDrop": CAP_DROP,
         "RestartPolicy": {"Name": "no"},
         "Init": true,
-        "ExtraHosts": ["host.docker.internal:host-gateway"],
+        "ExtraHosts": host_gateway.map(|g| vec![format!("host.docker.internal:{g}")]).unwrap_or_default(),
         "LogConfig": {"Type": "local", "Config": {}},
     });
     let mut config = json!({
@@ -956,6 +1020,9 @@ fn engine_config(spec: &InstanceSpec, host_port: Option<u16>) -> anyhow::Result<
             format!("{LABEL}.cpu"): nanos(spec.cpu).to_string(),
         },
     });
+    if let (Some(p), true) = (spec.port, spec.closed) {
+        config["Labels"][format!("{LABEL}.closed")] = json!(p.to_string());
+    }
     if let (Some(p), Some(hp)) = (spec.port, host_port) {
         let port = format!("{p}/tcp");
         config["ExposedPorts"] = json!({ &port: {} });
@@ -1173,18 +1240,19 @@ mod tests {
             cpu: 0.5,
             memory_mb: 512,
             network: Some("roll-apps-net-p-production".into()),
+            closed: false,
             aliases: vec!["web".into()],
             volume: None,
             idle_stop_s: None,
             registry: None,
         };
-        let c = engine_config(&spec, Some(41234)).unwrap();
+        let c = engine_config(&spec, Some(41234), Some("host-gateway")).unwrap();
         assert_eq!(c["Env"][0], format!("TLS_KEY={pem}"));
         assert_eq!(c["HostConfig"]["PortBindings"]["8080/tcp"][0]["HostIp"], "127.0.0.1");
         assert_eq!(c["HostConfig"]["CapDrop"][0], "NET_RAW");
         assert_eq!(c["NetworkingConfig"]["EndpointsConfig"]["roll-apps-net-p-production"]["Aliases"][0], "web");
         assert_eq!(c["Labels"]["sh.roll.apps"], "svc_x");
         let nul = InstanceSpec { vars: vec![("A".into(), "a\0b".into())], ..spec };
-        assert!(engine_config(&nul, None).is_err());
+        assert!(engine_config(&nul, None, None).is_err());
     }
 }

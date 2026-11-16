@@ -11,7 +11,7 @@ use crate::logs::{LogSink, Stream};
 use crate::model::*;
 use crate::runtime::{BuildJob, InstanceSpec};
 use crate::store::{EnvRow, NewDeployment, ServiceRow, Switch};
-use crate::{Apps, Error, PENDING_CLAIM_TTL, Result, fingerprint, lease_key, network_name, volume_name};
+use crate::{Apps, Error, PENDING_CLAIM_TTL, Result, closed_network_name, fingerprint, lease_key, network_name, volume_name};
 use bytes::Bytes;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -1270,8 +1270,25 @@ impl Apps {
         if run.kind != RunType::Web {
             vars.retain(|(k, _)| k != "PORT");
         }
-        let network = network_name(&svc.project, &env.name);
-        self.deps.runtime.ensure_network(&network, &svc.id).await.map_err(|e| Error::Internal(e.to_string()))?;
+        // With `egress` `roll`: a network with no route out, and the listed hosts through its
+        // proxy (the variables every HTTP client reads; the app's own win). Nothing outside roll
+        // is reached any other way, so a runtime that can't close it never runs it open.
+        let closed = env.egress.closed();
+        if closed && !self.deps.runtime.closes_egress() {
+            return Err(Error::Conflict("its egress is \"roll\", and this node's runtime can't close an environment's network".into()));
+        }
+        let network = if closed { closed_network_name(&svc.project, &env.name) } else { network_name(&svc.project, &env.name) };
+        self.deps.runtime.ensure_network(&network, &svc.id, closed).await.map_err(|e| Error::Internal(e.to_string()))?;
+        if closed && !env.egress.hosts.is_empty() {
+            let proxy = self.deps.runtime.egress_proxy(&network, &svc.id, &env.egress.hosts).await.map_err(|e| Error::Internal(e.to_string()))?;
+            let sid = svc.project.clone();
+            let names: Vec<String> = self.db(move |s| s.services(Some(&sid))).await?.into_iter().map(|s| s.name).collect();
+            for (k, v) in egress_vars(&proxy, &names, &vars) {
+                if !vars.iter().any(|(n, _)| n == &k) {
+                    vars.push((k, v));
+                }
+            }
+        }
         // An image service's registry login, for a runtime that pulls at each start; only the
         // registry it's for gets it.
         let registry = match &svc.source {
@@ -1296,6 +1313,7 @@ impl Apps {
             cpu: run.cpu,
             memory_mb: run.memory_mb,
             network: Some(network),
+            closed,
             aliases: vec![svc.name.clone(), format!("{}.{}.internal", svc.name, env.name)],
             volume: run.volume.as_ref().map(|v| (volume_name(&svc.id, &env.name), v.mount.clone())),
             // A web service that scales to zero sleeps after `sleep_after`: an instance idle well
@@ -2352,6 +2370,19 @@ fn build_failure(lines: &[String]) -> Option<String> {
         Some(s) => format!("{what} (its last output: {})", s.chars().take(200).collect::<String>()),
         None => what,
     })
+}
+
+
+/// A closed environment's proxy variables (`proxy` for its listed hosts): `HTTP_PROXY` and
+/// `HTTPS_PROXY` in both cases, and `NO_PROXY` naming what's reached directly: the host, its
+/// links' relays and the project's services (by name and `<name>.<env>.internal`).
+fn egress_vars(proxy: &str, services: &[String], vars: &[(String, String)]) -> Vec<(String, String)> {
+    let mut direct: Vec<String> = ["localhost", "127.0.0.1", "::1", "host.docker.internal", ".internal"].map(str::to_string).to_vec();
+    direct.extend(services.iter().cloned());
+    direct.extend(crate::runtime::links::ports(vars).into_iter().map(crate::runtime::links::relay_host));
+    let direct = direct.join(",");
+    let proxies = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"].map(|k| (k.to_string(), proxy.to_string()));
+    proxies.into_iter().chain(["NO_PROXY", "no_proxy"].map(|k| (k.to_string(), direct.clone()))).collect()
 }
 
 #[cfg(test)]

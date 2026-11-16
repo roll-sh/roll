@@ -994,3 +994,53 @@ async fn an_uploaded_image_runs_and_names_nothing_on_the_host() {
     assert!(docker(&["image", "inspect", &tag]).await.is_err(), "the archive's name was applied on the host");
     call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
 }
+
+/// Egress `roll` on real Docker: the instance runs on a network with no route out and is still
+/// served (at its address there); a direct connection out fails, and its proxy (through the
+/// relay on that network) refuses a host the environment doesn't list, which then shows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_environment_reaches_nothing_but_its_listed_hosts() {
+    let Some(w) = docker_world().await else { return };
+    use apps_control::runtime::docker::docker;
+    let start = "(env -u http_proxy -u HTTP_PROXY wget -q -T 3 -O /dev/null http://1.1.1.1/ && echo out:open || echo out:closed; wget -T 5 -O /dev/null http://unlisted.example.com/ 2>&1 | grep -o '403' | head -1 | sed 's/^/proxy:/') > /tmp/got; mkdir -p /tmp/w; cp /tmp/got /tmp/w/index.html; httpd -f -p $PORT -h /tmp/w";
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "closed", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"port": 8080, "start": start, "memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let settled = |dep: String| {
+        let (api, env) = (w.api.clone(), env.clone());
+        async move {
+            for _ in 0..1200 {
+                let (_, x) = call(&api, "GET", &format!("{env}/deploys/{dep}"), None, "application/json", None).await;
+                if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
+                    return x;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Value::Null
+        }
+    };
+    let first = settled(svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string()).await;
+    assert_eq!(first["status"], "active", "{first}");
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll", "hosts": ["api.example.com"]}})), "application/json", None).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({})), "application/json", None).await;
+    let d = settled(r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string()).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let host = svc["environments"][0]["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
+    let resp = w.public.clone().oneshot(Request::get("/").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
+    let body = String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
+    assert_eq!(body.split_whitespace().collect::<Vec<_>>(), ["out:closed", "proxy:403"], "{body}");
+    let (_, e) = call(&w.api, "GET", &env, None, "application/json", None).await;
+    assert_eq!(e["egress_refused"], json!(["unlisted.example.com"]), "{e}");
+    let closed = apps_control::closed_network_name(&w.project, "production");
+    assert_eq!(docker(&["network", "inspect", "-f", "{{.Internal}}", &closed]).await.unwrap(), "true");
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    for _ in 0..100 {
+        if docker(&["network", "inspect", &closed]).await.is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(docker(&["network", "inspect", &closed]).await.is_err(), "the closed network and its proxy's relay went with the service");
+}

@@ -931,6 +931,15 @@ pub enum AppsCmd {
         /// or not.
         #[arg(long)]
         redeploy_on_secrets: Option<bool>,
+        /// What its code may reach, from its next deploy: `roll` (roll's products, the
+        /// project's services and the `--egress-host`s, nothing else) or `open`.
+        #[arg(long, value_parser = ["roll", "open"])]
+        egress: Option<String>,
+        /// With `--egress roll`: a host outside roll it may still reach on 443 and 80
+        /// (`api.stripe.com`, or `*.sentry.io` for its subdomains). Repeatable; the list replaces
+        /// the one it has.
+        #[arg(long = "egress-host", value_name = "HOST", requires = "egress")]
+        egress_host: Vec<String>,
         /// Only visitors with its link get in (a new link, printed once; the old one stops).
         #[arg(long, conflicts_with = "open")]
         private: bool,
@@ -3621,7 +3630,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, private, open, maintenance, serve, pause, resume, resume_deploys, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, error_page, maintenance_page, roll_pages } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, egress, egress_host, private, open, maintenance, serve, pause, resume, resume_deploys, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, error_page, maintenance_page, roll_pages } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -3641,6 +3650,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(f) = follow_tag {
                 body.insert("follow_tag".into(), json!(f));
+            }
+            if let Some(mode) = egress {
+                body.insert("egress".into(), json!({ "mode": mode, "hosts": egress_host }));
             }
             if pause || resume {
                 body.insert("paused".into(), json!(pause));

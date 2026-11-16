@@ -10,6 +10,7 @@
 pub mod aws;
 pub mod codebuild;
 pub mod docker;
+pub mod egress;
 pub mod engine;
 pub mod fake;
 pub mod fargate;
@@ -44,6 +45,9 @@ pub struct InstanceSpec {
     pub memory_mb: u32,
     /// The project's private network for this environment, and the names it answers to there.
     pub network: Option<String>,
+    /// Its network has no route out (`egress` `roll`): it's reached at its address there, never
+    /// through a published port.
+    pub closed: bool,
     pub aliases: Vec<String>,
     /// A named volume and where it's mounted.
     pub volume: Option<(String, String)>,
@@ -200,8 +204,23 @@ pub trait Runtime: Send + Sync {
     /// Names of every instance this runtime has for `service` (or for every service), made by
     /// any process of this node.
     async fn list(&self, service: Option<&str>) -> Vec<String>;
-    /// Make the project's private network if it's missing.
-    async fn ensure_network(&self, name: &str, service: &str) -> anyhow::Result<()>;
+    /// Make the project's private network if it's missing; `closed`: one with no route out
+    /// ([`Runtime::closes_egress`]).
+    async fn ensure_network(&self, name: &str, service: &str, closed: bool) -> anyhow::Result<()>;
+    /// Whether it runs environments with no way out but roll (`egress` `roll`): a network with
+    /// no route out, and [`Runtime::egress_proxy`] for the hosts they may still reach.
+    fn closes_egress(&self) -> bool {
+        false
+    }
+    /// The egress proxy for `hosts` serving closed `network`: the URL its instances use as
+    /// `HTTP_PROXY`/`HTTPS_PROXY` ([`egress`]).
+    async fn egress_proxy(&self, _network: &str, _service: &str, _hosts: &[String]) -> anyhow::Result<String> {
+        anyhow::bail!("this runtime has no egress proxy")
+    }
+    /// The hosts the egress proxy for `hosts` refused lately (none: it hasn't, or isn't here).
+    fn egress_refused(&self, _hosts: &[String]) -> Vec<String> {
+        Vec::new()
+    }
     /// A project environment's network nothing uses any more (its last service there went):
     /// best effort, left if anything is still attached.
     async fn remove_network(&self, _name: &str) {}

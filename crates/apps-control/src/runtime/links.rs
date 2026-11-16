@@ -88,6 +88,11 @@ impl Links {
     }
 }
 
+/// A relay's host name on its network.
+pub fn relay_host(port: u16) -> String {
+    format!("{ALIAS}{port}")
+}
+
 /// The relay ports `vars`' values name (`roll-link-<port>:`).
 pub fn ports(vars: &[(String, String)]) -> BTreeSet<u16> {
     let mut out = BTreeSet::new();
@@ -115,10 +120,15 @@ pub fn relay_name(network: &str, port: u16) -> String {
 /// directory mounted, nothing else (no capabilities but binding a low port, a read-only root,
 /// 32 MiB, 64 processes), kept running across a daemon's restart.
 pub fn relay_args(network: &str, port: u16, socket_dir: &Path) -> Vec<String> {
-    let name = relay_name(network, port);
+    relay_args_as(&relay_name(network, port), network, &format!("{ALIAS}{port}"), port, socket_dir, "link")
+}
+
+/// `docker run` arguments for a relay named `name` answering `alias:port` on `network` with
+/// the socket in `socket_dir` (a link's, or an egress proxy's: `role`).
+pub fn relay_args_as(name: &str, network: &str, alias: &str, port: u16, socket_dir: &Path, role: &str) -> Vec<String> {
     [
-        "run", "-d", "--name", &name, "--network", network, "--network-alias", &format!("{ALIAS}{port}"),
-        "--label", &format!("{}=links", super::LABEL), "--label", &format!("{}.role=link", super::LABEL),
+        "run", "-d", "--name", name, "--network", network, "--network-alias", alias,
+        "--label", &format!("{}=links", super::LABEL), "--label", &format!("{}.role={role}", super::LABEL),
         "--read-only", "--cap-drop", "ALL", "--cap-add", "NET_BIND_SERVICE", "--security-opt", "no-new-privileges",
         "--memory", "32m", "--pids-limit", "64", "--restart", "unless-stopped",
         "-v", &format!("{}:/link", socket_dir.display()),

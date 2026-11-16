@@ -61,6 +61,11 @@ pub struct Fake {
     pub shared: std::sync::atomic::AtomicBool,
     instances: Mutex<HashMap<String, FakeInstance>>,
     networks: Mutex<Vec<String>>,
+    /// Networks made with no route out, and the egress proxies asked for (network, hosts).
+    closed: Mutex<Vec<String>>,
+    pub proxies: Mutex<Vec<(String, Vec<String>)>>,
+    /// What the egress proxies say they refused ([`Fake::refuse`]).
+    refused: Mutex<Vec<String>>,
     /// Tars written into instances (`copy_to`), by instance and directory, read back as they were.
     copied: Mutex<HashMap<(String, String), Vec<u8>>>,
     /// What a volume reports it takes, over its contents' length ([`Fake::set_volume_used`]).
@@ -112,6 +117,11 @@ impl Fake {
 
     pub fn state(&self, name: &str) -> Option<FakeState> {
         self.instances.lock().get(name).map(|i| i.state)
+    }
+
+    /// What instance `name` was made from.
+    pub fn spec(&self, name: &str) -> Option<InstanceSpec> {
+        self.instances.lock().get(name).map(|i| i.spec.clone())
     }
 
     /// Instances (name, deployment, state) of a service, by name.
@@ -189,6 +199,16 @@ impl Fake {
 
     pub fn networks(&self) -> Vec<String> {
         self.networks.lock().clone()
+    }
+
+    /// The networks made with no route out.
+    pub fn closed_networks(&self) -> Vec<String> {
+        self.closed.lock().clone()
+    }
+
+    /// An egress proxy refused `host` (as one would, an instance having tried it).
+    pub fn refuse(&self, host: &str) {
+        self.refused.lock().push(host.to_string());
     }
 
     pub fn count(c: &AtomicU64) -> u64 {
@@ -545,16 +565,33 @@ impl Runtime for Fake {
         self.instances.lock().values().filter(|i| service.is_none_or(|s| i.spec.service == s)).map(|i| i.spec.name.clone()).collect()
     }
 
-    async fn ensure_network(&self, name: &str, _service: &str) -> anyhow::Result<()> {
+    async fn ensure_network(&self, name: &str, _service: &str, closed: bool) -> anyhow::Result<()> {
         let mut n = self.networks.lock();
         if !n.iter().any(|x| x == name) {
             n.push(name.to_string());
+            if closed {
+                self.closed.lock().push(name.to_string());
+            }
         }
         Ok(())
     }
 
+    fn closes_egress(&self) -> bool {
+        true
+    }
+
+    async fn egress_proxy(&self, network: &str, _service: &str, hosts: &[String]) -> anyhow::Result<String> {
+        self.proxies.lock().push((network.to_string(), hosts.to_vec()));
+        Ok(super::egress::proxy_url(hosts))
+    }
+
+    fn egress_refused(&self, _hosts: &[String]) -> Vec<String> {
+        self.refused.lock().clone()
+    }
+
     async fn remove_network(&self, name: &str) {
         self.networks.lock().retain(|x| x != name);
+        self.closed.lock().retain(|x| x != name);
     }
 
     async fn remove_volume(&self, name: &str) {

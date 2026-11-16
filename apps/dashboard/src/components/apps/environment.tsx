@@ -74,6 +74,11 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   const [hook, setHook] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [notice, setNotice] = useState(env.maintenance?.message ?? "");
+  const closed = env.egress?.mode === "roll";
+  const egressText = (env.egress?.hosts ?? []).join("\n");
+  const [egressHosts, setEgressHosts] = useState(egressText);
+  useEffect(() => setEgressHosts(egressText), [egressText]);
+  const hostList = egressHosts.split(/[\s,]+/).filter(Boolean);
   const allowText = (env.allow_ips ?? []).map((r) => (r.description ? `${r.cidr} ${r.description}` : r.cidr)).join("\n");
   const [allow, setAllow] = useState(allowText);
   useEffect(() => setAllow(allowText), [allowText]);
@@ -209,6 +214,42 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           <button className={btn} disabled={busy} aria-pressed={!!env.traces} onClick={() => runner.run("traces", () => appsApi.putEnvironment(service.id, env.name, { traces: !env.traces }))}>
             {env.traces ? "Turn off" : "Turn on"}
           </button>
+        </div>
+
+        <div className="space-y-3 px-5 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-[13px] font-medium">Outbound traffic</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {closed
+                  ? `From its next deploy, its code reaches roll (linked databases, the project's services) and only the hosts below, through roll's egress proxy.`
+                  : "Its code reaches anything on the internet. Limit it to roll and the hosts you list, as roll previews does for a fork's preview."}
+              </p>
+            </div>
+            <button
+              className={btn}
+              disabled={busy}
+              aria-pressed={closed}
+              onClick={() => runner.run("egress", () => appsApi.putEnvironment(service.id, env.name, { egress: closed ? null : { mode: "roll", hosts: hostList } }))}
+            >
+              {closed ? "Open it" : "Limit to roll"}
+            </button>
+          </div>
+          {closed && (
+            <div className="flex flex-wrap items-end gap-2">
+              <Field label="Hosts it may reach (api.stripe.com, *.sentry.io)">
+                <textarea className={`${input} h-16 w-full max-w-sm font-mono text-[12px]`} value={egressHosts} onChange={(e) => setEgressHosts(e.target.value)} spellCheck={false} />
+              </Field>
+              <button className={btn} disabled={busy || egressHosts === egressText} onClick={() => runner.run("egress", () => appsApi.putEnvironment(service.id, env.name, { egress: { mode: "roll", hosts: hostList } }))}>
+                Save
+              </button>
+            </div>
+          )}
+          {closed && !!env.egress_refused?.length && (
+            <p className="text-[12px] text-muted">
+              Refused lately: <span className="font-mono">{env.egress_refused.join(", ")}</span>
+            </p>
+          )}
         </div>
 
         <div className="space-y-3 px-5 py-4">

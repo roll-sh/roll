@@ -407,6 +407,8 @@ pub struct EnvRow {
     /// Deploys held after this rollback (Vercel's Instant Rollback): pushes, hooks and tag moves
     /// don't put anything live until a person deploys or resumes them.
     pub held_by: Option<String>,
+    /// What its code may reach.
+    pub egress: crate::model::Egress,
 }
 
 /// A link: its kind, resource, variables' prefix, and the credentials it made for itself.
@@ -509,7 +511,7 @@ pub struct Store {
 }
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -580,6 +582,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         headers: r.get::<_, Option<String>>(22)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
         paused: r.get::<_, i64>(23)? != 0,
         held_by: r.get(24)?,
+        egress: r.get::<_, Option<String>>(25)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
     })
 }
 
@@ -708,6 +711,7 @@ impl Store {
         db.add_column("environments", "paused", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("runs", "attempt", "INTEGER NOT NULL DEFAULT 1")?;
         db.add_column("environments", "held_by", "TEXT")?;
+        db.add_column("environments", "egress", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
         db.add_column("log_drains", "environments", "TEXT")?;
@@ -886,7 +890,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -2146,6 +2150,12 @@ impl Store {
     pub fn set_follow_tag(&self, service: &str, env: &str, on: bool) -> Result<()> {
         // Turned on or off, it starts again from what the tag points at then.
         self.db.execute("UPDATE environments SET follow_tag = ?, tag_seen = NULL WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_egress(&self, service: &str, env: &str, egress: &crate::model::Egress) -> Result<()> {
+        let j = egress.closed().then(|| serde_json::to_string(egress).expect("JSON"));
+        self.db.execute("UPDATE environments SET egress = ? WHERE service = ? AND name = ?", params![j, service, env])?;
         Ok(())
     }
 
