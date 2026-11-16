@@ -5020,6 +5020,10 @@ pub struct UpdateNode {
     deferred: bool,
     /// Keep the rows for the parent's transition tables.
     capture: bool,
+    /// No row trigger runs before the update and no assignment is volatile: nothing can
+    /// change a row between its self-modified check and its update, which checks it once
+    /// (as `DeleteNode::defers_entries` reasons).
+    quiet: bool,
 }
 
 /// Captured rows (see `trigger::CAPTURE`) taken out of a queue.
@@ -5077,7 +5081,15 @@ impl UpdateNode {
         let trans = plan.inh && reads_transition(&plan.rules.triggers, tt::UPDATE);
         let source = source(&plan, ctx)?;
         let seen = (!rows_once(&plan.source)).then(Default::default);
+        let quiet = !plan.rules.view
+            && std::iter::once((&plan.rules, &plan.sets))
+                .chain(plan.members.iter().map(|m| (&m.rules, &m.sets)))
+                .all(|(r, sets)| {
+                    !trigger::any(&r.triggers, true, true, tt::UPDATE, ctx)
+                        && !sets.iter().any(|(_, e)| crate::sql::paths::expr_volatile_deep(e))
+                });
         Ok(UpdateNode {
+            quiet,
             plan,
             source,
             seen,
@@ -5467,7 +5479,9 @@ impl Node for UpdateNode {
                 SelfModified::ByThis => continue,
                 SelfModified::ByLater => return Err(triggered_change("updated")),
             }
-            let old: Row = match lock_row(&t, &dkey, RowMark::NoKeyUpdate, Wait::Block, Xltw::Update, ctx)? {
+            // (A later command's write was looked for just now: nothing ran since.)
+            let mode = super::scan::lock_mode(RowMark::NoKeyUpdate);
+            let old: Row = match super::scan::lock_row_with(&t, &dkey, mode, Wait::Block, Xltw::Update, false, ctx)? {
                 Locked::Skip => continue,
                 Locked::Same => match map {
                     Some(map) => member_row(&t, map, &src, &dkey, ctx)?,
@@ -5516,7 +5530,7 @@ impl Node for UpdateNode {
                 }
             }
             // Changed while the new values were computed, or by a BEFORE trigger.
-            match self_modified(&dkey, ctx) {
+            match if self.quiet { SelfModified::No } else { self_modified(&dkey, ctx) } {
                 SelfModified::No => {}
                 SelfModified::ByThis => continue,
                 SelfModified::ByLater => return Err(triggered_change("updated")),
