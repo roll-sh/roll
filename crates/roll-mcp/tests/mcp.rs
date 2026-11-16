@@ -41,6 +41,12 @@ fn products() -> Router {
         .route("/v1/projects", get(|| async { axum::Json(json!([{ "id": "pa" }])) }))
         .route("/v1/projects/{id}", delete(|| async { axum::http::StatusCode::NO_CONTENT }))
         .route("/v1/previews/{id}/screenshot", get(|| async { ([(axum::http::header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 0, 1, 2]) }))
+        // A run still going the first two times it's waited on (each wait answers at its limit).
+        .route("/v1/tasks/runs/{id}/wait", get(|| async {
+            static WAITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = WAITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            axum::Json(json!({ "id": "run_1", "status": if n < 2 { "running" } else { "completed" }, "output": if n < 2 { json!(null) } else { json!({ "ok": true }) } }))
+        }))
 }
 
 /// A fronted set (as roll code's tools are): its results are its own, text included.
@@ -390,6 +396,36 @@ async fn a_call_waiting_for_approval_is_a_task_polled_to_its_result() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert_eq!((got["result"]["status"].as_str(), got["result"]["result"]["isError"].as_bool()), (Some("completed"), Some(false)), "{got}");
+}
+
+/// A tool that waits for something (a run) up to its limit per request waits on as a task, asked
+/// again until it's over, and the task completes with the answer that says so.
+#[tokio::test]
+async fn a_wait_outlasting_its_request_goes_on_as_a_task() {
+    let d = Daemon::with_products(vec!["tasks".into()]);
+    let _ = d.access.sinks.set(Arc::new(TestSealer));
+    let send = |method: &'static str, params: Value| {
+        let d = &d;
+        async move {
+            let mut params = params;
+            params["_meta"] = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } } });
+            let name = params.get("name").or_else(|| params.get("taskId")).and_then(Value::as_str).unwrap_or_default().to_string();
+            let h = [("mcp-protocol-version", "2026-07-28"), ("mcp-method", method), ("mcp-name", name.as_str())];
+            d.http_with(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })), &h).await.2
+        }
+    };
+    let made = send("tools/call", json!({ "name": "tasks_wait_run", "arguments": { "id": "run_1" } })).await;
+    assert_eq!(made["result"]["resultType"], "task", "the run wasn't over: {made}");
+    let id = made["result"]["taskId"].as_str().unwrap().to_string();
+    let mut got = json!(null);
+    for _ in 0..100 {
+        got = send("tasks/get", json!({ "taskId": id })).await;
+        if got["result"]["status"] == "completed" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(got["result"]["result"]["structuredContent"]["status"], "completed", "{got}");
 }
 
 /// A 2026-07-28 client (the stateless core) is served with no `initialize`: each request names its

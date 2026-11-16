@@ -27,6 +27,8 @@ const POLL_MS: u64 = 2000;
 /// How often the running node says it's still on a task (a poll reads a task not touched for a
 /// minute as failed).
 const TOUCH_EVERY: Duration = Duration::from_secs(15);
+/// How long a waiting tool's task pauses before asking again.
+const AGAIN: Duration = Duration::from_secs(2);
 /// A stored result at most; a longer one keeps its structured content's first part only.
 const MAX_RESULT: usize = 4 << 20;
 
@@ -86,7 +88,12 @@ pub(crate) async fn call_or_task(ctx: &Arc<Ctx>, name: &str, args: Value) -> Res
             let done = done.ok().flatten();
             // A call that waits for a person is a task however soon it said so: the task shows
             // the approval page and runs the call once a person decides.
-            let waits = done.as_ref().is_some_and(|r| r["structuredContent"]["status"] == "approval_pending" && r["structuredContent"]["approval"].is_string());
+            // So is one that waits for something by design, answering before it's over.
+            let over = crate::tools::all().iter().find(|t| t.name == name).and_then(|t| t.until);
+            let waits = done.as_ref().is_some_and(|r| {
+                (r["structuredContent"]["status"] == "approval_pending" && r["structuredContent"]["approval"].is_string())
+                    || over.is_some_and(|f| r["isError"] != true && !f(&r["structuredContent"]))
+            });
             if !waits {
                 return Ok(done);
             }
@@ -161,6 +168,21 @@ async fn run(ctx: Arc<Ctx>, access: Arc<roll_access::Access>, hash: String, mut 
                     again["approval"] = json!(approval);
                     let (c, n) = (ctx.clone(), name.clone());
                     job = tokio::spawn(async move { call(&c, &n, again).await });
+                    continue;
+                }
+                // A tool that waits for something, answering before it's over (its own limit per
+                // request): as a task it waits on, asking again until it is.
+                let waits_on = crate::tools::all().iter().find(|t| t.name == name).and_then(|t| t.until);
+                if let Some(over) = waits_on
+                    && result["isError"] != true
+                    && !over(&result["structuredContent"])
+                {
+                    if save(TaskUpdate { status: "working", status_message: Some("still waiting"), input: None, result: None, error: None }).await {
+                        return cancelled(&save).await;
+                    }
+                    tokio::time::sleep(AGAIN).await;
+                    let (c, n, a) = (ctx.clone(), name.clone(), args.clone());
+                    job = tokio::spawn(async move { call(&c, &n, a).await });
                     continue;
                 }
                 let sealed = seal(&access, &hash, &result);
