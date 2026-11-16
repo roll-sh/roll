@@ -57,6 +57,10 @@ pub struct Settings {
     /// project's own mail settings reach previews.
     #[serde(default)]
     pub mail: MailRule,
+    /// What its services' code may reach (docs/previews.md, "Egress"): `open` (the default)
+    /// anything; `roll` only roll's own products, on a Docker network with no route out.
+    #[serde(default)]
+    pub egress: EgressRule,
     /// Branch the data as of a point in time (Neon's time-travel branches), where the product
     /// keeps history: `-24h` (`-30m`, `-7d`) before each branching or reset, or an RFC 3339 time;
     /// at most 30 days back. Products without history branch as of now and say so.
@@ -114,6 +118,14 @@ pub enum MailRule {
     #[default]
     Catch,
     Deliver,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EgressRule {
+    #[default]
+    Open,
+    Roll,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,6 +321,7 @@ impl Default for Settings {
             access: Access::Link,
             visual_review: VisualReviewRule::Off,
             mail: MailRule::Catch,
+            egress: EgressRule::Open,
             data_at: None,
             feedback: true,
             warm: true,
