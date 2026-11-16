@@ -8061,17 +8061,19 @@ container name: pick your own).
 
 ## Machine rules (learned the hard way)
 
-- **Verification train (since 2026-11-07).** With 12 agents on 4 heavy slots the queue reached
-  30 jobs, almost all full verifications of small batches. A batch is pushed after ONE heavy job
-  with: a release build, clippy (no new warnings), the crate test binaries that cover the files it
-  touches, the regress files of its area (`PGREGRESS_ONLY`), goldens it adds, and its benchmark.
-  The full suite (debug and release crate tests, `crash_random` 1-30, the same with
-  `CRASH_POWER=1` and `--features powerloss` plus its `power_cut` tests, full regress with 0 units
-  changed, isolation, pg_dump_tap, the difftest pair) runs on origin's head after each wave of
-  pushes, by the difftest owner's guard (`tools/difftest-guard.sh` plus the suite). A failure there
-  is bisected to its commit, and its owner fixes it or reverts it first, before anything else.
-  Exceptions that still need the full suite before their push: storage, block or SST format, WAL,
-  flush, recovery and commit ordering, catalog format, and anything touching durability.
+- **Verification: quick-check, then the batch train (since 2026-11-16, agent 242).** An agent
+  never runs the full train. Before offering a change it runs `tools/quick-check.sh` (through
+  `tools/heavy.sh`; header and tests/difftest/STATUS.md "Verification train" have the details):
+  clippy on the changed files, the crate test binaries that cover the diff plus lib, golden, wire
+  and wire_waits, a short crash stage when storage, WAL or commit paths changed, and the full
+  regress (0 newly differing), isolation (1,647 / 1,648) and pg_dump_tap (14,609) against its own
+  reference containers (`tools/ref-containers.sh`). Green there, it pushes the rebased change as a
+  candidate branch `cand/aNNN` (`git push origin HEAD:cand/aNNN`) and tells the coordinator. The
+  coordinator runs `tools/batch-train.sh cand/aNNN cand/aMMM ...`: ONE full train
+  (`tools/verification-train.sh`) on origin's head plus every candidate, landing the
+  combination with `tools/push.sh` when green and naming the candidate at fault when red (its
+  failing stage re-run on halving prefixes), then landing the rest. Only docs-only commits (no
+  file outside `*.md`) still go straight to the branch with `tools/push.sh`.
 - **Start long heavy jobs detached with `tools/heavy-bg.sh <log> <command...>`.** With the slots
   full, a job can wait hours for one, and a session's background command stops at 2 hours queue
   wait included, killing jobs that never ran. heavy-bg.sh runs the job through heavy.sh outside
@@ -12587,6 +12589,97 @@ and speed pull apart. BENCH.md "Modes" has the measurements behind every value.
   exactly. Combined all-target Clippy passes with 18 warnings: `jobH.log` (bulk) and
   `jobI.log` (planner); full combined runtime checks remain with the train.
 
+## Verification tooling: quick-check and one batch train (agent 242, 2026-11-16)
+
+Every agent ran the whole `tools/verification-train.sh` before each push: 4 h 50 min alone
+(agent 201's train on `d54dcbe10`), 9-10 hours with six at once (agent 240's: 9 h 34 min), and
+nothing landed for 19 hours. Now: `tools/quick-check.sh` before offering a change,
+`tools/batch-train.sh` (the coordinator's) for one train over every candidate, and a train that
+costs 78 minutes. Machine rules ("Verification") and the starting prompt say how agents use it;
+tests/difftest/STATUS.md ("Verification train") has the tiers and what each leaves out.
+
+**Where the old train's time went** (agent 201's status file; heavy.sh's 2 jobs; stage =
+build + run): release crate tests 206 min, of it the build 196 (`Finished release ... in 196m`;
+16 trains: 196-448 min) and the tests 9.4 (562 s summed); clippy 1; crash_random 3; power-cut
+18 (a second release build of the engine, `--features powerloss`, and 47 s of tests); the two
+power crash stages 3 each; debug crate tests 49 (build 3-11, tests 46: golden alone 33 min,
+parallel_scan 13; 16 trains: 46-71 min); regress 5; isolation 1; pg_dump_tap 1. The release
+profile is thin LTO with one codegen unit: every one of ~65 test binaries was an LTO link of the
+whole engine.
+
+**Profiles** (Cargo.toml): `verify` = release without LTO, incremental (256 codegen units; the
+train sets CARGO_INCREMENTAL=0 and 16), `verify-checked` = verify with debug assertions and
+overflow checks. Measured on `bf9366246`, 2 build jobs (heavy.sh's cap), load 30-70 on the build
+CPUs, `cargo build --timings` (`~/.cache/a242/measure/`):
+
+| build | time |
+|---|---|
+| verify, every test binary, cold (deps too) | 29.5 min: the engine lib 17.4 min and the lib again for its unit tests 18.1, side by side; each integration test binary ~10 s (wire 73 s) |
+| release, lib + its unit tests + golden, wire, wire_waits, pg_regress, cold | 47.5 min |
+| after `touch src/sql/explain.rs`: verify, that subset | 14.6 min |
+| the same, release | 49.8 min |
+| the same, verify incremental | 34 s (a touch); after a real one-line edit 45 s (quick-check run below) |
+| verify-checked, every test binary, cold | 26.9 min |
+
+Test run time, every crate test binary, 2 threads each: verify 988 s (release 562 s on a quieter
+machine; golden 321 / 246 s, parallel_scan 169 / 106 s), verify-checked 936 s (the debug build's
+2,754-4,243 s). Every test passed in both.
+
+**Quick-check** (load 30-50 on 36 threads; the machine was never idle, so there is no "alone"
+number), with containers `a242-*`:
+- one-line engine edit (`session/utility.rs`), warm incremental cache: 668 s: build 45 s, clippy
+  in it, golden + wire + wire_waits 338 s, regress 491 s, isolation 68 s, pg_dump_tap 66 s (the
+  reference chain, started after the build, is the critical path).
+- the same with the engine rebuilt (heavy.sh had cleared the 4 GB incremental cache: its cap is
+  now 12 GB for verify): 1,222 s.
+- a storage edit (`storage/wal.rs`): 18 test binaries, the crash stage and the powerloss engine
+  build (now alongside the tests): 1,331 s (build 630 s, tests 439 s, crash 262 s).
+- a Cargo.toml change (every binary, cold build): 84 min.
+- Known bad commits, from history (each found by a train): `a90913903` (on `d9efa95de`):
+  `qc clippy FAIL ... could not compile pg-engine (example "bench")` (agent 229's first train,
+  fixed by 877024ec3), and with clippy skipped `qc tests FAIL wire_waits: test
+  waits_end_by_timeouts_and_cancel` (the safe-snapshot cases, taken back by 24792655d); regress,
+  isolation and pg_dump_tap passed there. `6f97a771d` (agent 229's implicit transaction blocks, on
+  `da4c6aa34`): `qc clippy FAIL 1 new warning ... badparams.rs:222` (fixed by df6f86f02), and with
+  clippy skipped `qc regress FAIL ... newly differing 11`: transactions 319-322, 331-334, 367,
+  368, 373, the chain units 7fed6f2da fixed.
+
+**The train after** (`3240a1157`: `c4c0db709` + these commits, through tools/batch-train.sh,
+heavy.sh's 2 jobs and 2 test threads, load ~50): 77.5 min, every stage 0. Builds 39.5 min
+(verify, verify-checked, the powerloss crash_random and clippy side by side; clippy 16
+warnings); then lane 3 regress 0 newly differing, isolation 1,647 / 1,648, pg_dump_tap 14,609
+(done 12 min after the builds); lane 2 verify-checked 942 s; lane 1 verify tests 881 s, crash 5
+min, power-cut 1, crash-power 8, crash-power-async 8. The first push stopped at push.sh's guard
+(the train script's rewrite drops cf7c56ba2's four lines; their dist-flags.sh flags are kept in
+the PGO crash builds) and went in by hand with a removal review; batch-train.sh now reports such
+a refusal in its result.
+
+**Tests.** golden and golden_wire run their 706 files on up to 8 threads (golden_wire an engine
+per thread; all match). `wire::big_bytea_values_go_out_in_linear_time` checks CPU time, not the
+wall clock: a child process does the round trip at 16 and 64 MB and reports getrusage's time;
+64 MB may take 8 times 16 MB's (3.6-4.4 measured at load 64; the quadratic copy was ~15).
+`wire::parallel_workers_seen_by_others` samples pg_stat_activity until the leader and both
+workers show PgSleep (a single sample under load caught them between sleeps).
+
+**Dropped, and why.** The debug crate tests: verify-checked keeps every debug assertion and
+overflow check (they found real bugs: ddl/mod.rs's relation check, `btsim::Key::wrap`'s u16
+length, the replanning check, the cost cross-check) at a quarter of the run time; what only an
+unoptimised build shows is debug-frame stack overflows (crash_bulk's, agent 229), which a
+shipped binary doesn't have. Quick-check on the agent's release target dir, as asked: a release
+rebuild after one edit is 50 minutes. The lib's unit tests in quick-check's core set: a second
+engine build for 19 s of tests that never failed in a train (they run when a changed source file
+has unit tests, and in every train). No other test deleted: with the debug build gone no binary
+costs more than golden's 5 minutes at 2 threads, and the expensive ones each found bugs
+(parallel_scan: stack overflows; wire_waits: the safe-snapshot regression above; deep_input:
+release-frame depth limits; logical_apply: the cost cross-check).
+
+**Left.** (1) heavy.sh's jobs cap (2) was set for six trains at once; with one batch train the
+coordinator can give it more (`/tmp/pg-engine-heavy.lock.jobs` is machine-wide: the train's
+builds are most of its 78 minutes). (2) The difftest guard is still separate from the train.
+(3) A candidate that takes back other commits' lines needs a hand push with
+`PUSH_REMOVAL_REVIEW` after its green train. (4) Quick-check alone on an idle machine is
+unmeasured; the storage case is ~22 minutes under load.
+
 ## Starting prompt for the next agent
 
 Paste this into the new agent, from the repository root on branch
@@ -12610,11 +12703,16 @@ Then:
    engine, add a golden recorded from PostgreSQL, re-run the affected regress files (subset
    runs with PGREGRESS_ONLY and PGREGRESS_REPORT_DIR), and make sure nothing that matched
    before regresses. Results and errors before EXPLAIN text.
-3. Follow the machine rules: limit concurrent builds (HEAVY_SLOTS), every build/test/regress/golden run
-   through tools/heavy.sh, CARGO_BUILD_JOBS=2.
-4. After each verified batch (the whole `cargo test -p pg-engine` passes), add your round's
-   section to STATUS.md (prose; its numbers come from full runs, HANDOFF "Regression suite"),
-   commit with a clear message, and push the branch.
+3. Follow the machine rules: every build/test/regress/golden run through tools/heavy.sh (it
+   caps jobs and slots across agents). Build and test with `--profile verify` (release without
+   LTO; `--release` links each test binary for minutes), in your own CARGO_TARGET_DIR.
+4. Before offering a change: rebase on origin's branch and run
+   `QC_PREFIX=aNNN QC_PORTS=<four of your ports> tools/heavy.sh tools/quick-check.sh` (about 20
+   minutes; it prints one line per step and stops at the first failure). Green, push it as
+   `cand/aNNN` (`git push origin HEAD:cand/aNNN`) and tell the coordinator, who lands it with the
+   others in one full train (tools/batch-train.sh). Never run tools/verification-train.sh
+   yourself. Docs-only commits go to the branch directly with tools/push.sh. Add your round's
+   section to STATUS.md (prose; its numbers come from full runs, HANDOFF "Regression suite").
 ```
 
 ## A152 logical replication resume (2026-11-01)
