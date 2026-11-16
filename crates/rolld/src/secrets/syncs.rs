@@ -489,3 +489,64 @@ impl SyncTarget for Notify {
         self.0.post(&url, p, &body)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use roll_secrets::Deliver;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::rustls;
+
+    /// A CA, and a TLS server on localhost with a certificate it signed that answers `{}`.
+    async fn tls_server() -> (String, u16) {
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = rcgen::CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap().signed_by(&key, &ca).unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()))
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    // A client that doesn't trust the certificate ends the handshake: nothing to answer.
+                    let Ok(mut tls) = acceptor.accept(tcp).await else { return };
+                    let mut buf = [0u8; 4096];
+                    let _ = tls.read(&mut buf).await;
+                    let _ = tls.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").await;
+                    let _ = tls.shutdown().await;
+                });
+            }
+        });
+        (ca.pem(), port)
+    }
+
+    /// A Kubernetes cluster's own CA (roll secrets' `kubernetes` links) is trusted for that
+    /// cluster's calls, and only for them: neither another CA nor the system roots take it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_clusters_own_ca_is_trusted_for_its_calls_only() {
+        let (ca, port) = tls_server().await;
+        let (other, _) = tls_server().await;
+        // Private addresses allowed: the server is on localhost.
+        let d = AuditDeliver::new(true, Api::default());
+        let url = format!("https://localhost:{port}/api");
+        let (own, with_other, with_roots) = tokio::task::spawn_blocking(move || {
+            let call = |ca: Option<&str>| d.request_trusting(ca, "GET", &url, &[], None, 1024).map(|(s, b)| (s, b.to_vec()));
+            (call(Some(&ca)), call(Some(&other)), call(None))
+        })
+        .await
+        .unwrap();
+        assert_eq!(own.unwrap(), (200, b"{}".to_vec()));
+        assert!(with_other.is_err(), "another CA");
+        assert!(with_roots.is_err(), "the system roots");
+    }
+}
