@@ -353,7 +353,14 @@ impl Engine {
         // (spec, repo, revision, whether roll apps runs it)
         let mut wanted: Vec<(ServiceSpec, String, String, bool)> = Vec::new();
         let head_of = |repo: String| async move {
-            if repo == r.repo { Ok::<_, anyhow::Error>(Some(r.build().to_string())) } else { self.head_for(&repo, r.branch.as_deref(), None).await }
+            if repo == r.repo {
+                Ok::<_, anyhow::Error>(Some(r.build().to_string()))
+            } else if repo.starts_with("git:") {
+                // Another Git URL service of the project: its own (production's) build.
+                Ok(Some(String::new()))
+            } else {
+                self.head_for(&repo, r.branch.as_deref(), None).await
+            }
         };
         match self.apps.catalog(&r.project_id).await.map_err(|e| anyhow::anyhow!("reading the project's services: {e:#}"))? {
             Some(catalog) if !catalog.is_empty() => {
@@ -414,7 +421,14 @@ impl Engine {
             // A deploy the backend is still on is asked about again (until it's live or fails).
             let in_flight = self.deploying_since.lock().contains_key(&(r.id.clone(), spec.name.clone()));
             if svc.deployed.as_deref() != Some(&rev) || reset_any || config_moved || in_flight {
-                let git = if repo.is_empty() || rev.is_empty() { None } else { self.source.git_commit(&repo, &rev).await? };
+                // A Git URL service's revision is its git commit already.
+                let git = if repo.is_empty() || rev.is_empty() {
+                    None
+                } else if repo.starts_with("git:") {
+                    Some(rev.clone())
+                } else {
+                    self.source.git_commit(&repo, &rev).await?
+                };
                 let t = Target {
                     project: r.project_id.clone(),
                     preview: r.id.clone(),

@@ -112,8 +112,13 @@ impl Engine {
             }
             // Only of a repo the project still stands for (`repos`): one taken off its canvas, or
             // no longer trusted, has its previews go rather than keep its secrets and data.
-            if !repos.contains(&r.repo) {
-                self.mark_deleted(&r.id, "its repo is no longer in the project")?;
+            // A Git URL service's preview stands while the service is on the canvas.
+            let stands = match r.repo.strip_prefix("git:") {
+                Some(svc) => project.resources.iter().any(|x| x.kind == roll_workspace::Kind::Service && x.r#ref == svc),
+                None => repos.contains(&r.repo),
+            };
+            if !stands {
+                self.mark_deleted(&r.id, if r.repo.starts_with("git:") { "its service is no longer in the project" } else { "its repo is no longer in the project" })?;
                 continue;
             }
             // A baseline lasts while there are changes to compare with it.
@@ -193,8 +198,9 @@ impl Engine {
                         }
                     }
                 }
-            } else if let Some(branch) = &r.branch {
-                // A branch preview follows its branch until the branch goes.
+            } else if let Some(branch) = r.branch.as_ref().filter(|_| !r.repo.starts_with("git:")) {
+                // A branch preview follows its branch until the branch goes (a Git URL service's
+                // follows roll apps' pushes instead: `Engine::git_push`).
                 match self.source.head(&r.repo, Some(branch)).await? {
                     None => {
                         self.mark_deleted(&r.id, "the branch was deleted")?;
