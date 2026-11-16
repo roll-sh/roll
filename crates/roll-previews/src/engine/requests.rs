@@ -142,6 +142,72 @@ impl Engine {
         Ok((self.store.view(row)?, made))
     }
 
+    /// A push to a branch of a Git URL service on roll apps ([`crate::ports::GitPush`]): in each
+    /// project whose canvas holds the service, the branch's preview is made (its rules allowing:
+    /// previews on, the branch matching `branches`, no `[skip preview]`, room under
+    /// `max_previews`), moved to the pushed sha, or deleted with its branch. The service's
+    /// previews are the repo `git:<service>` with the branch: the same push twice changes
+    /// nothing. Only the repository's writers move its branches, so these previews are trusted.
+    pub async fn git_push(&self, p: &crate::ports::GitPush) -> Result<()> {
+        let repo = format!("git:{}", p.service);
+        let projects: Vec<roll_workspace::Project> = self
+            .workspace
+            .list(roll_workspace::Scope::All)?
+            .into_iter()
+            .filter(|pr| pr.resources.iter().any(|r| r.kind == roll_workspace::Kind::Service && r.r#ref == p.service))
+            .collect();
+        for project in projects {
+            let rows = self.store.rows(Some(&project.id))?;
+            let existing = rows.iter().find(|r| r.change_id.is_none() && r.repo == repo && r.branch.as_deref() == Some(p.branch.as_str()) && r.desired == Desired::Active).cloned();
+            match (&p.sha, existing) {
+                (None, Some(r)) => {
+                    self.mark_deleted(&r.id, &format!("its branch {} was deleted", p.branch))?;
+                }
+                (None, None) => {}
+                (Some(sha), Some(r)) => {
+                    if r.head != *sha {
+                        self.store.update(&r.id, |x| {
+                            x.head = sha.clone();
+                            x.next_at = 0;
+                        })?;
+                        self.store.log(&r.id, &format!("{} pushed: {}", p.branch, short(sha)))?;
+                    }
+                }
+                (Some(sha), None) => {
+                    let s = self.store.settings(&project.id)?;
+                    let skip = p.message.to_ascii_lowercase().contains("[skip preview]");
+                    if !s.enabled || skip || !crate::glob::any(&s.branches, &p.branch) {
+                        continue;
+                    }
+                    let busy = rows.iter().filter(|r| r.desired == Desired::Active && !r.is_baseline() && !matches!(r.state, State::Queued | State::AwaitingApproval)).count();
+                    if busy >= s.max_previews as usize {
+                        continue;
+                    }
+                    let now = self.store.now_ms()?;
+                    let n = New {
+                        project_id: project.id.clone(),
+                        key: p.branch.clone(),
+                        project_name: project.name.clone(),
+                        repo: repo.clone(),
+                        change_id: None,
+                        branch: Some(p.branch.clone()),
+                        number: None,
+                        title: format!("{}@{}", p.url.rsplit('/').next().unwrap_or(&p.service).trim_end_matches(".git"), p.branch),
+                        github_pr: None,
+                        head: sha.clone(),
+                        trusted: true,
+                        state: State::Creating,
+                        expires_at: Some(now + s.ttl_hours as i64 * 3_600_000),
+                        created_by: format!("git:{}", p.service),
+                    };
+                    self.store.create(&n)?;
+                }
+            }
+        }
+        self.kick();
+        Ok(())
+    }
+
     /// Delete a preview. A change's preview stays deleted until the change's next push.
     pub fn delete(&self, id: &str) -> Result<Preview> {
         let row = self.store.row(id)?;
