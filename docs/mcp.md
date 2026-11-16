@@ -715,7 +715,8 @@ waits on a sibling PR reaching main is last.
    ChatGPT need a public HTTPS rolld and the user's account (the review pack's decisions);
    MCPJam's inspector (3.18) asks for an MCPJam account first.
 2. **Machine clients, the rest:** the request's `scope` narrowing the token it gets (today a
-   token carries the client's rules as they are), and a Rotate button on the panel.
+   token carries the client's rules as they are); screenshots of the panel's Rotate control for
+   the review pack.
 
 3. **Skills over MCP** (`io.modelcontextprotocol/skills`, SEP-2640, Beta): roll's prompts
    (workflows) and `roll://guide` as skills a client discovers and reads as resources.
