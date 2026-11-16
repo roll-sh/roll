@@ -745,7 +745,8 @@ echo "$BODY3" | grep -q "preview of change 1" || { echo "the service on its own 
 OUT_AFTER=$(docker exec "$CONT2" python -c "$REACH" 2>&1 || true); OUT_AFTER=$(echo "$OUT_AFTER" | tail -1)
 case "$OUT_AFTER" in *unreachable*|*Errno*|*timed*) ;; *) echo "with egress roll the service shouldn't reach the internet: $OUT_AFTER"; exit 1;; esac
 # Its screenshot is still taken there (the browser in the service's own network: nothing is
-# published, the port comes from the container's label).
+# published, the port comes from the container's label), at the change's next push.
+api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"Roll only","files":{"index.html":{"content":"preview of change 1, roll only"},"docs/setup.md":{"content":"how to run it"},'"$OPENAPI_CHG"'}}' >/dev/null
 SHOT_ROLL=""
 for _ in $(seq 1 240); do
   SHOT_ROLL=$(api GET "/v1/previews/$PV" | jq_ "d.get('screenshot_at')")
