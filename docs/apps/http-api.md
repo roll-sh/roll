@@ -64,7 +64,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `PUT /v1/apps/services/{id}/environments/{env}` | `EnvironmentPut` | `Environment` | deploy*; with `variables_from` also reveal in that environment (it copies its values) |
 | `GET /v1/apps/services/{id}/environments/{env}` | | `Environment` | read |
 | `DELETE /v1/apps/services/{id}/environments/{env}` | | 204 | delete |
-| `POST /v1/apps/services/{id}/environments/{env}/deploys` | `NewDeploy`, a gzipped tar of a tree (`application/gzip`, `roll up`), or an image built elsewhere (`application/x-docker-image`: `docker save`'s archive, gzipped or not; at most the upload limit; its names are taken out before it's loaded, and it's tagged as a build's would be; Docker runtime only for now) | 202 `Deployment` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/deploys` | `NewDeploy`, a gzipped tar of a tree (`application/gzip`, `roll up`), or an image built elsewhere (`application/x-docker-image`: `docker save`'s archive, gzipped or not; at most the upload limit; its names are taken out before it's loaded, and it's tagged as a build's would be; on the fleet a CodeBuild run of its own loads and pushes it to the service's ECR repository) | 202 `Deployment` | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys?before=` | | `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}` | | `Deployment` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs?follow=&tail=` | | `LogLine[]` or SSE | read |
