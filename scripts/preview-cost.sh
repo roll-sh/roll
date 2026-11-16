@@ -765,7 +765,9 @@ done
 [ "$SHOT_ROLL" != "$SHOT_BEFORE" ] && [ "$SHOT_ROLL" != None ] || { echo "with egress roll the screenshot should still be taken: $SHOT_BEFORE then $SHOT_ROLL"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d if 'screenshot' in a['message']][:5]"; exit 1; }
 # A host the project allows: reached through the preview's egress proxy, anything else refused
 # and said in the activity.
-api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"roll","egress_hosts":["github.com"]}' >/dev/null
+# 169.254.169.254.nip.io is listed too: a name the project chose that points at the cloud's
+# metadata address (a private one) is refused, never connected to.
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"roll","egress_hosts":["github.com","169.254.169.254.nip.io"]}' >/dev/null
 FETCH='import sys, urllib.request
 try:
     print(urllib.request.urlopen(sys.argv[1], timeout=15).status)
@@ -781,13 +783,15 @@ done
 [ "$ALLOWED" = 200 ] || { echo "an allowed host should be reached through the egress proxy: $ALLOWED"; exit 1; }
 REFUSED=$(docker exec "$CONT2" python -c "$FETCH" https://example.com/ 2>&1 || true); REFUSED=$(echo "$REFUSED" | tail -1)
 case "$REFUSED" in *403*|*Tunnel*) ;; *) echo "a host not in egress_hosts should be refused: $REFUSED"; exit 1;; esac
+METADATA=$(docker exec "$CONT2" python -c "$FETCH" http://169.254.169.254.nip.io/latest/meta-data/ 2>&1 || true); METADATA=$(echo "$METADATA" | tail -1)
+case "$METADATA" in *403*|*Forbidden*) ;; *) echo "a listed name that resolves to a private address should be refused: $METADATA"; exit 1;; esac
 TOLD=""
 for _ in $(seq 1 60); do
-  TOLD=$(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d if 'egress_hosts' in a.get('message','')][:1]")
-  case "$TOLD" in *example.com*) break;; esac
+  TOLD=$(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d if 'egress_hosts' in a.get('message','')][:2]")
+  case "$TOLD" in *example.com*private*|*private*example.com*) break;; esac
   sleep 1
 done
-case "$TOLD" in *example.com*) ;; *) echo "the activity should say what the proxy refused: $TOLD"; exit 1;; esac
+case "$TOLD" in *example.com*private*|*private*example.com*) ;; *) echo "the activity should say what the proxy refused, and the private address: $TOLD"; exit 1;; esac
 api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"open","egress_hosts":[]}' >/dev/null
 
 if [ -n "${STOP_BEFORE_LAND:-}" ]; then
@@ -816,7 +820,7 @@ cat <<EOF
 | What | Measured |
 | --- | --- |
 | egress: roll: the service's network / 1.1.1.1:443 from it before and after / its screenshot | ${NETS% } / $OUT_BEFORE, then: ${OUT_AFTER:0:60} / taken |
-| egress_hosts ["github.com"]: github.com / example.com, through the preview's egress proxy | $ALLOWED / ${REFUSED:0:60} |
+| egress_hosts ["github.com", "169.254.169.254.nip.io"]: github.com / example.com / the metadata name, through the preview's egress proxy | $ALLOWED / ${REFUSED:0:60} / ${METADATA:0:40} |
 | A note's element, cropped by the next head's screenshot run (a PNG) | $CROP_NOTE |
 | A visit to a service frozen after sleep_after (it read as sleeping), instead of a cold start | $((T7 - T6)) ms, the same container |
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
