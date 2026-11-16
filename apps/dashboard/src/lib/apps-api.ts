@@ -367,7 +367,8 @@ export interface EnvironmentPut {
   hostname?: string;
   ephemeral?: boolean;
   /** Private: visitors need `?roll_access=<token>` once; null makes it public again. */
-  access?: { token: string; bypass_sha256?: string } | null;
+  /** `signed_in`: people signed in to roll who can open the project get in (alone, or with a token). */
+  access?: { token?: string; signed_in?: boolean; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables. */
   variables_from?: string;
   wait_for_ci?: boolean;
@@ -470,6 +471,8 @@ export interface Environment extends EnvironmentSummary {
   redeploy_on_secrets?: boolean;
   /** Its instances send OpenTelemetry traces to roll. */
   traces?: boolean;
+  /** People signed in to roll who can open its project get in. */
+  signed_in?: boolean;
   /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
   egress?: Egress;
   /** Hosts its egress proxy refused lately: not listed, or (`private`) resolving only to private addresses. */
@@ -902,6 +905,8 @@ export const appsApi = {
   connectGitHub: (id: string) => call<Service>("PUT", `${svc(id)}/github`),
   disconnectGitHub: (id: string) => call<Service>("DELETE", `${svc(id)}/github`),
   putEnvironment: (id: string, e: string, body: EnvironmentPut) => call<Environment>("PUT", env(id, e), body),
+  /** A one-use way into a sign-in-gated environment, as the signed-in person: the URL to go on to. */
+  visit: (id: string, e: string, to: string) => call<{ url: string }>("POST", `${env(id, e)}/visit`, { to }),
   removeEnvironment: (id: string, e: string) => call<null>("DELETE", env(id, e)),
 
   deploy: (id: string, e: string, body: NewDeploy = {}) => call<Deployment>("POST", `${env(id, e)}/deploys`, body),

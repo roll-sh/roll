@@ -97,6 +97,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=&format=` | | `Metrics`; `format=prometheus`: the last finished minute as Prometheus text (`roll_apps_requests_per_minute`, `…_errors_per_minute`, `…_latency_ms{quantile}`, `…_cpu_seconds_per_minute`, `…_memory_bytes`, `…_instances`, `…_cold_starts_per_minute`, `…_cold_start_ms`, labelled `service`, `service_id`, `environment`) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/routes?minutes=` | | `RouteStats` (the last 5–60 minutes, default 60): the access log grouped by method and route, id-like segments `:id` and no query; the busiest, the most 5xx and the slowest (5 requests or more), each at most 50 | read |
 | `GET /v1/apps/services/{id}/environments/{env}/analytics?minutes=` | | `Analytics` (the last 60–10,080 minutes, default 1,440): visitors and page views from the access log, no script or cookie | read |
+| `POST /v1/apps/services/{id}/environments/{env}/visit` | `{ to }` | `{ url }`: a one-use ticket (a minute) into a sign-in-gated environment for the person signed in, as the URL that opens `to` (a URL at one of its names: its generated hostname or an active custom domain; 400 otherwise, and for an environment without `access.signed_in`); the dashboard's `/dashboard/apps/visit` asks for it and goes on | a person signed in only (403 for a token); rolld's gate lets in only admins until roll apps serves users |
 | `GET /v1/apps/services/{id}/environments/{env}/traces?minutes=&min_ms=` | | `{ minutes, traces: TraceSummary[], cut }`: recent traces (5–10,080 minutes, default 60), newest first, at most 100; `min_ms` keeps the slower ones | read |
 | `GET /v1/apps/services/{id}/environments/{env}/traces/{trace}` | | `{ trace, spans: Span[] }` in start order (the last week's); 404 when none | read |
 | `GET /v1/apps/services/{id}/environments/{env}/usage?days=` | | `Usage` | read |
@@ -303,9 +304,19 @@ type EnvironmentPut = {
    *  `roll_access_<env>`, then a 302 to the URL without it), else a 401, before anything wakes.
    *  The token is 20–200 of [A-Za-z0-9_-]; only its SHA-256 is stored, and the app never sees
    *  the cookie. null: public again. */
+  /** Private: visitors need `?roll_access=<token>` once (a host-only HttpOnly cookie
+   *  `roll_access_<env>`, then a 302 to the URL without it), else a 401, before anything wakes.
+   *  The token is 20–200 of [A-Za-z0-9_-]; only its SHA-256 is stored, and the app never sees
+   *  the cookie. `signed_in: true` (with or without a token): people signed in to roll who can
+   *  open the project get in. A page load with no session goes to
+   *  `<web_url>/dashboard/apps/visit?service=&env=&to=`, which asks `POST …/visit` as them and
+   *  sends them back to `/__roll/visit?ticket=&to=` on the same host, where the ticket (one use,
+   *  a minute) becomes a host-only HttpOnly cookie `roll_visit_<env>` (12 hours; the app never
+   *  sees it) and a 302 to `to`; anything else is a 401. 409 without the node's `web_url`.
+   *  Changing access ends every session. null: public again. */
   /** `bypass_sha256`: the SHA-256 (hex) of an automation's secret (CI's end-to-end tests): a
    *  request with `X-Roll-Preview-Bypass: <secret>` goes in with no cookie or redirect. */
-  access?: { token: string; bypass_sha256?: string } | null;
+  access?: { token?: string; signed_in?: boolean; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables, except its sealed ones (ignored when it exists). */
   variables_from?: string;
   /** A push deploys only once its commit's checks pass (statuses other than roll apps' own):
@@ -380,7 +391,8 @@ type Environment = EnvironmentSummary & {
   domains: Domain[];
   port: number | null;       // locally, the service's own port (ROLL_APPS_PORTS)
   needs_deploy: boolean;     // variables or settings changed since the active deployment
-  private: boolean;          // its hostnames answer only visitors with its access token
+  private: boolean;          // its hostnames answer only visitors with its access token, or who signed in
+  signed_in?: true;          // people signed in to roll who can open its project get in (access.signed_in)
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
   volume_used?: { bytes: number; at: number }; // how full its volume was when last measured (hourly, on its owner), when it has one
   schedules?: { name: string; next_run_at: number | null; last: { job: string; status: RunStatus; started_at: number } | null }[]; // run.schedules as they stand: next due (none paused, in a preview or undeployed) and the job each last started

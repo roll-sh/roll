@@ -3298,6 +3298,53 @@
         "x-roll-action": "reveal"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/visit": {
+      "post": {
+        "description": "Answers `{ url }`: a one-use ticket (a minute) into a sign-in-gated environment for the person signed in, as the URL that opens `to` (a URL at one of its names: its generated hostname or an active custom domain; 400 otherwise, and for an environment without `access.signed_in`); the dashboard's `/dashboard/apps/visit` asks for it and goes on.",
+        "operationId": "postServicesIdEnvironmentsEnvVisit",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ to }`"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ url }`: a one-use ticket (a minute) into a sign-in-gated environment for the person signed in, as the URL that opens `to` (a URL at one of its names: its generated hostname or an active custom domain; 400 otherwise, and for an environment without `access.signed_in`); the dashboard's `/dashboard/apps/visit` asks for it and goes on"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Visit environment",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "a person signed in only (403 for a token); rolld's gate lets in only admins until roll apps serves users"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/volume/backups": {
       "get": {
         "description": "Answers `Backup[]`, newest first (7 kept).",

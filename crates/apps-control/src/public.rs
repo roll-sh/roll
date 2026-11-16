@@ -369,7 +369,6 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         Ok(None) => return None,
         Err(_) => return Some(page(StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "This environment's access couldn't be checked. Try again in a few seconds.")),
     };
-    let hash = access.token_hash;
     // An automation (CI's end-to-end tests) with the project's bypass secret: no cookie, no
     // redirect. The header is roll's, so it never reaches the app (`x-roll-*` is stripped).
     if let (Some(bypass), Some(given)) = (&access.bypass_hash, req.headers().get("x-roll-preview-bypass").and_then(|v| v.to_str().ok()))
@@ -377,6 +376,24 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
     {
         return None;
     }
+    if access.signed_in {
+        // A ticket from roll's dashboard, coming back: the session it opens.
+        if req.uri().path() == crate::visit::PATH {
+            let query = req.uri().query().unwrap_or("").to_string();
+            return Some(land_visit(apps, service, env, &query).await);
+        }
+        let name = crate::visit::cookie(env);
+        if let Some(t) = take_cookie(req, &name)
+            && apps.visitor(service, env, &t).await.is_some()
+        {
+            return None;
+        }
+        if access.token_hash.is_none() {
+            return Some(sign_in(apps, service, env, req));
+        }
+    }
+    let signed_in = access.signed_in;
+    let Some(hash) = access.token_hash else { return Some(denied(apps, service, env).await) };
     let name = format!("roll_access_{env}");
     let query = req.uri().query().unwrap_or("").to_string();
     let mut token = None;
@@ -419,7 +436,8 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         }
     }
     if !ok {
-        return Some(denied(apps, service, env).await);
+        // No token, and no session: signing in is the other way in.
+        return Some(if signed_in { sign_in(apps, service, env, req) } else { denied(apps, service, env).await });
     }
     req.headers_mut().remove(header::COOKIE);
     if !kept.is_empty()
@@ -428,6 +446,58 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         req.headers_mut().insert(header::COOKIE, v);
     }
     None
+}
+
+/// A visitor with no session of a sign-in-gated environment's: a page load goes to roll's
+/// dashboard, which signs them in and sends them back with a ticket; anything else is a 401
+/// that says where.
+fn sign_in(apps: &Arc<Apps>, service: &str, env: &str, req: &Request) -> Response {
+    let Some(web) = apps.cfg.web_url.clone() else {
+        return page(StatusCode::UNAUTHORIZED, "Sign in to open this", "This environment lets in people signed in to roll, and this node doesn't know where roll is.");
+    };
+    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
+    let back = format!("{}://{host}{}", apps.cfg.scheme, req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/"));
+    let q = |v: &str| percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC).to_string();
+    let url = format!("{web}/dashboard/apps/visit?service={}&env={}&to={}", q(service), q(env), q(&back));
+    let page_load = matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
+        && req.headers().get(header::ACCEPT).and_then(|a| a.to_str().ok()).is_some_and(|a| a.contains("text/html"));
+    if page_load && let Ok(l) = HeaderValue::from_str(&url) {
+        let mut r = StatusCode::FOUND.into_response();
+        r.headers_mut().insert(header::LOCATION, l);
+        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return r;
+    }
+    page(StatusCode::UNAUTHORIZED, "Sign in to open this", &format!("This environment lets in people signed in to roll who can open its project. <a href=\"{}\">Sign in</a>.", escape(&url)))
+}
+
+/// `/__roll/visit?ticket=…&to=…` on the environment's own host: the ticket traded for a session
+/// cookie (host-only, 12 hours), then on to `to` on the same site.
+async fn land_visit(apps: &Arc<Apps>, service: &str, env: &str, query: &str) -> Response {
+    let mut ticket = None;
+    let mut to = "/".to_string();
+    for pair in query.split('&') {
+        let decode = |v: &str| percent_encoding::percent_decode_str(v).decode_utf8_lossy().into_owned();
+        if let Some(v) = pair.strip_prefix("ticket=") {
+            ticket = Some(decode(v));
+        } else if let Some(v) = pair.strip_prefix("to=") {
+            to = crate::visit::local_path(&decode(v));
+        }
+    }
+    let Some(session) = (match ticket {
+        Some(t) => apps.open_visit(service, env, &t).await,
+        None => None,
+    }) else {
+        return page(StatusCode::UNAUTHORIZED, "This sign-in link has expired", "Open the page again: roll signs you in and sends you back.");
+    };
+    let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
+    let cookie = format!("{}={session}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}", crate::visit::cookie(env), crate::visit::SESSION_S);
+    let mut r = StatusCode::FOUND.into_response();
+    if let (Ok(l), Ok(c)) = (HeaderValue::from_str(&to), HeaderValue::from_str(&cookie)) {
+        r.headers_mut().insert(header::LOCATION, l);
+        r.headers_mut().insert(header::SET_COOKIE, c);
+        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+    r
 }
 
 /// A static site's request, answered from its files (`sites.rs`): no instance wakes. GET and

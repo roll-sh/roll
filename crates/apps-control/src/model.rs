@@ -264,12 +264,14 @@ pub struct Delivery {
     pub at: i64,
 }
 
-/// A private environment's gate: the visitors' token and an automation bypass (CI), as SHA-256
-/// hex digests; neither secret is kept.
+/// A private environment's gate: the visitors' token, people signed in to roll who may open the
+/// project (`signed_in`), or both, and an automation bypass (CI). Secrets as SHA-256 hex
+/// digests; none is kept.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Access {
-    pub token_hash: String,
+    pub token_hash: Option<String>,
     pub bypass_hash: Option<String>,
+    pub signed_in: bool,
 }
 
 /// A private registry's login for a service's image (`PUT …/registry`); the password is sealed
@@ -982,8 +984,11 @@ pub struct Environment {
     /// A TCP service's address (`host:port`), once it has its port.
     pub tcp: Option<String>,
     pub needs_deploy: bool,
-    /// Visitors need the environment's access token (`PUT … {access: {token}}`).
+    /// Visitors need the environment's access token (`PUT … {access: {token}}`), or to sign in.
     pub private: bool,
+    /// People signed in to roll who may open the project get in (`access.signed_in`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub signed_in: bool,
     /// A cron service's next scheduled run (unix ms), once it has a deployment.
     pub next_run_at: Option<i64>,
     /// Its schedules (`run.schedules`) as they stand: the next due time and the job each last

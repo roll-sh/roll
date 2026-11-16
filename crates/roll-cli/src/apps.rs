@@ -946,6 +946,10 @@ pub enum AppsCmd {
         /// Anyone with its URL gets in again.
         #[arg(long)]
         open: bool,
+        /// Only people signed in to roll who can open its project get in (sent to roll to sign
+        /// in, then back); its link, if it has one, stops.
+        #[arg(long, conflicts_with_all = ["open", "private"])]
+        signed_in: bool,
         /// Maintenance: its public names answer roll's page (with this note, if given) and
         /// nothing wakes.
         #[arg(long, value_name = "NOTE", num_args = 0..=1, default_missing_value = "", conflicts_with = "serve")]
@@ -3630,7 +3634,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, egress, egress_host, private, open, maintenance, serve, pause, resume, resume_deploys, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, error_page, maintenance_page, roll_pages } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, error_page, maintenance_page, roll_pages } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -3650,6 +3654,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(f) = follow_tag {
                 body.insert("follow_tag".into(), json!(f));
+            }
+            if signed_in {
+                body.insert("access".into(), json!({ "signed_in": true }));
             }
             if let Some(mode) = egress {
                 body.insert("egress".into(), json!({ "mode": mode, "hosts": egress_host }));

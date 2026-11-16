@@ -361,6 +361,73 @@ async fn traces_sent_by_instances_read_back() {
     assert!(vars.get("OTEL_SERVICE_NAME").is_none(), "{vars}");
 }
 
+/// Signing in to an environment: a page load with no session goes to roll's dashboard; a person
+/// signed in there gets a one-use ticket to a page at one of the environment's names (a token
+/// gets none); the ticket opens a host-only session, which the app never sees; changing the
+/// environment's access ends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_signed_in_person_gets_into_a_gated_environment() {
+    let w = world_with(|c| c.web_url = Some("https://roll.test".into())).await;
+    let (svc, _) = image_service(&w, "admin", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let h = host(&svc["environments"][0]["url"]);
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"access": {"signed_in": true}}))).await;
+    assert_eq!((st, &e["private"], &e["signed_in"]), (StatusCode::OK, &json!(true), &json!(true)), "{e}");
+    let get = |path: String, cookie: Option<String>, html: bool| {
+        let mut r = Request::builder().uri(path).header("host", h.clone());
+        if html {
+            r = r.header("accept", "text/html");
+        }
+        if let Some(c) = cookie {
+            r = r.header("cookie", c);
+        }
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(r.body(Body::empty()).unwrap()).await.unwrap();
+            let (st, hd) = (resp.status(), resp.headers().clone());
+            let b = resp.into_body().collect().await.unwrap().to_bytes();
+            (st, hd, serde_json::from_slice::<Value>(&b).unwrap_or(Value::Null))
+        }
+    };
+    let (st, hd, _) = get("/dash?x=1".into(), None, true).await;
+    assert_eq!(st, StatusCode::FOUND);
+    let to = format!("http://{h}/dash?x=1");
+    let q = |v: &str| percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC).to_string();
+    assert_eq!(hd["location"].to_str().unwrap(), format!("https://roll.test/dashboard/apps/visit?service={}&env=production&to={}", q(&id), q(&to)));
+    assert_eq!(get("/api".into(), None, false).await.0, StatusCode::UNAUTHORIZED, "an API call isn't sent to sign in");
+    // A ticket, for a person only, to the environment's own names only.
+    let ask = |user: Option<&str>, to: String| {
+        let mut req = Request::builder().method("POST").uri(format!("{env}/visit")).header("content-type", "application/json").body(Body::from(json!({ "to": to }).to_string())).unwrap();
+        if let Some(u) = user {
+            req.extensions_mut().insert(roll_auth::SignedIn { user: u.into(), handle: "ada".into(), admin: true, code_owner: None, session: "ses_1".into() });
+        }
+        let api = w.api.clone();
+        async move {
+            let resp = api.oneshot(req).await.unwrap();
+            let st = resp.status();
+            (st, serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+        }
+    };
+    assert_eq!(ask(None, to.clone()).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(ask(Some("usr_ada"), "https://evil.example/".into()).await.0, StatusCode::BAD_REQUEST);
+    let (st, t) = ask(Some("usr_ada"), to.clone()).await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    let url = t["url"].as_str().unwrap();
+    let path = &url[url.find("/__roll/visit").unwrap()..];
+    let (st, hd, _) = get(path.to_string(), None, true).await;
+    assert_eq!((st, hd["location"].to_str().unwrap()), (StatusCode::FOUND, "/dash?x=1"));
+    let set = hd["set-cookie"].to_str().unwrap().to_string();
+    assert!(set.contains("HttpOnly") && set.contains("Max-Age=43200"), "{set}");
+    let session = set.split(';').next().unwrap().to_string();
+    assert_eq!(get(path.to_string(), None, true).await.0, StatusCode::UNAUTHORIZED, "a ticket opens once");
+    let (st, _, body) = get("/dash".into(), Some(format!("{session}; theirs=1")), true).await;
+    assert_eq!((st, body["cookie"].as_str()), (StatusCode::OK, Some("theirs=1")), "the app never sees roll's cookie: {body}");
+    // New access, new sign-in.
+    call(&w.api, "PUT", &env, Some(json!({"access": {"signed_in": true}}))).await;
+    assert_eq!(get("/dash".into(), Some(session), true).await.0, StatusCode::FOUND);
+}
+
 /// Egress rules: an environment with `egress` `roll` runs on a network with no route out, its
 /// listed hosts through its proxy (the variables HTTP clients read, the project's services
 /// reached directly), what the proxy refused shown; hosts need `roll` and are names; opened

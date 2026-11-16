@@ -1579,6 +1579,32 @@ ones up. `a_paused_cron_skips_its_runs_and_pausing_stops_one`. It's the spend li
 environment's live state on its owner, read from the store when that state is loaded, so a
 takeover keeps it paused. `a_paused_worker_stays_stopped_until_its_resumed`.
 
+## Signing in to an environment
+
+`access: {signed_in: true}` (the environment panel's "Require sign-in", `roll apps env
+--signed-in`) lets in people signed in to roll who can open the project, as Vercel's
+Authentication, Cloud Run's IAM invoker and Netlify's team access do, instead of a link everyone
+shares (`visit.rs`):
+
+- **Sent to sign in.** A page load with no session of the environment's own goes to
+  `/dashboard/apps/visit` on roll's dashboard, before anything wakes; anything else is a 401. The
+  app's host never sees roll's session cookie (another site), so the dashboard asks
+  `POST …/visit` as the person for a one-use ticket (a minute) to the page they wanted. It's
+  only for a URL at one of the environment's names (its hostname, an active custom domain), and
+  only for a person's session, never a token.
+- **A session of its own.** The ticket goes back to the environment's host
+  (`/__roll/visit`), which trades it for a host-only HttpOnly cookie, `roll_visit_<env>`, for 12
+  hours, and sends them on. The app never sees the cookie. Tickets and sessions are kept by
+  their SHA-256; the owner remembers a session it read until it ends.
+- **Who.** rolld's gate lets only admins into roll apps' routes today, so today it's an
+  admin; once roll apps serves people, it's whoever may open the project, with no change here.
+  Changing the environment's access ends every session. A token (`access.token`) still works
+  alongside it, as does the bypass header for CI.
+
+`api.rs::a_signed_in_person_gets_into_a_gated_environment` follows a page load to the
+dashboard, a ticket only for a person and only to the environment's names, the ticket used
+once, the session the app never sees, and a new access ending it.
+
 ## Private services
 
 `run.public: false` (Settings' "Reachable", `roll apps set --public false`) takes a web service
@@ -2368,17 +2394,17 @@ commits was fixed (a run-setting typo in one environment's block failed every en
 build; a drain naming a deleted service couldn't be edited; route groups filled from the oldest
 lines; the pre-deploy container had no `ROLL_INSTANCE`; another environment's routes stayed on
 the charts). A second product review the same day (with the review pack's screenshots of the real UI)
-put items 1–11 first. A second review that day (after #78, against the same six and Netlify) put the six items above first and found five bugs, fixed: a tag push or any other event on a Git URL service's hook redeployed production; an environment whose first deploy failed was never followed; the watch ignored `[skip ci]`; an environment with no branch took any branch's push; `wait_for_ci` was accepted where nothing reads it. A review on 2026-11-16 (the product against the same six, each gap checked in the code) put items 1–6 first and found three bugs, fixed: links froze what they read (a rotated NoSQL login), `PUT …/environments/{env}` wrote a hold and a name before its last checks, and unlinking stopped at the first credential it couldn't revoke. Another that evening (after watch paths, the previews hand-off, the GitHub Action and more Terraform, against the same six and Netlify) found three gaps, all built since (private repositories on any Git host, one webhook for every environment, and linked services reached from `roll apps exec`, which it took for missing), and five bugs, fixed: a Git URL hook deployed whatever commit the body named; roll.toml's watch paths were ignored for Git URL services; the Action deployed a pull request's merge commit and read only its first 100 comments; a Bitbucket push was read for its last branch only; a Git host without fetch filters lost `[skip ci]`. A review after #99 merged (the same seven, and the other threads' open branches) put response caching and analytics in, and found: a fork's pull request would have been a trusted preview through a receiver that dropped `pull` (now `takes_pulls`), previews got production link credentials (now none in an ephemeral environment), a same-repository pull request from a followed branch made a second preview, and the digest note above was stale. A review of the stack after #115 (caching, analytics, traces, the GitHub App, against the same seven and the other threads' branches) found nine bugs, fixed: trace intake on rolld's API would have opened the API to every container through the link relay (it's on the apps listener now); the trace token showed in variable listings; the cache's key ignored the host, it survived an owner's release, had no node-wide bound, wasn't metered, refreshed private environments in vain and counted refreshes as page views; the App's events could stall behind a sleeping service and were queued after GitHub's answer; previews' GitHub Deployments weren't transient. It put the six items above after branch previews. Egress rules for previews were built next ("Egress"), leaving the fleet's half and closed services' private wakes as items.
+put items 1–11 first. A second review that day (after #78, against the same six and Netlify) put the six items above first and found five bugs, fixed: a tag push or any other event on a Git URL service's hook redeployed production; an environment whose first deploy failed was never followed; the watch ignored `[skip ci]`; an environment with no branch took any branch's push; `wait_for_ci` was accepted where nothing reads it. A review on 2026-11-16 (the product against the same six, each gap checked in the code) put items 1–6 first and found three bugs, fixed: links froze what they read (a rotated NoSQL login), `PUT …/environments/{env}` wrote a hold and a name before its last checks, and unlinking stopped at the first credential it couldn't revoke. Another that evening (after watch paths, the previews hand-off, the GitHub Action and more Terraform, against the same six and Netlify) found three gaps, all built since (private repositories on any Git host, one webhook for every environment, and linked services reached from `roll apps exec`, which it took for missing), and five bugs, fixed: a Git URL hook deployed whatever commit the body named; roll.toml's watch paths were ignored for Git URL services; the Action deployed a pull request's merge commit and read only its first 100 comments; a Bitbucket push was read for its last branch only; a Git host without fetch filters lost `[skip ci]`. A review after #99 merged (the same seven, and the other threads' open branches) put response caching and analytics in, and found: a fork's pull request would have been a trusted preview through a receiver that dropped `pull` (now `takes_pulls`), previews got production link credentials (now none in an ephemeral environment), a same-repository pull request from a followed branch made a second preview, and the digest note above was stale. A review of the stack after #115 (caching, analytics, traces, the GitHub App, against the same seven and the other threads' branches) found nine bugs, fixed: trace intake on rolld's API would have opened the API to every container through the link relay (it's on the apps listener now); the trace token showed in variable listings; the cache's key ignored the host, it survived an owner's release, had no node-wide bound, wasn't metered, refreshed private environments in vain and counted refreshes as page views; the App's events could stall behind a sleeping service and were queued after GitHub's answer; previews' GitHub Deployments weren't transient. It put the six items above after branch previews. Egress rules for previews were built next ("Egress"), leaving the fleet's half and closed services' private wakes as items; then sign-in-gated environments ("Signing in to an environment").
 
 1. **Branch and pull-request previews for Git URL services** (Vercel's, Render's, Railway's
    preview per branch and pull request): apps hands roll previews every push to a branch it
    doesn't follow and every pull request (`GitPush`, `GitPull`), each checked against the
    repository's refs; previews builds the environments, comments and gates forks behind a
    writer's approval (its side is the previews thread's, stacked on this).
-2. **Sign-in-gated environments** (Vercel Authentication, Cloud Run IAM, Netlify's password and
-   team access): `access: { signed_in: true }` on an environment, the proxy letting in a roll
-   session (roll-accounts) of someone who can reach the project, instead of a shared token; a
-   preview's link stays as it is.
+2. **A visitor's session ends with their account**: a sign-in-gated environment's 12-hour
+   session isn't checked against roll-accounts again; asking whether the person can still sign
+   in and reach the project (as roll secrets' `maker_reaches`) at most every few minutes would end
+   it within minutes of their removal.
 3. **The proxy's own span** (Cloud Run's): with traces on, a `traceparent` the proxy starts (or
    continues) and a root span for the wait, the wake and the instance's answer, so a cold start
    shows in the trace.
