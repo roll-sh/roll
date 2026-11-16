@@ -323,6 +323,58 @@ struct RollResources {
     /// rolld's own API (its address and the operator's token): a stream's routes answer there
     /// on any node, forwarded to the stream's owner on a fleet.
     api: (String, Option<String>, reqwest::Client),
+    /// The products' routes in process, for links that issue credentials of their own (a
+    /// bucket's key, a stream's, a NoSQL database's): roll secrets' providers, as its managed
+    /// links use them.
+    products: crate::secrets::Api,
+}
+
+impl RollResources {
+    /// What a link to `kind` sets through roll secrets' provider for it: each live field read
+    /// now, and (`label`: the credential's name in the product) each credential issued once,
+    /// its handles kept to revoke. None: a kind that has no provider.
+    async fn provided(&self, kind: LinkKind, r#ref: &str, label: Option<String>) -> anyhow::Result<Option<(Vec<(String, String)>, serde_json::Value)>> {
+        use roll_secrets::links::{Link, Mode};
+        let Some(p) = crate::secrets::link_provider(&self.products, kind.as_str()) else { return Ok(None) };
+        let r = r#ref.to_string();
+        blocking(move || {
+            let fields = p.fields_for(&r);
+            let mut vars = Vec::new();
+            let mut issued: Vec<(String, roll_secrets::links::Issued)> = Vec::new();
+            let mut made = || -> anyhow::Result<()> {
+                for (field, mode) in p.suggested_for(&r) {
+                    let Some(f) = fields.iter().find(|f| f.field == field) else { continue };
+                    let link = Link { kind: kind.as_str().to_string(), r#ref: r.clone(), field: field.to_string(), mode, options: Default::default() };
+                    let value = match (mode, &label) {
+                        (Mode::Live, _) => p.read(&r, field, &link)?,
+                        // Listing what a link sets: only what's read, never a credential made.
+                        (_, None) => continue,
+                        (_, Some(label)) => {
+                            let cred = f.credential.unwrap_or(field);
+                            if !issued.iter().any(|(c, _)| c == cred) {
+                                issued.push((cred.to_string(), p.issue(&r, cred, &link, label, None)?));
+                            }
+                            let parts = &issued.iter().find(|(c, _)| c == cred).expect("issued").1.parts;
+                            parts.get(field).cloned().ok_or_else(|| anyhow::anyhow!("{} issued no {field}", kind.as_str()))?
+                        }
+                    };
+                    vars.push((f.suggest.to_string(), value.expose().to_string()));
+                }
+                Ok(())
+            };
+            let result = made();
+            let handles = serde_json::Value::Array(issued.iter().map(|(_, i)| i.handle.clone()).collect());
+            if let Err(e) = result {
+                // What was issued before the failure goes again: nothing is left behind.
+                for (_, i) in &issued {
+                    let _ = p.revoke(&r, &i.handle);
+                }
+                return Err(e);
+            }
+            Ok(Some((vars, handles)))
+        })
+        .await
+    }
 }
 
 #[async_trait]
@@ -372,8 +424,35 @@ impl Resources for RollResources {
                 })
                 .await
             }
+            LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql => match self.provided(kind, r#ref, None).await? {
+                Some((vars, _)) => Ok(vars),
+                None => anyhow::bail!("links to {} aren't wired on this node yet", kind.as_str()),
+            },
             other => anyhow::bail!("links to {} aren't wired on this node yet", other.as_str()),
         }
+    }
+
+    /// A bucket's, a stream's or a NoSQL database's link gets credentials of its own (a key
+    /// named for the service), made once, revoked when the link goes; a database's URL is read
+    /// fresh instead.
+    async fn link(&self, kind: LinkKind, r#ref: &str, service: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+        if !matches!(kind, LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql) {
+            return Ok(None);
+        }
+        Ok(self.provided(kind, r#ref, Some(format!("roll apps {service}"))).await?.map(|(vars, handles)| apps_control::integrations::Minted { vars, kept: handles.to_string() }))
+    }
+
+    async fn unlink(&self, kind: LinkKind, r#ref: &str, kept: &str) -> anyhow::Result<()> {
+        let Some(p) = crate::secrets::link_provider(&self.products, kind.as_str()) else { return Ok(()) };
+        let handles: Vec<serde_json::Value> = serde_json::from_str(kept).unwrap_or_default();
+        let r = r#ref.to_string();
+        blocking(move || {
+            for h in &handles {
+                p.revoke(&r, h)?;
+            }
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -413,6 +492,7 @@ pub async fn start(
     postgres: Option<Arc<pg_control::Control>>,
     redis: Option<Arc<redis_control::Control>>,
     secrets: crate::secrets::ForApps,
+    products: crate::secrets::Api,
 ) -> anyhow::Result<AppsNode> {
     let a = &args.apps;
     let single = cluster.backend_name() == "memory";
@@ -505,6 +585,7 @@ pub async fn start(
                 let token = std::env::var("ROLL_ADMIN_TOKEN").ok().filter(|t| !t.trim().is_empty());
                 (format!("http://{}", std::net::SocketAddr::new(ip, args.api.port())), token, reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).no_proxy().build()?)
             },
+            products,
         }),
         resolver: Arc::new(Doh::new(&a.doh)),
         tls: domain_tls(args, single)?,
@@ -599,5 +680,49 @@ impl apps_control::integrations::Mailbox for AccountsMail {
 
     async fn send(&self, user: &str, subject: &str, text: &str) -> anyhow::Result<()> {
         self.0.mail_user(user, subject, text).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::{delete, get, post};
+
+    /// A bucket's link gets a key of its own, named for the service and for that bucket only,
+    /// with the storage's endpoint and region read as they are; unlinking revokes the key.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_buckets_link_gets_a_key_of_its_own_and_unlinking_revokes_it() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (s1, s2) = (seen.clone(), seen.clone());
+        let router = axum::Router::new()
+            .route("/v1/storage", get(|| async { axum::Json(serde_json::json!({ "endpoint": "http://s3.roll.test", "region": "eu-central-1" })) }))
+            .route(
+                "/v1/storage/keys",
+                post(move |axum::Json(b): axum::Json<serde_json::Value>| async move {
+                    s1.lock().unwrap().push(format!("key {} {} {}", b["name"].as_str().unwrap_or(""), b["permission"], b["buckets"]));
+                    axum::Json(serde_json::json!({ "id": "AKIA1", "secret_access_key": "s3cr3t" }))
+                }),
+            )
+            .route(
+                "/v1/storage/keys/{id}",
+                delete(move |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                    s2.lock().unwrap().push(format!("revoked {id}"));
+                    axum::http::StatusCode::NO_CONTENT
+                }),
+            );
+        let products = crate::secrets::Api::default();
+        products.set(router);
+        let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products };
+        let m = r.link(LinkKind::Bucket, "photos", "svc_a").await.unwrap().expect("credentials of its own");
+        let vars: std::collections::BTreeMap<String, String> = m.vars.iter().cloned().collect();
+        assert_eq!(vars.get("S3_BUCKET").map(String::as_str), Some("photos"));
+        assert_eq!(vars.get("AWS_ENDPOINT_URL").map(String::as_str), Some("http://s3.roll.test"));
+        assert_eq!(vars.get("AWS_REGION").map(String::as_str), Some("eu-central-1"));
+        assert_eq!((vars.get("AWS_ACCESS_KEY_ID").map(String::as_str), vars.get("AWS_SECRET_ACCESS_KEY").map(String::as_str)), (Some("AKIA1"), Some("s3cr3t")));
+        // Listing what a link sets reads; it never makes a credential.
+        let listed = r.link_vars(LinkKind::Bucket, "photos").await.unwrap();
+        assert!(listed.iter().all(|(k, _)| !k.starts_with("AWS_ACCESS")), "{listed:?}");
+        r.unlink(LinkKind::Bucket, "photos", &m.kept).await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), [r#"key roll apps svc_a "write" ["photos"]"#.to_string(), "revoked AKIA1".to_string()]);
     }
 }

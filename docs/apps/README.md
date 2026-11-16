@@ -702,7 +702,14 @@ every deployment is immutable with instant rollback.
 - **roll databases**: a service links to the project's Postgres, Redis, buckets, streams,
   queues and NoSQL. A link injects the resource's connection variables (`DATABASE_URL`,
   `REDIS_URL`, `S3_*`, `KAFKA_*`, `AMQP_URL`, `CASSANDRA_*`), named with the resource's prefix
-  when a service links two of a kind (`ORDERS_DATABASE_URL`). On one node a URL naming the
+  when a service links two of a kind (`ORDERS_DATABASE_URL`). A bucket's and a stream's link get
+  credentials of their own, through roll secrets' providers as its managed links get them
+  (rolld's `RollResources::link`): a storage key named `roll apps <service>` for that bucket only
+  (`S3_BUCKET`, `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), a
+  stream's own SASL user (`KAFKA_BROKERS`, `KAFKA_USERNAME`, `KAFKA_PASSWORD`). Each is made once
+  when the link is, kept sealed with it, and revoked when the link goes. A NoSQL database, which
+  has no keys of its own, gives its contact point and login (`CASSANDRA_*`). Postgres and Redis
+  give their URLs, read again at each deploy. Queues aren't linkable yet. On one node a URL naming the
   host's loopback reaches it through a relay (below, "Links on one node"); on the fleet they're
   the public edge names over TLS, as previews use, so there's no path from a task into the
   fleet's network.
@@ -2110,7 +2117,7 @@ put items 1–11 first.
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-7. *Unblocked: #62 landed (e689b0c76).* Links for buckets, streams, queues and NoSQL as roll secrets links.
+7. *Waiting on a queue link provider in roll secrets.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); a queue needs a provider that issues its own user first.
 8. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.

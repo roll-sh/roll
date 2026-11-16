@@ -349,6 +349,18 @@ fn sweeper(s: Arc<Secrets>, what: &'static str, pass: fn(&Secrets) -> roll_secre
     });
 }
 
+/// The provider for a kind roll apps links with credentials of its own (a bucket's key, a
+/// stream's or a NoSQL database's), over rolld's own API: issued and revoked as roll secrets'
+/// managed links are (`apps::RollResources`).
+pub fn link_provider(api: &Api, kind: &str) -> Option<Arc<dyn LinkProvider>> {
+    match kind {
+        "bucket" => Some(Arc::new(Bucket(api.clone()))),
+        "stream" => Some(Arc::new(Stream(api.clone()))),
+        "nosql" => Some(Arc::new(Nosql(api.clone()))),
+        _ => None,
+    }
+}
+
 /// The link providers of every product rolld serves.
 fn links(api: Api) -> Links {
     let mut l = Links::default();
