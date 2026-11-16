@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 axum.workspace = true
 base64.workspace = true
+jsonwebtoken.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 code-sql.workspace = true
@@ -34,7 +35,9 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
 futures.workspace = true
+getrandom.workspace = true
 http-body-util.workspace = true
 tempfile.workspace = true
 tower.workspace = true

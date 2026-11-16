@@ -1393,6 +1393,133 @@ async fn approvals_can_be_remembered() {
     assert_eq!(values("production").await.1["code"], "approval_pending");
 }
 
+/// Machine clients (OAuth client credentials): the operator makes one with rules; it trades its
+/// secret, or a JWT it signs with its key, for an hour's token that does what its rules allow and
+/// nothing more; an assertion works once; and revoking the client ends its tokens.
+#[tokio::test]
+async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
+    use base64::Engine;
+    let d = Daemon::new(50);
+    let rules = json!([{ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "read": "allow" } }]);
+    let (s, made) = d.call(OPERATOR, Method::POST, "/v1/access/clients", Some(json!({ "name": "ci", "rules": rules }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{made}");
+    let (id, secret) = (made["client_id"].as_str().unwrap().to_string(), made["client_secret"].as_str().unwrap().to_string());
+    let (s, wrong) = d.form("/v1/access/oauth/token", &[("grant_type", "client_credentials"), ("client_id", &id), ("client_secret", "rlc_nope")]).await;
+    assert_eq!((s, wrong["error"].as_str()), (StatusCode::UNAUTHORIZED, Some("invalid_client")));
+    let (s, got) = d.form("/v1/access/oauth/token", &[("grant_type", "client_credentials"), ("client_id", &id), ("client_secret", &secret)]).await;
+    assert_eq!(s, StatusCode::OK, "{got}");
+    let token = got["access_token"].as_str().unwrap().to_string();
+    let search = |t: String| {
+        let d = &d;
+        async move { d.call(&t, Method::POST, "/v1/search/clusters/cl_1/indices/logs/search", Some(json!({}))).await.0 }
+    };
+    assert_eq!(search(token.clone()).await, StatusCode::OK);
+    assert_eq!(d.call(&token, Method::GET, "/v1/secrets/projects/prj_a/transit", None).await.0, StatusCode::FORBIDDEN, "only what its rules allow");
+    assert_eq!(d.call(&token, Method::GET, "/v1/access/clients", None).await.0, StatusCode::FORBIDDEN, "a client never manages clients");
+    // Its id is no ordinary OAuth client's: no device or consent flow may hang another grant on
+    // it (someone else's, which its sign-ins could then land on).
+    let (s, e) = d.form("/v1/access/oauth/device_authorization", &[("client_id", &id)]).await;
+    assert_eq!((s, e["error"].as_str()), (StatusCode::UNAUTHORIZED, Some("invalid_client")), "{e}");
+
+    // A key it signs with: nothing secret is stored, and an assertion works once.
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).unwrap();
+    let public = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
+    let jwk = json!({ "kty": "OKP", "crv": "Ed25519", "x": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.as_bytes()) });
+    let (s, keyed) = d.call(OPERATOR, Method::POST, "/v1/access/clients", Some(json!({ "name": "deployer", "rules": rules, "public_jwk": jwk }))).await;
+    assert!(s == StatusCode::CREATED && keyed.get("client_secret").is_none(), "{keyed}");
+    let kid = keyed["client_id"].as_str().unwrap().to_string();
+    let mut der = vec![0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20];
+    der.extend_from_slice(&seed);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let claims = json!({ "iss": kid, "sub": kid, "aud": made["token_endpoint"], "exp": now + 60, "jti": "one" });
+    let jwt = jsonwebtoken::encode(&jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA), &claims, &jsonwebtoken::EncodingKey::from_ed_der(&der)).unwrap();
+    let assert_with = |jwt: String| {
+        let d = &d;
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", "client_credentials"), ("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"), ("client_assertion", &jwt)]).await }
+    };
+    let (s, signed) = assert_with(jwt.clone()).await;
+    assert_eq!(s, StatusCode::OK, "{signed}");
+    assert_eq!(search(signed["access_token"].as_str().unwrap().to_string()).await, StatusCode::OK);
+    assert_eq!(assert_with(jwt).await.0, StatusCode::UNAUTHORIZED, "a replayed assertion");
+
+    // Rotated, it keeps its id: kept a minute, the old secret works beside the new one; rotated
+    // again keeping nothing, the old ones stop at once, and so do the tokens they got.
+    let (_, rot) = d.call(OPERATOR, Method::POST, "/v1/access/clients", Some(json!({ "name": "rotating", "rules": rules }))).await;
+    let rid = rot["client_id"].as_str().unwrap().to_string();
+    let trade = |s: String| {
+        let (d, rid) = (&d, rid.clone());
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", "client_credentials"), ("client_id", &rid), ("client_secret", &s)]).await }
+    };
+    let first = rot["client_secret"].as_str().unwrap().to_string();
+    let early = trade(first.clone()).await.1["access_token"].as_str().unwrap().to_string();
+    let rotate = |body: Value| {
+        let (d, path) = (&d, format!("/v1/access/clients/{rid}/rotate"));
+        async move { d.call(OPERATOR, Method::POST, &path, Some(body)).await.1["client_secret"].as_str().unwrap().to_string() }
+    };
+    let second = rotate(json!({ "keep_old_for_s": 60 })).await;
+    assert_eq!((trade(first.clone()).await.0, trade(second.clone()).await.0), (StatusCode::OK, StatusCode::OK));
+    let third = rotate(json!({})).await;
+    assert_eq!((trade(first).await.0, trade(second).await.0, trade(third).await.0), (StatusCode::UNAUTHORIZED, StatusCode::UNAUTHORIZED, StatusCode::OK));
+    assert_eq!(search(early).await, StatusCode::UNAUTHORIZED, "what the old secret got stops too");
+
+    // A leaked secret (found in a push, say) revokes the client, and so its tokens, at once.
+    assert!(roll_access::checksum_ok(&secret));
+    assert_eq!(d.access.revoke_leaked(std::slice::from_ref(&secret), "a test").unwrap().len(), 1);
+    assert_eq!(search(token).await, StatusCode::UNAUTHORIZED);
+    // Revoking one by hand does the same.
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/clients/{kid}"), None).await.0, StatusCode::OK);
+    assert_eq!(search(signed["access_token"].as_str().unwrap().to_string()).await, StatusCode::UNAUTHORIZED);
+}
+
+/// A person's own machine client acts as them, as their tokens do: within their account's reach,
+/// theirs alone to see and revoke, past the policy only once an admin approves, and it stops when
+/// they can't sign in.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_persons_machine_client_acts_as_them() {
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    d.people.add("usr_bob", "bob");
+    d.workspace.create("usr_alice", "alices", "", None).unwrap();
+    d.workspace.create("usr_bob", "bobs", "", None).unwrap();
+    let read = json!([{ "product": "*", "resources": "*", "actions": { "read": "allow" } }]);
+    let (s, made) = d.as_user("usr_alice", Method::POST, "/v1/access/clients", Some(json!({ "name": "nightly", "rules": read }))).await;
+    assert_eq!((s, made["grant"]["user"].as_str()), (StatusCode::CREATED, Some("usr_alice")), "{made}");
+    let id = made["client_id"].as_str().unwrap().to_string();
+    let trade = |id: String, secret: String| {
+        let d = &d;
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", "client_credentials"), ("client_id", &id), ("client_secret", &secret)]).await }
+    };
+    let (_, got) = trade(id.clone(), made["client_secret"].as_str().unwrap().to_string()).await;
+    let token = got["access_token"].as_str().unwrap_or_else(|| panic!("{got}")).to_string();
+    let (_, list) = d.call(&token, Method::GET, "/v1/workspace/projects", None).await;
+    assert_eq!(list.as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap()).collect::<Vec<_>>(), vec!["alices"]);
+    assert_eq!(d.call(&token, Method::GET, "/v1/projects", None).await.0, StatusCode::FORBIDDEN, "never past her account");
+    assert!(d.people.1.lock().unwrap().iter().any(|m| m == "usr_alice: A machine client was added to your roll account: \"nightly\""));
+
+    // Hers alone: bob neither sees nor revokes it; the operator sees it.
+    let clients = |list: &Value| list.as_array().unwrap().iter().map(|c| c["client_id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    assert!(clients(&d.as_user("usr_bob", Method::GET, "/v1/access/clients", None).await.1).is_empty());
+    assert_eq!(d.as_user("usr_bob", Method::DELETE, &format!("/v1/access/clients/{id}"), None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(clients(&d.as_user("usr_alice", Method::GET, "/v1/access/clients", None).await.1), vec![id.clone()]);
+    assert_eq!(clients(&d.call(OPERATOR, Method::GET, "/v1/access/clients", None).await.1), vec![id.clone()]);
+
+    // Past the policy, it waits for an admin: no token until one approves.
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "approve_people": ["admin"] }))).await.0, StatusCode::OK);
+    let admin = json!([{ "product": "workspace", "resources": "*", "actions": { "admin": "allow" } }]);
+    let (_, wide) = d.as_user("usr_alice", Method::POST, "/v1/access/clients", Some(json!({ "name": "wide", "rules": admin }))).await;
+    assert_eq!(wide["grant"]["pending"], true, "{wide}");
+    let (wide_id, wide_secret) = (wide["client_id"].as_str().unwrap().to_string(), wide["client_secret"].as_str().unwrap().to_string());
+    assert_eq!(trade(wide_id.clone(), wide_secret.clone()).await.0, StatusCode::UNAUTHORIZED);
+    let grant = wide["grant"]["id"].as_str().unwrap();
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{grant}/approve"), None).await.0, StatusCode::OK);
+    assert_eq!(trade(wide_id, wide_secret).await.0, StatusCode::OK);
+
+    // She can't sign in any more: its token stops at once.
+    d.people.remove("usr_alice");
+    assert_eq!(d.call(&token, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED);
+}
+
 /// A rule can grant one encryption key of a secrets project: its routes are decided key by key,
 /// and the project's list stays shut to it (secrets doesn't filter the list by key yet).
 #[tokio::test]

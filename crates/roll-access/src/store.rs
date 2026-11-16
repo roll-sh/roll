@@ -14,6 +14,8 @@ use serde_json::Value;
 mod device;
 pub use device::{DEVICE_TTL_MS, DeviceRequest, normalize_user_code, show_user_code};
 mod tasks;
+mod machine;
+pub use machine::{CLIENT_SECRET_PREFIX, ClientKey, MachineClient};
 pub use tasks::{McpTask, TASK_STALE_MS, TASK_TTL_MS, TASKS_PER_OWNER, TaskUpdate, iso};
 
 const SCHEMA: &str = "
@@ -150,6 +152,13 @@ CREATE TABLE IF NOT EXISTS mcp_tasks (
     expires_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS mcp_tasks_owner ON mcp_tasks (owner, status);
+-- Machine clients' JWT assertion ids, refused when seen again (store/machine.rs).
+CREATE TABLE IF NOT EXISTS client_jtis (
+    client_id TEXT NOT NULL,
+    jti TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY (client_id, jti)
+) WITHOUT ROWID;
 ";
 
 /// A grant's secret prefixes: scoped tokens, OAuth access and refresh tokens.
@@ -325,8 +334,8 @@ fn insert_oauth_grant(c: &code_sql::Conn<'_>, grant_id: &str, client: &Client, n
     let rules = serde_json::to_string(&new.rules).unwrap_or_default();
     let ip = serde_json::to_string(&new.ip_allow).unwrap_or_default();
     c.execute(
-        "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise, pending) VALUES (?, ?, 'oauth', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        params![grant_id, new.name.trim(), rules, new.expires_at, ip, created_by, now, client.id, new.rate_per_minute.map(i64::from), user, new.ask_otherwise, new.pending],
+        "INSERT INTO grants (id, name, kind, rules, expires_at, not_before, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise, pending) VALUES (?, ?, 'oauth', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![grant_id, new.name.trim(), rules, new.expires_at, new.not_before, ip, created_by, now, client.id, new.rate_per_minute.map(i64::from), user, new.ask_otherwise, new.pending],
     )?;
     Ok(())
 }
@@ -770,6 +779,19 @@ impl Store {
     pub fn new(db: Db) -> Result<Store> {
         db.ensure_schema(SCHEMA)?;
         db.ensure_schema(crate::sinks::SCHEMA)?;
+        // Machine clients (client credentials): a confidential client's secret hash or key.
+        // `add_column` checks for itself, so every database gets them, however old.
+        db.add_column("oauth_clients", "confidential", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("oauth_clients", "secret_hash", "TEXT")?;
+        db.add_column("oauth_clients", "jwk", "TEXT")?;
+        // Its previous credential, still accepted until `old_until` after a rotation.
+        db.add_column("oauth_clients", "old_secret_hash", "TEXT")?;
+        db.add_column("oauth_clients", "old_jwk", "TEXT")?;
+        db.add_column("oauth_clients", "old_until", "INTEGER")?;
+        // A machine client's own grant (its queries never take another grant on the same id), and
+        // how many times its credential was rotated (a token is issued only if it still matches).
+        db.add_column("oauth_clients", "grant_id", "TEXT")?;
+        db.add_column("oauth_clients", "generation", "INTEGER NOT NULL DEFAULT 0")?;
         // Where an approval's chat card is (`{install, channel, ts}`), once posted.
         if !db.has_column("approvals", "chat")? {
             db.add_column("approvals", "chat", "TEXT")?;
@@ -1208,6 +1230,17 @@ impl Store {
         let why: String = why.chars().take(300).collect();
         let id = self.db.write(|c| {
             let id: Option<String> = c.query_row("SELECT grant_id FROM grant_secrets WHERE hash = ? AND (expires_at IS NULL OR expires_at > ?)", params![h, now], |r| r.get(0)).optional()?;
+            // A machine client's secret: its grant, and so every token it got.
+            let id = match id {
+                Some(id) => Some(id),
+                None => c
+                    .query_row(
+                        "SELECT o.grant_id FROM oauth_clients o WHERE o.confidential = 1 AND o.grant_id IS NOT NULL AND (o.secret_hash = ? OR (o.old_secret_hash = ? AND o.old_until > ?))",
+                        params![h, h, now],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+            };
             let Some(id) = id else { return Ok::<_, Error>(None) };
             let n = c.execute("UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND revoked_at IS NULL", params![now, why, id])?;
             c.execute("DELETE FROM grant_secrets WHERE grant_id = ?", [&id])?;
@@ -1689,7 +1722,9 @@ impl Store {
 
     fn kept_client(&self, id: &str) -> Result<Option<Client>> {
         Ok(self.db.read(|c| {
-            c.query_row("SELECT id, name, uri, redirect_uris, created_at, last_used_at FROM oauth_clients WHERE id = ?", [id], |r| {
+            // A machine client is never an ordinary client: no consent or device flow may name it
+            // (that would hang a second grant, someone else's, on its id).
+            c.query_row("SELECT id, name, uri, redirect_uris, created_at, last_used_at FROM oauth_clients WHERE id = ? AND confidential = 0", [id], |r| {
                 Ok(Client {
                     id: r.get(0)?,
                     name: r.get(1)?,
