@@ -165,6 +165,22 @@ pub struct GitPush {
     pub sha: Option<String>,
     /// The pushed commit's message, as the push said it (`[skip ci]` is the receiver's to read).
     pub message: String,
+    /// A pull request's (or merge request's) push, opening or closing: `branch` is its own for a
+    /// same-repository one, `pull/<number>` for a fork's.
+    pub pull: Option<GitPull>,
+}
+
+/// The pull request a [`GitPush`] is for. `sha` was checked against its head ref (a fork's
+/// `refs/pull/N/head`, GitLab's `refs/merge-requests/N/head`; a same-repository one's branch).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitPull {
+    pub number: u64,
+    /// As the event says it: untrusted text.
+    pub title: String,
+    /// Its page, made from the service's own URL and the number (never the event's link).
+    pub url: String,
+    /// From another repository (head and base repository ids differ): its code is untrusted.
+    pub fork: bool,
 }
 
 /// Where pushes to branches roll apps doesn't follow go (rolld fills it with roll previews).
