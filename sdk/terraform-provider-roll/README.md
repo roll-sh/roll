@@ -56,6 +56,19 @@ data "roll_secrets_values" "production" {
   environment = "production"
 }
 
+# Without values in the state (Terraform 1.11+): read for this run only, write write-only.
+ephemeral "roll_secrets_values" "production" {
+  environment = "production"
+  dynamic     = true # a dynamic credential for the run, revoked when it closes
+}
+
+resource "roll_secret" "staging_db" {
+  environment      = "staging"
+  key              = "DB_URL"
+  value_wo         = ephemeral.roll_secrets_values.production.values["DB_URL"]
+  value_wo_version = 1 # bump to write it again
+}
+
 # roll apps: a service, a variable, a custom domain, an environment, a link and a notification
 # target (docs/apps/http-api.md).
 resource "roll_app_service" "web" {
@@ -112,7 +125,7 @@ data "roll_app_service" "api" {
   Terraform shows in the plan (the token needs `reveal`).
 - In a protected environment a write opens a change request for someone else to approve, and
   Terraform reports it as an error.
-- Values in `roll_secret` and the data source land in Terraform's state: keep the state as
-  private as the values.
+- Values in `roll_secret`'s `value` and the data source land in Terraform's state: keep the state as
+  private as the values, or use `ephemeral "roll_secrets_values"` and `value_wo`, which never do.
 
 Tests: `TF_ACC=1 go test ./...` with `terraform` on `PATH` (CI's `terraform` job).
