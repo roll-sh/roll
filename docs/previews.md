@@ -1561,6 +1561,12 @@ Ranked by what a person notices first. Done so far:
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.
+6. **Watch: the live check's broken link against main** (about one run in three on
+   2026-11-16, before and after screenshot runs were kept in one transaction): the change's new
+   broken link isn't counted against main's (`links_added` stays empty). The script now prints the
+   comparison and main's baseline's `page_links` when it fails; the next failure says whether
+   main's link check came back empty (a timeout under load) or the comparison missed it.
+
 
 Looked at and kept: previews' copy of a preview's variables in its roll apps environment, next
 to the `pv-` secrets environment roll apps reads itself (#31's `ForApps`). roll apps reads
