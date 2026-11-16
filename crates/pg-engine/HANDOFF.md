@@ -8061,17 +8061,19 @@ container name: pick your own).
 
 ## Machine rules (learned the hard way)
 
-- **Verification train (since 2026-11-07).** With 12 agents on 4 heavy slots the queue reached
-  30 jobs, almost all full verifications of small batches. A batch is pushed after ONE heavy job
-  with: a release build, clippy (no new warnings), the crate test binaries that cover the files it
-  touches, the regress files of its area (`PGREGRESS_ONLY`), goldens it adds, and its benchmark.
-  The full suite (debug and release crate tests, `crash_random` 1-30, the same with
-  `CRASH_POWER=1` and `--features powerloss` plus its `power_cut` tests, full regress with 0 units
-  changed, isolation, pg_dump_tap, the difftest pair) runs on origin's head after each wave of
-  pushes, by the difftest owner's guard (`tools/difftest-guard.sh` plus the suite). A failure there
-  is bisected to its commit, and its owner fixes it or reverts it first, before anything else.
-  Exceptions that still need the full suite before their push: storage, block or SST format, WAL,
-  flush, recovery and commit ordering, catalog format, and anything touching durability.
+- **Verification: quick-check, then the batch train (since 2026-11-16, agent 242).** An agent
+  never runs the full train. Before offering a change it runs `tools/quick-check.sh` (through
+  `tools/heavy.sh`; header and tests/difftest/STATUS.md "Verification train" have the details):
+  clippy on the changed files, the crate test binaries that cover the diff plus lib, golden, wire
+  and wire_waits, a short crash stage when storage, WAL or commit paths changed, and the full
+  regress (0 newly differing), isolation (1,647 / 1,648) and pg_dump_tap (14,609) against its own
+  reference containers (`tools/ref-containers.sh`). Green there, it pushes the rebased change as a
+  candidate branch `cand/aNNN` (`git push origin HEAD:cand/aNNN`) and tells the coordinator. The
+  coordinator runs `tools/batch-train.sh cand/aNNN cand/aMMM ...`: ONE full train
+  (`tools/verification-train.sh`) on origin's head plus every candidate, landing the
+  combination with `tools/push.sh` when green and naming the candidate at fault when red (its
+  failing stage re-run on halving prefixes), then landing the rest. Only docs-only commits (no
+  file outside `*.md`) still go straight to the branch with `tools/push.sh`.
 - **Start long heavy jobs detached with `tools/heavy-bg.sh <log> <command...>`.** With the slots
   full, a job can wait hours for one, and a session's background command stops at 2 hours queue
   wait included, killing jobs that never ran. heavy-bg.sh runs the job through heavy.sh outside
@@ -12232,11 +12234,16 @@ Then:
    engine, add a golden recorded from PostgreSQL, re-run the affected regress files (subset
    runs with PGREGRESS_ONLY and PGREGRESS_REPORT_DIR), and make sure nothing that matched
    before regresses. Results and errors before EXPLAIN text.
-3. Follow the machine rules: limit concurrent builds (HEAVY_SLOTS), every build/test/regress/golden run
-   through tools/heavy.sh, CARGO_BUILD_JOBS=2.
-4. After each verified batch (the whole `cargo test -p pg-engine` passes), add your round's
-   section to STATUS.md (prose; its numbers come from full runs, HANDOFF "Regression suite"),
-   commit with a clear message, and push the branch.
+3. Follow the machine rules: every build/test/regress/golden run through tools/heavy.sh (it
+   caps jobs and slots across agents). Build and test with `--profile verify` (release without
+   LTO; `--release` links each test binary for minutes), in your own CARGO_TARGET_DIR.
+4. Before offering a change: rebase on origin's branch and run
+   `QC_PREFIX=aNNN QC_PORTS=<four of your ports> tools/heavy.sh tools/quick-check.sh` (about 20
+   minutes; it prints one line per step and stops at the first failure). Green, push it as
+   `cand/aNNN` (`git push origin HEAD:cand/aNNN`) and tell the coordinator, who lands it with the
+   others in one full train (tools/batch-train.sh). Never run tools/verification-train.sh
+   yourself. Docs-only commits go to the branch directly with tools/push.sh. Add your round's
+   section to STATUS.md (prose; its numbers come from full runs, HANDOFF "Regression suite").
 ```
 
 ## A152 logical replication resume (2026-11-01)

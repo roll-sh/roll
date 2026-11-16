@@ -15,7 +15,8 @@
 #   clippy   `--all-targets` (so also the examples), alongside the build: fails on a warning in
 #            a changed file that the base doesn't have (the batch train keeps each head's
 #            warnings; without them, a warning on a line the diff touched)
-#   tests    lib, golden, wire, wire_waits and the binaries the diff maps to
+#   tests    golden, wire, wire_waits, the binaries the diff maps to, and the lib's unit tests when
+#            a changed source file has some
 #   crash    when storage, WAL or commit paths changed: crash_random seeds 1-3 x 2 rounds, then
 #            one power cut case (power_cut_at_every_point, built `--features powerloss`)
 #   regress  the full regression suite on the reference: 0 newly differing units
@@ -62,8 +63,8 @@ if [ "${QC_REF_CHAIN:-}" = 1 ]; then
     rc=$?
     nd=$(grep -o 'Newly differing units: [0-9]*' "$D/pgr/report/REPORT.md" 2>/dev/null | grep -o '[0-9]*$')
     m=$(grep -o '[0-9]*/[0-9]* units match' "$D/regress.log" | tail -1)
-    if [ $rc = 0 ] && [ "${nd:-x}" = 0 ]; then echo "regress ok $t $m, 0 newly differing"
-    else echo "regress FAIL $t exit $rc, newly differing ${nd:-?} (report: $D/pgr/report/REPORT.md)"; fi >>"$D/ref.status"
+    if [ $rc = 0 ] && [ "${nd:-x}" = 0 ]; then echo "regress ok $(( $(now) - t )) $m, 0 newly differing"
+    else echo "regress FAIL $(( $(now) - t )) exit $rc, newly differing ${nd:-?} (report: $D/pgr/report/REPORT.md)"; fi >>"$D/ref.status"
   fi
   if ! skip iso; then
     t=$(now)
@@ -71,8 +72,8 @@ if [ "${QC_REF_CHAIN:-}" = 1 ]; then
       PGISOLATION_REPORT_DIR=$D/iso/report run pg_isolation --ignored --nocapture >"$D/iso.log" 2>&1
     rc=$?
     m=$(grep -o '[0-9]*/[0-9]* permutations' "$D/iso.log" | tail -1)
-    if [ $rc = 0 ] && [ "${m%%/*}" -ge 1647 ] 2>/dev/null; then echo "iso ok $t $m"
-    else echo "iso FAIL $t exit $rc, ${m:-no count} (1,647 needed)"; fi >>"$D/ref.status"
+    if [ $rc = 0 ] && [ "${m%%/*}" -ge 1647 ] 2>/dev/null; then echo "iso ok $(( $(now) - t )) $m"
+    else echo "iso FAIL $(( $(now) - t )) exit $rc, ${m:-no count} (1,647 needed)"; fi >>"$D/ref.status"
   fi
   if ! skip dump; then
     t=$(now)
@@ -80,8 +81,8 @@ if [ "${QC_REF_CHAIN:-}" = 1 ]; then
       PGDUMP_SRC=$D/pgr/src-repo run pg_dump --ignored --nocapture --exact pg_dump_tap >"$D/dump.log" 2>&1
     rc=$?
     m=$(grep -o '002_pg_dump.pl: [0-9]* passed, [0-9]* failed' "$D/dump.log" | tail -1)
-    if [ $rc = 0 ] && [ "$(echo "$m" | awk '{print ($2 >= 14609 && $4 == 0)}')" = 1 ]; then echo "dump ok $t ${m#002_pg_dump.pl: }"
-    else echo "dump FAIL $t exit $rc, ${m:-no count} (14,609 passed, 0 failed needed)"; fi >>"$D/ref.status"
+    if [ $rc = 0 ] && [ "$(echo "$m" | awk '{print ($2 >= 14609 && $4 == 0)}')" = 1 ]; then echo "dump ok $(( $(now) - t )) ${m#002_pg_dump.pl: }"
+    else echo "dump FAIL $(( $(now) - t )) exit $rc, ${m:-no count} (14,609 passed, 0 failed needed)"; fi >>"$D/ref.status"
   fi
   echo done >>"$D/ref.status"
   exit 0
@@ -98,8 +99,8 @@ trap 'cleanup; exit 130' INT TERM
 t=$(now)
 BASE=$(git merge-base "${QC_BASE:-origin/docs/postgres-architecture-strategy}" HEAD) || fail diff "$t" "no merge base"
 { git diff --name-only "$BASE"; git ls-files --others --exclude-standard; } | sort -u >"$D/changed"
-# Test binaries per changed path, beside the core set (lib, golden, wire, wire_waits: what the
-# train's crate tests caught, STATUS.md "Verification train"). CRASH adds the crash stage.
+# Test binaries per changed path, beside the core set (golden, wire, wire_waits: what the train's
+# crate tests caught, STATUS.md "Verification train"). CRASH adds the crash stage.
 tests_for() {
   case $1 in
     crates/pg-engine/tests/common/*|crates/pg-engine/Cargo.toml|Cargo.toml|Cargo.lock) echo ALL ;;
@@ -135,12 +136,15 @@ tests_for() {
     crates/pg-engine/src/types/collation*|crates/pg-engine/src/types/text.rs) echo locale ;;
   esac
 }
-SEL="lib golden wire wire_waits ${QC_TESTS:-}"
+SEL="golden wire wire_waits ${QC_TESTS:-}"
 [ -n "${QC_ALL:-}" ] && SEL="$SEL ALL"
 ENGINE=0
 while read -r f; do
   case $f in crates/pg-engine/*|Cargo.toml|Cargo.lock) ENGINE=1 ;; esac
   SEL="$SEL $(tests_for "$f")"
+  # The lib's unit tests cost a second build of the engine (cfg(test)): only for a changed file
+  # that has some.
+  case $f in crates/pg-engine/src/*.rs) grep -q '#\[test\]' "$f" 2>/dev/null && SEL="$SEL lib" ;; esac
 done <"$D/changed"
 if [ $ENGINE = 0 ]; then
   line diff ok "$t" "$(wc -l <"$D/changed") files changed, none in crates/pg-engine: nothing to check"
@@ -179,20 +183,30 @@ for l in sys.stdin:
         k = m["target"]["kind"][0]
         print(("lib" if k == "lib" else m["target"]["name"]) + sys.argv[1], m["executable"])
 ' "$1"; }
-cargo test --profile "$PROF" -p pg-engine --no-run $ARGS --test pg_regress --test pg_isolation --test pg_dump \
-  --message-format=json-render-diagnostics 2>"$D/build.log" | artifacts "" >"$D/bins"
-[ -s "$D/bins" ] && ! grep -q '^error' "$D/build.log" || fail build "$t" "$(grep -m1 -E '^error' "$D/build.log")"
+build() { cargo test --profile "$PROF" -p pg-engine --no-run --message-format=json-render-diagnostics "$@" 2>>"$D/build.log"; }
+: >"$D/build.log"; : >"$D/bins"
+# The engine and the reference harnesses first, so the reference suites start while the rest links.
+if [ $REF = 1 ]; then
+  build --test pg_regress --test pg_isolation --test pg_dump | artifacts "" >>"$D/bins"
+  [ -n "$(bin pg_dump)" ] || fail build "$t" "$(grep -m1 -E '^error' "$D/build.log")"
+  wait "$CONT" || fail containers "$T0" "$(tail -1 "$D/containers.log")"
+  : >"$D/ref.status"
+  export QC_REF_CHAIN=1 QC_PREFIX QC_PORTS QC_DIR="$D" QC_PROFILE="$PROF" QC_SKIP="${QC_SKIP:-}"
+  setsid "$TOOLS/quick-check.sh" </dev/null >"$D/ref-chain.log" 2>&1 &
+  REFPID=$!; KILLGRPS="$KILLGRPS $REFPID"
+  unset QC_REF_CHAIN
+fi
+build $ARGS | artifacts "" >>"$D/bins"
+[ -n "$(bin wire)" ] && ! grep -q '^error' "$D/build.log" || fail build "$t" "$(grep -m1 -E '^error' "$D/build.log")"
 if [ $CRASH = 1 ]; then
-  cargo test --profile "$PROF" -p pg-engine --no-run --test crash_random --message-format=json-render-diagnostics \
-    2>>"$D/build.log" | artifacts "" >>"$D/bins"
-  cargo test --profile "$PROF" -p pg-engine --features powerloss --no-run --test crash_random \
-    --message-format=json-render-diagnostics 2>>"$D/build.log" | artifacts @power >>"$D/bins"
+  build --test crash_random | artifacts "" >>"$D/bins"
+  build --features powerloss --test crash_random | artifacts @power >>"$D/bins"
   [ -n "$(bin crash_random@power)" ] || fail build "$t" "$(grep -m1 -E '^error' "$D/build.log")"
 fi
 line build ok "$t" "profile $PROF, $(wc -l <"$D/bins") test binaries"
 
 if ! skip clippy; then
-  wait "$CLIPPY"; rc=$?; KILLGRPS=
+  wait "$CLIPPY"; rc=$?
   [ $rc = 0 ] || fail clippy "$tc" "$(grep -m1 -E '^error' "$D/clippy.log")"
   CACHE=${QC_CLIPPY_CACHE:-$HOME/.cache/pg-engine-train/clippy}
   python3 -I - "$D/clippy.log" "$D/changed" "$CACHE/$BASE.txt" "$BASE" >"$D/clippy-new.txt" <<'PY'
@@ -228,16 +242,6 @@ PY
   line clippy ok "$tc" "$(grep -c ': warning: ' "$D/clippy.log") warnings, none new in changed files"
 fi
 
-# --- the reference suites, in the background -----------------------------------------------
-if [ $REF = 1 ]; then
-  wait "$CONT" || fail containers "$T0" "$(tail -1 "$D/containers.log")"
-  : >"$D/ref.status"
-  export QC_REF_CHAIN=1 QC_PREFIX QC_PORTS QC_DIR="$D" QC_PROFILE="$PROF" QC_SKIP="${QC_SKIP:-}"
-  setsid "$TOOLS/quick-check.sh" </dev/null >"$D/ref-chain.log" 2>&1 &
-  REFPID=$!; KILLGRPS="$KILLGRPS $REFPID"
-  unset QC_REF_CHAIN
-fi
-
 # --- crate tests and the crash stage -------------------------------------------------------
 t=$(now); : >"$D/tests.log"
 for s in $SEL; do
@@ -264,9 +268,9 @@ if [ $REF = 1 ]; then
       printed=$((printed + 1))
       set -- $(sed -n "${printed}p" "$D/ref.status")
       [ "$1" = done ] && break 2
-      step=$1 res=$2 st=$3; shift 3
-      [ "$res" = ok ] || fail "$step" "$st" "$*"
-      line "$step" ok "$st" "$*"
+      step=$1 res=$2 secs=$3; shift 3
+      [ "$res" = ok ] || { echo "qc $step FAIL ${secs}s $* (log: $D/$step.log)"; cleanup; exit 1; }
+      echo "qc $step ok ${secs}s $*"
     done
     [ $alive = 1 ] || fail regress "$T0" "the reference suites stopped early ($D/ref-chain.log)"
     sleep 5

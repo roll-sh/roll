@@ -32,6 +32,12 @@ if [ ! -f "$D/pgr/src-repo/src/bin/pg_dump/t/002_pg_dump.pl" ]; then
 fi
 U=$(id -u):$(id -g)
 have() { docker inspect -f '{{.Name}}' "$1" >/dev/null 2>&1; }
+# A helper made for another directory mounts the wrong one: make it again.
+for c in "$P-psql" "$P-dclient"; do
+  if have "$c" && ! docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$c" | grep -q "$D/pgr "; then
+    docker rm -f -v "$c" >/dev/null
+  fi
+done
 have "$P-rref" || docker run -d --name "$P-rref" -e POSTGRES_PASSWORD=pw \
   -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" "$IMG" >/dev/null
 have "$P-iref" || docker run -d --name "$P-iref" --network host -e POSTGRES_PASSWORD=pw \

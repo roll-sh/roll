@@ -3942,7 +3942,9 @@ fn big_bytea_values_go_out_in_linear_time() {
             .unwrap();
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(out.status.success(), "{text}{}", String::from_utf8_lossy(&out.stderr));
-        text.lines().find_map(|l| l.strip_prefix("big_bytea cpu_us=")).unwrap().parse().unwrap()
+        // (On libtest's "test ... " line.)
+        let at = text.split_once("big_bytea cpu_us=").unwrap_or_else(|| panic!("no CPU time in {text}")).1;
+        at[..at.find(|c: char| !c.is_ascii_digit()).unwrap_or(at.len())].parse().unwrap()
     };
     let (small, big) = (cpu(16), cpu(64));
     assert!(big < small.max(1000) * 8, "16 MB: {small} us, 64 MB: {big} us of CPU");
