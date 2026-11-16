@@ -1474,6 +1474,25 @@ A file sent as it is takes one byte range (`Range: bytes=…`, `Accept-Ranges: b
 plays a site's video and a download resumes: a 206 with `Content-Range`, a 416 past the end,
 and the whole file for several ranges or an `If-Range` that names another version.
 
+## Caching answers
+
+A web service's answers can be kept and answered by roll (Vercel's CDN with `s-maxage` and
+`stale-while-revalidate`, Netlify's and Render's edge caching) when its app says a shared cache may
+keep them: `CDN-Cache-Control: max-age=N` (RFC 9213, which only shared caches read), else
+`Cache-Control: s-maxage=N`. The owner's proxy (`resp_cache.rs`) keeps a 200's body (at most
+1 MiB, its length known) per environment, path and query, and the request headers it `Vary`s
+on, and answers the next GET or HEAD from it after the allow list, firewall, rate limit and
+access checks but before anything wakes: a sleeping service answers its cached pages asleep, and
+costs nothing for them. A stale answer within `stale-while-revalidate` is answered while one
+background request fetches it again (marked by a request extension no client can send). Never
+kept: `private`, `no-store`, `no-cache`, `Vary: *`, an answer that sets a cookie (roll's own
+affinity and rollout cookies go on after it's kept). A request with `Authorization`, a
+deployment's own URL, a gradual rollout's environment and a preview's feedback page never use it.
+It's bounded (32 MiB and 2,000 answers an environment, the least recently used going first),
+emptied whenever the live deployment changes, and lives on the owner (a takeover starts empty).
+Answers say `X-Roll-Cache: HIT`, `STALE` or `MISS` with `Age`, and a cached answer's access line
+is `by: cache`. Not yet: purging a path by hand (`roll apps purge`), and caching across nodes.
+
 ## Maintenance and draining
 
 An environment in maintenance (Render's maintenance mode; Settings' "Maintenance", `roll apps
@@ -2286,10 +2305,9 @@ put items 1–11 first. A second review that day (after #78, against the same si
 2. **Search links in roll.toml**: once roll search's #100 is on main, `[databases]` takes
    `kind = "search"` (apps-build's `DB_KINDS`), so a project file declares a search link and
    `roll apps export` writes it instead of naming it in its notes.
-3. **Response caching for web services** (Vercel's CDN with `s-maxage` and ISR, Netlify's, Render's
-   edge caching): the owner's proxy keeps answers that say `Cache-Control: s-maxage` or
-   `stale-while-revalidate` (per environment, bounded, keyed by host, path, query and `Vary`),
-   cleared on every deploy, so a sleeping service answers cached pages without waking.
+3. **Purging cached answers** (Vercel's and Netlify's on-demand revalidation): `POST
+   …/environments/{env}/cache/purge {paths?}` and `roll apps purge`, so an app can revalidate a
+   page when its data changes, not only by time.
 4. **Visitor analytics and traces** (Vercel's Web Analytics and Observability, Netlify's, Cloud Run's
    Cloud Trace): page views, referrers and countries from the access log already kept (no script
    to add), then an OTLP endpoint per environment with spans kept in roll search.

@@ -5,7 +5,8 @@
 //! variables: `FAKE_UNHEALTHY=1` answers 500 on every path, `FAKE_BOOT_MS` delays its first
 //! answer, `FAKE_SLOW_MS` delays every answer (requests pile up; one still waiting when the instance
 //! stops answers 502, as a killed process's would; `/sleep/<ms>` is one such request), `FAKE_MISSING=<prefix>` answers
-//! 404 for paths under it, `FAKE_EXIT=<code>` makes it a
+//! 404 for paths under it, `FAKE_CACHE=<value>` answers with it as `Cache-Control`, and counts
+//! the requests it answers at `/count`, `FAKE_EXIT=<code>` makes it a
 //! job that exits with that code (cron runs, workers). The fake builder fails a build whose tree
 //! has a file `FAIL_BUILD`, and takes as many milliseconds as a file `SLOW_BUILD` says.
 
@@ -204,6 +205,8 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
     let boot = var(&spec, "FAKE_BOOT_MS").and_then(|v| v.parse().ok()).map(Duration::from_millis);
     let slow = var(&spec, "FAKE_SLOW_MS").and_then(|v| v.parse().ok()).map(Duration::from_millis);
     let missing = var(&spec, "FAKE_MISSING").map(str::to_string);
+    let cache = var(&spec, "FAKE_CACHE").and_then(|v| axum::http::HeaderValue::from_str(v).ok());
+    let answered = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let echo: Vec<(String, String)> = var(&spec, "FAKE_ECHO")
         .map(|names| names.split(',').filter_map(|n| var(&spec, n).map(|v| (n.to_string(), v.to_string()))).collect())
         .unwrap_or_default();
@@ -213,9 +216,13 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
     log.line(format!("listening on {}", spec.port.unwrap_or(0)));
     let (name, dep, kill) = (spec.name.clone(), spec.deployment.clone(), killed.clone());
     let app = axum::Router::new().fallback(move |req: Request| {
-        let (name, dep, echo, sick, missing, killed) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), kill.clone());
+        let (name, dep, echo, sick, missing, killed, cache, answered) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), kill.clone(), cache.clone(), answered.clone());
         async move {
             use axum::response::IntoResponse;
+            if req.uri().path() == "/count" {
+                return answered.load(std::sync::atomic::Ordering::SeqCst).to_string().into_response();
+            }
+            answered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if missing.as_deref().is_some_and(|m| req.uri().path().starts_with(m)) {
                 return (axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "path": req.uri().path() }))).into_response();
             }
@@ -243,7 +250,11 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             let cookie = req.headers().get("cookie").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             let version = format!("{:?}", req.version());
             let te = req.headers().get("te").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
-            (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te }))).into_response()
+            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te }))).into_response();
+            if let Some(c) = cache {
+                r.headers_mut().insert(axum::http::header::CACHE_CONTROL, c);
+            }
+            r
         }
     });
     // Served by hand so a kill ends every connection too, kept-alive ones included, as the
