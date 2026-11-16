@@ -1543,9 +1543,13 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Allowed hosts for previews' egress** (see "Egress"): `egress: "roll"` is built; next a list
-   (`egress: ["api.stripe.com"]`) through a forwarding proxy on the network's gateway, the only
-   way out, with what it refused said in the activity.
+1. **Pull-request previews of Git URL services** (Vercel's and Railway's PR environments):
+   roll apps hands its `GitPush` a `pull: Option<GitPull { number, title, url, fork }>` from
+   GitHub's `pull_request` and GitLab's merge request events (feature/roll-apps-next, after #99),
+   every claim checked against the repository's refs first. A same-repo pull request names its
+   branch's preview by number and title; a fork's (`pull/N`) runs only once a writer of the
+   service approves that head, resolving secrets untrusted; a close deletes it. The title is
+   shown as plain words only.
 2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
