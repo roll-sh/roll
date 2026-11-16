@@ -127,6 +127,23 @@ pub struct AwsRole {
     pub created_by: String,
 }
 
+/// A role's name: letters, digits, - and _, 64 at most.
+fn check_role_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
+        return Err(Error::BadRequest("a role's name is letters, digits, - and _ (64 at most)".into()));
+    }
+    Ok(())
+}
+
+/// `PATCH …/aws-roles/{id}`: what changes.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AwsRoleChange {
+    pub name: Option<String>,
+    pub role_arn: Option<String>,
+    pub trust: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewAwsRole {
@@ -220,34 +237,10 @@ impl Secrets {
     /// token of roll's issuer for it) and that its trust refuses another project.
     pub fn add_aws_role(&self, project: &str, n: NewAwsRole, caller: &Caller) -> Result<AwsRole> {
         caller.need(Action::Admin, &Scope::project(project))?;
-        let sts = self.sts.clone().ok_or_else(|| Error::BadRequest("AWS roles aren't on this server".into()))?;
-        if n.name.is_empty() || n.name.len() > 64 || !n.name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
-            return Err(Error::BadRequest("a role's name is letters, digits, - and _ (64 at most)".into()));
-        }
-        check_role(&n.role_arn)?;
+        check_role_name(&n.name)?;
         let trust = n.trust.unwrap_or_else(|| "external_id".into());
-        if !TRUSTS.contains(&trust.as_str()) {
-            return Err(Error::BadRequest("trust is external_id or oidc".into()));
-        }
         self.project(project)?;
-        let issuing = match (&self.clouds, &self.keys) {
-            (Some(c), Ok(keys)) => Some(Issuing { url: c.issuer.clone(), keys: keys.clone() }),
-            _ => None,
-        };
-        let pinned = if trust == "oidc" {
-            format!("a federated principal for roll's issuer ({}) with the conditions aud = {AWS_AUDIENCE} and sub = {}", issuing.as_ref().map(|i| i.url.as_str()).unwrap_or("not on this server"), crate::issuer::subject(project))
-        } else {
-            format!("roll's role with sts:ExternalId = {}", external_id(project))
-        };
-        let probe = format!("prj_probe_{}", names::new_id("p", 12));
-        match session(&*sts, &self.db, issuing.as_ref(), &probe, &n.role_arn, &trust, "roll-check", 900) {
-            Ok(_) => return Err(Error::BadRequest(format!("{}'s trust takes any of roll's projects: trust {pinned}, so roll assumes it for this project and nobody else's", n.role_arn))),
-            // Only AWS refusing the made-up project shows the trust pins this one: any other error
-            // (throttling, AWS unable to fetch roll's keys) proves nothing, and nothing is registered.
-            Err(why) if !refused(&why) => return Err(Error::BadRequest(format!("roll couldn't check {}'s trust: {why}; try again", n.role_arn))),
-            Err(_) => {}
-        }
-        session(&*sts, &self.db, issuing.as_ref(), project, &n.role_arn, &trust, "roll-check", 900).map_err(|why| Error::BadRequest(format!("roll couldn't assume {}: {why} (its trust policy must trust {pinned})", n.role_arn)))?;
+        self.verify_role(project, &n.role_arn, &trust)?;
         let now = self.db.now_ms()?;
         let r = AwsRole { id: names::new_id("awr", 16), name: n.name, role_arn: n.role_arn, trust, created_at: now, created_by: caller.principal.clone() };
         self.db.write(|c| {
@@ -258,6 +251,75 @@ impl Secrets {
             audit::record(c, project, caller, "aws_role.add", None, None, &[], &format!("added AWS role {} ({})", r.name, r.role_arn), now)
         })?;
         Ok(r)
+    }
+
+    /// Change a role in place: its name, ARN or trust (a role made again, a move to roll's issuer).
+    /// A new ARN or trust is proved as a new role is (roll assumes it for this project, and its
+    /// trust refuses another) before anything changes; leases issued under the old one run out.
+    pub fn update_aws_role(&self, project: &str, id: &str, ch: AwsRoleChange, caller: &Caller) -> Result<AwsRole> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        self.project(project)?;
+        let old = self.aws_roles(project, caller)?.into_iter().find(|r| r.id == id).ok_or_else(|| Error::NotFound(format!("no AWS role {id}")))?;
+        let name = ch.name.unwrap_or_else(|| old.name.clone());
+        check_role_name(&name)?;
+        let (role_arn, trust) = (ch.role_arn.unwrap_or_else(|| old.role_arn.clone()), ch.trust.unwrap_or_else(|| old.trust.clone()));
+        // IAM users rotate through an ExternalId role (iam.rs): said before AWS is asked anything.
+        let user = |c: &code_sql::Conn<'_>| c.query_row("SELECT name FROM aws_users WHERE role_id = ? LIMIT 1", [id], |r| r.get::<_, String>(0)).optional();
+        if trust != "external_id"
+            && let Some(u) = self.db.read(user)?
+        {
+            return Err(Error::Conflict("in_use", format!("{u} rotates its keys through {}: IAM users need a role that trusts roll by ExternalId", old.name)));
+        }
+        if role_arn != old.role_arn || trust != old.trust {
+            self.verify_role(project, &role_arn, &trust)?;
+        }
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            if c.query_row("SELECT 1 FROM aws_roles WHERE project_id = ? AND name = ? AND id <> ?", [project, &name, id], |_| Ok(())).optional()?.is_some() {
+                return Err(Error::Conflict("exists", format!("an AWS role named {name} exists")));
+            }
+            // Again in the write: a user added meanwhile.
+            if trust != "external_id"
+                && let Some(u) = user(c)?
+            {
+                return Err(Error::Conflict("in_use", format!("{u} rotates its keys through {}: IAM users need a role that trusts roll by ExternalId", old.name)));
+            }
+            if c.execute("UPDATE aws_roles SET name = ?, role_arn = ?, trust = ? WHERE id = ? AND project_id = ?", params![name, role_arn, trust, id, project])? == 0 {
+                return Err(Error::NotFound(format!("no AWS role {id}")));
+            }
+            audit::record(c, project, caller, "aws_role.update", None, None, &[], &format!("changed AWS role {name} ({role_arn}, trust {trust})"), now)
+        })?;
+        Ok(AwsRole { name, role_arn, trust, ..old })
+    }
+
+    /// That roll can assume `role_arn` for this project with `trust`, and that its trust refuses
+    /// another project (only AWS refusing a made-up project proves it pins this one).
+    fn verify_role(&self, project: &str, role_arn: &str, trust: &str) -> Result<()> {
+        let sts = self.sts.clone().ok_or_else(|| Error::BadRequest("AWS roles aren't on this server".into()))?;
+        check_role(role_arn)?;
+        if !TRUSTS.contains(&trust) {
+            return Err(Error::BadRequest("trust is external_id or oidc".into()));
+        }
+        let trust = trust.to_string();
+        let issuing = match (&self.clouds, &self.keys) {
+            (Some(c), Ok(keys)) => Some(Issuing { url: c.issuer.clone(), keys: keys.clone() }),
+            _ => None,
+        };
+        let pinned = if trust == "oidc" {
+            format!("a federated principal for roll's issuer ({}) with the conditions aud = {AWS_AUDIENCE} and sub = {}", issuing.as_ref().map(|i| i.url.as_str()).unwrap_or("not on this server"), crate::issuer::subject(project))
+        } else {
+            format!("roll's role with sts:ExternalId = {}", external_id(project))
+        };
+        let probe = format!("prj_probe_{}", names::new_id("p", 12));
+        match session(&*sts, &self.db, issuing.as_ref(), &probe, role_arn, &trust, "roll-check", 900) {
+            Ok(_) => return Err(Error::BadRequest(format!("{}'s trust takes any of roll's projects: trust {pinned}, so roll assumes it for this project and nobody else's", role_arn))),
+            // Only AWS refusing the made-up project shows the trust pins this one: any other error
+            // (throttling, AWS unable to fetch roll's keys) proves nothing, and nothing is registered.
+            Err(why) if !refused(&why) => return Err(Error::BadRequest(format!("roll couldn't check {}'s trust: {why}; try again", role_arn))),
+            Err(_) => {}
+        }
+        session(&*sts, &self.db, issuing.as_ref(), project, role_arn, &trust, "roll-check", 900).map_err(|why| Error::BadRequest(format!("roll couldn't assume {}: {why} (its trust policy must trust {pinned})", role_arn)))?;
+        Ok(())
     }
 
     /// Delete a role no key links to.

@@ -55,6 +55,15 @@ pub struct NewAwsUser {
     pub user: String,
 }
 
+/// `PATCH …/aws-users/{id}`: a new name, or another ExternalId role in the project to rotate the
+/// user's keys through (the IAM user stays: keys already issued keep working).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AwsUserChange {
+    pub name: Option<String>,
+    pub role: Option<String>,
+}
+
 /// An IAM user's name: `[\w+=,.@-]`, 1–64.
 fn check_user(u: &str) -> bool {
     (1..=64).contains(&u.len()) && u.chars().all(|c| c.is_ascii_alphanumeric() || "_+=,.@-".contains(c))
@@ -172,6 +181,45 @@ impl Secrets {
             audit::record(c, project, caller, "aws_user.add", None, None, &[], &format!("added AWS user {} ({})", u.name, u.user), now)
         })?;
         Ok(u)
+    }
+
+    /// Rename a user, or move its rotation to another ExternalId role of the project (proved, as a
+    /// new user is, by listing its access keys through that role, before anything changes).
+    pub fn update_aws_user(&self, project: &str, id: &str, ch: AwsUserChange, caller: &Caller) -> Result<AwsUser> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        self.project(project)?;
+        let old = self.aws_users(project, caller)?.into_iter().find(|u| u.id == id).ok_or_else(|| Error::NotFound(format!("no AWS user {id}")))?;
+        let name = ch.name.unwrap_or_else(|| old.name.clone());
+        if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
+            return Err(Error::BadRequest("a name is letters, digits, - and _ (64 at most)".into()));
+        }
+        let role = ch.role.unwrap_or_else(|| old.role.clone());
+        let arn: String = self
+            .db
+            .read(|c| c.query_row("SELECT role_arn FROM aws_roles WHERE id = ? AND project_id = ? AND COALESCE(trust, 'external_id') = 'external_id'", [role.as_str(), project], |r| r.get(0)).optional())?
+            .ok_or_else(|| Error::BadRequest(format!("no AWS role {role} in this project that trusts roll by ExternalId")))?;
+        if role != old.role {
+            let sts = self.sts.clone().ok_or_else(|| Error::BadRequest("AWS isn't on this server".into()))?;
+            sts.iam_keys(&arn, &external_id(project), &old.user).map_err(|why| Error::BadRequest(format!("roll couldn't list {}'s access keys as {arn}: {why}", old.user)))?;
+        }
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            if c.query_row("SELECT 1 FROM aws_users WHERE project_id = ? AND name = ? AND id <> ?", [project, &name, id], |_| Ok(())).optional()?.is_some() {
+                return Err(Error::Conflict("exists", format!("an AWS user named {name} exists")));
+            }
+            // Two registrations would fight over its two key slots.
+            if let Some(other) = c
+                .query_row("SELECT u.name FROM aws_users u JOIN aws_roles r ON r.id = u.role_id WHERE u.project_id = ? AND u.user_name = ? AND r.role_arn = ? AND u.id <> ?", [project, &old.user, &arn, id], |r| r.get::<_, String>(0))
+                .optional()?
+            {
+                return Err(Error::Conflict("exists", format!("{other} already rotates {}'s keys", old.user)));
+            }
+            if c.execute("UPDATE aws_users SET name = ?, role_id = ? WHERE id = ? AND project_id = ?", params![name, role, id, project])? == 0 {
+                return Err(Error::NotFound(format!("no AWS user {id}")));
+            }
+            audit::record(c, project, caller, "aws_user.update", None, None, &[], &format!("changed AWS user {name} ({}, through role {role})", old.user), now)
+        })?;
+        Ok(AwsUser { name, role, ..old })
     }
 
     /// Delete a user no key links to and with no retired key still to delete.

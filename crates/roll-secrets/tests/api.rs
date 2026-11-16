@@ -2072,6 +2072,12 @@ async fn an_aws_role_gives_each_lease_a_short_lived_session() {
     let before = *api.sts.sessions.lock().unwrap();
     let v = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "app:web" }))).await;
     assert!(v["values"]["AWS_SESSION_TOKEN"].as_str().unwrap().starts_with("token-") && *api.sts.sessions.lock().unwrap() == before + 1, "{v}");
+    // Edited in place: a new ARN is proved as a new role is, and nothing changes when it isn't.
+    let role_path = format!("/aws-roles/{}", made["id"].as_str().unwrap());
+    let (s, _) = api.call(Method::PATCH, &role_path, Some(json!({ "role_arn": "arn:aws:iam::123456789012:role/gone" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "an ARN roll can't assume");
+    let renamed = api.ok(Method::PATCH, &role_path, Some(json!({ "name": "deploy-web" }))).await;
+    assert_eq!((renamed["name"].as_str(), renamed["role_arn"].as_str()), (Some("deploy-web"), Some("arn:aws:iam::123456789012:role/roll-oidc")));
 }
 
 #[tokio::test]
@@ -2082,6 +2088,13 @@ async fn an_iam_users_access_keys_take_turns() {
     let (s, _) = api.call(Method::POST, "/aws-users", Some(json!({ "name": "ci", "role": role["id"], "user": "nobody" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "a user the role can't see is refused");
     let user = api.ok(Method::POST, "/aws-users", Some(json!({ "name": "ci", "role": role["id"], "user": "legacy-ci" }))).await;
+    // Its rotation moves to another ExternalId role, proved by listing its keys there; a role that
+    // trusts roll's issuer can't take IAM users, and one that has them can't switch to it.
+    let other = api.ok(Method::POST, "/aws-roles", Some(json!({ "name": "keys-2", "role_arn": "arn:aws:iam::123456789012:role/roll" }))).await;
+    let moved = api.ok(Method::PATCH, &format!("/aws-users/{}", user["id"].as_str().unwrap()), Some(json!({ "role": other["id"] }))).await;
+    assert_eq!(moved["role"], other["id"]);
+    let (s, _) = api.call(Method::PATCH, &format!("/aws-roles/{}", other["id"].as_str().unwrap()), Some(json!({ "trust": "oidc" }))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "its IAM user needs ExternalId trust");
     let link = |field: &str| json!({ "kind": "aws_iam_user", "ref": user["id"], "field": field, "mode": "managed" });
     api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "AWS_ACCESS_KEY_ID", "link": link("access_key_id") }, { "op": "set", "key": "AWS_SECRET_ACCESS_KEY", "link": link("secret_access_key") }] }))).await;
     let key = || async { api.values("production", "/").await["values"]["AWS_ACCESS_KEY_ID"].as_str().unwrap().to_string() };

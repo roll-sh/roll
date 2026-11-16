@@ -2341,9 +2341,11 @@ isn't in the workspace is 404.
 | `GET /aws-roles` | | `AwsRole[]` (`read` on the project) |
 | `POST /aws-roles` | `{name, role_arn}` | 201 `AwsRole` after assuming it (admin; 400 when its trust policy doesn't pin `sts:ExternalId`) |
 | `DELETE /aws-roles/{id}` | | 204 (admin; 409 `in_use` while a key links to it) |
+| `PATCH /aws-roles/{id}` | `{name?, role_arn?, trust?}` | `AwsRole` (admin; a new ARN or trust is proved as a new role's is, before anything changes; 409 `in_use` switching a role IAM users rotate through away from `external_id`; leases already issued run out) |
 | `GET /aws-users` | | `AwsUser[]` (`read` on the project) |
 | `POST /aws-users` | `{name, role, user}` | 201 `AwsUser` (`admin`; lists the user's keys as the role first: 400 with AWS's code) |
 | `DELETE /aws-users/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
+| `PATCH /aws-users/{id}` | `{name?, role?}` | `AwsUser` (admin; another ExternalId role of the project, proved by listing the user's keys through it; keys already issued keep working) |
 | `GET /rotations` | | `Rotation[]`: every managed credential the caller may read (environment, keys, resource, `rotate_days`, `issued_at`, `next_due`, `last_error`) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
