@@ -8,8 +8,8 @@
 //! - CORS answers only the dashboard's origins (`ROLL_DASHBOARD_ORIGIN`; on loopback, by default,
 //!   any localhost port), with credentials: people sign in with a session cookie
 //!   (docs/accounts.md), which the gate resolves on every request. An admin's session opens what
-//!   the token does; anyone else's opens roll code, the agents and their own projects, and gets
-//!   403 on the rest.
+//!   the token does; anyone else's opens roll code, the agents, their own projects and their own
+//!   search clusters, and gets 403 on the rest.
 
 use crate::Args;
 use roll_auth::{Access, AdminToken, Gate, Origins, Rule};
@@ -62,6 +62,10 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/accounts", access: Access::Product("accounts: sign-in, then the session decides") },
     // Workspace projects: the operator and every signed-in user, each seeing their own.
     Rule { route: "/v1/workspace", access: Access::User("workspace projects: a user's own") },
+    // roll search's control plane: the operator and every signed-in person, each seeing their own
+    // clusters (search scopes by SignedIn; another's answers 404). Clusters' data plane is the
+    // REST port, with the cluster's own credentials.
+    Rule { route: "/v1/search", access: Access::User("search clusters: a user's own") },
     // Node-to-node hops are signed with the cluster secret; computes fetch WAL with their token.
     Rule { route: "/internal", access: Access::Product("internal: signed hops and the WAL token") },
     // Storage: IAM users signed in to the dashboard (console sessions) act as themselves.

@@ -204,7 +204,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
               <p className="mt-1 text-[12px] text-muted">
                 {service.source.kind === "git"
                   ? env.hook
-                    ? `Add its URL as the repository's push webhook (GitHub: Settings → Webhooks, content type application/json; GitLab: Webhooks, push events): a push to ${env.branch ?? "its branch"} deploys ${env.name} at once instead of within five minutes.`
+                    ? `Add its URL as the repository's push webhook (GitHub: Settings → Webhooks, content type application/json, push and pull request events; GitLab: Webhooks, push and merge request events): a push to ${env.branch ?? "its branch"} deploys ${env.name} at once instead of within five minutes, and pull requests get previews.`
                     : "A secret URL for the repository's push webhook: pushes deploy at once instead of within five minutes."
                   : env.hook
                     ? `A POST to its URL deploys ${env.name}, from CI or a registry's webhook${service.source.kind === "image" ? " (?image= another tag of the same image)" : ""}.`
