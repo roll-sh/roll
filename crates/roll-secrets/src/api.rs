@@ -611,8 +611,8 @@ async fn digest(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
 /// answer), it answers as soon as the digest differs from `since`, or with the same digest
 /// when `wait` runs out (`GET …/digest?since=&wait=`, and roll apps' redeploys in process). It
 /// reads the project's change counter each second (cheap) and works the digest out again only
-/// when that moved, or every 10 s (what the counter can't see: a live link's value, a folder
-/// another project shares). At most 32 held per principal and 4096 per node; past that it answers
+/// when that moved (one reader per node and project, `subscribe`), or every 10 s (what the counter
+/// can't see: a live link's value, a folder another project shares). At most 32 held per principal and 4096 per node; past that it answers
 /// at once.
 pub async fn wait_digest(s: Arc<Secrets>, project: String, env: String, path: String, since: Option<String>, wait: u64, c: Caller) -> crate::Result<String> {
     let wait = wait.min(25);
@@ -625,26 +625,59 @@ pub async fn wait_digest(s: Arc<Secrets>, project: String, env: String, path: St
         return Ok(d);
     }
     let Some(_held) = Held::take(&c.principal) else { return Ok(d) };
-    let marker = |s: Arc<Secrets>| {
+    let first = {
         let project = project.clone();
-        blocking(s, move |s| s.change_marker(&project))
+        blocking(s.clone(), move |s| s.change_marker(&project)).await?
     };
+    let mut marker = subscribe(&s, &project, first);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
-    let mut seen = marker(s.clone()).await?;
-    let mut worked_out = tokio::time::Instant::now();
     while tokio::time::Instant::now() < deadline {
-        tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(1))).await;
-        let now = marker(s.clone()).await?;
-        if now != seen || worked_out.elapsed() >= std::time::Duration::from_secs(10) {
-            seen = now;
-            worked_out = tokio::time::Instant::now();
-            d = read(s.clone()).await?;
-            if since.as_deref() != Some(d.as_str()) {
-                break;
-            }
+        // Woken when the project's counter moves, else every 10 s (what it can't see).
+        let next = deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
+        if let Ok(Err(_)) = tokio::time::timeout_at(next, marker.changed()).await {
+            tokio::time::sleep_until(next).await; // no reader (can't happen while subscribed): wait, never spin
+        }
+        d = read(s.clone()).await?;
+        if since.as_deref() != Some(d.as_str()) {
+            break;
         }
     }
     Ok(d)
+}
+
+/// One reader per node and project of a project's change counter, for every poll held on it: it
+/// reads the counter each second while anyone's subscribed and wakes them when it moves, then
+/// ends (4096 held polls cost a query a second per project, not 4096).
+static MARKERS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<(i64, i64)>>>> = std::sync::LazyLock::new(Default::default);
+
+fn subscribe(s: &Arc<Secrets>, project: &str, first: (i64, i64)) -> tokio::sync::watch::Receiver<(i64, i64)> {
+    // Keyed by the store too: tests run several in one process.
+    let key = format!("{:p}/{project}", Arc::as_ptr(s));
+    let mut m = MARKERS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(tx) = m.get(&key) {
+        return tx.subscribe();
+    }
+    let (tx, rx) = tokio::sync::watch::channel(first);
+    m.insert(key.clone(), tx.clone());
+    let (s, project) = (s.clone(), project.to_string());
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            {
+                // Under the map's lock, so a subscriber arriving now finds no stale reader.
+                let mut m = MARKERS.lock().unwrap_or_else(|e| e.into_inner());
+                if tx.receiver_count() == 0 {
+                    m.remove(&key);
+                    return;
+                }
+            }
+            let p = project.clone();
+            if let Ok(now) = blocking(s.clone(), move |s| s.change_marker(&p)).await {
+                tx.send_if_modified(|v| std::mem::replace(v, now) != now);
+            }
+        }
+    });
+    rx
 }
 
 #[derive(Deserialize)]
