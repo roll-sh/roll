@@ -239,6 +239,11 @@ impl Sources for CodeSources {
         Ok(f.filter(|f| f.mode.is_file() && f.data.len() <= 64 << 10).map(|f| f.data.to_vec()))
     }
 
+    fn any_path_matches(&self, patterns: &[String], paths: &[String]) -> bool {
+        let patterns: Vec<code_control::review::pattern::Pattern> = patterns.iter().filter_map(|p| code_control::review::pattern::Pattern::new(p)).collect();
+        paths.iter().any(|p| code_control::review::pattern::any_match(&patterns, p))
+    }
+
     async fn touches(&self, repo: &str, from: &str, to: &str, patterns: &[String]) -> anyhow::Result<bool> {
         let (this, repo, from, to) = (self.clone(), repo.to_string(), from.to_string(), to.to_string());
         let patterns: Vec<code_control::review::pattern::Pattern> = patterns.iter().filter_map(|p| code_control::review::pattern::Pattern::new(p)).collect();
