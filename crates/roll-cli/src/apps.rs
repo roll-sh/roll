@@ -558,8 +558,8 @@ pub enum AppsCmd {
     },
     /// Run a command here, on this machine, with an environment's variables (Railway's
     /// `railway run`): `roll apps exec -- npm run dev`. `PORT` and `ROLL_*` are left out (they're
-    /// the platform's), sealed variables can't be (they're never shown again), and `*.internal`
-    /// names only resolve inside roll (`roll apps proxy` reaches a private service from here).
+    /// the platform's), sealed variables can't be (they're never shown again), and a linked
+    /// service's `*.internal` URL points at a local tunnel to it while the command runs.
     /// Exits with the command's exit code.
     Exec {
         #[command(flatten)]
@@ -1100,20 +1100,30 @@ fn secret_env_file(name: &str) -> bool {
 
 /// `…/tunnel` for each connection to `127.0.0.1:local`: its bytes copied both ways.
 async fn proxy(api: &Api, env: &str, what: &str, port: u16, local: u16) -> anyhow::Result<()> {
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let l = tokio::net::TcpListener::bind(("127.0.0.1", local)).await.map_err(|e| anyhow::anyhow!("127.0.0.1:{local} is taken ({e}): pick another with --local-port"))?;
+    eprintln!("127.0.0.1:{local} → {what}:{port} (Ctrl-C ends it)");
+    let (url, headers) = tunnel_to(api, env);
+    tokio::select! {
+        r = tunnels(url, headers, l) => r,
+        _ = tokio::signal::ctrl_c() => Ok(()),
+    }
+}
+
+/// Environment `env`'s tunnel URL and the headers that open it.
+fn tunnel_to(api: &Api, env: &str) -> (String, Vec<(String, String)>) {
     let base = api.base.strip_prefix("http").map(|rest| format!("ws{rest}")).unwrap_or_else(|| api.base.clone());
-    let url = format!("{base}{env}/tunnel");
     let mut headers: Vec<(String, String)> = api.headers.clone();
     if let Some(k) = &api.key {
         headers.push(("authorization".into(), format!("Bearer {k}")));
     }
-    eprintln!("127.0.0.1:{local} → {what}:{port} (Ctrl-C ends it)");
+    (format!("{base}{env}/tunnel"), headers)
+}
+
+/// Every connection to `l` carried through a tunnel of its own (`tunnel_to`).
+async fn tunnels(url: String, headers: Vec<(String, String)>, l: tokio::net::TcpListener) -> anyhow::Result<()> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     loop {
-        let (conn, _) = tokio::select! {
-            a = l.accept() => a?,
-            _ = tokio::signal::ctrl_c() => return Ok(()),
-        };
+        let (conn, _) = l.accept().await?;
         let mut req = url.as_str().into_client_request()?;
         for (k, v) in &headers {
             req.headers_mut().insert(reqwest::header::HeaderName::from_bytes(k.as_bytes())?, v.parse()?);
@@ -2561,6 +2571,30 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             if !sealed.is_empty() {
                 eprintln!("not set here (sealed, never shown again): {}", sealed.join(", "));
             }
+            // A linked service's private URL (`http://<name>.<env>.internal:<port>`) pointed at a
+            // local tunnel to it, as `roll apps proxy` makes one, for as long as the command runs.
+            let mut vars = vars;
+            let mut tunneled = Vec::new();
+            let links = api.get(&format!("/v1/apps/services/{}/links", enc(&s(&svc["id"])))).await?;
+            for l in links.as_array().into_iter().flatten().filter(|l| l["kind"] == "service") {
+                let other = api.get(&format!("/v1/apps/services/{}", enc(&s(&l["ref"])))).await?;
+                let internal = format!("{}.{}.internal:{}", s(&other["name"]), target.env, other["run"]["port"].as_u64().unwrap_or(8080));
+                if !vars.iter().any(|(_, v)| v.contains(&internal)) {
+                    continue;
+                }
+                let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+                let local = listener.local_addr()?.to_string();
+                for (_, v) in vars.iter_mut().filter(|(_, v)| v.contains(&internal)) {
+                    *v = v.replace(&internal, &local);
+                }
+                eprintln!("{local} → {} ({}), for {}'s link", s(&other["name"]), target.env, s(&svc["name"]));
+                let (url, headers) = tunnel_to(api, &env_path(&other, &target.env));
+                tunneled.push(tokio::spawn(async move {
+                    if let Err(e) = tunnels(url, headers, listener).await {
+                        eprintln!("a tunnel ended: {e:#}");
+                    }
+                }));
+            }
             let internal: Vec<&str> = vars.iter().filter(|(_, v)| v.contains(".internal")).map(|(k, _)| k.as_str()).collect();
             if !internal.is_empty() {
                 eprintln!("{} name a private address (*.internal) that only resolves inside roll: `roll apps proxy` reaches one from here", internal.join(", "));
@@ -2571,6 +2605,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 .status()
                 .await
                 .with_context(|| format!("couldn't run {}", command[0]))?;
+            for t in tunneled {
+                t.abort();
+            }
             match status.code() {
                 Some(0) => return Ok(()),
                 Some(code) => std::process::exit(code),

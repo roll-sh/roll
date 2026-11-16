@@ -41,9 +41,9 @@ impl Apps {
     /// `POST /v1/apps/hooks/{service}/{env}/{token}[?image=]`: deploy, as the hook. Anything
     /// that isn't a live hook is the same 404, so the URL tells a guesser nothing. A Git URL
     /// service's hook is also its repository's push webhook (GitHub's or GitLab's `push` event
-    /// as `payload`): a push to the environment's branch deploys that commit at once, keyed by
-    /// it as the five-minute watch's deploy is (a redelivery, or the watch, makes no second one);
-    /// another branch, a deleted branch, a `[skip ci]` commit or a ping is `Ignored`. A branch no
+    /// as `payload`): a push deploys every environment that follows the pushed branch at once,
+    /// keyed by the commit as the five-minute watch's deploy is (a redelivery, or the watch, makes
+    /// no second one); a deleted branch, a `[skip ci]` commit or a ping is `Ignored`. A branch no
     /// environment follows goes to roll previews once the repository agrees ([`GitPush`]).
     ///
     /// [`GitPush`]: crate::integrations::GitPush
@@ -56,7 +56,6 @@ impl Apps {
             return Err(none());
         }
         let mut body = json!({ "message": "deploy hook" });
-        let mut key = None;
         if let (Source::Git { .. }, Some(w)) = (&svc.source, payload.as_ref()) {
             match push_of(w) {
                 Push::Ping => return Ok(HookOutcome::Ignored("pong".into())),
@@ -64,41 +63,69 @@ impl Apps {
                 Push::Ignored(why) => return Ok(HookOutcome::Ignored(why)),
                 Push::Branches(moved) => {
                     let Source::Git { url, .. } = &svc.source else { unreachable!("matched above") };
+                    // One webhook for every environment (Render's, Railway's): each branch the push
+                    // moved deploys every environment that follows it, whichever environment's hook
+                    // it was posted to; a branch none follows is roll previews' (when it's on this
+                    // node). Only a branch's head per the repository's refs deploys, so this hook
+                    // can do no more than the five-minute watch would, sooner.
                     let sid = service.to_string();
                     let envs = self.db(move |s| s.environments(&sid)).await?;
-                    // Each branch the push moved (Bitbucket's can move several): one no
-                    // environment follows is roll previews' (when it's on this node); this
-                    // environment's own deploys; the rest are another environment's hook's.
-                    let (mut said, mut mine) = (Vec::new(), None);
+                    let remote = self.git_remote(service, url).await;
+                    let (mut said, mut deployed) = (Vec::new(), Vec::new());
                     for p in moved {
-                        let followed = envs.iter().any(|e| e.branch.as_deref() == Some(p.branch.as_str()));
-                        if let (false, Some(pushes)) = (followed, self.pushes.get()) {
-                            said.push(self.hand_to_previews(pushes.clone(), service, url, p).await);
-                        } else if row.branch.as_deref() == Some(p.branch.as_str()) {
-                            mine = Some(p);
-                        } else {
-                            said.push(match row.branch.as_deref() {
-                                Some(follows) => format!("a push to {}; {env} follows {follows}", p.branch),
-                                None => format!("{env} follows no branch: set its branch to deploy on push"),
+                        let following: Vec<&crate::store::EnvRow> = envs.iter().filter(|e| !e.ephemeral && e.branch.as_deref() == Some(p.branch.as_str())).collect();
+                        if following.is_empty() {
+                            said.push(match self.pushes.get() {
+                                Some(pushes) => self.hand_to_previews(pushes.clone(), service, url, p).await,
+                                None => format!("a push to {}: no environment follows it", p.branch),
                             });
+                            continue;
+                        }
+                        let Some(sha) = p.sha.clone() else {
+                            said.push(format!("{} was deleted", p.branch));
+                            continue;
+                        };
+                        // The body alone never names a commit: a leaked hook URL can't put an old
+                        // commit, or a fork's, live, and a push a newer one overtook is that one's.
+                        match crate::git_source::head(&remote, Some(&p.branch)).await {
+                            Ok((now, _)) if now == sha => {}
+                            Ok((now, _)) => {
+                                said.push(format!("the repository has {} at {}, not {}: only its head deploys", p.branch, &now[..12], &sha[..12]));
+                                continue;
+                            }
+                            Err(e) => {
+                                said.push(format!("{} couldn't be checked against the repository ({e:#}): not deployed", p.branch));
+                                continue;
+                            }
+                        }
+                        for e in following {
+                            if e.paused {
+                                said.push(format!("{} is paused", e.name));
+                                continue;
+                            }
+                            if let Some(r) = &e.held_by {
+                                said.push(format!("{}'s deploys are held after the rollback {r}", e.name));
+                                continue;
+                            }
+                            if let Some(why) = self.git_push_skip(&svc, e, &sha, &p.message).await {
+                                said.push(format!("{}: {why}", e.name));
+                                continue;
+                            }
+                            let first = p.message.lines().next().unwrap_or("").chars().take(500).collect::<String>();
+                            let body = json!({ "revision": sha, "message": if first.is_empty() { format!("push to {}", p.branch) } else { first } });
+                            let by = By { trigger: Trigger::Push, actor: Some("deploy hook".into()) };
+                            match self.deploy(service, &e.name, body, by, None, Some(&format!("git:{}:{sha}", e.name))).await {
+                                Ok(d) => deployed.push(d),
+                                Err(err) => said.push(format!("{}: {err}", e.name)),
+                            }
                         }
                     }
-                    let Some(BranchPush { branch, sha, message }) = mine else { return Ok(HookOutcome::Ignored(said.join("; "))) };
-                    let Some(sha) = sha else { return Ok(HookOutcome::Ignored(format!("{branch} was deleted"))) };
-                    // Only where the branch is now deploys: the body alone never names a commit
-                    // (a leaked hook URL can't put an old commit, or a fork's, live). A push
-                    // overtaken by a newer one is that one's to deploy.
-                    match crate::git_source::head(&self.git_remote(service, url).await, Some(&branch)).await {
-                        Ok((now, _)) if now == sha => {}
-                        Ok((now, _)) => return Ok(HookOutcome::Ignored(format!("the repository has {branch} at {}, not {}: only its head deploys", &now[..12], &sha[..12]))),
-                        Err(e) => return Ok(HookOutcome::Ignored(format!("{branch} couldn't be checked against the repository ({e:#}): not deployed"))),
-                    }
-                    if let Some(why) = self.git_push_skip(&svc, &row, &sha, &message).await {
-                        return Ok(HookOutcome::Ignored(why));
-                    }
-                    let first = message.lines().next().unwrap_or("").chars().take(500).collect::<String>();
-                    body = json!({ "revision": sha, "message": if first.is_empty() { format!("push to {branch}") } else { first } });
-                    key = Some(format!("git:{env}:{sha}"));
+                    // The answer is this environment's deploy when it made one, else another's.
+                    deployed.sort_by_key(|d| d.environment != env);
+                    return Ok(match deployed.into_iter().next() {
+                        Some(d) => HookOutcome::Deployed(Box::new(d)),
+                        None => HookOutcome::Ignored(said.join("; ")),
+                    });
                 }
             }
         }
@@ -115,8 +142,7 @@ impl Apps {
         if let Some(r) = self.held(service, env).await {
             return Err(crate::Error::Conflict(format!("deploys are held after the rollback {r}: resume them (or deploy) first")));
         }
-        let trigger = if key.is_some() { Trigger::Push } else { Trigger::Api };
-        self.deploy(service, env, body, By { trigger, actor: Some("deploy hook".into()) }, None, key.as_deref()).await.map(|d| HookOutcome::Deployed(Box::new(d)))
+        self.deploy(service, env, body, By { trigger: Trigger::Api, actor: Some("deploy hook".into()) }, None, None).await.map(|d| HookOutcome::Deployed(Box::new(d)))
     }
 }
 

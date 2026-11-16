@@ -3809,7 +3809,7 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     assert_eq!((d3["revision"].as_str(), d3["message"].as_str(), d3["trigger"].as_str()), (Some(third.as_str()), Some("fix the header"), Some("push")), "{d3}");
     assert_eq!(call(&w.api, "POST", &hook, Some(push)).await.1["id"], d3["id"], "a redelivery is the same deploy");
     let (st, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": third }))).await;
-    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("follows main"), "{v}");
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("no environment follows it"), "{v}");
     assert_eq!(call(&w.api, "POST", &hook, Some(json!({ "zen": "Keep it logically awesome.", "hook_id": 1 }))).await.1["ignored"], "pong");
     assert_eq!(settled(&w, &id, "production", d3["id"].as_str().unwrap()).await["status"], "active");
     // What a repository sends that isn't a branch push deploys nothing: a tag, another event,
@@ -3892,6 +3892,13 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let (st, d) = call(&w.api, "POST", &hook, Some(bitbucket)).await;
     assert_eq!((st, d["revision"].as_str(), d["message"].as_str()), (StatusCode::ACCEPTED, Some(api.as_str()), Some("add the api")), "{d}");
     assert_eq!(pushes.0.lock().len(), 3, "feature went to previews too");
+    // One webhook for every environment: a push to the branch staging follows, posted to
+    // production's hook, deploys staging.
+    let (st, v) = call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/staging"), Some(json!({"branch": "feature"}))).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, d) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": code, "head_commit": { "message": "try it on staging" } }))).await;
+    assert_eq!((st, d["environment"].as_str(), d["revision"].as_str()), (StatusCode::ACCEPTED, Some("staging"), Some(code.as_str())), "{d}");
+    assert_eq!(pushes.0.lock().len(), 3, "a followed branch isn't a preview's");
 }
 
 /// A private repository on any Git host: the service's own login (sealed, never returned, sent
