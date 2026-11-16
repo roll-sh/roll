@@ -2796,12 +2796,14 @@ extension that logs in with the function's role), #117 (an Ansible collection), 
 Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (Pulumi) and #147
 (approvals in the audit, on #114).
 
-0. **Previews follow their branches** (building: `feature/roll-secrets-preview-branches`): an
-   ephemeral environment knows what its preview branched (`branches: [{kind, parent, branch}]` on
-   ensure, from roll previews, checked with the product), and an inherited link to a branched parent
-   resolves against the branch through the product's provider, never the parent; a link that can't
-   follow is dropped with a problem, never the parent's value. roll previews passes the list (asked
-   of them, with their brancher's credential choice per kind).
+0. **Previews follow their branches** (building: `feature/roll-secrets-preview-branches`, designed
+   with roll previews): an ephemeral environment carries what its preview branched
+   (`branches: [{kind, parent}]` on ensure, set only by roll previews or the operator). A link to a
+   branched parent isn't resolved at all (no provider call, no lease, never a parent's value):
+   answers list it under `followed: [{name, kind, parent, field}]`, and roll previews sets each name
+   from its branch by field, blank where the branch has none (their #123 rule, for apps' and
+   secrets' links alike). Meanwhile roll previews sets the providers' default names from the branch
+   after the secrets layer, so they win.
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
