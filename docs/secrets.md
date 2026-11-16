@@ -2790,7 +2790,7 @@ windows), #87 (encryption keys by name), #88 (password policies), #92 (SaaS rota
 credential checked at registration), #97 (search keys say `access: data`), #102 (Kubernetes
 service-account tokens), #105 (Java), #110 (.NET with `IConfiguration`), #113 (an AWS Lambda
 extension that logs in with the function's role), #117 (an Ansible collection), #132 (LDAP and
-Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs) and #145 (Pulumi).
+Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (Pulumi) and #147 (approvals in the audit, on #114).
 
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
@@ -2826,9 +2826,11 @@ Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs) and #14
    the registries (public: the user's call).
 8. **Access requests**: roll-access's `ask` rules already are Infisical's and 1Password's
    time-boxed requests for tokens and agents (a `reveal` held for an operator, approved once or
-   remembered for 1h/8h/1d), so roll secrets builds no second system. Left: auditing which
-   approval let a reveal through, asked of roll MCP (a `roll_auth::Approved` extension the gate sets);
-   roll secrets then records it in the audit row and the activity timeline. People's own requests
+   remembered for 1h/8h/1d), so roll secrets builds no second system. #147 (on roll MCP's #114,
+   which added `roll_auth::Approved`) records which approval let a request through, and who
+   approved it, in the audit row and the activity timeline. Next: reveals in a protected environment
+   needing two approvers, through roll-access's two-person policies (roll MCP is building them),
+   matched to change requests' rule that an author never approves their own. People's own requests
    wait on projects having members.
 9. *To check against the real services (accounts, the user's call):* #113's STS login
    (`GetWebIdentityToken`) in an AWS account, Entra's answer for removing a secret that's already
