@@ -307,7 +307,7 @@ export function SettingsTab({
             )}
             {form.sourceKind === "git" && (
               <>
-                <Field label="Git URL" hint="a public repository: each new commit on the branch deploys">
+                <Field label="Git URL" hint="each new commit on the branch deploys (a private one: its login below)">
                   {t("url", "https://github.com/owner/name")}
                 </Field>
                 <Field label="Root directory" hint="optional">
@@ -323,6 +323,7 @@ export function SettingsTab({
             {form.sourceKind === "upload" && <p className="self-end text-[12px] text-subtle">Deploys come from `roll up`.</p>}
           </Grid>
           {service.source.kind === "image" && <RegistryLogin service={service} runner={runner} />}
+          {service.source.kind === "git" && <GitLogin service={service} runner={runner} />}
         </Section>
 
         {form.sourceKind !== "image" && (
@@ -354,7 +355,7 @@ export function SettingsTab({
               <Field label="System packages" hint="installed in the generated image (apt, or apk on Alpine)">
                 {t("packages", "ffmpeg chromium")}
               </Field>
-              {form.sourceKind === "repo" && (
+              {(form.sourceKind === "repo" || form.sourceKind === "git") && (
                 <Field label="Watch paths" hint="a push deploys only when it changes one">
                   {t("watch", "apps/web/**, packages/ui/**")}
                 </Field>
@@ -801,6 +802,49 @@ function Estimate({ prices, cpu, memoryMb, min }: { prices: Prices; cpu: number;
 }
 
 const Grid = ({ children }: { children: ReactNode }) => <div className="grid gap-x-3 gap-y-4 p-5 sm:grid-cols-2 lg:grid-cols-3">{children}</div>;
+
+/** A private Git repository's login (GitLab's deploy token, Bitbucket's app password, an access
+ *  token): write-only, and sent only to the source URL's host. */
+function GitLogin({ service, runner }: { service: Service; runner: Runner }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const l = service.git_login;
+  return (
+    <div className="border-t border-line px-5 py-4">
+      <p className="text-[13px] font-medium">Private repository</p>
+      {l ? (
+        <div className="mt-2 flex flex-wrap items-center gap-3 text-[13px] text-muted">
+          <span>
+            Fetches as <span className="font-mono text-fg">{l.username}</span> from <span className="font-mono text-fg">{l.host}</span>
+          </span>
+          <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("git-login", () => appsApi.deleteGitLogin(service.id))}>
+            Remove
+          </button>
+        </div>
+      ) : (
+        <form
+          className="mt-2 flex flex-wrap items-end gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void runner.run("git-login", () => appsApi.putGitLogin(service.id, { username, password })).then((ok) => {
+              if (ok) {
+                setUsername("");
+                setPassword("");
+              }
+            });
+          }}
+        >
+          <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" aria-label="Git username" autoComplete="off" spellCheck={false} className={`${input} w-44 font-mono text-[12px]`} />
+          <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="token or app password" aria-label="Git token" autoComplete="new-password" className={`${input} w-56 font-mono text-[12px]`} />
+          <button type="submit" className={primary} disabled={!username || !password || runner.busy !== null}>
+            Save login
+          </button>
+          <span className="text-[12px] text-subtle">Sealed; sent only to this repository's host.</span>
+        </form>
+      )}
+    </div>
+  );
+}
 
 /** A private registry's login for the image: write-only (the password never comes back). */
 function RegistryLogin({ service, runner }: { service: Service; runner: Runner }) {

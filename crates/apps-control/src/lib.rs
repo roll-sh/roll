@@ -214,6 +214,8 @@ pub struct Apps {
     capped_refresh: tokio::sync::Mutex<()>,
     /// roll previews' notes for a preview's feedback button ([`Apps::set_feedback_notes`]).
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
+    /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
+    pub(crate) pushes: std::sync::OnceLock<Arc<dyn integrations::GitPushes>>,
     /// Email to projects' owners (`notify`), once rolld has accounts.
     mail: std::sync::OnceLock<Arc<dyn integrations::Mailbox>>,
     /// Log drains whose batch came back (the drainer sends the next).
@@ -369,6 +371,7 @@ impl Apps {
             capped: Mutex::new(Default::default()),
             capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
+            pushes: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
@@ -432,7 +435,7 @@ impl Apps {
     pub async fn create_service(self: &Arc<Self>, body: Value, actor: Option<String>) -> Result<Service> {
         let o = body.as_object().ok_or_else(|| Error::BadRequest("the body is an object".into()))?;
         for k in o.keys() {
-            if !["project", "name", "source", "build", "run", "variables", "sealed", "registry", "links", "branch", "x", "y"].contains(&k.as_str()) {
+            if !["project", "name", "source", "build", "run", "variables", "sealed", "registry", "git_login", "links", "branch", "x", "y"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -486,6 +489,21 @@ impl Apps {
             Some(Value::Object(_)) => return Err(Error::BadRequest("registry is for an image source".into())),
             Some(_) => return Err(Error::BadRequest("registry is {username, password, server?}".into())),
         };
+        // A private repository's login, for the branch check below and every fetch after
+        // (`PUT …/git-login`'s body).
+        let git_login = match o.get("git_login") {
+            None | Some(Value::Null) => None,
+            Some(g @ Value::Object(m)) if matches!(source, Source::Git { .. }) => {
+                // Checked as `PUT …/git-login` checks it, before anything is sent with it.
+                let ok = |k: &str, max: usize| m.get(k).and_then(Value::as_str).filter(|v| !v.is_empty() && v.len() <= max && !v.contains(['\0', '\n', '\r']));
+                match (ok("username", 200), ok("password", 4096)) {
+                    (Some(u), Some(p)) if m.len() == 2 => Some((g.clone(), (u.to_string(), p.to_string()))),
+                    _ => return Err(Error::BadRequest("git_login is {username, password}, each on one line (1–200 and 1–4096 characters)".into())),
+                }
+            }
+            Some(Value::Object(_)) => return Err(Error::BadRequest("git_login is for a Git URL source".into())),
+            Some(_) => return Err(Error::BadRequest("git_login is {username, password}".into())),
+        };
         let (x, y) = (o.get("x").and_then(Value::as_f64), o.get("y").and_then(Value::as_f64));
         // A paused project makes nothing new (its first deploy would be refused anyway).
         let (p, month) = (project.clone(), crate::spend::month_of(code_sql::now_ms()).0);
@@ -515,7 +533,8 @@ impl Apps {
             (Source::Repo { repo, .. }, None) => return Err(Error::BadRequest(format!("roll code isn't on this node, so {repo} can't be a source"))),
             // A Git URL's branch must exist now (its default when none is named), as a repo's must.
             (Source::Git { url, .. }, _) => {
-                let (_, b) = git_source::head(&git_source::client(self.cfg.allow_private), url, named.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e}")))?;
+                let remote = git_source::Remote::new(self.cfg.allow_private, url, git_login.as_ref().map(|(_, l)| l.clone()));
+                let (_, b) = git_source::head(&remote, named.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e}")))?;
                 Some(b)
             }
             _ => None,
@@ -545,6 +564,12 @@ impl Apps {
                 let _ = self.delete_service(&row.id).await;
                 return Err(e);
             }
+        }
+        if let Some((g, _)) = git_login
+            && let Err(e) = self.put_git_login(&row.id, g).await
+        {
+            let _ = self.delete_service(&row.id).await;
+            return Err(e);
         }
         if let Some(r) = registry
             && let Err(e) = self.put_registry(&row.id, r).await
@@ -617,9 +642,9 @@ impl Apps {
             summaries.push(self.summary(e).await?);
         }
         let id = r.id.clone();
-        let (registry, links) = self.db(move |s| Ok((s.registry(&id)?, s.links(&id)?))).await?;
+        let (registry, git_login, links) = self.db(move |s| Ok((s.registry(&id)?, s.git_login(&id)?, s.links(&id)?))).await?;
         let links = links.into_iter().map(|(kind, r#ref, _)| LinkRef { kind, r#ref }).collect();
-        Ok(Service { id: r.id, project: r.project, name: r.name, source: r.source, build: r.build, run: r.run, registry, links, created_at: r.created_at, environments: summaries })
+        Ok(Service { id: r.id, project: r.project, name: r.name, source: r.source, build: r.build, run: r.run, registry, git_login, links, created_at: r.created_at, environments: summaries })
     }
 
     /// `PUT …/registry`: the login a service's image pulls with. `server` defaults to the image's
@@ -653,6 +678,45 @@ impl Apps {
         // Wakes and new instances pull with it from now on, not at the next deploy.
         self.registry_changed(service, Some(&login)).await;
         self.service(service).await
+    }
+
+    /// `PUT …/git-login`: the login a Git URL service's private repository is fetched with (a
+    /// deploy token, app password or access token as `password`), sent only to the source URL's
+    /// host. The URL itself stays without credentials.
+    pub async fn put_git_login(self: &Arc<Self>, service: &str, body: Value) -> Result<Service> {
+        let o = body.as_object().cloned().unwrap_or_default();
+        if let Some(k) = o.keys().find(|k| !["username", "password"].contains(&k.as_str())) {
+            return Err(Error::BadRequest(format!("unknown field {k}")));
+        }
+        let text = |k: &str, max: usize| -> Result<String> {
+            match o.get(k) {
+                Some(Value::String(v)) if !v.is_empty() && v.len() <= max && !v.contains(['\0', '\n', '\r']) => Ok(v.clone()),
+                _ => Err(Error::BadRequest(format!("{k} is 1–{max} characters on one line"))),
+            }
+        };
+        let (username, password) = (text("username", 200)?, text("password", 4096)?);
+        let sid = service.to_string();
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        let Source::Git { url, .. } = &svc.source else { return Err(Error::Conflict("only a Git URL source fetches with a login".into())) };
+        let host = git_host(url).ok_or_else(|| Error::BadRequest("the source URL has no host".into()))?;
+        let sid = service.to_string();
+        self.db(move |s| s.set_git_login(&sid, &host, &username, &password)).await?;
+        self.service(service).await
+    }
+
+    pub async fn delete_git_login(self: &Arc<Self>, service: &str) -> Result<Service> {
+        let sid = service.to_string();
+        self.db(move |s| s.delete_git_login(&sid)).await?;
+        self.service(service).await
+    }
+
+    /// The repository a Git URL service fetches from: with its login when the login is for this
+    /// URL's host (a login never goes to another host).
+    pub(crate) async fn git_remote<'a>(self: &Arc<Self>, service: &str, url: &'a str) -> git_source::Remote<'a> {
+        let sid = service.to_string();
+        let login = self.db(move |s| s.git_login_secret(&sid)).await.ok().flatten();
+        let login = login.filter(|(l, _)| Some(&l.host) == git_host(url).as_ref()).map(|(l, password)| (l.username, password));
+        git_source::Remote::new(self.cfg.allow_private, url, login)
     }
 
     pub async fn delete_registry(self: &Arc<Self>, service: &str) -> Result<Service> {
@@ -740,7 +804,7 @@ impl Apps {
             check_name("a service name", n)?;
             row.name = n.to_string();
         }
-        let mut forget_login = false;
+        let (mut forget_login, mut forget_git) = (false, false);
         if let Some(s) = o.get("source") {
             let source: Source = serde_json::from_value(s.clone()).map_err(|e| Error::BadRequest(format!("source: {e}")))?;
             self.check_source(&source)?;
@@ -750,6 +814,13 @@ impl Apps {
                 _ => None,
             };
             forget_login = registry(&row.source) != registry(&source);
+            // So does a Git login its repository: one given for a repository is never used for
+            // another, even on the same host.
+            let git = |s: &Source| match s {
+                Source::Git { url, .. } => git_repo(url),
+                _ => None,
+            };
+            forget_git = git(&row.source) != git(&source);
             row.source = source;
         }
         row.build = merge(&row.build, o.get("build"), "build")?;
@@ -760,6 +831,9 @@ impl Apps {
             s.update_service(&r)?;
             if forget_login {
                 s.delete_registry(&r.id)?;
+            }
+            if forget_git {
+                s.delete_git_login(&r.id)?;
             }
             Ok(())
         })
@@ -1240,6 +1314,10 @@ impl Apps {
         }
         if o.get("follow_tag") == Some(&Value::Bool(true)) && !matches!(&svc.source, Source::Image { image } if !image.contains('@')) {
             return Err(Error::BadRequest("follow_tag is for an image service whose image has a tag (not a digest)".into()));
+        }
+        // Only a roll code repo's pushes wait for their commit's checks (its statuses are roll's).
+        if o.get("wait_for_ci") == Some(&Value::Bool(true)) && !matches!(&svc.source, Source::Repo { .. }) {
+            return Err(Error::BadRequest("wait_for_ci is for a roll code repo's service: a Git URL's checks aren't roll's to read (deploy from the workflow after its tests instead: sdk/apps-github-action, with the environment's branch unset)".into()));
         }
         // A name another environment has is refused before anything is made or changed.
         if let Some(h) = hostname.clone() {
@@ -2311,6 +2389,11 @@ impl Apps {
         self.notes.get().cloned()
     }
 
+    /// Where a Git URL service's pushes to branches it doesn't follow go (roll previews). Set once.
+    pub fn set_git_pushes(&self, pushes: Arc<dyn integrations::GitPushes>) {
+        let _ = self.pushes.set(pushes);
+    }
+
     /// How email reaches people (roll-accounts' mailer). Set once.
     pub fn set_mailbox(&self, mail: Arc<dyn integrations::Mailbox>) {
         let _ = self.mail.set(mail);
@@ -2555,6 +2638,23 @@ fn free_spot(ws: &roll_workspace::Workspace, project: &str) -> (f64, f64) {
     (48.0, 48.0)
 }
 
+/// A Git URL's repository, to compare: its host and path, without a trailing `/` or `.git`.
+fn git_repo(url: &str) -> Option<String> {
+    let u = url::Url::parse(url).ok()?;
+    let path = u.path().trim_end_matches('/');
+    Some(format!("{}{}", git_host(url)?, path.strip_suffix(".git").unwrap_or(path)))
+}
+
+/// A Git URL's host, lowercase (with its port when it names one): where its login is sent.
+fn git_host(url: &str) -> Option<String> {
+    let u = url::Url::parse(url).ok()?;
+    let host = u.host_str()?.to_ascii_lowercase();
+    Some(match u.port() {
+        Some(p) => format!("{host}:{p}"),
+        None => host,
+    })
+}
+
 #[cfg(test)]
 mod fingerprint_tests {
     use super::*;
@@ -2569,3 +2669,4 @@ mod fingerprint_tests {
         assert_eq!(set_only(&run, &Run::default()), json!({"memory_mb": 1024, "alerts": {"error_pct": 10}}));
     }
 }
+
