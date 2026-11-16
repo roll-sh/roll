@@ -6,6 +6,7 @@ import (
 	"net/url"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/objectvalidator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -35,6 +36,8 @@ type secretModel struct {
 	Path        types.String `tfsdk:"path"`
 	Key         types.String `tfsdk:"key"`
 	Value       types.String `tfsdk:"value"`
+	ValueWO     types.String `tfsdk:"value_wo"`
+	ValueWOVer  types.Int64  `tfsdk:"value_wo_version"`
 	Comment     types.String `tfsdk:"comment"`
 	Link        *linkModel   `tfsdk:"link"`
 	Version     types.Int64  `tfsdk:"version"`
@@ -56,8 +59,14 @@ func (r *secretResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 			"environment": schema.StringAttribute{Required: true, PlanModifiers: replace, Description: "The environment's slug."},
 			"path":        schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("/"), PlanModifiers: replace, Description: "The folder (default /)."},
 			"key":         schema.StringAttribute{Required: true, PlanModifiers: replace},
-			"value":       schema.StringAttribute{Optional: true, Sensitive: true, Description: "The value. It may hold references (${staging.DB_HOST}); they're kept as written."},
-			"comment":     schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("")},
+			"value":       schema.StringAttribute{Optional: true, Sensitive: true, Description: "The value. It may hold references (${staging.DB_HOST}); they're kept as written. It's in Terraform's state: value_wo keeps it out."},
+			"value_wo": schema.StringAttribute{
+				Optional: true, Sensitive: true, WriteOnly: true,
+				Description: "The value, write-only (Terraform 1.11+): sent to roll secrets and never kept in the plan or the state. Change value_wo_version to write a new one.",
+				Validators:  []validator.String{stringvalidator.ConflictsWith(path.MatchRoot("value"), path.MatchRoot("link")), stringvalidator.AlsoRequires(path.MatchRoot("value_wo_version"))},
+			},
+			"value_wo_version": schema.Int64Attribute{Optional: true, Description: "Bump it to write value_wo again (Terraform can't see a write-only value change)."},
+			"comment":          schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("")},
 			"link": schema.SingleNestedAttribute{
 				Optional:    true,
 				Description: "A link to a roll resource on the project's canvas instead of a value.",
@@ -84,7 +93,8 @@ func (r *secretResource) url(m *secretModel, suffix string) string {
 	return r.c.envPath(m.Project.ValueString(), m.Environment.ValueString()) + "/secrets/" + url.PathEscape(m.Key.ValueString()) + suffix + pathQuery(m.Path.ValueString())
 }
 
-func (r *secretResource) write(ctx context.Context, m *secretModel, d *diag.Diagnostics) bool {
+// write sends m; wo is value_wo from the configuration (write-only: never in the plan).
+func (r *secretResource) write(ctx context.Context, m *secretModel, wo types.String, d *diag.Diagnostics) bool {
 	p, ok := project(r.c, m.Project)
 	if !ok {
 		d.AddError("which project?", "set project here or on the provider (ROLL_PROJECT)")
@@ -96,6 +106,9 @@ func (r *secretResource) write(ctx context.Context, m *secretModel, d *diag.Diag
 		body["link"] = link{Kind: m.Link.Kind.ValueString(), Ref: m.Link.Ref.ValueString(), Field: m.Link.Field.ValueString(), Mode: m.Link.Mode.ValueString()}
 	} else {
 		body["value"] = m.Value.ValueString()
+		if !wo.IsNull() && !wo.IsUnknown() {
+			body["value"] = wo.ValueString()
+		}
 		body["link"] = nil
 	}
 	var w struct {
@@ -132,6 +145,11 @@ func (r *secretResource) read(ctx context.Context, m *secretModel) error {
 		return nil
 	}
 	m.Link = nil
+	// Written with value_wo: the value stays out of the state, so it isn't read back.
+	if !m.ValueWOVer.IsNull() {
+		m.Value = types.StringNull()
+		return nil
+	}
 	// The stored value, references as written (reveal: the token must be allowed to).
 	var v struct {
 		Value string `json:"value"`
@@ -145,8 +163,10 @@ func (r *secretResource) read(ctx context.Context, m *secretModel) error {
 
 func (r *secretResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var m secretModel
+	var wo types.String
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &m)...)
-	if resp.Diagnostics.HasError() || !r.write(ctx, &m, &resp.Diagnostics) {
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("value_wo"), &wo)...)
+	if resp.Diagnostics.HasError() || !r.write(ctx, &m, wo, &resp.Diagnostics) {
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, m)...)
@@ -170,8 +190,10 @@ func (r *secretResource) Read(ctx context.Context, req resource.ReadRequest, res
 
 func (r *secretResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var m secretModel
+	var wo types.String
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &m)...)
-	if resp.Diagnostics.HasError() || !r.write(ctx, &m, &resp.Diagnostics) {
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("value_wo"), &wo)...)
+	if resp.Diagnostics.HasError() || !r.write(ctx, &m, wo, &resp.Diagnostics) {
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, m)...)
