@@ -19,16 +19,17 @@ api() { local m=$1 p=$2 b=${3:-}; if [ -n "$b" ]; then curl -sS -X "$m" "http://
 jq_() { python3 -c "import json,sys; d=json.load(sys.stdin); print(eval(sys.argv[1], {'d': d}))" "$1"; }
 now_ms() { date +%s%3N; }
 SVC=""
+SVC2=""
 PRJ=""
 cleanup() {
   [ -n "${PID:-}" ] && { kill "$PID" 2>/dev/null || true; for _ in $(seq 1 20); do kill -0 "$PID" 2>/dev/null || break; sleep 0.5; done; kill -9 "$PID" 2>/dev/null || true; }
   for c in $(docker ps -aq --filter "label=sh.roll.code.home=$H"); do docker rm -f "$c" >/dev/null; done
-  if [ -n "$SVC" ]; then
-    s=${SVC#svc_}
+  for one in $SVC $SVC2; do
+    s=${one#svc_}
     for c in $(docker ps -aq --filter "name=^roll-apps-$s-"); do docker rm -f "$c" >/dev/null; done
     for i in $(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^roll-apps-$s:" || true); do docker rmi -f "$i" >/dev/null || true; done
     for v in $(docker volume ls -q | grep "^roll-apps-vol-$s-" || true); do docker volume rm -f "$v" >/dev/null || true; done
-  fi
+  done
   if [ -n "$PRJ" ]; then
     for n in $(docker network ls --format '{{.Name}}' | grep "^roll-apps-net-${PRJ#prj_}-" || true); do docker network rm "$n" >/dev/null || true; done
   fi
@@ -38,7 +39,7 @@ if curl -s -o /dev/null --max-time 1 "http://$API/v1/info"; then echo "something
 rm -rf "$H" && mkdir -p "$H"
 export ROLL_HOME=$H ROLL_API=$API ROLL_PROXY=127.0.0.1:${PORTS}432 ROLL_REDIS=127.0.0.1:${PORTS}380 ROLL_REDIS_HTTP=127.0.0.1:${PORTS}081 \
   ROLL_APPS_LISTEN=127.0.0.1:${PORTS}080 ROLL_APPS_DOMAIN=apps.localhost ROLL_CODE_PREVIEW_DOMAIN=preview.localhost \
-  ROLL_PRODUCTS=code,redis,apps RUST_LOG=${RUST_LOG:-info}
+  ROLL_PRODUCTS=code,redis,apps ROLL_APPS_ALLOW_PRIVATE=1 RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
 nice -n 10 "$BIN" >"$H/rolld.log" 2>&1 &
 PID=$!
@@ -205,6 +206,72 @@ say "land"
 api POST "/v1/code/changes/$CHG/land" '{}' >/dev/null
 for _ in $(seq 1 120); do N=$(api GET "/v1/previews?project=$PRJ" | jq_ "len(d)"); [ "$N" = 0 ] && break; sleep 0.5; done
 GONE=$(curl -s -o /dev/null -w '%{http_code}' "http://$API/v1/apps/services/$SVC/environments/$ENV")
+
+say "a Git URL service: a push to a branch no environment follows makes its preview, the next push moves it, deleting the branch deletes it"
+# The Git URL is roll code's own git over HTTP (a private address, so ROLL_APPS_ALLOW_PRIVATE).
+api POST /v1/code/repos '{"owner":"acme","name":"site","source":"native"}' >/dev/null
+SITE_INIT=$(python3 - <<'PY'
+import json
+docker = 'FROM python:3.13-alpine\nWORKDIR /app\nCOPY . .\nCMD ["python", "-m", "http.server", "8000"]\n'
+print(json.dumps({"message": "init", "files": {"Dockerfile": {"content": docker}, "index.html": {"content": "site main"}}}))
+PY
+)
+api POST /v1/code/repos/acme/site/land "$SITE_INIT" >/dev/null
+GIT_URL="http://$API/git/acme/site.git"
+SVC2J=$(api POST "/v1/apps/projects/$PRJ/services" "{\"name\":\"site\",\"source\":{\"kind\":\"git\",\"url\":\"$GIT_URL\"},\"run\":{\"type\":\"web\",\"port\":8000}}")
+SVC2=$(echo "$SVC2J" | jq_ "d['id']") || { echo "a Git URL service should be made: $SVC2J"; exit 1; }
+HOOK=$(api POST "/v1/apps/services/$SVC2/environments/production/hook" | jq_ "d['path']")
+WT="$H/site-wt"
+git clone -q "$GIT_URL" "$WT"
+gitc() { git -C "$WT" -c user.name=e2e -c user.email=e2e@example.invalid "$@"; }
+hook_push() { # hook_push <sha> <message>: GitHub's push event for the branch feature
+  curl -sS -X POST "http://$API$HOOK" -H 'content-type: application/json' -H 'x-github-event: push' \
+    -d "$(python3 -c 'import json,sys; print(json.dumps({"ref": "refs/heads/feature", "after": sys.argv[1], "head_commit": {"message": sys.argv[2]}}))' "$1" "$2")"
+}
+git_preview() { api GET "/v1/previews?project=$PRJ" | jq_ "[p for p in d if p['branch'] == 'feature']"; }
+serves() { # serves <body>: the feature branch's preview of the site serves it
+  local want=$1 got=""
+  for _ in $(seq 1 600); do
+    GPV=$(api GET "/v1/previews?project=$PRJ" | jq_ "([p['id'] for p in d if p['branch'] == 'feature' and p['state'] in ('ready', 'sleeping')] + [''])[0]")
+    if [ -n "$GPV" ]; then
+      GURL=$(api GET "/v1/previews/$GPV" | jq_ "([s['url'] for s in d['services'] if s.get('url') and s['repo'] == 'git:$SVC2'] + [''])[0]")
+      GHOST=$(echo "$GURL" | sed -E 's#^https?://##; s#/.*##; s#:.*##')
+      [ -n "$GHOST" ] && got=$(curl -sS -H "Host: $GHOST" "http://127.0.0.1:${PORTS}080/" --max-time 30 2>/dev/null || true)
+      [ "$got" = "$want" ] && return 0
+    fi
+    sleep 1
+  done
+  echo "the feature branch's preview should serve '$want', not '$got'"
+  git_preview
+  [ -n "${GPV:-}" ] && api GET "/v1/previews/$GPV/activity" | jq_ "[a['message'] for a in d[:10]]"
+  grep -E "git_push|GitPush|previews" "$H/rolld.log" | tail -12 | cut -c1-260
+  exit 1
+}
+T7=$(now_ms)
+echo "site feature 1" > "$WT/index.html"
+gitc commit -qam "feature 1"
+gitc push -q origin HEAD:refs/heads/feature
+SAID=$(hook_push "$(gitc rev-parse HEAD)" "feature 1")
+case "$SAID" in *"handed to roll previews"*) ;; *) echo "the push should be handed to roll previews: $SAID"; exit 1;; esac
+serves "site feature 1"
+T8=$(now_ms)
+GREPO=$(api GET "/v1/previews/$GPV" | jq_ "d['repo']")
+[ "$GREPO" = "git:$SVC2" ] || { echo "the Git URL service's preview should be of git:$SVC2, not $GREPO"; exit 1; }
+FIRST=$GPV
+echo "site feature 2" > "$WT/index.html"
+gitc commit -qam "feature 2"
+gitc push -q origin HEAD:refs/heads/feature
+hook_push "$(gitc rev-parse HEAD)" "feature 2" >/dev/null
+hook_push "$(gitc rev-parse HEAD)" "feature 2" >/dev/null
+serves "site feature 2"
+[ "$GPV" = "$FIRST" ] || { echo "the next push should move the branch's preview, not make $GPV"; exit 1; }
+GCOUNT=$(git_preview | python3 -c "import sys,ast; print(len(ast.literal_eval(sys.stdin.read())))")
+[ "$GCOUNT" = 1 ] || { echo "the same push twice should keep one preview: $(git_preview)"; exit 1; }
+gitc push -q origin :refs/heads/feature
+hook_push 0000000000000000000000000000000000000000 "" >/dev/null
+for _ in $(seq 1 240); do [ "$(git_preview)" = "[]" ] && break; sleep 0.5; done
+[ "$(git_preview)" = "[]" ] || { echo "deleting the branch should delete its preview: $(git_preview)"; exit 1; }
+GIT_SAID="made and serving in $((T8 - T7)) ms; moved by the next push (the same preview); deleted with the branch"
 cat <<EOF
 | What | Measured |
 | --- | --- |
@@ -219,4 +286,5 @@ cat <<EOF
 | A preview's own variable on roll apps | $UNSET |
 | Promoted to production (the preview's image, no build): production serves / took / expecting another deployment | $PROD_AFTER / $((T6 - T5)) ms / HTTP $STALE |
 | After landing: previews left / the environment | $N / HTTP $GONE |
+| A Git URL service's branch (a git push and its webhook): its preview | $GIT_SAID |
 EOF

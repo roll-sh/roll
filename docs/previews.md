@@ -348,7 +348,10 @@ none of the service's environments follows, after checking the branch really is 
 - roll code's discovery leaves them alone (they follow pushes, not roll code's branches), and
   keeps them while the service is on the canvas.
 
-`a_git_url_services_branch_push_makes_its_preview`.
+`a_git_url_services_branch_push_makes_its_preview`; live in `scripts/preview-apps.sh`: a `git push` of a
+branch to the service's repository (roll code's own git over HTTP) and its GitHub push webhook
+made the branch's preview, serving the pushed commit, in 21 s (a Docker build); the next push moved
+the same preview, and deleting the branch deleted it.
 
 ## Secrets
 
