@@ -16,7 +16,10 @@
 //! on its field, counts each bucket's range from the points tree on every segment it can
 //! ([`FilterRewrite::count_segment`]: no deletions, one point per document) and needs none of
 //! that segment's documents. Elasticsearch gets there by rewriting the histogram into a `range`
-//! aggregation run filter by filter (`DateHistogramAggregator.FromDateRange`).
+//! aggregation run filter by filter (`DateHistogramAggregator.FromDateRange`). A top-level
+//! `auto_date_histogram` on a `date` field uses the same counts when Elasticsearch's choice of
+//! rounding can be told from them (`bucket/auto_histogram.rs`, `count_from_points`): every
+//! segment counted, its answer is the one `FromSingle` collects.
 //!
 //! The walk is replayed exactly: Lucene's one-dimensional BKD writer cuts the sorted points of
 //! a segment into leaves of 512 in order and splits the leaves with
@@ -195,6 +198,9 @@ pub struct FilterRewrite {
     weight: Option<Box<dyn Weight>>,
     /// [`FilterRewrite::counting`]: the `_doc_count` field (a segment with values is collected).
     doc_count_field: Option<u32>,
+    /// [`FilterRewrite::counting`]: the query's bounds on the field clipped to the shard's
+    /// points (`None` inside: no value matches).
+    bounds: Option<Option<(i64, i64)>>,
     pub segments: u32,
     pub optimized: u32,
     pub leaf_visited: u32,
@@ -302,6 +308,7 @@ impl FilterRewrite {
         };
         // Only a query whose matches are exactly the buckets' ranges (clipped to it) is counted.
         let shard = shard?;
+        fr.bounds = Some(shard);
         fr.shard_ranges = Some(match (&fr.source, shard) {
             (Source::Date(d), Some((l, h))) => d.ranges(l, h),
             // No values in range anywhere: nothing to count, every segment is done.
@@ -314,25 +321,69 @@ impl FilterRewrite {
     /// The documents of each bucket range on `seg`, counted from the points tree (`None`: the
     /// segment must be collected doc by doc). Ranges are `[lower, upper)` in the field's units.
     pub fn count_segment(&self, seg: &SegmentContext) -> Option<Vec<((i64, i64), u64)>> {
-        if seg.live.is_some() || self.doc_count_field.is_some_and(|f| seg.reader.doc_values(f).is_some()) {
-            return None;
-        }
         let ranges = self.shard_ranges.as_ref()?.as_ref()?;
-        let Some(points) = seg.reader.points(self.field) else { return Some(Vec::new()) };
-        if points.doc_count() as u64 != points.size() || points.spec().packed_len() != 8 {
+        if !self.countable(seg) {
             return None;
         }
-        // One walk of the tree for every range: cells inside one range count whole, crossing
-        // leaves are bucketed value by value.
         let ranges: Vec<(i64, i64)> = ranges.iter().copied().filter(|&(lo, hi)| hi > lo).collect();
-        let mut v = MultiCount { counts: vec![0; ranges.len()], ranges: &ranges, last_inside: None };
+        let counts = self.count_ranges(seg, &ranges);
+        Some(ranges.into_iter().zip(counts).filter(|(_, n)| *n > 0).collect())
+    }
+
+    /// [`FilterRewrite::counting`]'s query bounds on the field, clipped to the shard's points
+    /// (`Some(None)`: no value matches).
+    pub fn bounds(&self) -> Option<Option<(i64, i64)>> {
+        self.bounds
+    }
+
+    /// Whether `seg` can be counted from its points: no deletions, no `_doc_count` values, one
+    /// 8-byte point per document (or no points at all).
+    pub fn countable(&self, seg: &SegmentContext) -> bool {
+        if seg.live.is_some() || self.doc_count_field.is_some_and(|f| seg.reader.doc_values(f).is_some()) {
+            return false;
+        }
+        seg.reader.points(self.field).is_none_or(|p| p.doc_count() as u64 == p.size() && p.spec().packed_len() == 8)
+    }
+
+    /// The points of a [countable](Self::countable) segment in each of `ranges` (`[lower,
+    /// upper)`, sorted, disjoint), in one walk of its tree: cells inside one range count
+    /// whole, crossing leaves are bucketed value by value.
+    pub fn count_ranges(&self, seg: &SegmentContext, ranges: &[(i64, i64)]) -> Vec<u64> {
+        let Some(points) = seg.reader.points(self.field) else { return vec![0; ranges.len()] };
+        let mut v = MultiCount { counts: vec![0; ranges.len()], ranges, last_inside: None };
         let mut inside = vec![0u64; ranges.len()];
         points.count_cells(&mut v, &mut |min, n| {
-            if let Some(i) = find_range(&ranges, encode::i64_from(min)) {
+            if let Some(i) = find_range(ranges, encode::i64_from(min)) {
                 inside[i] += n;
             }
         });
-        Some(ranges.iter().zip(v.counts.iter().zip(&inside)).filter(|(_, (a, b))| **a + **b > 0).map(|(&r, (a, b))| (r, a + b)).collect())
+        v.counts.iter().zip(&inside).map(|(a, b)| a + b).collect()
+    }
+
+    /// The smallest (`max` false) or largest value of a [countable](Self::countable)
+    /// segment's points in `[lo, hi]`: a binary search over values, each step a range count
+    /// from the tree (inner cells whole, at most two leaves read).
+    pub fn extreme(&self, seg: &SegmentContext, lo: i64, hi: i64, max: bool) -> Option<i64> {
+        seg.reader.points(self.field)?;
+        // Whether a point lies in `[a, b]` (the ranges are half-open: `i64::MAX` itself is
+        // never a date's value).
+        let any = |a: i64, b: i64| a <= b && self.count_ranges(seg, &[(a, b.saturating_add(1))])[0] > 0;
+        if !any(lo, hi) {
+            return None;
+        }
+        // The answer is in `[a, b]`.
+        let (mut a, mut b) = (lo, hi);
+        while a < b {
+            let half = ((b as i128 - a as i128) / 2) as i64;
+            if max {
+                let m = b - half;
+                if any(m, b) { a = m } else { b = m - 1 }
+            } else {
+                let m = a + half;
+                if any(a, m) { b = m } else { a = m + 1 }
+            }
+        }
+        Some(a)
     }
 
     /// A `range` aggregation: non-overlapping ranges (sorted by `from`, then `to`) over a
@@ -370,6 +421,7 @@ impl FilterRewrite {
             matches_all: ctx.matches_all,
             weight: None,
             doc_count_field: None,
+            bounds: None,
             segments: 0,
             optimized: 0,
             leaf_visited: 0,
