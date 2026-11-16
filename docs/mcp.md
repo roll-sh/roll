@@ -259,6 +259,18 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     `ttlMs: 60000` and `cacheScope: "private"`: a token's tools are its own, and its rules can
     change.
   - Approvals are Multi Round-Trip Requests (see Approvals).
+  - **MCP Apps** (`roll_mcp::ui`, `io.modelcontextprotocol/ui`, SEP-1865): for a host that
+    declares HTML views (`mimeTypes: ["text/html;profile=mcp-app"]`), the read-only tools that
+    answer rows (lists, queries, logs, reads, usage) point at `ui://roll/table` (`_meta.ui`). The
+    host renders that view in a sandboxed iframe, and it shows the tool's result as a table, light
+    or dark as the host is.
+    - **Declaring it:** a 2026-07-28 request on itself; in `initialize`, the session id carries it
+      (`~ui.` after its prefix), as URL elicitation does.
+    - **Safety:** the view has no network (its resource declares no domains), writes every value
+      as text, and calls no tools. An approval is never decided from a view, because an agent's
+      token could drive it.
+    - **Checked:** `a_host_that_renders_apps_gets_the_table_view` (roll-mcp), and the view rendered
+      by a stand-in host (`~/.local/share/roll-mcp/users-live/app-shot.mjs`).
   - **Tasks** (`roll_mcp::tasks`, the `io.modelcontextprotocol/tasks` extension, SEP-2663):
     - **When:** a client that declares the extension on its request gets a task handle
       (`resultType: "task"`) for a call still running after 3 s, or one waiting for a person's
@@ -686,16 +698,15 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **MCP Apps** (`io.modelcontextprotocol/ui`, SEP-1865, Stable): the most widely supported
-   extension (Claude, ChatGPT, VS Code Copilot, Cursor, Goose). Servers render interactive UI in
-   the conversation (`text/html;profile=mcp-app` resources a tool points at, sandboxed by the
-   host). For roll:
-   - an approval card the person decides right there;
-   - a query's rows as a table;
-   - a deploy's logs and its rollback button;
-   - a preview's screenshot with its diff.
+1. **More MCP Apps views:**
+   - a deploy's logs with its rollback (calling `apps_rollback` through the host, so through the
+     gate, as deploy);
+   - a preview's screenshot against its baseline;
+   - an approval card that shows the request and opens roll's approval page (`ui/open-link`),
+     never deciding it.
 
-   Every button calls a tool through the same gate, never around it.
+   Check each in a real host (Claude.ai or ChatGPT's developer mode, or MCPJam) as well as the
+   stand-in.
 2. **OAuth client credentials** (`io.modelcontextprotocol/oauth-client-credentials`, Stable):
    automation connecting over OAuth with no person, a registered confidential client trading
    its id and secret for a token whose rules were chosen when the client was registered. Today
@@ -741,7 +752,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: the other products' operator checks reviewed: apps' references were the only one a grant got past (fixed in #80); tasks, storage's console, streams and secrets check the grant first or only skip their own keys; tools that wait (`tasks_wait_run`, `access_wait_approval`) wait on as tasks until it's over; MCP tasks checked live with apify's `mcpc` 0.8 (task, approval, result); MCP tasks (2026-07-28's extension: a long call, or one waiting for approval, is a task its owner polls from any node; sealed results, an hour's TTL, 16 per token); `roll_find_tools` ranks by how much of a name the query covers, and a test holds 30 everyday queries to their tool (titles now say what a tool acts on: "Roll back a deployment", "Upload an object to a bucket"); search mode for clients that can't take the list (the connect panel and `roll mcp config` turn it on for VS Code and Cursor; `claude mcp add` lines quote a URL with a mode); credentials read tokens could see are hidden (a project's preview variables, tasks' forwarded headers, agents' share links); `tests/admin_only.rs` (every "needs the admin token" refusal is admin in the catalogue); apps' notifications and log drains and secrets' key workflows as tools; write and deploy tokens no longer pass roll code's admin-only checks (connecting a GitHub repository, landing with `bypass`), shorten a stream's retention (now `delete`), mint agents machine tokens (`admin`) or share threads (`reveal`); a rule can grant one transit key (`{"id": "prj_x", "index": "payments"}`: the per-key rows name it); loosening a NoSQL database's masking policy or read-only flag is `admin` (it was `write`, so a token that could read and write could drop the masking and read raw values); postgres, Redis, storage, queues, streams and tasks tools for their everyday routes; lockdown (`?lockdown=1`: work items from GitHub issues, reviews and review comments whose author can't push, and changes from forks, are `outside`, and their text is withheld from the model); search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
+Done lately: MCP Apps (`ui://roll/table`: tools that answer rows show them as a table in hosts that render apps); the other products' operator checks reviewed: apps' references were the only one a grant got past (fixed in #80); tasks, storage's console, streams and secrets check the grant first or only skip their own keys; tools that wait (`tasks_wait_run`, `access_wait_approval`) wait on as tasks until it's over; MCP tasks checked live with apify's `mcpc` 0.8 (task, approval, result); MCP tasks (2026-07-28's extension: a long call, or one waiting for approval, is a task its owner polls from any node; sealed results, an hour's TTL, 16 per token); `roll_find_tools` ranks by how much of a name the query covers, and a test holds 30 everyday queries to their tool (titles now say what a tool acts on: "Roll back a deployment", "Upload an object to a bucket"); search mode for clients that can't take the list (the connect panel and `roll mcp config` turn it on for VS Code and Cursor; `claude mcp add` lines quote a URL with a mode); credentials read tokens could see are hidden (a project's preview variables, tasks' forwarded headers, agents' share links); `tests/admin_only.rs` (every "needs the admin token" refusal is admin in the catalogue); apps' notifications and log drains and secrets' key workflows as tools; write and deploy tokens no longer pass roll code's admin-only checks (connecting a GitHub repository, landing with `bypass`), shorten a stream's retention (now `delete`), mint agents machine tokens (`admin`) or share threads (`reveal`); a rule can grant one transit key (`{"id": "prj_x", "index": "payments"}`: the per-key rows name it); loosening a NoSQL database's masking policy or read-only flag is `admin` (it was `write`, so a token that could read and write could drop the masking and read raw values); postgres, Redis, storage, queues, streams and tasks tools for their everyday routes; lockdown (`?lockdown=1`: work items from GitHub issues, reviews and review comments whose author can't push, and changes from forks, are `outside`, and their text is withheld from the model); search mode (`?tools=search`: `roll_find_tools`, `roll_run_read` and `roll_run` instead of ~240 tools; a run is the tool it names to every check, the audit log included; the connect panel offers it past a client's limit); a token's "last day" counts only its own requests (its change history and roll's
 revocations were counted as asks: "1 asked" on a token that never made a request; seen in the review
 pack) (#25); ended OAuth connections and their kept clients are forgotten after the audit log's days
 (each `roll login` made one of each, kept forever) (#25); `roll login` checked live against a rolld
