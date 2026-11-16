@@ -10,9 +10,9 @@ const field = "w-full rounded-lg border border-line-2 bg-canvas px-3 outline-non
 
 /** A project's settings: how it looks, its name and description, and deleting it; with services,
  *  what roll apps keeps for all of them (notifications, log drains, spending limits). */
-export function ProjectSettings({ project, open, onClose }: { project: WorkspaceProject; open: boolean; onClose: () => void }) {
+export function ProjectSettings({ project, open, onClose, initialTab = "general" }: { project: WorkspaceProject; open: boolean; onClose: () => void; initialTab?: "general" | "apps" }) {
   const [key, setKey] = useState(0);
-  const [tab, setTab] = useState<"general" | "apps">("general");
+  const [tab, setTab] = useState<"general" | "apps">(initialTab);
   const apps = project.resources.some((r) => r.kind === "service");
   const shown = apps ? tab : "general";
   return (

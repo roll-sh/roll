@@ -9,7 +9,12 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+aes-gcm.workspace = true
 base64.workspace = true
+# OpenSearch Security (`xpack::security::opensearch`): internal users' bcrypt hashes, masked
+# fields' BLAKE2b, password strength.
+bcrypt.workspace = true
+blake2.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
@@ -29,6 +34,8 @@ rand.workspace = true
 reqwest.workspace = true
 regex.workspace = true
 regex-syntax.workspace = true
+# The one private-address guard for URLs tenants choose (watcher's `http` input and webhooks).
+roll-net.workspace = true
 ryu.workspace = true
 search-aggs.workspace = true
 search-analysis.workspace = true
@@ -39,7 +46,11 @@ serde_json.workspace = true
 serde_yaml_ng.workspace = true
 sha1.workspace = true
 sha2.workspace = true
+hkdf.workspace = true
 tokio.workspace = true
+# Word and sentence boundaries of inference chunking (`xpack::inference::chunking`).
+unicode-segmentation.workspace = true
+zxcvbn.workspace = true
 
 [build-dependencies]
 serde_json.workspace = true

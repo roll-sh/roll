@@ -418,6 +418,8 @@ if [ -n "$PG_BRANCH" ]; then
   APP_ROLE=$(echo "$APP_DB2" | sed -E 's#^postgres://([^:]+):.*#\1#')
   PLANTED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB2" -Atc "CREATE FUNCTION public.pg_get_indexdef(oid) RETURNS text LANGUAGE plpgsql AS \$f\$ BEGIN EXECUTE 'ALTER ROLE $APP_ROLE SUPERUSER'; RETURN 'x'; END \$f\$; ALTER DATABASE main SET search_path = public, pg_catalog" 2>&1 | tail -1 || true)
   [ "$PLANTED" = "ALTER DATABASE" ] || { echo "the hostile function should have been planted: $PLANTED (env.txt: $(echo "$ENV_TXT" | head -c 300))"; exit 1; }
+  # A note left open across the push: the next head's screenshot run crops its element.
+  api POST "/v1/code/changes/$CHG/reviews" "{\"verdict\":\"comment\",\"body\":\"**Feedback on the preview** · [\`/\`](http://x/) · \`body\`\\n\\nThe whole page\"}" >/dev/null
   api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"New page, again","files":{"index.html":{"content":"preview of change 1, again"},'"$OPENAPI_CHG"'}}' >/dev/null
   SCHEMA=""
   for _ in $(seq 1 120); do
@@ -664,6 +666,17 @@ done
 PHONE=$(curl -sS "http://$API/v1/previews/$PV/screenshot?view=phone" | python3 -c "import sys, struct; b=sys.stdin.buffer.read(); print(f'{struct.unpack(\">I\", b[16:20])[0]} px wide, PNG' if b[:4]==b'\x89PNG' else 'not a PNG')")
 case "$PHONE" in "780 px wide, PNG") ;; *) echo "the phone-width screenshot should be 390 px at twice the density: $PHONE"; exit 1;; esac
 
+say "the open note's element, cropped by the next head's screenshot run"
+CROP_NOTE=""
+for _ in $(seq 1 240); do
+  CROP_NOTE=$(api GET "/v1/previews/$PV/notes" | jq_ "([n['id'] for n in d['notes'] if n.get('crop')] or [''])[0]")
+  [ -n "$CROP_NOTE" ] && break
+  sleep 0.5
+done
+[ -n "$CROP_NOTE" ] || { echo "the open note should get a picture of its element: $(api GET "/v1/previews/$PV/notes")"; exit 1; }
+CROP=$(curl -sS "http://$API/v1/previews/$PV/notes/$CROP_NOTE/crop" | head -c 8 | od -An -tx1 | tr -d ' \n')
+[ "$CROP" = 89504e470d0a1a0a ] || { echo "the note's crop should be a PNG: $CROP"; exit 1; }
+
 say "[skip preview] in the title removes the preview; without it, a new one comes"
 api PATCH "/v1/code/changes/$CHG" '{"title":"New page [skip preview]"}' >/dev/null
 for _ in $(seq 1 120); do
@@ -679,6 +692,47 @@ for _ in $(seq 1 240); do
   sleep 0.5
 done
 [ -n "$PV" ] || { echo "a new preview should come once the title stops skipping it"; exit 1; }
+
+say "idle past sleep_after, its service is frozen (paused), not stopped: the next visit thaws it"
+SHARE2=$(api GET "/v1/previews/$PV" | jq_ "[s['share_url'] for s in d['services'] if s['name']=='web'][0]")
+HOST2=$(echo "$SHARE2" | sed -E 's#^https?://##; s#/.*##; s#:.*##')
+JAR2="$HOME_DIR/cookies-frozen"
+curl -sS -o /dev/null -L -c "$JAR2" -b "$JAR2" -H "Host: $HOST2" "http://$API/?${SHARE2#*\?}" --max-time 120
+CONT2="roll-previews-$(echo "$HOST2" | cut -d. -f1)"
+for _ in $(seq 1 200); do
+  [ "$(docker inspect -f '{{.State.Paused}}' "$CONT2" 2>/dev/null)" = true ] && break
+  sleep 1
+done
+[ "$(docker inspect -f '{{.State.Paused}}' "$CONT2" 2>/dev/null)" = true ] || { echo "an idle service should be frozen (paused) after sleep_after"; docker ps -a --filter "name=$CONT2"; exit 1; }
+FROZEN_STATE=$(api GET "/v1/previews/$PV" | jq_ "[s['state'] for s in d['services'] if s['name']=='web'][0]")
+[ "$FROZEN_STATE" = sleeping ] || { echo "a frozen service should read as sleeping: $FROZEN_STATE"; exit 1; }
+ID_FROZEN=$(docker inspect -f '{{.Id}}' "$CONT2")
+T6=$(now_ms); BODY2=$(curl -sS -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60); T7=$(now_ms)
+echo "$BODY2" | grep -q "preview of change 1" || { echo "the thawed service should answer: $BODY2"; exit 1; }
+[ "$(docker inspect -f '{{.Id}} {{.State.Running}} {{.State.Paused}}' "$CONT2")" = "$ID_FROZEN true false" ] || { echo "the visit should thaw the same container, not start another"; exit 1; }
+[ $((T7 - T6)) -lt 1500 ] || { echo "a thaw should answer within 1.5 s, not $((T7 - T6)) ms"; exit 1; }
+
+say "egress: roll puts the preview's services on a network of their own, with no route out"
+REACH='import socket; socket.create_connection(("1.1.1.1", 443), 3); print("out")'
+# Awake first (an idle service is frozen, and a frozen container takes no exec).
+curl -sS -o /dev/null -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60 || true
+OUT_BEFORE=$(docker exec "$CONT2" python -c "$REACH" 2>&1 || true); OUT_BEFORE=$(echo "$OUT_BEFORE" | tail -1)
+# The premise: by default a preview's service reaches the internet.
+[ "$OUT_BEFORE" = out ] || { echo "a preview's service should reach the internet by default (egress open): $OUT_BEFORE"; exit 1; }
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"roll"}' >/dev/null
+NETS=""
+for _ in $(seq 1 120); do
+  curl -sS -o /dev/null -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60 || true
+  NETS=$(docker inspect -f '{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{end}}' "$CONT2" 2>/dev/null || true)
+  case "$NETS" in *roll-previews-net-*) break;; esac
+  sleep 1
+done
+case "$NETS" in *roll-previews-net-*) ;; *) echo "with egress roll the service should run on the preview's own network: $NETS"; exit 1;; esac
+BODY3=$(curl -sS -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60)
+echo "$BODY3" | grep -q "preview of change 1" || { echo "the service on its own network should still be served through roll: $BODY3"; exit 1; }
+OUT_AFTER=$(docker exec "$CONT2" python -c "$REACH" 2>&1 || true); OUT_AFTER=$(echo "$OUT_AFTER" | tail -1)
+case "$OUT_AFTER" in *unreachable*|*Errno*|*timed*) ;; *) echo "with egress roll the service shouldn't reach the internet: $OUT_AFTER"; exit 1;; esac
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"open"}' >/dev/null
 
 if [ -n "${STOP_BEFORE_LAND:-}" ]; then
   echo "stopped before landing: project $PRJ, preview $PV (run with --keep to leave the daemon up)"
@@ -705,6 +759,9 @@ BRANCHES_LEFT=$(api GET /v1/redis/databases | jq_ "len([x for x in d if x['name'
 cat <<EOF
 | What | Measured |
 | --- | --- |
+| egress: roll: the service's network / 1.1.1.1:443 from it before and after | ${NETS% } / $OUT_BEFORE, then: ${OUT_AFTER:0:60} |
+| A note's element, cropped by the next head's screenshot run (a PNG) | $CROP_NOTE |
+| A visit to a service frozen after sleep_after (it read as sleeping), instead of a cold start | $((T7 - T6)) ms, the same container |
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
 | NoSQL branch's mask on app.users.email / masks on the parent | $MASKED / $PARENT_MASKED |

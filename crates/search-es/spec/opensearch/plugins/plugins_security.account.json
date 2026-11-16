@@ -1,0 +1,32 @@
+{
+  "plugins_security.account": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/security/access-control/api/",
+      "description": "The authenticated user's account."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_security/api/account",
+          "methods": [
+            "GET",
+            "PUT"
+          ]
+        },
+        {
+          "path": "/_opendistro/_security/api/account",
+          "methods": [
+            "GET",
+            "PUT"
+          ]
+        }
+      ]
+    },
+    "params": {},
+    "body": {
+      "description": "The entry, or a JSON patch",
+      "required": false
+    }
+  }
+}

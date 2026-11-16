@@ -441,6 +441,9 @@ async fn run() -> anyhow::Result<()> {
     let workspace = workspace::open(&args, &home)?;
     // roll apps: services built and run on this host's Docker, each on its lease's holder.
     let apps_secrets = secrets::ForApps::default();
+    // The products' routes in process (set once the router is built): roll secrets' links and
+    // roll apps' links that issue credentials of their own.
+    let products_api = secrets::Api::default();
     let apps = match on.on(Product::Apps) {
         true => Some(
             apps::start(
@@ -453,6 +456,7 @@ async fn run() -> anyhow::Result<()> {
                 postgres.as_ref().map(|p| p.control.clone()),
                 redis.as_ref().map(|r| r.control.clone()),
                 apps_secrets.clone(),
+                products_api.clone(),
             )
             .await?,
         ),
@@ -565,10 +569,8 @@ async fn run() -> anyhow::Result<()> {
     // stands only for what's theirs (roll_workspace::Workspace::trusts, asked by every consumer).
     let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
-    // Grants from roll-access are looked up when a sync made by one pushes.
-    let products_api = secrets::Api::default();
-    let grants: std::sync::Arc<dyn roll_auth::Grants> = access.clone();
-    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), Some(grants), people)?;
+    // Its tokens are roll-access's: grants for syncs a token made, workload tokens for identities.
+    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people)?;
     code_secrets.set(secrets.clone(), workspace.clone());
     apps_secrets.set(secrets.clone(), workspace.clone());
     let _ = secrets_envs.0.set(secrets.clone());

@@ -159,7 +159,9 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
         compared = e.code.last_report("chg_1").base_change;
         // Main's screenshot may compare the change before the change's own report is in: the
         // change's own comparison, right after, has its API too.
-        if compared.as_ref().is_some_and(|c| c.api.is_some()) {
+        // Each page's own comparison lands with it, or a moment after.
+        let pages_compared = e.code.last_report("chg_1").pages.iter().all(|p| p.base_percent.is_some());
+        if compared.as_ref().is_some_and(|c| c.api.is_some()) && pages_compared {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -922,13 +924,103 @@ async fn a_roll_apps_preview_costs_what_it_runs_with() {
 
 /// The notes on a page, by the preview's environment name (how roll apps' proxy asks for them):
 /// that page's only, nothing for an environment that isn't a preview's.
+/// Only the pages a push can change are taken again (Chromatic's TurboSnap): another service that
+/// runs what it ran at the push before keeps its pages without a browser run; once its data is
+/// reset they're taken again.
+#[tokio::test]
+async fn a_service_that_didnt_change_keeps_its_pages() {
+    // A change in acme/api: api is the change's (taken every push), web the project's other
+    // service, running acme/web's default branch whatever the change pushes.
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "pages": ["web:/"] } }));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    let runs = |svc: &str| e.apps.shot_services.lock().iter().filter(|s| *s == svc).count();
+    async fn taken(apps: &common::FakeApps, svc: &str, n: usize) {
+        for _ in 0..3000 {
+            if apps.shot_services.lock().iter().filter(|s| *s == svc).count() >= n {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+    let mut c = change("chg_ts", 3);
+    c.repo = "acme/api".into();
+    e.code.open(c);
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_ts").unwrap().unwrap();
+    // The change's run takes api's page, then web's.
+    taken(&e.apps, "web", 1).await;
+    let web_before = runs("web");
+    assert!(web_before >= 1, "web's page taken at first");
+    let api_before = runs("api");
+    // A push to api: web runs what it ran, so its page is kept, not taken again.
+    e.code.edit("chg_ts", |c| c.head = "cs_4a".into());
+    e.engine.pass().await.unwrap();
+    taken(&e.apps, "api", api_before + 1).await;
+    for _ in 0..3000 {
+        if e.engine.store.screenshot_head(&p.id).unwrap().as_deref() == Some("cs_4a") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(runs("web"), web_before, "an unchanged service's pages are kept");
+    assert!(e.engine.store.preview(&p.id).unwrap().pages.iter().any(|x| x.path == "web:/"), "and still listed");
+    // Its data reset since: taken again.
+    let now = e.engine.store.now_ms().unwrap();
+    e.engine.store.update(&p.id, |r| r.last_reset_at = Some(now)).unwrap();
+    e.code.edit("chg_ts", |c| c.head = "cs_5a".into());
+    e.engine.pass().await.unwrap();
+    taken(&e.apps, "web", web_before + 1).await;
+    assert_eq!(runs("web"), web_before + 1, "after a reset its pages are taken again");
+}
+
+/// A note left with the page's Feedback button gets a picture of its element: the next screenshot
+/// run crops it by its selector (only selectors roll accepts, from the preview's code), keeps it
+/// with the note and lists it; a note already cropped isn't asked again, and one whose element
+/// isn't on the page has none.
+#[tokio::test]
+async fn a_notes_element_is_cropped_by_the_next_screenshot() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true } }));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png.clone());
+    let note = |id: &str, selector: &str| roll_previews::notes::Note { id: id.into(), path: "/".into(), selector: selector.into(), note: "look".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false };
+    e.code.feedback.lock().insert("chg_cr".into(), vec![note("rv_h1", "body > h1"), note("rv_gone", "#missing"), note("rv_bad", "h1 { color: red }")]);
+    e.code.open(change("chg_cr", 4));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_cr").unwrap().unwrap();
+    let mut listed = Vec::new();
+    for _ in 0..3000 {
+        listed = e.engine.open_notes(&p.id).await.unwrap();
+        if listed.iter().any(|n| n.crop) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let crop_of = |id: &str| listed.iter().find(|n| n.id == id).map(|n| n.crop);
+    assert_eq!((crop_of("rv_h1"), crop_of("rv_gone"), crop_of("rv_bad")), (Some(true), Some(false), Some(false)));
+    assert_eq!(e.engine.store.note_crop(&p.id, "rv_h1").unwrap(), Some(png));
+    assert_eq!(*e.apps.crops_asked.lock(), ["rv_h1", "rv_gone"], "a selector roll refuses is never sent to the page");
+    // The next head's run asks only for what has no picture yet.
+    e.code.edit("chg_cr", |c| c.head = "cs_5a".into());
+    e.engine.pass().await.unwrap();
+    for _ in 0..3000 {
+        if e.apps.crops_asked.lock().len() > 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(*e.apps.crops_asked.lock(), ["rv_h1", "rv_gone", "rv_gone"]);
+}
+
 #[tokio::test]
 async fn a_pages_notes_by_its_environment_name() {
     let e = env(json!({ "enabled": true }));
     e.code.open(change("chg_n", 4));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_n").unwrap().unwrap();
-    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1, replies: Vec::new() };
+    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false };
     e.code.feedback.lock().insert("chg_n".into(), vec![note("/", "Too big"), note("/about", "Typo")]);
     let env_name = roll_previews::branch_name(&p.id);
     let got = e.engine.notes_for(&env_name, "/").await.unwrap();

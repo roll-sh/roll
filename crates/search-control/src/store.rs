@@ -61,6 +61,9 @@ pub struct SearchCluster {
     /// lists show without asking the cluster's lease.
     #[serde(skip)]
     pub loaded_on: Option<String>,
+    /// When a sleeping cluster's next background job is due (ms; its node wakes it then).
+    #[serde(skip)]
+    pub wake_at: Option<i64>,
 }
 
 /// One metering interval of a loaded cluster.
@@ -114,7 +117,7 @@ const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_f
                     parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, loaded_on, own_bytes";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, loaded_on, own_bytes, wake_at";
 
 fn row(r: &Row) -> code_sql::Result<SearchCluster> {
     Ok(SearchCluster {
@@ -136,6 +139,7 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         stored_bytes: r.get(15)?,
         loaded_on: r.get(16)?,
         own_bytes: r.get(17)?,
+        wake_at: r.get(18)?,
     })
 }
 
@@ -408,6 +412,7 @@ mod tests {
             stored_bytes: 0,
             own_bytes: 0,
             loaded_on: None,
+            wake_at: None,
         }
     }
 
