@@ -1480,10 +1480,14 @@ An app with an OpenTelemetry SDK sends its traces to roll with no setup (Vercel'
 Cloud Run's Cloud Trace, Heroku's OpenTelemetry): `traces: true` on an environment (`PUT
 …/environments/{env}`, the environment panel's Traces switch) sets `OTEL_EXPORTER_OTLP_ENDPOINT`
 (this environment's address, with a token of its own, kept sealed: `trace_ingest`),
-`OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`, `OTEL_TRACES_EXPORTER=otlp` and `OTEL_SERVICE_NAME`
-from the next deploy (the app's own variables win). The address is rolld's API as the runtime
-reaches it from an instance (`ROLL_APPS_OTLP_URL` on a fleet: the public API). `POST
-/v1/apps/otlp/{id}/{env}/{token}/v1/traces` takes OTLP/HTTP, protobuf (read by a small bounded
+`OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`, `OTEL_TRACES_EXPORTER=otlp`,
+`OTEL_METRICS_EXPORTER=none`, `OTEL_LOGS_EXPORTER=none` (only traces are taken) and
+`OTEL_SERVICE_NAME` from the next deploy (the app's own variables win). The endpoint is a sealed
+variable: its token is in no answer, the instances still get it. The address is the apps
+listener's, public traffic's, as the runtime reaches it from an instance (`ROLL_APPS_OTLP_URL` on a
+fleet: the public apps address), never the API's: a relay serves what it reaches to every
+container on the node, and the API's loopback is open. `POST
+/_roll/otlp/{id}/{env}/{token}/v1/traces` on that listener (any host) takes OTLP/HTTP, protobuf (read by a small bounded
 reader of its own, `otlp.rs`: the fields roll keeps, every length checked against the bytes
 present) or JSON, gzip or not, at most 8 MiB; the token is the credential, as a deploy hook's
 (another is the same 404), and it runs on the service's owner. Spans are kept as the

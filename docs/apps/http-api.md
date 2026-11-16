@@ -99,7 +99,6 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/analytics?minutes=` | | `Analytics` (the last 60–10,080 minutes, default 1,440): visitors and page views from the access log, no script or cookie | read |
 | `GET /v1/apps/services/{id}/environments/{env}/traces?minutes=&min_ms=` | | `{ minutes, traces: TraceSummary[], cut }`: recent traces (5–10,080 minutes, default 60), newest first, at most 100; `min_ms` keeps the slower ones | read |
 | `GET /v1/apps/services/{id}/environments/{env}/traces/{trace}` | | `{ trace, spans: Span[] }` in start order (the last week's); 404 when none | read |
-| `POST /v1/apps/otlp/{id}/{env}/{token}/v1/traces` | OTLP/HTTP `ExportTraceServiceRequest`: protobuf (`application/x-protobuf`) or JSON (`application/json`), gzip or not, at most 8 MiB | 200, an empty export response | anonymous: the token in the path (`traces: true` sets `OTEL_EXPORTER_OTLP_ENDPOINT` to it); any other token 404 |
 | `GET /v1/apps/services/{id}/environments/{env}/usage?days=` | | `Usage` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/runs` | | `CronRun[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/runs` | | 202 `CronRun` (run now) | deploy* |
@@ -629,3 +628,9 @@ from the owner's cache, before anything wakes: `X-Roll-Cache: HIT`, `STALE` (fet
 background), or `MISS` when it was just kept, with `Age`. A request with `Authorization`, a
 deployment's own URL, a gradual rollout and a preview's feedback page never use it. A new live
 deployment empties it, and so does `POST …/cache/purge` (all of it, or some paths).
+
+`POST /_roll/otlp/{id}/{env}/{token}/v1/traces` on the apps listener (any host; not the API) takes
+an environment's traces from its instances: OTLP/HTTP `ExportTraceServiceRequest`, protobuf
+(`application/x-protobuf`) or JSON (`application/json`), gzip or not, at most 8 MiB; 200 with an
+empty export response. The token in the path is the credential (`traces: true` sets a sealed
+`OTEL_EXPORTER_OTLP_ENDPOINT` to it); any other is a 404.

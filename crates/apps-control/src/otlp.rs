@@ -153,7 +153,7 @@ fn span(b: &[u8], service: &str) -> anyhow::Result<Span> {
             _ => {}
         }
     }
-    anyhow::ensure!(s.trace.len() == 32 && s.span.len() == 16, "a span without its trace or span id");
+    anyhow::ensure!(s.trace.len() == 32 && s.span.len() == 16 && (s.parent.is_empty() || s.parent.len() == 16), "a span without its trace or span id, or with a malformed parent");
     Ok(s)
 }
 
@@ -237,7 +237,7 @@ pub fn from_json(v: &Value) -> anyhow::Result<Vec<Span>> {
                     attrs: sp["attributes"].as_array().into_iter().flatten().take(MAX_ATTRS).filter_map(|a| Some((clip(a["key"].as_str()?, 128), json_any(&a["value"])?))).collect(),
                 };
                 let hexish = |x: &str, n: usize| x.len() == n && x.bytes().all(|b| b.is_ascii_hexdigit());
-                anyhow::ensure!(hexish(&s.trace, 32) && hexish(&s.span, 16), "a span without its trace or span id");
+                anyhow::ensure!(hexish(&s.trace, 32) && hexish(&s.span, 16) && (s.parent.is_empty() || hexish(&s.parent, 16)), "a span without its trace or span id, or with a malformed parent");
                 out.push(s);
             }
         }

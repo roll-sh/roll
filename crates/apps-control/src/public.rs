@@ -20,6 +20,11 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
         let apps = apps.clone();
         async move {
             strip_ours(&mut req);
+            // Traces from instances (`traces: true`), on this listener only: what reaches it is
+            // what the internet reaches, never the API.
+            if req.uri().path().starts_with(OTLP) {
+                return otlp(apps, req).await;
+            }
             let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             // A domain that redirects (www → apex): a 308 to the same path and query there.
             if let Some(to) = apps.redirect_for_host(&host).await {
@@ -37,6 +42,42 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
             }
         }
     })
+}
+
+/// Where instances send traces: `/_roll/otlp/{service}/{env}/{token}/v1/traces`, any host.
+pub const OTLP: &str = "/_roll/otlp/";
+
+/// OTLP/HTTP from an environment's instances, on the service's owner: the token in the path is
+/// the credential (anything else is the same 404). Answered as OTLP expects: an empty export
+/// response.
+async fn otlp(apps: Arc<Apps>, req: Request) -> Response {
+    let parts: Vec<String> = req.uri().path()[OTLP.len()..].split('/').map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()).collect();
+    let [id, env, token, v1, traces] = parts.as_slice() else { return (StatusCode::NOT_FOUND, "").into_response() };
+    if req.method() != axum::http::Method::POST || v1 != "v1" || traces != "traces" || !id.starts_with("svc_") {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    let (id, env, token) = (id.clone(), env.clone(), token.clone());
+    let sid = id.clone();
+    if apps.db(move |s| s.service(&sid)).await.is_err() {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    let cluster = apps.deps.cluster.clone();
+    let key = lease_key(&id);
+    cluster
+        .dispatch(&key, req, |req, _guard| async move {
+            let json = req.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("application/json"));
+            let gzip = req.headers().get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).is_some_and(|c| c.eq_ignore_ascii_case("gzip"));
+            let body = match axum::body::to_bytes(req.into_body(), 8 << 20).await {
+                Ok(b) => b,
+                Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "traces are at most 8 MiB a request").into_response(),
+            };
+            match apps.ingest_traces(&id, &env, &token, json, gzip, &body).await {
+                Ok(_) if json => (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], "{}").into_response(),
+                Ok(_) => (StatusCode::OK, [(header::CONTENT_TYPE, "application/x-protobuf")], bytes::Bytes::new()).into_response(),
+                Err(e) => e.into_response(),
+            }
+        })
+        .await
 }
 
 /// A listener that's one environment's own port (local development without wildcard DNS).

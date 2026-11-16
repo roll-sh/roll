@@ -134,9 +134,9 @@ pub struct AppsConfig {
     pub upload_max: usize,
     /// The dashboard (roll code's `web_url`): a private preview's 401 page links into it.
     pub web_url: Option<String>,
-    /// Where an instance sends its traces (OTLP/HTTP): this API's base as rolld reaches it
-    /// (`http://127.0.0.1:7070`, made reachable from instances by the runtime), or a public one on
-    /// a fleet. None: traces can't be turned on.
+    /// Where an instance sends its traces (OTLP/HTTP): the apps listener's base (public traffic's,
+    /// never the API's: `http://127.0.0.1:7080`, made reachable from instances by the runtime), or
+    /// the public apps address on a fleet. None: traces can't be turned on.
     pub otlp_base: Option<String>,
     /// URLs a tenant chooses may be private addresses and plain HTTP: notification targets, and
     /// registries whose names resolve to one (local development and tests only:
@@ -1835,14 +1835,20 @@ impl Apps {
             vars.insert("ROLL_GIT_URL".into(), (url.clone(), "roll"));
         }
         // Traces turned on: the OpenTelemetry SDK's own variables, to this environment's address.
+        let mut trace_endpoint = false;
         if let Some(base) = &self.cfg.otlp_base {
             let (sid, e) = (svc.id.clone(), env.name.clone());
             if let Some(token) = self.db(move |s| s.trace_token(&sid, &e)).await? {
-                let url = format!("{}/v1/apps/otlp/{}/{}/{token}", base.trim_end_matches('/'), svc.id, env.name);
+                let url = format!("{}{}{}/{}/{token}", base.trim_end_matches('/'), crate::public::OTLP, svc.id, env.name);
                 vars.insert("OTEL_EXPORTER_OTLP_ENDPOINT".into(), (self.deps.runtime.reach(&url), "roll"));
                 vars.insert("OTEL_EXPORTER_OTLP_PROTOCOL".into(), ("http/protobuf".into(), "roll"));
                 vars.insert("OTEL_TRACES_EXPORTER".into(), ("otlp".into(), "roll"));
+                // Only traces are taken: an SDK's metrics and logs exporters stay quiet.
+                vars.insert("OTEL_METRICS_EXPORTER".into(), ("none".into(), "roll"));
+                vars.insert("OTEL_LOGS_EXPORTER".into(), ("none".into(), "roll"));
                 vars.insert("OTEL_SERVICE_NAME".into(), (svc.name.clone(), "roll"));
+                // Its token is a credential: never shown, as a sealed variable.
+                trace_endpoint = true;
             }
         }
         let sid = svc.id.clone();
@@ -1881,6 +1887,9 @@ impl Apps {
         }
         let (sid, e) = (svc.id.clone(), env.name.clone());
         let (own, mut sealed) = self.db(move |s| Ok((s.variables(&sid, &e)?, s.sealed_variables(&sid, &e)?))).await?;
+        if trace_endpoint {
+            sealed.insert("OTEL_EXPORTER_OTLP_ENDPOINT".into());
+        }
         for (k, v) in own {
             vars.insert(k, (v, "service"));
         }
