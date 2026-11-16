@@ -322,7 +322,7 @@ impl Secrets {
             caller.need(Action::Read, &Scope::project(project))?;
         }
         self.project(project)?;
-        let keys: Vec<TransitKey> = self.db.read(|c| {
+        let keys: Vec<TransitKey> = self.db.read(|c| -> Result<Vec<TransitKey>> {
             Ok(c.query("SELECT id, name, versions, min_decrypt_version, created_at, created_by FROM transit_keys WHERE project_id = ? ORDER BY name", [project], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get(4)?, r.get(5)?))
             })?
