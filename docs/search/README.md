@@ -243,7 +243,9 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    pending); nested inner hits `big_size` 2.25x Elasticsearch (49 against 22 ms;
    `default` 1.20x; roll leads both since `7fe679918`, 13 against 22-26 ms, Rally rerun pending); dense_vector `knn-search-100-1000_multiple_segments` 2.09x; so_vector, 25 of
    32 `knn` tasks 1.03-1.92x (filtered and `concurrency` worst; segments are searched
-   concurrently since, `66d16fce6`); nested `randomized-sorted-term-queries` 1.62x OpenSearch;
+   concurrently since, `66d16fce6`); nested `randomized-sorted-term-queries` 1.62x OpenSearch
+   (Round 9 1.23x; roll leads since `664f44401`, 3.5-4.3 against 8.5-9.7 ms p50 at under half
+   OpenSearch's server CPU, Rally rerun pending);
    noaa indexing (Elasticsearch 1.29x roll's docs/s: `double_range` kept every document off the
    direct parser; it takes them now, -34% server CPU per document, Rally rerun pending); nyc_taxis `distance_amount_agg` 1.27x Elasticsearch (103 against 81 ms: roll
    runs a shard on one thread, Elasticsearch splits its segments across threads at twice roll's
