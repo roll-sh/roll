@@ -532,6 +532,9 @@ impl Store {
         if !db.has_column("previews", "vars")? {
             db.add_column("previews", "vars", "TEXT")?;
         }
+        if !db.has_column("services", "shot_key")? {
+            db.add_column("services", "shot_key", "TEXT")?;
+        }
         for col in ["kept_until", "goes_at"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "INTEGER")?;
@@ -613,6 +616,29 @@ impl Store {
     /// A service's deploy fingerprint (what it was deployed with: variables, access).
     pub fn service_config(&self, id: &str, name: &str) -> Result<Option<String>> {
         Ok(self.db.read(|c| c.query_row("SELECT config FROM services WHERE preview_id = ? AND name = ?", [id, name], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
+    }
+
+    /// What a service ran when its pages were last taken (its revision, what it's deployed with,
+    /// the data's last reset): the same again means its pages can't have changed.
+    pub fn service_shot_key(&self, id: &str, name: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT shot_key FROM services WHERE preview_id = ? AND name = ?", [id, name], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
+    }
+
+    pub fn set_service_shot_key(&self, id: &str, name: &str, key: &str) -> Result<()> {
+        self.db.write(|c| c.execute("UPDATE services SET shot_key = ? WHERE preview_id = ? AND name = ?", params![key, id, name]).map(drop))?;
+        Ok(())
+    }
+
+    /// A page as it was last kept (its picture, what went wrong while it loaded, its checks), to
+    /// keep again at a new head.
+    pub fn kept_page(&self, id: &str, path: &str) -> Result<Option<crate::ports::PageShot>> {
+        use base64::Engine as _;
+        let row: Option<(String, i64, Option<String>)> = self.db.read(|c| c.query_row("SELECT png, errors, report FROM page_shots WHERE preview_id = ? AND path = ?", [id, path], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?;
+        Ok(row.and_then(|(b64, errors, report)| {
+            let png = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+            let report = report.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default();
+            Some(crate::ports::PageShot { path: path.to_string(), png, errors: errors.max(0) as u32, report })
+        }))
     }
 
     /// The revision a service last passed its health check at.
