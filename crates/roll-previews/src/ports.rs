@@ -180,6 +180,21 @@ pub struct Shot {
     pub crops: Vec<(String, Vec<u8>)>,
 }
 
+/// A push to a branch of a roll apps service built from a Git URL that none of its environments
+/// follows (roll apps' push hook, checked against the repository before it's handed on): the
+/// branch's preview is made or moved to `sha`, or goes when `sha` is `None` (the branch was
+/// deleted). It may come more than once for the same sha.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitPush {
+    /// The roll apps service (`svc_…`).
+    pub service: String,
+    pub url: String,
+    pub branch: String,
+    pub sha: Option<String>,
+    /// The push's commit message (`[skip preview]` in it skips one).
+    pub message: String,
+}
+
 /// A note's element to crop in a screenshot run: its page and its selector, both checked.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CropAsk {

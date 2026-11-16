@@ -1014,6 +1014,34 @@ async fn a_notes_element_is_cropped_by_the_next_screenshot() {
     assert_eq!(*e.apps.crops_asked.lock(), ["rv_h1", "rv_gone", "rv_gone"]);
 }
 
+/// A push to a branch of a Git URL service on roll apps makes that branch's preview in each
+/// project whose canvas holds the service (trusted: only the repository's writers move its
+/// branches); the same push again changes nothing, a new one moves it, `[skip preview]` skips
+/// one, and deleting the branch deletes its preview.
+#[tokio::test]
+async fn a_git_url_services_branch_push_makes_its_preview() {
+    let e = env(json!({ "enabled": true }));
+    e.ws.place(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Service, "svc_shop", 0.0, 0.0).unwrap();
+    let push = |branch: &str, sha: Option<&str>, message: &str| roll_previews::ports::GitPush {
+        service: "svc_shop".into(),
+        url: "https://github.com/acme/shop.git".into(),
+        branch: branch.into(),
+        sha: sha.map(Into::into),
+        message: message.into(),
+    };
+    let rows = || e.engine.store.rows(Some(&e.project)).unwrap().into_iter().filter(|r| r.repo == "git:svc_shop").collect::<Vec<_>>();
+    e.engine.git_push(&push("feat/cart", Some("a1"), "cart")).await.unwrap();
+    e.engine.git_push(&push("feat/cart", Some("a1"), "cart")).await.unwrap();
+    let r = rows();
+    assert_eq!(r.iter().map(|x| (x.branch.clone(), x.head.clone(), x.trusted)).collect::<Vec<_>>(), [(Some("feat/cart".to_string()), "a1".to_string(), true)], "made once");
+    e.engine.git_push(&push("feat/cart", Some("b2"), "more")).await.unwrap();
+    assert_eq!(rows()[0].head, "b2", "a new push moves it");
+    e.engine.git_push(&push("feat/docs", Some("c3"), "typo [skip preview]")).await.unwrap();
+    assert_eq!(rows().len(), 1, "[skip preview] skips one");
+    e.engine.git_push(&push("feat/cart", None, "")).await.unwrap();
+    assert_eq!(e.engine.store.row(&r[0].id).unwrap().desired, Desired::Deleted, "the branch went: so does its preview");
+}
+
 #[tokio::test]
 async fn a_pages_notes_by_its_environment_name() {
     let e = env(json!({ "enabled": true }));
