@@ -11,11 +11,6 @@ import hmac
 import traceback
 
 try:
-    from urllib.parse import quote
-except ImportError:  # pragma: no cover - Python 2 never runs this collection
-    from urllib import quote
-
-try:
     import roll_secrets
 
     HAS_ROLL_SECRETS = True
@@ -37,8 +32,7 @@ def connect(api_url, token=None, project=None, identity=None, oidc_token=None, o
     if not api_url:
         raise ConfigError("set api_url (or ROLL_API_URL)")
     if token:
-        c = roll_secrets.Client(api_url, token, project=project or None, timeout=timeout, cache_ttl=cache_ttl)
-        return c
+        return roll_secrets.Client(api_url, token, project=project or None, timeout=timeout, cache_ttl=cache_ttl)
     if not identity:
         raise ConfigError("set token (ROLL_TOKEN), or identity (ROLL_IDENTITY) for a workload identity")
 
@@ -49,25 +43,10 @@ def connect(api_url, token=None, project=None, identity=None, oidc_token=None, o
             with open(oidc_token_file, encoding="utf-8") as f:
                 return f.read()
         # GitHub Actions' token, as from_env asks for it (ROLL_OIDC_AUDIENCE, default the API's URL).
-        import os
+        return roll_secrets.oidc_token_from_env(api_url)
 
-        return roll_secrets._oidc_token(api_url, lambda k: (os.environ.get(k) or "").strip())
-
-    # roll_secrets.login takes the OIDC token once; this logs in again with a fresh read of the file
-    # (a projected token is replaced on disk), as from_env does.
-    c = roll_secrets._logged_in(api_url, identity, source)
-    c.timeout, c.cache_ttl = timeout, cache_ttl
-    if project:
-        c.project = project
-    return c
-
-
-def _env_url(client, environment):
-    return "/v1/secrets/projects/%s/environments/%s" % (quote(client.project_id(), safe=""), quote(environment, safe=""))
-
-
-def _path_query(path):
-    return "?path=" + quote(path or "/", safe="")
+    # Called for each login, so a projected token replaced on disk is read afresh, as from_env does.
+    return roll_secrets.login_with_identity(api_url, identity, source, project=project or None, timeout=timeout, cache_ttl=cache_ttl)
 
 
 def read_values(client, environment, path="/", dynamic=False):
@@ -78,24 +57,11 @@ def read_values(client, environment, path="/", dynamic=False):
     return client.values(environment, path, dynamic=dynamic)
 
 
-def _secret_url(client, environment, key, path, suffix=""):
-    return _env_url(client, environment) + "/secrets/" + quote(key, safe="") + suffix + _path_query(path)
-
-
-def _missing(e):
-    return isinstance(e, roll_secrets.SecretsError) and e.status == 404
-
-
 def _own(client, environment, key, path):
     """The key's record in this folder, or None when it isn't the environment's own (absent, or only
     showing through a base or an import)."""
-    try:
-        s = client._call("GET", _secret_url(client, environment, key, path))
-    except roll_secrets.SecretsError as e:
-        if _missing(e):
-            return None
-        raise
-    if not s or (s.get("source") or {}).get("kind", "own") != "own":
+    s = client.secret(environment, key, path or "/")
+    if s is None or s.source.kind != "own":
         return None
     return s
 
@@ -105,19 +71,18 @@ def _would_set(client, environment, key, value, path, comment):
     (``resolve=false``, references as written; ``reveal``) here, in constant time, and keeps it
     nowhere. Returns (changed, warning)."""
     s = _own(client, environment, key, path)
-    if s is None or s.get("link"):
+    if s is None or s.link_kind:
         return True, None
-    if comment is not None and comment != (s.get("comment") or ""):
+    if comment is not None and comment != s.comment:
         return True, None
     try:
-        stored = client._call("GET", _secret_url(client, environment, key, path, "/value") + "&resolve=false")
+        current = client.stored_value(environment, key, path or "/")
     except roll_secrets.SecretsError as e:
-        if e.status != 403:
-            raise
-        return True, "the token can't reveal %s, so check mode can't tell whether its value differs" % key
-    current = (stored or {}).get("value")
-    if not isinstance(current, str):
-        return True, None
+        if e.status == 403:
+            return True, "the token can't reveal %s, so check mode can't tell whether its value differs" % key
+        if e.code == "unresolved":
+            return True, None
+        raise
     return not hmac.compare_digest(current.encode("utf-8"), value.encode("utf-8")), None
 
 
