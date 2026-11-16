@@ -1,18 +1,18 @@
 //! LDAP and Active Directory servers outside roll (roll-secrets' directories.rs). The address is
 //! the tenant's, so it's handled as outside databases are (outside.rs): rolld resolves the host,
 //! refuses a private address unless private ones are allowed, and connects to the address it
-//! checked. Always over TLS: `ldaps://`, or `ldap://` with StartTLS (a password, and Active
-//! Directory's `unicodePwd`, never go in plain text). The connection goes through a small relay
-//! that stops after 1 MiB from the server, and the whole conversation has 15 seconds.
+//! checked, or a gateway dials it (docs/secrets.md, "Gateways"). Always over TLS: `ldaps://`, or
+//! `ldap://` with StartTLS (a password, and Active Directory's `unicodePwd`, never go in plain
+//! text), from here to the server. The connection goes through a small relay (relay.rs) that stops
+//! after 1 MiB from the server, and the whole conversation has 15 seconds.
 
 use ldap3::exop::PasswordModify;
 use ldap3::{Ldap, LdapConnAsync, LdapConnSettings, LdapError, Mod, Scope, SearchEntry, SearchOptions, StdStream};
 use roll_secrets::directories::{AccountNames, Bind, Flavor};
+use super::outside::Via;
 use std::collections::HashSet;
-use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// One conversation, connecting included.
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -21,11 +21,79 @@ const MAX_READ: u64 = 1 << 20;
 /// The Password Modify extended operation (RFC 3062).
 const PASSMOD: &str = "1.3.6.1.4.1.4203.1.11.1";
 
+/// The provider roll-secrets calls: a directory behind a gateway runs where the gateway's link is
+/// ([`super::gateway::Gateways::call`]); any other runs here.
 pub(crate) struct Guarded {
     pub allow_private: bool,
+    pub gateways: Arc<super::gateway::Gateways>,
+}
+
+impl Guarded {
+    fn here(&self) -> Engine {
+        Engine { via: Via::Direct { allow_private: self.allow_private } }
+    }
 }
 
 impl roll_secrets::directories::Directory for Guarded {
+    fn check(&self, bind: &Bind<'_>, accounts: &[String], groups: &[String], user_base_dn: Option<&str>) -> Result<(), String> {
+        use super::gateway::{Call, DirOp};
+        match bind.gateway {
+            Some(g) => self.gateways.call(g, Call::dir(bind, DirOp::Check { accounts: accounts.to_vec(), groups: groups.to_vec(), base: user_base_dn.map(Into::into) })).map(drop),
+            None => self.here().check(bind, accounts, groups, user_base_dn),
+        }
+    }
+
+    fn set_password(&self, bind: &Bind<'_>, dn: &str, password: &str) -> Result<(), String> {
+        use super::gateway::{Call, DirOp};
+        match bind.gateway {
+            Some(g) => self.gateways.call(g, Call::dir(bind, DirOp::SetPassword { dn: dn.into(), password: password.into() })).map(drop),
+            None => self.here().set_password(bind, dn, password),
+        }
+    }
+
+    fn create_user(&self, bind: &Bind<'_>, dn: &str, password: &str, groups: &[String], description: &str, until: i64) -> Result<(), String> {
+        use super::gateway::{Call, DirOp};
+        match bind.gateway {
+            Some(g) => self.gateways.call(g, Call::dir(bind, DirOp::CreateUser { dn: dn.into(), password: password.into(), groups: groups.to_vec(), description: description.into(), until })).map(drop),
+            None => self.here().create_user(bind, dn, password, groups, description, until),
+        }
+    }
+
+    fn extend_user(&self, bind: &Bind<'_>, dn: &str, until: i64) -> Result<(), String> {
+        use super::gateway::{Call, DirOp};
+        match bind.gateway {
+            Some(g) => self.gateways.call(g, Call::dir(bind, DirOp::ExtendUser { dn: dn.into(), until })).map(drop),
+            None => self.here().extend_user(bind, dn, until),
+        }
+    }
+
+    fn delete_user(&self, bind: &Bind<'_>, dn: &str, groups: &[String]) -> Result<(), String> {
+        use super::gateway::{Call, DirOp};
+        match bind.gateway {
+            Some(g) => self.gateways.call(g, Call::dir(bind, DirOp::DeleteUser { dn: dn.into(), groups: groups.to_vec() })).map(drop),
+            None => self.here().delete_user(bind, dn, groups),
+        }
+    }
+
+    fn account_names(&self, bind: &Bind<'_>, dns: &[String]) -> Result<Vec<AccountNames>, String> {
+        use super::gateway::{Call, DirOp};
+        match bind.gateway {
+            Some(g) => {
+                let v = self.gateways.call(g, Call::dir(bind, DirOp::AccountNames { dns: dns.to_vec() }))?;
+                let pairs: Vec<(String, String)> = serde_json::from_value(v).map_err(|_| "the gateway's node answered names roll doesn't read".to_string())?;
+                Ok(pairs.into_iter().map(|(account_name, upn)| AccountNames { account_name, upn }).collect())
+            }
+            None => self.here().account_names(bind, dns),
+        }
+    }
+}
+
+/// One conversation's way to the directory.
+pub(crate) struct Engine {
+    pub via: Via,
+}
+
+impl roll_secrets::directories::Directory for Engine {
     fn check(&self, bind: &Bind<'_>, accounts: &[String], groups: &[String], user_base_dn: Option<&str>) -> Result<(), String> {
         let dns: Vec<String> = accounts.iter().chain(groups).cloned().chain(user_base_dn.map(str::to_string)).collect();
         self.run(bind, async move |l| {
@@ -129,15 +197,15 @@ impl roll_secrets::directories::Directory for Guarded {
     }
 }
 
-impl Guarded {
+impl Engine {
     /// Bind as the directory's bind account, then `work`, all within [`TIMEOUT`].
     fn run<T: Send>(&self, bind: &Bind<'_>, work: impl AsyncFnOnce(&mut Ldap) -> Result<T, String>) -> Result<T, String> {
         let (url, host, port, starttls) = parse(bind.url)?;
         let tls = Arc::new(super::outside::tls_config(bind.ca)?);
-        let allow_private = self.allow_private;
+        let via = self.via.clone();
         let go = async move {
-            let addr = super::outside::resolve(&host, port, allow_private).await?;
-            let stream = pinned(addr).await.map_err(|e| format!("{host}: {e}"))?;
+            let remote = via.dial(&host, port).await?;
+            let stream = super::relay::pinned(remote, MAX_READ).await.map_err(|e| format!("{host}: {e}"))?;
             let settings = LdapConnSettings::new().set_conn_timeout(TIMEOUT).set_config(tls).set_starttls(starttls).set_std_stream(StdStream::Tcp(stream));
             let (conn, mut l) = LdapConnAsync::with_settings(settings, &url).await.map_err(|e| format!("{host}: {}", ldap_error(e)))?;
             tokio::spawn(tokio::time::timeout(TIMEOUT, conn.drive()));
@@ -173,35 +241,6 @@ fn parse(url: &str) -> Result<(String, String, u16, bool), String> {
         return Err("the URL is ldaps://host or ldap://host".into());
     }
     Ok((url.trim_end_matches('/').to_string(), host.to_string(), port, starttls))
-}
-
-/// A stream to `addr` (the address that was checked) through a relay that reads at most
-/// [`MAX_READ`] from the server: ldap3 takes a standard library stream, so the relay listens on
-/// loopback for the one connection it opens itself.
-async fn pinned(addr: SocketAddr) -> Result<std::net::TcpStream, String> {
-    let remote = tokio::time::timeout(TIMEOUT, tokio::net::TcpStream::connect(addr)).await.map_err(|_| "timed out connecting".to_string())?.map_err(|e| e.to_string())?;
-    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.map_err(|e| e.to_string())?;
-    let at = listener.local_addr().map_err(|e| e.to_string())?;
-    let (local, accepted) = tokio::join!(tokio::net::TcpStream::connect(at), listener.accept());
-    let local = local.map_err(|e| e.to_string())?;
-    let (inner, peer) = accepted.map_err(|e| e.to_string())?;
-    if Some(peer) != local.local_addr().ok() {
-        return Err("another process took the relay's connection".into());
-    }
-    tokio::spawn(tokio::time::timeout(TIMEOUT, async move {
-        let (mut from_server, mut to_server) = remote.into_split();
-        let (mut from_client, mut to_client) = inner.into_split();
-        let up = async {
-            let _ = tokio::io::copy(&mut from_client, &mut to_server).await;
-            let _ = to_server.shutdown().await;
-        };
-        let down = async {
-            let _ = tokio::io::copy(&mut (&mut from_server).take(MAX_READ), &mut to_client).await;
-            let _ = to_client.shutdown().await;
-        };
-        tokio::join!(up, down);
-    }));
-    local.into_std().map_err(|e| e.to_string())
 }
 
 /// Whether `dn` exists (a base search for no attributes).
@@ -274,8 +313,8 @@ mod tests {
         assert_eq!(parse("ldap://ldap.example.com:1389/").unwrap(), ("ldap://ldap.example.com:1389".into(), "ldap.example.com".into(), 1389, true), "ldap:// always starts with StartTLS");
         assert_eq!(parse("ldaps://[2001:db8::1]:636").unwrap().1, "2001:db8::1");
         assert!(parse("ldapi:///run/slapd.sock").is_err());
-        let g = Guarded { allow_private: false };
-        let bind = Bind { url: "ldaps://127.0.0.1:636", flavor: Flavor::Openldap, bind_dn: "cn=admin,dc=example,dc=com", bind_password: "fake-pw", ca: None };
+        let g = Engine { via: Via::Direct { allow_private: false } };
+        let bind = Bind { url: "ldaps://127.0.0.1:636", flavor: Flavor::Openldap, bind_dn: "cn=admin,dc=example,dc=com", bind_password: "fake-pw", ca: None, gateway: None };
         let refused = tokio::task::spawn_blocking(move || roll_secrets::directories::Directory::check(&g, &bind, &[], &[], None)).await.unwrap();
         assert!(refused.unwrap_err().contains("private"));
         // unicodePwd is the quoted password as UTF-16LE.
@@ -294,11 +333,11 @@ mod tests {
         let env = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k}"));
         let (url, ca, bind_dn, pw, base) = (env("ROLL_E2E_LDAP_URL"), std::fs::read_to_string(env("ROLL_E2E_LDAP_CA")).unwrap(), env("ROLL_E2E_LDAP_BIND"), env("ROLL_E2E_LDAP_PASSWORD"), env("ROLL_E2E_LDAP_BASE"));
         tokio::task::spawn_blocking(move || {
-            let g = Guarded { allow_private: true };
+            let g = Engine { via: Via::Direct { allow_private: true } };
             let at = |dn: &'static str| format!("{dn},{base}");
             let (blue, users, group) = (at("cn=app-blue,ou=svc"), at("ou=roll"), at("cn=readers,ou=groups"));
-            let admin = Bind { url: &url, flavor: Flavor::Openldap, bind_dn: &bind_dn, bind_password: &pw, ca: Some(&ca) };
-            let as_user = |dn: &str, password: &str| g.check(&Bind { url: &url, flavor: Flavor::Openldap, bind_dn: dn, bind_password: password, ca: Some(&ca) }, &[], &[], None);
+            let admin = Bind { url: &url, flavor: Flavor::Openldap, bind_dn: &bind_dn, bind_password: &pw, ca: Some(&ca), gateway: None };
+            let as_user = |dn: &str, password: &str| g.check(&Bind { url: &url, flavor: Flavor::Openldap, bind_dn: dn, bind_password: password, ca: Some(&ca), gateway: None }, &[], &[], None);
             // The bind proof, and a refusal for what isn't there.
             g.check(&admin, std::slice::from_ref(&blue), std::slice::from_ref(&group), Some(&users)).unwrap();
             assert!(g.check(&admin, &[at("cn=nobody,ou=svc")], &[], None).unwrap_err().contains("there's no"));
@@ -338,11 +377,11 @@ mod tests {
         let env = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k}"));
         let (url, ca, bind_dn, pw, base) = (env("ROLL_E2E_AD_URL"), std::fs::read_to_string(env("ROLL_E2E_AD_CA")).unwrap(), env("ROLL_E2E_AD_BIND"), env("ROLL_E2E_AD_PASSWORD"), env("ROLL_E2E_AD_BASE"));
         tokio::task::spawn_blocking(move || {
-            let g = Guarded { allow_private: true };
+            let g = Engine { via: Via::Direct { allow_private: true } };
             let at = |dn: &'static str| format!("{dn},{base}");
             let (blue, users, group) = (at("CN=app-blue,OU=svc"), at("OU=roll"), at("CN=readers,OU=groups"));
-            let admin = Bind { url: &url, flavor: Flavor::ActiveDirectory, bind_dn: &bind_dn, bind_password: &pw, ca: Some(&ca) };
-            let as_user = |dn: &str, password: &str| g.check(&Bind { url: &url, flavor: Flavor::ActiveDirectory, bind_dn: dn, bind_password: password, ca: Some(&ca) }, &[], &[], None);
+            let admin = Bind { url: &url, flavor: Flavor::ActiveDirectory, bind_dn: &bind_dn, bind_password: &pw, ca: Some(&ca), gateway: None };
+            let as_user = |dn: &str, password: &str| g.check(&Bind { url: &url, flavor: Flavor::ActiveDirectory, bind_dn: dn, bind_password: password, ca: Some(&ca), gateway: None }, &[], &[], None);
             // The bind proof, a refusal for what isn't there, and a certificate from a CA nobody trusts.
             g.check(&admin, std::slice::from_ref(&blue), std::slice::from_ref(&group), Some(&users)).unwrap();
             assert!(g.check(&admin, &[at("CN=nobody,OU=svc")], &[], None).unwrap_err().contains("there's no"));
@@ -389,7 +428,7 @@ mod tests {
         .unwrap();
     }
 
-    fn attribute(g: &Guarded, admin: &Bind<'_>, dn: &str, name: &str) -> Option<String> {
+    fn attribute(g: &Engine, admin: &Bind<'_>, dn: &str, name: &str) -> Option<String> {
         let (dn, name) = (dn.to_string(), name.to_string());
         g.run(admin, async move |l| {
             let (entries, _) = l.search(&dn, Scope::Base, "(objectClass=*)", vec![name.as_str()]).await.and_then(|r| r.success()).map_err(ldap_error)?;
@@ -404,7 +443,7 @@ mod tests {
         b.iter().map(|x| format!("{x:02x}")).collect::<String>() + "Aa1"
     }
 
-    fn member_of(g: &Guarded, admin: &Bind<'_>, group: &str, dn: &str) -> bool {
+    fn member_of(g: &Engine, admin: &Bind<'_>, group: &str, dn: &str) -> bool {
         let (group, dn) = (group.to_string(), dn.to_string());
         g.run(admin, async move |l| {
             let (entries, _) = l.search(&group, Scope::Base, "(objectClass=*)", vec!["member"]).await.and_then(|r| r.success()).map_err(ldap_error)?;

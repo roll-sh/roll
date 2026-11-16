@@ -3,7 +3,7 @@
 //! `VALID UNTIL`: a dynamic login ends when roll ends its lease. Passwords go in `IDENTIFIED BY`
 //! (over TLS; MySQL rewrites them out of its logs).
 
-use super::{TIMEOUT, resolve};
+use super::{TIMEOUT, Via, resolve};
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, OptsBuilder, SslOpts};
 
@@ -59,8 +59,13 @@ pub(super) fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-async fn connect(u: &Url, ca: Option<&str>, allow_private: bool) -> Result<Conn, String> {
-    let addr = resolve(&u.host, u.port, allow_private).await?;
+async fn connect(u: &Url, ca: Option<&str>, via: &Via) -> Result<Conn, String> {
+    let addr = match via {
+        Via::Direct { allow_private } => resolve(&u.host, u.port, *allow_private).await?,
+        // mysql_async dials an address itself: a loopback listener hands it the gateway's stream
+        // (TLS still runs to the server, checked against the URL's host below).
+        Via::Gateway(_) => super::super::relay::listen(via.dial(&u.host, u.port).await?).await?,
+    };
     let mut opts = OptsBuilder::default()
         .ip_or_hostname(addr.ip().to_string())
         .tcp_port(addr.port())
@@ -101,9 +106,9 @@ fn literal(password: &str) -> Result<String, String> {
     Ok(format!("'{password}'"))
 }
 
-pub(super) async fn run<T>(u: Url, ca: Option<String>, allow_private: bool, work: impl AsyncFnOnce(&mut Conn) -> Result<T, String>) -> Result<T, String> {
+pub(super) async fn run<T>(u: Url, ca: Option<String>, via: Via, work: impl AsyncFnOnce(&mut Conn) -> Result<T, String>) -> Result<T, String> {
     tokio::time::timeout(TIMEOUT, async move {
-        let mut c = connect(&u, ca.as_deref(), allow_private).await?;
+        let mut c = connect(&u, ca.as_deref(), &via).await?;
         let out = work(&mut c).await;
         let _ = c.disconnect().await;
         out

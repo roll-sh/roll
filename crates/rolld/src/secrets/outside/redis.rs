@@ -8,10 +8,10 @@
 //! The server is the tenant's: its replies are read by a small parser that bounds depth, counts
 //! and lengths by the bytes present, never by what the server claims.
 
-use super::{TIMEOUT, resolve, tls_config};
+use super::{TIMEOUT, Via, tls_config};
 use sha2::Digest;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::rustls::pki_types::ServerName;
 
 /// The most of one reply read (an ACL GETUSER is a few hundred bytes).
@@ -146,8 +146,7 @@ fn encode(args: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+use super::Io;
 
 pub(super) struct Conn {
     io: Box<dyn Io>,
@@ -179,9 +178,8 @@ impl Conn {
     }
 }
 
-async fn connect(u: &Url, ca: Option<&str>, allow_private: bool) -> Result<Conn, String> {
-    let addr = resolve(&u.host, u.port, allow_private).await?;
-    let tcp = tokio::net::TcpStream::connect(addr).await.map_err(|e| format!("{}: {e}", u.host))?;
+async fn connect(u: &Url, ca: Option<&str>, via: &Via) -> Result<Conn, String> {
+    let tcp = via.dial(&u.host, u.port).await?;
     let io: Box<dyn Io> = if u.tls {
         let name = ServerName::try_from(u.host.clone()).map_err(|_| format!("{} isn't a name TLS can check", u.host))?;
         let tls = tokio_rustls::TlsConnector::from(Arc::new(tls_config(ca)?)).connect(name, tcp).await.map_err(|e| format!("{}: {e}", u.host))?;
@@ -198,9 +196,9 @@ async fn connect(u: &Url, ca: Option<&str>, allow_private: bool) -> Result<Conn,
     Ok(c)
 }
 
-pub(super) async fn run<T>(u: Url, ca: Option<String>, allow_private: bool, work: impl AsyncFnOnce(&mut Conn) -> Result<T, String>) -> Result<T, String> {
+pub(super) async fn run<T>(u: Url, ca: Option<String>, via: Via, work: impl AsyncFnOnce(&mut Conn) -> Result<T, String>) -> Result<T, String> {
     tokio::time::timeout(TIMEOUT, async move {
-        let mut c = connect(&u, ca.as_deref(), allow_private).await?;
+        let mut c = connect(&u, ca.as_deref(), &via).await?;
         work(&mut c).await
     })
     .await

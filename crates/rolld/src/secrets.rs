@@ -21,8 +21,9 @@ use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
 mod clouds;
 mod directory;
-
+pub mod gateway;
 mod outside;
+mod relay;
 mod syncs;
 
 /// The router of every product's routes (no gate), set once rolld has built it.
@@ -289,7 +290,7 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     o.open(path)?.write_all(text.as_bytes())
 }
 
-pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, access: Arc<roll_access::Access>, people: People) -> anyhow::Result<Arc<Secrets>> {
+pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, access: Arc<roll_access::Access>, people: People, gateways: Arc<gateway::Gateways>) -> anyhow::Result<Arc<Secrets>> {
     let system = args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty());
     let target = match system {
         Some(url) => code_sql::Target::Postgres { url: url.to_string(), schema: "secrets".into() },
@@ -308,10 +309,11 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
         grants: Some(access.clone() as Arc<dyn roll_auth::Grants>),
         workloads: Some(Arc::new(Workloads(access))),
         people: Some(Arc::new(people)),
-        kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private })), directory: Some(Arc::new(directory::Guarded { allow_private })), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
+        kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private, gateways: gateways.clone() })), directory: Some(Arc::new(directory::Guarded { allow_private, gateways: gateways.clone() })), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
     };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
+    gateways.set_secrets(secrets.clone());
     // Where clients reach rolld: a CA's certificates name its CRL there.
     secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
     // A deleted project's secrets go with it.
@@ -1064,6 +1066,27 @@ impl roll_secrets::Workloads for Workloads {
     /// Only a live workload grant, with why and an audit row (`false`: it had already ended).
     fn revoke(&self, id: &str) -> roll_secrets::Result<()> {
         self.0.revoke_workload(id, "its workload identity was deleted").map(|_| ()).map_err(|e| Error::Internal(format!("revoking a workload token: {e}")))
+    }
+
+    /// A gateway's token, made for the request's caller as `POST /v1/access/tokens` makes one.
+    fn token(&self, ext: &axum::http::Extensions, name: &str, rule: roll_auth::scope::Rule) -> roll_secrets::Result<roll_secrets::Minted> {
+        let new = roll_access::store::NewGrant { name: name.chars().take(64).collect(), rules: roll_auth::scope::Scope(vec![rule]), ..Default::default() };
+        let (access, ext) = (self.0.clone(), ext.clone());
+        // On the store's blocking threads, as `mint`.
+        match tokio::runtime::Handle::current().block_on(async move { access.create_grant(&ext, new).await }) {
+            Ok((g, secret)) => Ok(roll_secrets::Minted { id: g.id, secret, expires_at: g.expires_at.unwrap_or_default() }),
+            Err(roll_access::Error::Forbidden(m)) => Err(Error::Forbidden(m)),
+            Err(roll_access::Error::BadRequest(m)) => Err(Error::BadRequest(m)),
+            Err(roll_access::Error::Conflict(m) | roll_access::Error::TooMany(m)) => Err(Error::TooMany(m)),
+            Err(e) => Err(Error::Internal(format!("making a gateway's token: {e}"))),
+        }
+    }
+
+    fn revoke_token(&self, id: &str, why: &str) -> roll_secrets::Result<()> {
+        match self.0.store.revoke(id) {
+            Ok(_) | Err(roll_access::Error::NotFound(_)) => Ok(()),
+            Err(e) => Err(Error::Internal(format!("revoking {id} ({why}): {e}"))),
+        }
     }
 
     /// Each token as roll-access answers it now: gone once revoked or expired, or (a person's own)

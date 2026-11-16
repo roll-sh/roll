@@ -6,7 +6,7 @@
 //! ends its lease. Values go as query parameters, never into SQL; names roll checked (lowercase
 //! letters, digits, _) are quoted as identifiers. Answers are read up to [`ANSWER_MAX`].
 
-use super::{TIMEOUT, resolve, tls_config};
+use super::{TIMEOUT, Via, tls_config};
 use sha2::{Digest, Sha256};
 
 /// The most of one answer read: counts and errors.
@@ -49,8 +49,8 @@ pub(super) struct Conn {
     db: Option<String>,
 }
 
-async fn connect(u: &Url, ca: Option<&str>, allow_private: bool) -> Result<Conn, String> {
-    let addr = resolve(&u.host, u.port, allow_private).await?;
+async fn connect(u: &Url, ca: Option<&str>, via: &Via) -> Result<Conn, String> {
+    let addr = via.address(&u.host, u.port).await?;
     let client = reqwest::Client::builder()
         .use_preconfigured_tls(tls_config(ca)?)
         // The address rolld checked, whatever DNS says next; the certificate is still the host's.
@@ -130,9 +130,9 @@ fn hash(password: &str) -> String {
     Sha256::digest(password.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub(super) async fn run<T>(u: Url, ca: Option<String>, allow_private: bool, work: impl AsyncFnOnce(&Conn) -> Result<T, String>) -> Result<T, String> {
+pub(super) async fn run<T>(u: Url, ca: Option<String>, via: Via, work: impl AsyncFnOnce(&Conn) -> Result<T, String>) -> Result<T, String> {
     tokio::time::timeout(TIMEOUT, async move {
-        let c = connect(&u, ca.as_deref(), allow_private).await?;
+        let c = connect(&u, ca.as_deref(), &via).await?;
         work(&c).await
     })
     .await

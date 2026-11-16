@@ -7,7 +7,7 @@
 //! expiry for a user: a dynamic one lasts until roll ends its lease, which deletes it and closes
 //! its connections. Answers are read up to [`ANSWER_MAX`].
 
-use super::{TIMEOUT, resolve, tls_config};
+use super::{TIMEOUT, Via, tls_config};
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 
@@ -54,8 +54,8 @@ pub(super) struct Conn {
     vhost: String,
 }
 
-async fn connect(u: &Url, ca: Option<&str>, allow_private: bool) -> Result<Conn, String> {
-    let addr = resolve(&u.host, u.port, allow_private).await?;
+async fn connect(u: &Url, ca: Option<&str>, via: &Via) -> Result<Conn, String> {
+    let addr = via.address(&u.host, u.port).await?;
     let client = reqwest::Client::builder()
         .use_preconfigured_tls(tls_config(ca)?)
         // The address rolld checked, whatever DNS says next; the certificate is still the host's.
@@ -131,9 +131,9 @@ fn password_hash(password: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(out)
 }
 
-pub(super) async fn run<T>(u: Url, ca: Option<String>, allow_private: bool, work: impl AsyncFnOnce(&Conn) -> Result<T, String>) -> Result<T, String> {
+pub(super) async fn run<T>(u: Url, ca: Option<String>, via: Via, work: impl AsyncFnOnce(&Conn) -> Result<T, String>) -> Result<T, String> {
     tokio::time::timeout(TIMEOUT, async move {
-        let c = connect(&u, ca.as_deref(), allow_private).await?;
+        let c = connect(&u, ca.as_deref(), &via).await?;
         work(&c).await
     })
     .await
