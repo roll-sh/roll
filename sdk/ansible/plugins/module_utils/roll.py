@@ -7,7 +7,6 @@ from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
 
-import copy
 import hmac
 import traceback
 
@@ -76,13 +75,7 @@ def read_values(client, environment, path="/", dynamic=False):
     issues no dynamic credential (``dynamic=false``): those keys are left out and named in
     ``Values.dynamic``, since nothing renews a playbook's lease. The client's cache applies
     either way."""
-    if dynamic:
-        return client.values(environment, path)
-    url = _env_url(client, environment) + "/values" + _path_query(path) + "&dynamic=false"
-    # The client's values(), with dynamic=false: kept and revalidated by its digest the same way.
-    if client.cache_ttl > 0:
-        return copy.deepcopy(client._cached(url))
-    return roll_secrets.Values._of(client._call("GET", url))
+    return client.values(environment, path, dynamic=dynamic)
 
 
 def _secret_url(client, environment, key, path, suffix=""):
@@ -137,12 +130,7 @@ def set_key(client, environment, key, value, path="/", comment=None, message=Non
         if warning:
             out["warnings"].append(warning)
         return out
-    body = {"value": value, "link": None}
-    if comment is not None:
-        body["comment"] = comment
-    if message:
-        body["message"] = message
-    w = client._call("PUT", _secret_url(client, environment, key, path), body) or {}
+    w = client.set(environment, key, value, path=path, comment=comment, message=message)
     change, secret = w.get("change"), w.get("secret") or {}
     out["changed"] = change is not None
     if change:
@@ -160,12 +148,9 @@ def delete_key(client, environment, key, path="/", check_mode=False):
     if check_mode:
         out["changed"] = _own(client, environment, key, path) is not None
         return out
-    try:
-        w = client._call("DELETE", _secret_url(client, environment, key, path)) or {}
-    except roll_secrets.SecretsError as e:
-        if _missing(e):
-            return out
-        raise
+    w = client.delete(environment, key, path=path)
+    if not w["deleted"]:
+        return out
     change = w.get("change")
     out["changed"] = change is not None
     if change:
