@@ -403,6 +403,10 @@ impl roll_previews::ports::Apps for Services {
     fn warm(&self, preview: &str, service: &str) -> bool {
         self.runtime.warm(preview, service)
     }
+
+    async fn egress_refused(&self, preview: &str) -> Vec<String> {
+        self.runtime.egress_refused(preview).await
+    }
 }
 
 /// What a deploy of `key` finds of the one previews last started (`last`: its id and key).
