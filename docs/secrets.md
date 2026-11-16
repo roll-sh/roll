@@ -2774,9 +2774,12 @@ Doppler, Infisical, Vault and 1Password (clients, IaC, CI, Kubernetes, BYOK). Th
 is Vault's signature: dynamic credentials for clouds and databases roll doesn't run. CI stays
 under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
-Ranked (twenty-sixth review, 2026-11-16 night, against Doppler, Infisical, Vault, AWS Secrets
-Manager, 1Password and Akeyless, and the other threads' branches): first what can be built now,
-then what waits on a merge or another thread.
+Ranked (twenty-seventh review, 2026-11-16 late night, against Vault, Infisical, Doppler, AWS
+Secrets Manager, 1Password, Akeyless and step-ca, and the other threads' branches): first what can
+be built now, then what waits on a merge or another thread. Since the twenty-sixth: LDAP and Active
+Directory opened as #132 (checked against OpenLDAP), Snowflake as #136 on it; roll search's #134
+(inference keys from a secret, an internal sync kind) was reviewed here and is getting the
+destination pinned whole; roll MCP's `roll_machine_client` Terraform resource was agreed.
 
 On main: #20, #62, #63 (the CSI provider), #65 (conditional reads and client caches), #85
 (roll-access's tokens), #74 (live links' digests) and #66 (Terraform without values in state).
@@ -2793,37 +2796,42 @@ Active Directory) and #136 (Snowflake, on #132).
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
 2. **Landing the stacks together where it saves a lock cycle** (#128 on #105, #124 on #102, #95 on
-   #79, #117 on #121), and the Spring integration's first CI run (#128). (The TypeScript client's
-   `fromEnv` and `oidcTokenFromEnv` are on #117, so the three clients' surfaces match.)
-3. **LDAP and Active Directory passwords** (#132): a directory registered with a bind account;
-   managed links rotate a service account's password, and dynamic links make a short-lived user
-   (Vault's LDAP secrets engine, Infisical's). Checked against a real OpenLDAP over LDAPS and
-   StartTLS; Active Directory's steps next, against Samba AD, then usernames as UPNs as well as DNs
-   and an MCP tool for directories.
-   Since roll search's #100, roll apps' search links use roll secrets' search provider, so #97's
-   data-only check covers them too.
-4. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
-   backup schedules, rotation windows): the resources once their routes are on main (each kind's
-   PR predates main's provider changes, so a resource now would conflict), the tools with roll MCP.
-5. **Snowflake credentials** (#136, on #132): key pairs rotated through a user's two key slots
-   without downtime, passwords, and short-lived users (Vault's Snowflake plugin); to check against a
-   real account, the user's call. Then **a Pulumi provider** (bridged from the Terraform provider).
-6. **Access requests**: a time-boxed `reveal` on a protected environment that an approver grants
-   (Infisical's and 1Password's), once projects have members.
-7. **A gateway into private networks** (Infisical's and Akeyless'); **ACME on project CAs**.
-8. *To check against the real services:* #113's STS login (`GetWebIdentityToken`) in an AWS account,
-   and Entra's answer for removing a secret that's already gone (#92). Both need accounts: the
-   user's call.
-9. *Waits on roll MCP:* #114 (`roll-oidc`, approved here), the GitHub Action's `client-id`
-   mode (their diff, reviewed here), and their `roll_machine_client` resource in the Terraform
-   provider (agreed; their diff comes here first).
-   *Waits on roll search:* #134 (inference endpoints keyed by a secret, an internal sync kind):
-   approved once its pin covers the endpoint's whole destination.
-10. *Waits on roll apps:* their redeploys holding `wait_digest` once #79 lands.
-11. *Waits on other threads:* a live check of OpenSearch links, roll redis and nosql keeping a
+   #79, #117 on #121, #136 on #132), and the Spring integration's first CI run (#128).
+3. **ACME on project CAs** (building: `feature/roll-secrets-acme`), as Vault's PKI and step-ca
+   serve it: cert-manager, certbot, Caddy and lego get certificates from a project's CA with no roll
+   client. Accounts always bind an EAB key a CA's admin makes (revoked at once, looked up on every
+   request); `dns-01` through public DNS and `http-01` through the guarded client; names a binding
+   pre-authorizes for clusters whose names roll can't reach (off by default, the EAB key then the
+   whole proof). Nonces and orders in the database, so any node answers.
+4. **Active Directory against Samba AD** (building, on #132): every step #132 wrote from
+   Microsoft's documentation run against a real domain controller with a delegated bind account,
+   the permissions table corrected, and UPN / `sAMAccountName` usernames next to the DN.
+5. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
+   backup schedules, rotation windows, directories, Snowflake accounts, ACME bindings): the
+   resources once their routes are on main, the tools with roll MCP.
+6. **A gateway into private networks** (Infisical's Gateway, Akeyless'): a small process inside a
+   VPC that dials out to roll and carries rotations, dynamic credentials, directory calls and ACME
+   challenges to private addresses, so private databases need neither a public address nor
+   `allow_private`, and pre-authorized ACME names can be checked after all. Its link is a
+   workload identity; it carries only the conversations rolld starts.
+7. **A Pulumi provider**, bridged from the Terraform provider (Pulumi's own path for
+   plugin-framework providers), with TypeScript, Python and Go SDKs generated.
+8. **Access requests**: a time-boxed `reveal` on a protected environment that an approver grants
+   (Infisical's and 1Password's). First check roll-access's `ask` rules (roll MCP's design), which
+   may already be the request; roll secrets should then only show and audit it.
+9. *To check against the real services (accounts, the user's call):* #113's STS login
+   (`GetWebIdentityToken`) in an AWS account, Entra's answer for removing a secret that's already
+   gone (#92), and #136's statements on a Snowflake account.
+10. *Waits on roll MCP:* #114 (`roll-oidc`, approved here), the GitHub Action's `client-id` mode
+   (their diff, reviewed here), and their `roll_machine_client` Terraform resource (their diff
+   comes here first).
+11. *Waits on roll search:* #134 approved once its pin covers the endpoint's whole destination
+   (`service_settings` but the key, rate limit and allocations; `task_settings` where they route).
+12. *Waits on roll apps:* their redeploys holding `wait_digest` once #79 lands.
+13. *Waits on other threads:* a live check of OpenSearch links, roll redis and nosql keeping a
    rotated password a while, splitting the CLI's `secrets.rs` once the queue has landed.
-12. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
-13. *Waits on products serving signed-in people:* a person's project linking their own databases,
+14. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
+15. *Waits on products serving signed-in people:* a person's project linking their own databases,
    buckets and streams.
 
 ### Landing
