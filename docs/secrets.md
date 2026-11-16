@@ -527,7 +527,8 @@ which characters `symbol` means (1–32 ASCII punctuation; default `!#%&*+-=?^_~
 rules: no `@` or `:` in a connection URL's password, no quotes for a shell. Writes are checked as
 typed keys are (`DB_PASSWORD needs at least a digit`, never the value). The generators follow it:
 `roll secrets set KEY --generate` makes `length` characters of its classes, one of each (a longer
-`--generate N` if asked), and so do the dashboard's Generate buttons. Set one with `roll secrets
+`--generate N` if asked), and so do the dashboard's Generate and Health's New value buttons. Set one in
+Environments → Required keys (a length and a set of classes) or with `roll secrets
 required add DB_PASSWORD --password-length 32 --classes lower,upper,digit,symbol --symbols '-_'`.
 
 ### Owners
