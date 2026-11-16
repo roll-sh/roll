@@ -23,8 +23,20 @@ const OWN_KINDS: Record<string, { icon: LucideIcon; label: string }> = {
 
 /** A Kubernetes name: namespaces are DNS labels, service accounts DNS subdomains. */
 const K8S_LABEL = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
-/** A Kubernetes token can't be revoked: its lease is a day at most. */
+/** A Kubernetes token's lease is a day at most. */
 const K8S_TTL_MAX = 24 * 60;
+const RULES_PLACEHOLDER = '[{"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]}]';
+
+/** `role_rules` typed as JSON: a list of Kubernetes PolicyRules (the server checks each one), or null. */
+function parseRules(text: string): Record<string, unknown>[] | null {
+  try {
+    const v: unknown = JSON.parse(text);
+    const rule = (r: unknown): r is Record<string, unknown> => typeof r === "object" && r !== null && !Array.isArray(r);
+    return Array.isArray(v) && v.length > 0 && v.every(rule) ? v : null;
+  } catch {
+    return null;
+  }
+}
 
 /** A link target's kind: a canvas resource's icon, roll secrets' own, or a plain link for one this dashboard doesn't know yet. */
 function kindOf(kind: string): { icon: LucideIcon; label: string } {
@@ -77,6 +89,9 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const [namespace, setNamespace] = useState("");
   const [serviceAccount, setServiceAccount] = useState("");
   const [audiences, setAudiences] = useState("");
+  const [account, setAccount] = useState<"existing" | "generated">("existing");
+  const [ruleText, setRuleText] = useState("");
+  const [clusterWide, setClusterWide] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const pickOf = (t: LinkTarget, f: LinkField): Pick => picks[`${t.kind}:${t.ref}:${f.field}`] ?? { on: false, key: f.suggest, mode: f.modes[0] };
@@ -106,10 +121,14 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const needsRotation = chosen.some((c) => c.t.kind === "pki" && c.p.mode === "managed");
   const rotate = Number(rotateDays);
   const rotateOk = !needsRotation || (Number.isInteger(rotate) && rotate >= 1 && rotate <= 198);
-  // A Kubernetes token is a service account's, in a namespace, for audiences (the API server's own by default).
+  // A Kubernetes token is a service account's, in a namespace, for audiences (the API server's own by default):
+  // an existing account, or one made per lease with a role of the rules given.
   const needsAccount = chosen.some((c) => c.t.kind === "kubernetes");
   const auds = audiences.split(",").map((a) => a.trim()).filter(Boolean);
-  const accountOk = !needsAccount || (K8S_LABEL.test(namespace) && serviceAccount.length <= 253 && serviceAccount.split(".").every((p) => K8S_LABEL.test(p)) && auds.length <= 10);
+  const rules = account === "generated" ? parseRules(ruleText) : null;
+  const saOk = account === "generated" ? rules !== null : serviceAccount.length <= 253 && serviceAccount.split(".").every((p) => K8S_LABEL.test(p));
+  const accountOk = !needsAccount || (K8S_LABEL.test(namespace) && saOk && auds.length <= 10);
+  const k8sAccount = account === "generated" ? { role_rules: rules, ...(clusterWide && { cluster_wide: true }) } : { service_account: serviceAccount };
   const k8sTtlOk = !needsAccount || ttlMinutes <= K8S_TTL_MAX;
 
   const submit = async () => {
@@ -126,7 +145,7 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
             ...(c.p.mode === "dynamic" && { ttl_minutes: ttlMinutes }),
             ...(c.t.kind === "pki" && { names, ...(c.p.mode === "managed" && { rotate_days: rotate }) }),
             ...(c.t.kind === "ssh" && { principals: logins }),
-            ...(c.t.kind === "kubernetes" && { namespace, service_account: serviceAccount, ...(auds.length > 0 && { audiences: auds }) }),
+            ...(c.t.kind === "kubernetes" && { namespace, ...k8sAccount, ...(auds.length > 0 && { audiences: auds }) }),
           },
         }),
       },
@@ -212,14 +231,42 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
               Namespace
               <input value={namespace} onChange={(e) => setNamespace(e.target.value)} placeholder="ci" spellCheck={false} className={`${sized} h-7 w-28 font-mono`} aria-label="Namespace" />
             </label>
-            <label className="flex items-center gap-1.5 text-[12px] text-muted">
-              Service account
-              <input value={serviceAccount} onChange={(e) => setServiceAccount(e.target.value)} placeholder="deployer" spellCheck={false} className={`${sized} h-7 w-32 font-mono`} aria-label="Service account" />
-            </label>
+            <Segmented
+              label="Service account"
+              value={account}
+              onChange={setAccount}
+              options={[
+                { value: "existing", label: <span className="px-1 text-[11px]">Existing account</span>, title: "A token of a service account the cluster has" },
+                { value: "generated", label: <span className="px-1 text-[11px]">Generated role</span>, title: "Per lease: a service account, a role of these rules and its binding, deleted when the lease ends" },
+              ]}
+            />
+            {account === "existing" && (
+              <label className="flex items-center gap-1.5 text-[12px] text-muted">
+                Service account
+                <input value={serviceAccount} onChange={(e) => setServiceAccount(e.target.value)} placeholder="deployer" spellCheck={false} className={`${sized} h-7 w-32 font-mono`} aria-label="Service account" />
+              </label>
+            )}
             <label className="flex items-center gap-1.5 text-[12px] text-muted">
               Audiences
               <input value={audiences} onChange={(e) => setAudiences(e.target.value)} placeholder="default" title="Comma-separated audiences; none: the API server's own" spellCheck={false} className={`${sized} h-7 w-36 font-mono`} aria-label="Token audiences" />
             </label>
+            {account === "generated" && (
+              <div className="flex w-full flex-col gap-1.5">
+                <textarea
+                  value={ruleText}
+                  onChange={(e) => setRuleText(e.target.value)}
+                  rows={4}
+                  placeholder={RULES_PLACEHOLDER}
+                  spellCheck={false}
+                  className={`${field} h-auto py-1.5 font-mono text-[11.5px]`}
+                  aria-label="Role rules (JSON)"
+                />
+                <label className="flex items-center gap-1.5 text-[12px] text-muted">
+                  <input type="checkbox" checked={clusterWide} onChange={(e) => setClusterWide(e.target.checked)} className="accent-[var(--accent)]" />
+                  Cluster-wide (a ClusterRole and ClusterRoleBinding)
+                </label>
+              </div>
+            )}
           </>
         )}
         {needsRotation && (
@@ -237,7 +284,7 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
           </label>
         )}
         <span className="text-[11.5px] text-danger">
-          {badKey ? `${badKey.p.key || "A key"} isn't a valid key` : dupKey ? `${dupKey.p.key} is picked twice` : !ttlOk ? "A lease is 1 minute to 7 days" : !namesOk ? "A certificate names what it's for" : !rotateOk ? "Rotate every 1 to 198 days" : !principalsOk ? "An SSH certificate names its logins" : !accountOk ? "A Kubernetes token names its namespace and service account" : !k8sTtlOk ? "A Kubernetes token can't be revoked: a lease is a day at most" : ""}
+          {badKey ? `${badKey.p.key || "A key"} isn't a valid key` : dupKey ? `${dupKey.p.key} is picked twice` : !ttlOk ? "A lease is 1 minute to 7 days" : !namesOk ? "A certificate names what it's for" : !rotateOk ? "Rotate every 1 to 198 days" : !principalsOk ? "An SSH certificate names its logins" : !accountOk ? (account === "generated" ? "A generated role names its namespace and its rules, a JSON list" : "A Kubernetes token names its namespace and service account") : !k8sTtlOk ? "A Kubernetes token's lease is a day at most" : ""}
         </span>
         <span className="ml-auto" />
         <button className={ghost} onClick={onClose}>

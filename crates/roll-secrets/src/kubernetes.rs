@@ -115,6 +115,9 @@ enum Account {
 const RULES_MAX: usize = 32;
 const LIST_MAX: usize = 32;
 
+/// Whether one entry of a rule's list is valid.
+type Valid = fn(&str) -> bool;
+
 /// `role_rules` as Kubernetes PolicyRules (`apiGroups`, `resources`, `verbs`, `resourceNames?`),
 /// checked by Kubernetes' name rules and bounded, in the API's own shape.
 fn rules(v: &Json) -> Result<Vec<Json>> {
@@ -122,16 +125,16 @@ fn rules(v: &Json) -> Result<Vec<Json>> {
     let Some(list) = v.as_array().filter(|l| (1..=RULES_MAX).contains(&l.len())) else {
         return Err(bad(format!("role_rules is a list of 1 to {RULES_MAX} rules: {{apiGroups, resources, verbs, resourceNames?}}")));
     };
-    let group = |s: &str| s.is_empty() || s == "*" || subdomain(s);
-    let resource = |s: &str| s.len() <= 253 && s.split('/').count() <= 2 && s.split('/').all(|p| p == "*" || subdomain(p));
-    let verb = |s: &str| s == "*" || ((1..=32).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_lowercase()));
-    let object = |s: &str| (1..=253).contains(&s.len()) && s != "." && s != ".." && !s.chars().any(|c| c == '/' || c == '%' || c.is_whitespace() || c.is_control());
+    let group: Valid = |s| s.is_empty() || s == "*" || subdomain(s);
+    let resource: Valid = |s| s.len() <= 253 && s.split('/').count() <= 2 && s.split('/').all(|p| p == "*" || subdomain(p));
+    let verb: Valid = |s| s == "*" || ((1..=32).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_lowercase()));
+    let object: Valid = |s| (1..=253).contains(&s.len()) && s != "." && s != ".." && !s.chars().any(|c| c == '/' || c == '%' || c.is_whitespace() || c.is_control());
     // (key, valid entry, required, what its entries are)
-    let checks: [(&str, &dyn Fn(&str) -> bool, bool, &str); 4] = [
-        ("apiGroups", &group, true, "API groups (\"\" is the core group)"),
-        ("resources", &resource, true, "resources (pods, pods/log, *)"),
-        ("verbs", &verb, true, "verbs (get, list, watch, create, *)"),
-        ("resourceNames", &object, false, "object names"),
+    let checks: [(&str, Valid, bool, &str); 4] = [
+        ("apiGroups", group, true, "API groups (\"\" is the core group)"),
+        ("resources", resource, true, "resources (pods, pods/log, *)"),
+        ("verbs", verb, true, "verbs (get, list, watch, create, *)"),
+        ("resourceNames", object, false, "object names"),
     ];
     list.iter()
         .enumerate()
@@ -496,9 +499,13 @@ impl LinkProvider for Provider {
     }
 
     fn check(&self, link: &Link) -> Result<()> {
-        want(link)?;
+        let w = want(link)?;
         if link.option_u64("ttl_minutes").is_some_and(|t| t > TTL_MAX) {
-            return Err(Error::BadRequest(format!("a Kubernetes token can't be revoked before it expires: ttl_minutes is {TTL_MAX} at most (keep it short)")));
+            let why = match w.account {
+                Account::Existing(_) => "an existing service account's token can't be revoked before it expires",
+                Account::Generated { .. } => "a Kubernetes token lives a day at most",
+            };
+            return Err(Error::BadRequest(format!("{why}: ttl_minutes is {TTL_MAX} at most (keep it short)")));
         }
         Ok(())
     }

@@ -6,8 +6,9 @@ import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field
 
 /**
  * Kubernetes clusters (docs/secrets.md, "Kubernetes service-account tokens"): roll issues a
- * short-lived token of an existing service account per lease, through the TokenRequest API. The
- * admin token and the cluster's CA are sealed; a token can't be revoked, so it lives until it expires.
+ * short-lived token per lease, through the TokenRequest API, of an existing service account (it
+ * can't be revoked: it lives until it expires) or of one made for the lease with a role of the
+ * link's rules (deleted when the lease ends). The admin token and the cluster's CA are sealed.
  */
 export function KubernetesClusters() {
   const { api } = useSecrets();
@@ -55,8 +56,8 @@ export function KubernetesClusters() {
       }
     >
       <p className="mb-2 text-[11.5px] text-muted">
-        Short-lived service account tokens, one per lease. Link <span className="font-mono">KUBE_TOKEN</span> to a cluster (dynamic) with the namespace and service account it&apos;s for, and{" "}
-        <span className="font-mono">KUBE_API_URL</span> and <span className="font-mono">KUBE_CA</span> to build a kubeconfig. A token can&apos;t be revoked: it works until it expires, so keep leases short.
+        Short-lived service account tokens, one per lease. Link <span className="font-mono">KUBE_TOKEN</span> to a cluster (dynamic) with the namespace and an existing service account, or rules for a role made per lease, and{" "}
+        <span className="font-mono">KUBE_API_URL</span> and <span className="font-mono">KUBE_CA</span> to build a kubeconfig. An existing account&apos;s token works until it expires, so keep leases short; a generated role&apos;s account is deleted when its lease ends.
       </p>
       <ErrorNote error={error ?? list.error} onDismiss={error ? () => setError(null) : undefined} className="mb-2" />
       {adding && (
