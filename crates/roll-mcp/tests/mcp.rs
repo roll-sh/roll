@@ -428,6 +428,34 @@ async fn a_wait_outlasting_its_request_goes_on_as_a_task() {
     assert_eq!(got["result"]["result"]["structuredContent"]["status"], "completed", "{got}");
 }
 
+/// MCP Apps: a host that declares them in `initialize` keeps them for its session (the id says
+/// so: roll keeps none), its row-reading tools point at roll's table view, and the view is served
+/// as an app's HTML; a host that didn't declare them sees no UI at all.
+#[tokio::test]
+async fn a_host_that_renders_apps_gets_the_table_view() {
+    let d = Daemon::new();
+    let caps = json!({ "extensions": { "io.modelcontextprotocol/ui": { "mimeTypes": ["text/html;profile=mcp-app"] } } });
+    let (_, h, _) = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": caps, "clientInfo": { "name": "host", "version": "1" } } }))).await;
+    let session = h["mcp-session-id"].to_str().unwrap().to_string();
+    let rpc = |method: &'static str, params: Value, session: Option<String>| {
+        let d = &d;
+        async move {
+            let h: Vec<(&str, String)> = session.map(|s| vec![("mcp-session-id", s)]).unwrap_or_default();
+            let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            d.http_with(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 2, "method": method, "params": params })), &h).await.2["result"].clone()
+        }
+    };
+    let tools = rpc("tools/list", json!({}), Some(session.clone())).await;
+    let ui_of = |list: &Value, name: &str| list["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).map(|t| t["_meta"]["ui"]["resourceUri"].clone()).unwrap_or(Value::Null);
+    assert_eq!(ui_of(&tools, "postgres_query"), "ui://roll/table", "{tools}");
+    assert_eq!(ui_of(&tools, "postgres_delete_project"), Value::Null, "only tools that read rows");
+    let view = rpc("resources/read", json!({ "uri": "ui://roll/table" }), Some(session)).await;
+    assert_eq!(view["contents"][0]["mimeType"], "text/html;profile=mcp-app", "{view}");
+    assert!(view["contents"][0]["text"].as_str().unwrap().contains("ui/initialize"));
+    // A host that didn't declare them: no UI.
+    assert_eq!(ui_of(&rpc("tools/list", json!({}), None).await, "postgres_query"), Value::Null);
+}
+
 /// A 2026-07-28 client (the stateless core) is served with no `initialize`: each request names its
 /// version and what the client offers in `_meta`, its headers must say what its body says, its
 /// answers say they're complete (lists may be kept a minute, for this caller only), no session is

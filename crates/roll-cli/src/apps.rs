@@ -627,7 +627,8 @@ pub enum AppsCmd {
         #[arg(long, conflicts_with = "reveal")]
         deploy: bool,
     },
-    /// Link a roll resource (`postgres <project>`, `redis <db>`): its connection variables go in.
+    /// Link a roll resource (`postgres <project>`, `redis <db>`, `search <cluster>`): its
+    /// connection variables go in (a search cluster's are an API key of the link's own).
     Link {
         kind: String,
         r#ref: String,
