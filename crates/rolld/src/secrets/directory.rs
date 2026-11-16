@@ -252,4 +252,61 @@ mod tests {
         assert_eq!("\"Ab1!\"".encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>(), b"\"\0A\0b\x001\0!\0\"\0");
         assert_eq!(filetime(0), "116444736000000000");
     }
+
+    /// Against a real OpenLDAP with TLS, run by hand (docs/secrets.md, "Directories"):
+    /// `ROLL_E2E_LDAP_URL=ldaps://127.0.0.1:PORT ROLL_E2E_LDAP_CA=ca.pem ROLL_E2E_LDAP_BIND=cn=roll,…
+    /// ROLL_E2E_LDAP_PASSWORD=… ROLL_E2E_LDAP_BASE=dc=example,dc=com cargo test -p rolld real_openldap -- --ignored`,
+    /// with `ou=svc` holding `cn=app-blue`, `ou=roll` and `ou=groups` holding `cn=readers`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn a_real_openldap_sets_passwords_and_makes_and_deletes_users() {
+        use roll_secrets::directories::Directory;
+        let env = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k}"));
+        let (url, ca, bind_dn, pw, base) = (env("ROLL_E2E_LDAP_URL"), std::fs::read_to_string(env("ROLL_E2E_LDAP_CA")).unwrap(), env("ROLL_E2E_LDAP_BIND"), env("ROLL_E2E_LDAP_PASSWORD"), env("ROLL_E2E_LDAP_BASE"));
+        tokio::task::spawn_blocking(move || {
+            let g = Guarded { allow_private: true };
+            let at = |dn: &'static str| format!("{dn},{base}");
+            let (blue, users, group) = (at("cn=app-blue,ou=svc"), at("ou=roll"), at("cn=readers,ou=groups"));
+            let admin = Bind { url: &url, flavor: Flavor::Openldap, bind_dn: &bind_dn, bind_password: &pw, ca: Some(&ca) };
+            let as_user = |dn: &str, password: &str| g.check(&Bind { url: &url, flavor: Flavor::Openldap, bind_dn: dn, bind_password: password, ca: Some(&ca) }, &[], &[], None);
+            // The bind proof, and a refusal for what isn't there.
+            g.check(&admin, std::slice::from_ref(&blue), std::slice::from_ref(&group), Some(&users)).unwrap();
+            assert!(g.check(&admin, &[at("cn=nobody,ou=svc")], &[], None).unwrap_err().contains("there's no"));
+            assert!(g.check(&Bind { bind_password: "fake-wrong", ..admin }, &[], &[], None).unwrap_err().contains("49"));
+            // A managed account's new password works and its old one doesn't.
+            let first = roll_secrets_password();
+            g.set_password(&admin, &blue, &first).unwrap();
+            as_user(&blue, &first).unwrap();
+            let second = roll_secrets_password();
+            g.set_password(&admin, &blue, &second).unwrap();
+            as_user(&blue, &second).unwrap();
+            assert!(as_user(&blue, &first).is_err(), "the old password is refused");
+            // A dynamic user: made in the group, binds, then is gone (twice: gone counts as deleted).
+            let user = format!("cn=roll-lse_fakefakefakefake,{users}");
+            let upw = roll_secrets_password();
+            g.create_user(&admin, &user, &upw, std::slice::from_ref(&group), "roll secrets lease lse_fakefakefakefake (test)", 0).unwrap();
+            as_user(&user, &upw).unwrap();
+            assert!(member_of(&g, &admin, &group, &user), "it joined the group");
+            g.delete_user(&admin, &user, std::slice::from_ref(&group)).unwrap();
+            assert!(as_user(&user, &upw).is_err() && !member_of(&g, &admin, &group, &user), "deleted and out of the group");
+            g.delete_user(&admin, &user, std::slice::from_ref(&group)).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    fn roll_secrets_password() -> String {
+        let mut b = [0u8; 18];
+        getrandom::fill(&mut b).unwrap();
+        b.iter().map(|x| format!("{x:02x}")).collect::<String>() + "Aa1"
+    }
+
+    fn member_of(g: &Guarded, admin: &Bind<'_>, group: &str, dn: &str) -> bool {
+        let (group, dn) = (group.to_string(), dn.to_string());
+        g.run(admin, async move |l| {
+            let (entries, _) = l.search(&group, Scope::Base, "(objectClass=*)", vec!["member"]).await.and_then(|r| r.success()).map_err(ldap_error)?;
+            Ok(entries.into_iter().map(SearchEntry::construct).any(|e| e.attrs.get("member").is_some_and(|m| m.iter().any(|v| v.eq_ignore_ascii_case(&dn)))))
+        })
+        .unwrap()
+    }
 }

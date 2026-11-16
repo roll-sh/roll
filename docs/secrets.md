@@ -996,6 +996,16 @@ The bind account needs, at least:
 | `openldap` | `write` on each account's `userPassword` (`olcAccess: to dn.exact="cn=app-blue,…" attrs=userPassword by dn.exact="cn=roll,…" write`), and `read` on the root DSE's `supportedExtension` | `write` on `entry` and `children` of `user_base_dn` (to add and delete users) and on the new users' attributes, and `write` on each group's `member` |
 | `active_directory` | the *Reset Password* extended right on each account (Delegate Control, "Reset user passwords and force password change at next logon") | *Create* and *Delete User objects* on the `user_base_dn` OU, *Reset Password* and write `userAccountControl`, `accountExpires` and `description` on its users, and write `member` on each group |
 
+Checked against OpenLDAP 2.4 (`osixia/openldap:1.5.0`, a certificate from a private CA) over
+LDAPS and StartTLS, bound as an account with only the `openldap` row's rights (`olcAccess` above):
+the bind proof and a missing account refused, a new password that binds while the old one is
+refused (stored `{SSHA}` through Password Modify), a dynamic user that binds and is in its group,
+then deleted and out of the group, a second delete that's fine, and an untrusted certificate
+refused (`a_real_openldap_sets_passwords_and_makes_and_deletes_users` in
+`crates/rolld/src/secrets/directory.rs`, ignored: run by hand with `ROLL_E2E_LDAP_*`). Active
+Directory's calls (`unicodePwd`, `userAccountControl`, `accountExpires`) follow Microsoft's
+documentation and haven't been run against a domain controller yet.
+
 A directory a key links to, or with a retired password or a dynamic user still to delete, can't be
 deleted (409).
 ### GCP and Azure
