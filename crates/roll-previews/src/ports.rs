@@ -200,6 +200,29 @@ pub struct GitPush {
     pub pull: Option<GitPull>,
 }
 
+/// What a Git URL service's preview says on its repository ([`Source::git_report_body`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitReportBody {
+    /// The commit status (`pending`, `success`, `failure`; `None`: no status, e.g. deleted).
+    pub state: Option<String>,
+    pub description: String,
+    /// The service's URL (plain: never the access token) or roll's dashboard.
+    pub target_url: Option<String>,
+    /// The pull request's comment, edited in place.
+    pub comment: String,
+}
+
+/// Posts a Git URL service's preview where its code lives (rolld: roll apps' GitHub App
+/// connection, a short-lived token for that one repository; never the service's git login).
+/// `Ok(false)` / `Ok(None)`: the service isn't connected, so nothing was posted.
+#[async_trait]
+pub trait GitReport: Send + Sync {
+    /// The commit status `roll/preview` on `sha`.
+    async fn status(&self, service: &str, sha: &str, state: &str, description: &str, target_url: Option<&str>) -> anyhow::Result<bool>;
+    /// Pull request `number`'s comment, `existing` edited in place (made again if it's gone): its id.
+    async fn comment(&self, service: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>>;
+}
+
 /// A pull request of a Git URL service's repository, as roll apps hands it on.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GitPull {
@@ -298,6 +321,13 @@ pub trait Source: Send + Sync {
     async fn report(&self, preview: &Preview, settings: &crate::Settings);
     /// The preview is gone; `teardown`: what the project's teardown said when it failed.
     async fn forget(&self, preview: &Preview, teardown: Option<&str>);
+    /// What a Git URL service's preview (no roll code change) says on its repository: the
+    /// `roll/preview` status and the pull request's comment, as a roll code change's preview
+    /// says them (`None`: nothing, e.g. a preview being deleted's status). `deleted`: its last
+    /// comment.
+    fn git_report_body(&self, _preview: &Preview, _settings: &crate::Settings, _deleted: Option<Option<&str>>) -> Option<GitReportBody> {
+        None
+    }
     /// The project's previews passed `alert.percent` of their monthly budget: tell the people
     /// who follow its repos (roll code: each repo's `budget` event). `Err` when it couldn't be
     /// queued: the engine tries again on its next pass.

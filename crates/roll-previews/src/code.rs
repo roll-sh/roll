@@ -364,6 +364,18 @@ impl Source for CodeSource {
         Ok(())
     }
 
+    fn git_report_body(&self, p: &Preview, s: &Settings, deleted: Option<Option<&str>>) -> Option<crate::ports::GitReportBody> {
+        let marker = format!("<!-- roll-preview:{} -->", p.id);
+        if let Some(teardown) = deleted {
+            return Some(crate::ports::GitReportBody { state: None, description: String::new(), target_url: None, comment: code_control::github::preview_comment_for(None, &marker, teardown) });
+        }
+        let summary = self.summary(p, s);
+        let (state, _, description) = code_control::github::preview_states(Some(&summary));
+        let env = summary.environment.as_ref();
+        let target_url = env.and_then(|e| e.services.first().map(|x| x.url.clone()).filter(|u| !u.is_empty())).or_else(|| env.and_then(|e| e.dashboard_url.clone()));
+        Some(crate::ports::GitReportBody { state: state.map(str::to_string), description, target_url, comment: code_control::github::preview_comment_for(Some(&summary), &marker, None) })
+    }
+
     async fn forget(&self, p: &Preview, teardown: Option<&str>) {
         let Some(change) = &p.change else { return };
         // Only the change's preview environment, never roll code's own preview of it.
