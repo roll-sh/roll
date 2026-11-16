@@ -2229,7 +2229,10 @@ async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token()
     let (s, l) = login(issuer.sign(claims("repo:acme/web:ref:refs/heads/main", "refs/heads/main", now + 300))).await;
     assert_eq!(s, StatusCode::OK, "{l}");
     let token = l["token"].as_str().unwrap().to_string();
-    assert!(token.starts_with("rlt_") && l["expires_at"].as_i64().unwrap() <= (now + 601) * 1000);
+    // At most ten minutes from when it was issued (bounded by the answer's time, not `now`: a
+    // loaded machine can take more than a second to log in).
+    let answered = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    assert!(token.starts_with("rlt_") && l["expires_at"].as_i64().unwrap() <= answered + 600_000, "{l}");
     let (s, v) = api.req(Method::GET, "/environments/staging/values", None, Some(&token)).await;
     assert_eq!((s, v["values"]["API_KEY"].as_str()), (StatusCode::OK, Some("staging-key")));
     let (s, _) = api.req(Method::GET, "/environments/production/values", None, Some(&token)).await;
