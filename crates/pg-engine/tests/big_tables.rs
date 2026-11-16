@@ -11,7 +11,11 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 fn open(dir: &std::path::Path) -> std::sync::Arc<Engine> {
-    Engine::open(EngineOptions {
+    Engine::open(options(dir)).unwrap()
+}
+
+fn options(dir: &std::path::Path) -> EngineOptions {
+    EngineOptions {
         data_dir: dir.to_path_buf(),
         cache_bytes: 4 << 20,
         memtable_bytes: 256 << 10,
@@ -27,8 +31,7 @@ fn open(dir: &std::path::Path) -> std::sync::Arc<Engine> {
         max_prepared_transactions: 0,
         auth_files: Default::default(),
         settings: Vec::new(),
-    })
-    .unwrap()
+    }
 }
 
 fn rows(s: &mut Session, sql: &str) -> Vec<String> {
@@ -645,35 +648,107 @@ fn estimate_kept_across_restart() {
 /// The bulk script's history (an UPDATE of half the rows, a DELETE of a quarter, VACUUM) on
 /// a table too big to model: its btrees grow as PostgreSQL's (`sizing::btest`), the new
 /// versions are placed where PostgreSQL puts them, and a serial scan returns the rows in its
-/// heap order (a float sum's order). Expected values recorded from PostgreSQL 18.6.
+/// heap order (a float sum's order). Expected values recorded from PostgreSQL 18.6. The same
+/// after a restart and after a crash (`sizing::estkeep`), and a later UPDATE places its
+/// versions alike after either.
 #[test]
 fn sizes_and_heap_order_past_the_model() {
     let dir = tempfile::tempdir().unwrap();
-    let eng = open(dir.path());
-    with_max_versions(2000, || {
+    let after = with_max_versions(2000, || {
+        let eng = open(dir.path());
         let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
-        let one = |s: &mut Session, q: &str| rows(s, q).join("\n");
-        // (The heap's and t_a's pages exactly; t_id's within a page of PostgreSQL's 167: the
-        // summary estimates where its leaves split.)
-        let sizes = "SELECT concat_ws(' ', pg_relation_size('t') / 8192, pg_relation_size('t_a') / 8192, abs(pg_relation_size('t_id') / 8192 - 167) <= 1)";
-        run(&mut s, "CREATE TABLE t (id int NOT NULL, a int NOT NULL, b text, c float8) WITH (autovacuum_enabled = off);
-             INSERT INTO t SELECT g, g * 7919 % 3000, 'some text value ' || g, g / 7.0 FROM generate_series(1, 30000) g;
-             CREATE INDEX t_a ON t (a);
-             CREATE UNIQUE INDEX t_id ON t (id);
-             UPDATE t SET c = c + 1 WHERE id % 2 = 0");
-        assert_eq!(one(&mut s, sizes), r#"[Text("375 71 t")]"#);
-        run(&mut s, "DELETE FROM t WHERE id % 4 = 1;\nVACUUM t");
-        assert_eq!(one(&mut s, sizes), r#"[Text("375 71 t")]"#);
-        assert_eq!(
-            one(&mut s, "SELECT string_agg(concat_ws(' ', relname, CASE WHEN relname = 't_id' THEN abs(relpages - 167) <= 1 ELSE relpages > 0 END, relpages * (relname <> 't_id')::int, reltuples, relallvisible), ', ' ORDER BY relname) FROM pg_class WHERE relname IN ('t', 't_a', 't_id')"),
-            r#"[Text("t t 375 22500 375, t_a t 71 22500 0, t_id t 0 22500 0")]"#
-        );
-        run(&mut s, "SET max_parallel_workers_per_gather = 0");
-        assert_eq!(one(&mut s, "SELECT sum(c)::text || ' ' || avg(c)::text FROM t"), r#"[Text("48232500 2143.6666666666665")]"#);
-        assert_eq!(one(&mut s, "SELECT string_agg(id::text, ',') FROM (SELECT id FROM t LIMIT 6) s"), r#"[Text("3,7,11,15,19,23")]"#);
-        assert_eq!(one(&mut s, "SELECT md5(string_agg(id::text, ',')) FROM t"), r#"[Text("dac6087b4c96233c6601d1779252870e")]"#);
-        assert_eq!(one(&mut s, "EXPLAIN (COSTS OFF) SELECT count(*) FROM t"), "[Text(\"Aggregate\")]\n[Text(\"  ->  Seq Scan on t\")]");
+        past_model_history(&mut s);
+        past_model_checks(&mut s, "before a restart");
+        drop(s);
+        eng.shutdown();
+        let eng = open(dir.path());
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        past_model_checks(&mut s, "after a restart");
+        let after = past_model_update(&mut s);
+        drop(s);
+        eng.shutdown();
+        let eng = open(dir.path());
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        assert_eq!(past_model_state(&mut s), after, "after an UPDATE and a restart");
+        drop(s);
+        eng.shutdown();
+        after
     });
+    let tmp = tempfile::tempdir().unwrap();
+    let st = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "past_model_crash_child", "--nocapture", "--test-threads=1"])
+        .env("PAST_MODEL_CRASH_DIR", tmp.path())
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!st.success(), "the child wasn't killed");
+    with_max_versions(2000, || {
+        let eng = open(tmp.path());
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        past_model_checks(&mut s, "after a crash");
+        assert_eq!(past_model_update(&mut s), after, "an UPDATE after a crash");
+        drop(s);
+        eng.shutdown();
+    });
+}
+
+/// `sizes_and_heap_order_past_the_model`'s crash: the history committed, then `kill -9`.
+#[test]
+fn past_model_crash_child() {
+    let Ok(dir) = std::env::var("PAST_MODEL_CRASH_DIR") else {
+        return;
+    };
+    with_max_versions(2000, || {
+        let eng = Engine::open(EngineOptions { sync: true, ..options(std::path::Path::new(&dir)) }).unwrap();
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        past_model_history(&mut s);
+        let me = std::process::id().to_string();
+        std::process::Command::new("kill").args(["-9", &me]).status().unwrap();
+        unreachable!("still alive after SIGKILL");
+    });
+}
+
+/// (The heap's and t_a's pages exactly; t_id's within a page of PostgreSQL's 167: the
+/// summary estimates where its leaves split.)
+const PAST_MODEL_SIZES: &str = "SELECT concat_ws(' ', pg_relation_size('t') / 8192, pg_relation_size('t_a') / 8192, abs(pg_relation_size('t_id') / 8192 - 167) <= 1)";
+
+fn past_model_history(s: &mut Session) {
+    run(s, "CREATE TABLE t (id int NOT NULL, a int NOT NULL, b text, c float8) WITH (autovacuum_enabled = off);
+         INSERT INTO t SELECT g, g * 7919 % 3000, 'some text value ' || g, g / 7.0 FROM generate_series(1, 30000) g;
+         CREATE INDEX t_a ON t (a);
+         CREATE UNIQUE INDEX t_id ON t (id);
+         UPDATE t SET c = c + 1 WHERE id % 2 = 0");
+    assert_eq!(rows(s, PAST_MODEL_SIZES).join("\n"), r#"[Text("375 71 t")]"#);
+    run(s, "DELETE FROM t WHERE id % 4 = 1;\nVACUUM t");
+}
+
+fn past_model_checks(s: &mut Session, when: &str) {
+    let mut one = |q: &str| rows(s, q).join("\n");
+    assert_eq!(one(PAST_MODEL_SIZES), r#"[Text("375 71 t")]"#, "{when}");
+    assert_eq!(
+        one("SELECT string_agg(concat_ws(' ', relname, CASE WHEN relname = 't_id' THEN abs(relpages - 167) <= 1 ELSE relpages > 0 END, relpages * (relname <> 't_id')::int, reltuples, relallvisible), ', ' ORDER BY relname) FROM pg_class WHERE relname IN ('t', 't_a', 't_id')"),
+        r#"[Text("t t 375 22500 375, t_a t 71 22500 0, t_id t 0 22500 0")]"#,
+        "{when}"
+    );
+    one("SET max_parallel_workers_per_gather = 0");
+    assert_eq!(one("SELECT sum(c)::text || ' ' || avg(c)::text FROM t"), r#"[Text("48232500 2143.6666666666665")]"#, "{when}");
+    assert_eq!(one("SELECT string_agg(id::text, ',') FROM (SELECT id FROM t LIMIT 6) s"), r#"[Text("3,7,11,15,19,23")]"#, "{when}");
+    assert_eq!(one("SELECT md5(string_agg(id::text, ',')) FROM t"), r#"[Text("dac6087b4c96233c6601d1779252870e")]"#, "{when}");
+    assert_eq!(one("EXPLAIN (COSTS OFF) SELECT count(*) FROM t"), "[Text(\"Aggregate\")]\n[Text(\"  ->  Seq Scan on t\")]", "{when}");
+}
+
+/// An UPDATE after the history (into the space VACUUM freed and past it), and the state it
+/// leaves (`past_model_state`).
+fn past_model_update(s: &mut Session) -> String {
+    run(s, "UPDATE t SET c = c + 0.5 WHERE id % 3 = 0");
+    past_model_state(s)
+}
+
+/// The table's sizes, serial row order and float sum.
+fn past_model_state(s: &mut Session) -> String {
+    run(s, "SET max_parallel_workers_per_gather = 0");
+    let q = format!("SELECT concat_ws(' ', ({PAST_MODEL_SIZES}), pg_relation_size('t_id') / 8192, (SELECT md5(string_agg(id::text, ',')) FROM t), (SELECT sum(c) FROM t))");
+    rows(s, &q).join("\n")
 }
 
 #[test]

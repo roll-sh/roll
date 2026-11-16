@@ -3990,6 +3990,9 @@ impl Txn {
             for &t in &linked_tables {
                 db.watch.committing_table(t);
             }
+            // (Estimates of tables too big to model that changed: durable with it, in commit
+            // order, `sizing::estkeep`.)
+            crate::exec::sizing::estkeep::take(db, catalog.borrow().as_deref(), writes);
             Ok(())
         };
         let db2 = &self.db;
