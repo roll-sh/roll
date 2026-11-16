@@ -265,6 +265,9 @@ struct EstHeap {
     writes: u64,
     /// The fill page was taken by a bulk load (whose state keeps it as its target).
     fill_bulk: bool,
+    /// The transaction whose bulk load took the fill page, while its state is in
+    /// `RelFiles::bulk` (`CopyLoad`'s drop clears it): its rows needn't look the state up.
+    fill_owner: Option<u64>,
     /// The last update's new version stayed on its old one's page (`add_in`).
     in_place: bool,
     /// The key of the first row put on the fill page while rows went in in key order: the
@@ -398,6 +401,7 @@ impl EstHeap {
             order,
             writes: 0,
             fill_bulk: fresh > 0,
+            fill_owner: None,
             in_place: false,
             fill_key: None,
             tail: None,
@@ -456,7 +460,11 @@ impl EstHeap {
         let reserve = heapsim::BLCKSZ * (100 - fillfactor.min(100)) / 100;
         // (A writer other than the bulk load filling the page has no target page of its own:
         // the free space map gives it the bulk extension's fresh pages first.)
-        let leave = self.fill_bulk && self.fresh > 0 && state(&mut bulk).is_none();
+        let writer = bulk.as_ref().map(|b| b.1.1);
+        let leave = self.fill_bulk
+            && self.fresh > 0
+            && (self.fill_owner.is_none() || self.fill_owner != writer)
+            && state(&mut bulk).is_none();
         if leave || self.pages == 0 || need + reserve > self.room || full(self.items) {
             let is_bulk = state(&mut bulk).is_some();
             if let Some(key) = self.fill_key.take() {
@@ -475,6 +483,7 @@ impl EstHeap {
             self.room = heapsim::BLCKSZ - heapsim::PAGE_HEADER;
             self.items = 0;
             self.fill_bulk = is_bulk;
+            self.fill_owner = if is_bulk { writer } else { None };
             self.fill_key = match put {
                 Put::Row(Some(k)) if self.order == EstOrder::InOrder => Some(k.to_vec()),
                 _ => None,
@@ -5958,7 +5967,14 @@ impl Drop for CopyLoad {
         if let Some((batches, multi, xid, cid)) = self.take_deferred() {
             self.model(batches, multi, xid, cid, None);
         }
-        self.db.relfiles.of(self.key.0).write().bulk.remove(&self.key);
+        let mut rf = self.db.relfiles.of(self.key.0).write();
+        rf.bulk.remove(&self.key);
+        if let Some(e) = rf.estimated.get_mut(&self.key.0)
+            && e.fill_owner == Some(self.key.1)
+        {
+            e.fill_owner = None;
+        }
+        drop(rf);
         let bkey = self.batch_key();
         let _ = BATCHES.try_with(|b| b.borrow_mut().retain(|(k, _)| *k != bkey));
     }
