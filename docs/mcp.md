@@ -40,8 +40,10 @@ config with your address filled in.
 
 ### Toolsets
 
-Every product's tools are about 259 (222 of roll's own, ~21k tokens of what a model reads, and
-roll code's), before an agent does anything. Connect to `/v1/mcp?toolsets=postgres,code` (or send `X-MCP-Toolsets: postgres,code`) to
+Every product's tools are about 310 (roll's own and roll code's: ~200 KB, ~25k tokens of what a
+model reads), before an agent does anything. Building that list takes 6.5 ms at p50 and 15.5 ms at
+p99 in release (`tools_list_cost`, an ignored test: linear in the tools, 3.2 ms for 149), and a
+client keeps it for a minute (`ttlMs`). Connect to `/v1/mcp?toolsets=postgres,code` (or send `X-MCP-Toolsets: postgres,code`) to
 list only those products' tools, as GitHub's MCP server does; the access tools (approvals,
 `access_check`) are always listed. On a four-product node, Redis alone is 12 tools, ~2.4k tokens
 instead of ~16k. An unknown name is `400`, naming the toolsets there are. The dashboard's connect
