@@ -70,6 +70,18 @@ impl Link {
     pub fn rotate_days(&self) -> Option<u64> {
         self.option_u64("rotate_days").filter(|d| *d > 0).map(|d| d.min(3650))
     }
+
+    /// When a due scheduled rotation may run (`rotate_window`, UTC); none: as soon as it's due.
+    pub fn rotate_window(&self) -> Option<crate::window::Window> {
+        self.options.get("rotate_window").and_then(Json::as_str).and_then(|w| crate::window::Window::parse(w).ok())
+    }
+
+    /// When the next scheduled rotation runs: `rotate_days` after `issued_at`, or with a window,
+    /// its first opening once due (an overdue one: its next opening from `now`).
+    pub fn next_rotation(&self, issued_at: i64, now: i64) -> Option<i64> {
+        let due = issued_at + self.rotate_days()? as i64 * 86_400_000;
+        Some(self.rotate_window().map_or(due, |w| w.next_open(due.max(now))))
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -207,8 +219,15 @@ impl Links {
             return Err(Error::BadRequest(format!("{} {} is {}, not {}", l.kind, l.field, f.modes.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(" or "), l.mode.as_str())));
         }
         for k in l.options.keys() {
-            if !["ttl_minutes", "grace_minutes", "rotate_days", "branch", "permission", "names", "principals"].contains(&k.as_str()) {
+            if !["ttl_minutes", "grace_minutes", "rotate_days", "rotate_window", "branch", "permission", "names", "principals"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown link option {k}")));
+            }
+        }
+        if let Some(w) = l.options.get("rotate_window") {
+            let w = w.as_str().ok_or_else(|| Error::BadRequest("rotate_window is a string like \"sun 02:00-04:00\"".into()))?;
+            crate::window::Window::parse(w).map_err(Error::BadRequest)?;
+            if l.mode != Mode::Managed || l.rotate_days().is_none() {
+                return Err(Error::BadRequest("rotate_window goes with a managed link's rotate_days".into()));
             }
         }
         p.check(l)

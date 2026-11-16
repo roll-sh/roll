@@ -50,6 +50,7 @@ mod shares;
 pub mod sinks;
 pub mod suggestions;
 mod sweep;
+pub mod window;
 pub mod syncs;
 mod tokens;
 pub mod kms;

@@ -1270,6 +1270,36 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
     assert!(!health.to_string().contains("failing"), "both cleared once they succeed: {health}");
     let rot = api.ok(Method::GET, "/rotations", None).await;
     assert!(rot[0]["last_error"].is_null() && rot[0]["next_due"].as_i64().unwrap() > rot[0]["issued_at"].as_i64().unwrap(), "{rot}");
+    // A rotation window: a due rotation waits until it's open (UTC), and says when that is.
+    let (s, _) = api.call(Method::PUT, "/environments/production/secrets/OTHER_KEY", Some(json!({ "link": { "kind": "rotator", "ref": r["id"], "field": "value", "mode": "managed", "options": { "rotate_window": "sun 02:00-04:00" } } }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a window goes with rotate_days");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let hhmm = |ms: i64| format!("{:02}:{:02}", ms.rem_euclid(86_400_000) / 3_600_000, ms.rem_euclid(3_600_000) / 60_000);
+    let (closed, open) = (format!("daily {}-{}", hhmm(now + 3 * 3_600_000), hhmm(now + 5 * 3_600_000)), format!("daily {}-{}", hhmm(now - 1_800_000), hhmm(now + 5_400_000)));
+    let window = |w: String| {
+        let p = api.project.clone();
+        api.db
+            .write(move |c| {
+                let state: String = c.query_row("SELECT link_state FROM secrets WHERE project_id = ? AND key = 'STRIPE_KEY'", [p.as_str()], |r| r.get(0))?;
+                let mut state: Value = serde_json::from_str(&state).unwrap();
+                state["issued_at"] = json!(0);
+                let link: String = c.query_row("SELECT link FROM secrets WHERE project_id = ? AND key = 'STRIPE_KEY'", [p.as_str()], |r| r.get(0))?;
+                let mut link: Value = serde_json::from_str(&link).unwrap();
+                link["options"]["rotate_window"] = json!(w);
+                c.execute("UPDATE secrets SET link_state = ?, link = ? WHERE project_id = ? AND key = 'STRIPE_KEY'", [state.to_string().as_str(), link.to_string().as_str(), p.as_str()])
+            })
+            .unwrap();
+    };
+    window(closed.clone());
+    let before = api.values("production", "/").await["values"]["STRIPE_KEY"].clone();
+    sweep().await;
+    assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], before, "due, but its window isn't open");
+    let rot = api.ok(Method::GET, "/rotations", None).await;
+    assert_eq!(rot[0]["rotate_window"].as_str(), Some(closed.as_str()));
+    assert!(rot[0]["next_due"].as_i64().unwrap() > now + 2 * 3_600_000, "the window's next opening: {rot}");
+    window(open);
+    sweep().await;
+    assert_ne!(api.values("production", "/").await["values"]["STRIPE_KEY"], before, "rotated inside its window");
 
     // The project goes while the rotator is down: what it issued is still revoked, by the
     // sweeper, which keeps the rotator (and the project's key) until then.

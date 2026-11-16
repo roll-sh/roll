@@ -696,7 +696,11 @@ A link is `{kind, ref, field, mode, options}`:
   credential, stores it as the secret's value (encrypted, versioned), and can **rotate** it, on
   demand or every `rotate_days`. Rotation issues a new credential, makes it the current version, and
   revokes the previous one after `grace_minutes` (default 60), so running services have time to
-  pick up the new value.
+  pick up the new value. With `rotate_window` (as AWS Secrets Manager's schedule window: `"sun
+  02:00-04:00"`, `"mon,thu 22:00-01:00"`, `"daily 03:00-05:00"`; UTC, at least an hour, ending past
+  midnight on the next day), a due rotation waits for the window to open and runs inside it, so a
+  credential changes only when you expect it to; `next_due` says when that is. A window goes with
+  `rotate_days`, on a managed link.
 - **`dynamic`** (short-lived credentials): each resolve that asks for it (`roll run`, an app's
   start) issues a fresh credential with a TTL (`ttl_minutes`, default 60, at least 15 minutes, at most 7 days), recorded
   as a **lease**. Leases are revoked when they expire, or at once with `DELETE …/leases/{id}`. A
@@ -2369,7 +2373,7 @@ isn't in the workspace is 404.
 | `GET /aws-users` | | `AwsUser[]` (`read` on the project) |
 | `POST /aws-users` | `{name, role, user}` | 201 `AwsUser` (`admin`; lists the user's keys as the role first: 400 with AWS's code) |
 | `DELETE /aws-users/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
-| `GET /rotations` | | `Rotation[]`: every managed credential the caller may read (environment, keys, resource, `rotate_days`, `issued_at`, `next_due`, `last_error`) |
+| `GET /rotations` | | `Rotation[]`: every managed credential the caller may read (environment, keys, resource, `rotate_days`, `rotate_window`, `issued_at`, `next_due`: with a window, its next opening once due, `last_error`) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -2469,7 +2473,7 @@ type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: st
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Finding = { issue: "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
-type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
+type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Finding = { issue: "expired" | "missing" | "exposed" | "public" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };

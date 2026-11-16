@@ -265,7 +265,7 @@ export type Finding = { issue: "expired" | "rotation_failing" | "revoke_failing"
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
 /** A managed credential and its rotation: its keys, resource, schedule, and why its last scheduled rotation failed. */
-export type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
+export type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 /** An encryption key (encryption as a service): its versions, never its material. */
 /** A transit key version's public signing key (Ed25519): raw base64, PEM (SPKI) and a JWK. */
 export type TransitPublicKey = { version: number; public_key: string; pem: string; jwk: { kty: "OKP"; crv: "Ed25519"; x: string; kid: string; alg: "EdDSA"; use: "sig" } };
