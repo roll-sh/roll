@@ -280,6 +280,14 @@ pub struct Registry {
     pub username: String,
 }
 
+/// A private Git repository's login for a Git URL service (`PUT …/git-login`): sent only to
+/// `host`, the source URL's; the password (a token) is sealed and never returned.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GitLogin {
+    pub host: String,
+    pub username: String,
+}
+
 /// A relative path inside a tree: no `..`, not absolute, plain characters.
 pub fn check_rel_path(what: &str, p: &str) -> Result<()> {
     let ok = !p.is_empty()
@@ -895,6 +903,8 @@ pub struct Service {
     pub run: Run,
     /// The private registry login its image pulls with (never the password).
     pub registry: Option<Registry>,
+    /// The private Git repository login its source fetches with (never the password).
+    pub git_login: Option<GitLogin>,
     /// What it links (the canvas draws them), without their variables.
     pub links: Vec<LinkRef>,
     pub created_at: i64,

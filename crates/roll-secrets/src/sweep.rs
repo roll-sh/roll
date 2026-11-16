@@ -161,7 +161,16 @@ impl Secrets {
         let l = self.lease(project, id)?;
         let handle: Option<String> = self.db.read(|c| c.query_row("SELECT handle FROM leases WHERE id = ?", [id], |r| r.get(0)).optional())?;
         let (env, kind, issued_at, expires_at, revoked_at) = (l.environment.clone(), l.kind.clone(), l.issued_at, l.expires_at, l.revoked_at);
-        caller.need(Action::Reveal, &Scope::at(project, &env, &l.path))?;
+        // As ending one: whoever may delete there, or the caller it was issued to while it may
+        // still reveal there (keeping another's credential alive is as much theirs to decide).
+        let at = Scope::at(project, &env, &l.path);
+        if !caller.allows(Action::Delete, &at) {
+            caller.need(Action::Reveal, &at)?;
+            let by: Option<String> = self.db.read(|c| c.query_row("SELECT issued_by FROM leases WHERE id = ?", [id], |r| r.get(0)))?;
+            if by.as_deref() != Some(caller.principal.as_str()) {
+                return Err(Error::Forbidden(format!("{id} wasn't issued to you: renewing another's lease needs delete on {env}")));
+            }
+        }
         if kind != "dynamic" {
             return Err(Error::BadRequest(format!("{id} is a retired credential's: only dynamic leases renew")));
         }
@@ -185,13 +194,22 @@ impl Secrets {
         self.lease(project, id)
     }
 
-    /// Revoke a lease now.
+    /// Revoke a lease now: whoever may delete there, or the caller it was issued to while it may
+    /// still reveal there (Terraform's ephemeral reads close their own leases with a read token).
+    /// A reader can't end another's: that would drop a running service's credential.
     pub fn revoke_lease(&self, project: &str, id: &str, caller: &Caller) -> Result<()> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let l = self.lease(project, id)?;
         let env = l.environment;
-        caller.need(Action::Delete, &Scope::at(project, &env, &l.path))?;
+        let at = Scope::at(project, &env, &l.path);
+        if !caller.allows(Action::Delete, &at) {
+            caller.need(Action::Reveal, &at)?;
+            let by: Option<String> = self.db.read(|c| c.query_row("SELECT issued_by FROM leases WHERE id = ?", [id], |r| r.get(0)))?;
+            if by.as_deref() != Some(caller.principal.as_str()) {
+                return Err(Error::Forbidden(format!("{id} wasn't issued to you: ending another's lease needs delete on {env}")));
+            }
+        }
         match self.revoke_one(id)? {
             true => {
                 self.audit_now(project, caller, "lease.revoke", Some(&env), None, &[], &format!("revoked {id}"));
@@ -335,12 +353,7 @@ impl Secrets {
                     return Err(Error::BadRequest(format!("{} {} has no credential to rotate", link.kind, link.r#ref)));
                 }
                 // Every folder that links it live reads a new value now: their digests move.
-                self.db.write(|c| {
-                    c.execute(
-                        "INSERT INTO source_generations (kind, ref, generation) VALUES (?, ?, 1) ON CONFLICT (kind, ref) DO UPDATE SET generation = source_generations.generation + 1",
-                        [link.kind.as_str(), link.r#ref.as_str()],
-                    )
-                })?;
+                self.source_changed(&link.kind, &link.r#ref)?;
                 self.audit_now(project, caller, "secrets.rotate", Some(slug), Some(&path), &[key.to_string()], &format!("rotated {} {}'s credential", link.kind, link.r#ref));
                 Ok(Applied { change: None, items: vec![], warnings: vec![], request: None })
             }

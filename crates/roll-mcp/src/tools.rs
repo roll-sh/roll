@@ -66,6 +66,10 @@ pub struct Tool {
     /// The `sql` argument as the route gets it (`EXPLAIN (FORMAT JSON) <sql>`).
     pub wrap: Option<fn(&str) -> String>,
     pub hint: Hint,
+    /// For a tool that waits for something (a run, a decision) up to a request's limit: whether
+    /// its answer says the wait is over. As an MCP task, an answer that isn't is asked again, so
+    /// the task waits as long as it takes (tasks::run).
+    pub until: Option<fn(&Value) -> bool>,
 }
 
 pub enum Built {
@@ -261,7 +265,17 @@ const IDEMPOTENCY: P = P { name: "idempotency_key", ty: Ty::Str, at: At::Header(
 const IN_PROJECT: P = P { name: "workspace_project", ty: Ty::Str, at: At::Header("x-roll-project"), required: false, desc: "Workspace project (prj_…) to put the new resource in" };
 
 const fn t(name: &'static str, title: &'static str, description: &'static str, product: &'static str, method: &'static str, path: &'static str, params: &'static [P]) -> Tool {
-    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto }
+    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None }
+}
+
+/// A tasks run that's over (`completed`, `failed` or `canceled`).
+fn run_over(v: &Value) -> bool {
+    matches!(v["status"].as_str(), Some("completed" | "failed" | "canceled"))
+}
+
+/// An approval a person decided (or that expired): anything but `pending`.
+fn decided(v: &Value) -> bool {
+    v["state"].as_str().is_some_and(|s| s != "pending")
 }
 
 impl Tool {
@@ -275,6 +289,10 @@ impl Tool {
     }
     const fn destructive(mut self) -> Tool {
         self.hint = Hint::Destructive;
+        self
+    }
+    const fn until(mut self, f: fn(&Value) -> bool) -> Tool {
+        self.until = Some(f);
         self
     }
 }
@@ -375,7 +393,7 @@ const SERVICE: P = req("service", "App service id");
 static TOOLS: &[Tool] = &[
     // ── access ──
     t("access_whoami", "Who am I", "The connection's identity: the operator, or the token or OAuth connection and the rules it has.", "access", "GET", "/v1/access", &[]),
-    t("access_wait_approval", "Wait for an approval", "Wait (up to 55 s) for a person to decide an approval this connection asked for; then call the original tool again with approval.", "access", "GET", "/v1/access/approvals/{approval_id}", &[req("approval_id", "The approval id (apr_…)"), q("wait", Ty::Int, "Seconds to wait (at most 55; default 55)")]),
+    t("access_wait_approval", "Wait for an approval", "Wait (up to 55 s) for a person to decide an approval this connection asked for; then call the original tool again with approval.", "access", "GET", "/v1/access/approvals/{approval_id}", &[req("approval_id", "The approval id (apr_…)"), q("wait", Ty::Int, "Seconds to wait (at most 55; default 55)")]).until(decided),
     t(
         "access_check",
         "Check before acting",
@@ -651,7 +669,7 @@ static TOOLS: &[Tool] = &[
     t("tasks_pause_function", "Pause a function", "Start no new runs of a function (running ones carry on).", "tasks", "POST", "/v1/tasks/functions/{id}/pause", &[req("id", "Function id")]),
     t("tasks_resume_function", "Resume a function", "Start runs of a paused function again.", "tasks", "POST", "/v1/tasks/functions/{id}/resume", &[req("id", "Function id")]),
     t("tasks_cancel_function_runs", "Cancel a function's runs", "Stop every running run of a function, or those an expression matches.", "tasks", "POST", "/v1/tasks/functions/{id}/cancel", &[req("id", "Function id"), b("if", Ty::Str, "Only runs this matches, e.g. event.data.user == \"u1\"")]),
-    t("tasks_wait_run", "Wait for a run", "A run once it finishes, or as it is when the timeout passes.", "tasks", "GET", "/v1/tasks/runs/{id}/wait", &[req("id", "Run id (run_…)"), q("timeout", Ty::Str, "e.g. 30s (the default), at most a few minutes")]),
+    t("tasks_wait_run", "Wait for a run", "A run once it finishes, or as it is when the timeout passes.", "tasks", "GET", "/v1/tasks/runs/{id}/wait", &[req("id", "Run id (run_…)"), q("timeout", Ty::Str, "e.g. 30s (the default), at most a few minutes")]).until(run_over),
     t("tasks_get_schedule", "Get a schedule", "A schedule, its next run and what it publishes.", "tasks", "GET", "/v1/tasks/schedules/{id}", &[req("id", "Schedule id")]),
     t(
         "tasks_update_schedule",
@@ -858,6 +876,9 @@ static TOOLS: &[Tool] = &[
         &[SERVICE, ENV, breq("command", Ty::Str, "The command line"), b("timeout_s", Ty::Int, "Seconds before it's stopped")],
     ),
     t("apps_job_logs", "Job logs", "A job's output (it ends with the job).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/logs", &[SERVICE, ENV, req("job", "Job id"), q("tail", Ty::Int, "Last lines")]),
+    t("apps_list_jobs", "List jobs", "An environment's one-off jobs, newest first: command, status, exit code, when.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs", &[SERVICE, ENV]),
+    t("apps_get_job", "Get a job", "One job: its status, exit code and timing; poll it until it ends, then read apps_job_logs.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs/{job}", &[SERVICE, ENV, req("job", "Job id")]),
+    t("apps_cancel_job", "Cancel a job", "Stop a running job (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/cancel", &[SERVICE, ENV, req("job", "Job id")]),
     t("apps_events", "App events", "What happened to services (deploys going live or failing, crash loops, failed cron runs and jobs, memory, error and latency alerts, and audit.* changes to settings, variables, domains and links), in order after a cursor.", "apps", "GET", "/v1/apps/events", &[q("after", Ty::Int, "The last answer's next"), q("limit", Ty::Int, "At most this many")]),
     t("apps_list_variables", "List variables", "An environment's variables, values masked. A sealed variable is never readable again by anyone (only the running service gets it): set a new value or delete it, never look for the old one.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/variables", &[SERVICE, ENV]),
     t(
