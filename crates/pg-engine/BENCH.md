@@ -285,6 +285,107 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Build flags (2026-11-15, agent 236)
+
+HANDOFF "Build flags" has the decision and the recipe. The shipped builds now pad branches for
+Intel's JCC erratum: `-Cllvm-args=-x86-branches-within-32B-boundaries` on x86-64
+(`tools/dist-flags.sh`, taken by `tools/dist.sh` and `tools/dist-pgo.sh`). The host is a Xeon
+W-2295 (Cascade Lake), one of the cores with the erratum. **From this round on, "plain dist" in
+a table means `tools/dist.sh` (the dist profile plus these flags); a bare `cargo build --profile
+dist` lacks the padding.** What limits these numbers: TPC-H and bulk are CPU-bound in the
+engine; the OLTP classes' cycles per operation move 10-20% from pass to pass with other
+sessions' load on lane A, so only the interleaved runs resolve a few percent there.
+
+Builds: all of `af42e8495`, rustc 1.99.1 (LLVM 23.1.1), dist profile (fat LTO,
+`codegen-units = 1`), line tables, one variable at a time:
+
+| build | flags on top of the dist profile | `.text` | stripped binary |
+|---|---|---:|---:|
+| d0 | none (the old plain dist) | 38.08 MB | 64.38 MB |
+| dj | `-x86-branches-within-32B-boundaries` | 39.02 MB (+2.45%) | 65.32 MB (+1.45%) |
+| djf | `-x86-align-branch-boundary=32 -x86-align-branch=fused+jcc` (no plain jumps) | 38.89 MB (+2.11%) | 65.19 MB |
+| djv2 / djv3 | dj and `-Ctarget-cpu=x86-64-v2` / `x86-64-v3` | 39.01 / 39.16 MB | 65.31 / 65.45 MB |
+| dl32 | `-align-loops=32` (LLVM's x86 default is 16) | 38.99 MB (+2.37%) | 65.29 MB |
+| da | `-align-all-functions=5` (32-byte functions; default 16) | 38.34 MB (+0.68%) | 64.64 MB |
+| p0 | PGO (`tools/dist-pgo.sh`, its own profile) | 33.96 MB | 60.07 MB |
+| pj | PGO, the same profile, with the padding | 34.90 MB (+2.76%) | 61.02 MB (+1.57%) |
+| d0pd | d0 run with `MIMALLOC_PURGE_DELAY=100` (mimalloc's default 10 ms) | | |
+
+Method. Lane A: point reads (`bench oltp --only point_select`) at 1, 8 and 32 clients and the
+bench client's short write transaction (`short_txn`, fsync on) at 1, 8 and 32, plus `short_txn`
+with `synchronous_commit = off` at 8 (and 32) as a CPU-bound diagnostic of the same code ("nc"),
+10 s runs. Lane B: `range_scan_100` at 1, 8 and 32 clients. Lane C: the bench client's bulk script (1M
+rows, one rep, then until the server is quiet: its compaction counted) and TPC-H SF1 (all 22
+queries, a fresh engine on a restored data directory, 2 GB block cache, a warm-up pass, then 3
+runs a query in one `perf stat` window). Servers in containers on the lane's server CPUs (8 GiB,
+`--cpu-shares 2`), clients on its client CPUs. OLTP: user cycles and instructions per operation
+of the connection threads (`perf stat --per-thread`); "work cycles" subtract the share of cycle
+samples in socket polling (`IdleRead::read` with `spin_read` inlined, and its clock), which was
+under 1% in every run, also at 1 client, so it changes nothing. Bulk: user cycles of the server's cgroup. TPC-H:
+user cycles of the engine process, summed over the 22 queries. Two designs: **pairs** (a fresh
+server per arm, arms alternating pass by pass, a pass being every workload of the lane: 5-6 min
+apart) and **interleaved** (both servers up at once on the same CPUs, each idle while the other
+is measured, the arms alternating a b b a run by run: seconds apart). Turns or pairs with more than 1.0 core of other
+work on the server CPUs are flagged and left out of medians. Other sessions' unpinned builds
+ran on lanes A and C most of the night (1-3.3 foreign cores in about half the turns), which is
+why the interleaved design was added. Single pairs of the same binary differ by up to 10-20% in
+OLTP cycles on lane A; lane B (0.1-0.4 foreign cores) repeats within about 1%.
+
+### The padding, PGO (p0 -> pj: same profile; user cycles per operation unless noted)
+
+| workload | cycles: median (per clean pair or turn) | instructions | throughput |
+|---|---|---:|---:|
+| TPC-H SF1, 22 queries, pairs (run 1) | **-4.6%** (-2.0 / -7.2 clean; -7.0 / -9.3 / -4.1 flagged) | +4.1% | wall -3.3% |
+| TPC-H, pairs (run 2) | **-6.9%** (-5.9 / -7.8; -4.8 / -5.6 / -2.0 flagged) | +4.1% | wall -10.3% |
+| TPC-H, interleaved (4 reps x 22 queries) | **-5.2%** (-6.0 / -5.7 / -5.3 / -6.7) | +4.2% | wall -4.9% |
+| TPC-H by query (interleaved) | q01 -15.0, q06 -20.9, q12 -15.0, q15 -16.7, q10 -11.9, q08 -7.4, q05 -6.0, q13 +7.4, q19 +4.6, the rest within +-4 | | |
+| range reads, 1 / 8 / 32 clients (lane B, 5 pairs, quiet) | **-2.8% / -2.3% / -0.9%** | +2.9 / +4.2 / +4.1% | +3.2 / +1.5 / +1.2% |
+| point reads, 8 clients | pairs -2.6% (4) and +1.1% (3); interleaved +0.4% (1) | +2.0-2.2% | |
+| point reads, 32 clients | pairs +4.2% (4) and -2.7% (4); interleaved -1.9% (2) | +2.5-3.2% | |
+| short transactions, 8 clients | pairs +4.8% (3), +2.1% (3); interleaved -3.0% (6), +2.5% (6) | | interleaved +0.4%, +4.1% |
+| short transactions, 32 clients | pairs +4.0% (4), -2.2% (3); interleaved +1.6% (5) | | |
+| short, synchronous_commit off, 8 / 32 clients (interleaved) | **-1.2%** (4: -0.3 / -0.7 / -4.4 / -1.7) / -0.2% (5) | +4.7 / +6.3% | +5.8 / +0.3% |
+| bulk script | 17 runs, all but 2 flagged (lane C at 1.1-3.1 foreign cores): median -1.7%; the 2 clean +2.0%, +0.7% | +2.7% | |
+
+### The padding, plain dist (d0 -> dj)
+
+| workload | cycles: median (per clean pair or turn) | instructions | throughput |
+|---|---|---:|---:|
+| TPC-H, pairs (two runs) | -1.4% (4 clean: -1.6 / -6.5 / -1.3 / -0.5), -2.4% (2: -1.1 / -3.8) | +3.4% | wall +5.1%, -0.4% |
+| TPC-H, interleaved | **-3.0%** (-2.2 / -2.3 / -3.6 / -4.1) | +3.0% | wall -2.5% |
+| TPC-H by query (interleaved) | q01 -10.1, q06 -10.9, q10 -7.9, q12 -7.1, q15 -8.3, q08 -5.9, the rest within +-3 | | |
+| bulk script, 5 pairs | **-3.5%** (4 clean: -5.2 / +0.3 / -5.8 / -1.8) | +2.2% | steps +5.3% faster |
+| range reads, 1 / 8 / 32 clients (5 pairs, quiet) | +1.6% (+1.6 / -9.5 / -8.8 / +2.5 / +2.8) / **-0.6%** / **-0.7%** (every pair: -0.4 / -0.2 / -1.5 / -0.7 / -1.3) | +1.3 / +3.6 / +2.7% | |
+| point reads, 8 / 32 clients | interleaved -0.1% (3) / -0.2% (4); pairs +3.2% (1) / +1.3% (4) | +1.6-2.5% | |
+| short transactions, 8 clients | interleaved -2.3% (3), -0.4% (7: +4.3 / -2.7 / -0.4 / -2.5 / +1.0 / -1.2 / +2.2) | +0.4-2.4% | +0.3%, +3.8% |
+| short transactions, 1 client | interleaved +5.7% (6), throughput +4.8% (cycles per transaction rise with the rate at 1 client) | | +4.8% |
+| short, synchronous_commit off, 8 clients | interleaved **+1.3%** (10: -1.2 / +2.6 / -1.0 / +0.1 / +3.5 / +4.9 / -0.7 / +4.4 / +3.8 / +0.1) and +3.6% (6) | +3.4% | -1.8% |
+
+The one number leaning against the padding is the plain build's CPU-bound short-transaction
+diagnostic (+1.3% and +3.6%); the same transactions with fsync, the class as benchmarked, are
+-0.4% and -2.3%, and under PGO the diagnostic is -1.2% / -0.2%.
+
+Memory (cgroup anon + shmem; 3 alternating rounds, lane A): a fresh server 8.2 MB in every
+build; 100 idle sessions d0 37.3 / 37.5 / 37.6 MB, dj 37.5 / 37.5 / 37.7, p0 46.8 / 46.9 / 47.0,
+pj 46.9 / 46.9 / 46.9 (RSS +0.1-0.3 MB: the extra code pages). After each OLTP run and at
+TPC-H's peak (1,690-1,700 MB with the 2 GB cache) the padded builds are within the runs' spread.
+
+What the flag does to the code (objdump of the first 400,000 jumps in `.text`): 11.5% of
+them cross or end on a 32-byte boundary in d0, 0.1% in the `tools/dist.sh` build (what is left
+is presumably the C code, mimalloc and the compression libraries, which rustc's flag doesn't
+reach).
+
+### Other settings (each against the same base; user cycles, medians of clean pairs)
+
+| setting | TPC-H | bulk | verdict |
+|---|---|---|---|
+| `target-cpu=x86-64-v2` (djv2 against dj) | +3.7% (3 clean), instructions +0.1% | -0.5% (1 clean) | dropped: no gain |
+| `target-cpu=x86-64-v3` (djv3 against dj) | -1.25% (4 clean, every pair), instructions -0.6% | flagged | not landed: small, and AVX2 is not guaranteed on every production CPU (a v3 binary dies with SIGILL without it) |
+| fused + jcc padding only (djf against d0) | -3.2% (3 clean) | -5.1% (all flagged) | no better than full padding, 0.13 MB less code; not pursued |
+| loops aligned to 32 (dl32 against d0) | -0.7% (4 clean, +-6%) | +7.9% (2 clean) | dropped |
+| functions aligned to 32 (da against d0) | +0.0% (4 clean) | -1.4% (5 clean, +8.5 to -11.3) | dropped |
+| `MIMALLOC_PURGE_DELAY=100` (d0pd against d0; q01, q06, q18 only) | -2.5% (2 clean) | | dropped: short transactions' memory +11 MB (8 clients) and +16 MB (32) |
+
 ## Storage format v2, re-confirmed (2026-11-15, agent 239)
 
 Agent 231's format 2 (round 1 below) re-gated after its rebase: **b239** is `5526bfef4` (the

@@ -8144,7 +8144,8 @@ container name: pick your own).
 ## Conventions
 
 - **Builds for comparisons with PostgreSQL use `--profile dist`** (root `Cargo.toml`: release
-  with fat LTO and one codegen unit). It costs 15-25% less CPU per transaction than `release`
+  with fat LTO and one codegen unit), built with `tools/dist.sh` (or `tools/dist-pgo.sh`), which
+  add the shipped build flags (JCC-erratum padding, "Build flags"). It costs 15-25% less CPU per transaction than `release`
   (BENCH.md "Build profile: dist"), so a `release` engine understates the engine against
   PostgreSQL. It takes about twice as long to build, so tests and before/after comparisons of
   two engine revisions stay on `release` (both sides on the same profile).
@@ -10057,6 +10058,97 @@ when it loses; an index none of whose key columns a clause reads still runs
 `Planner::endpoint`'s reverse scan expands a whole SST block (0.4%); Describe at Bind
 (`describe_here`, 1.1%) is per-Bind work outside planning.
 
+## Build flags (agent 236)
+
+BENCH.md "Build flags" has the tables. **The shipped builds now pad branches for Intel's JCC
+erratum**: `-Cllvm-args=-x86-branches-within-32B-boundaries` on x86-64, so that no jump crosses
+or ends on a 32-byte boundary. The flags live in `tools/dist-flags.sh` (sourced; empty on other
+architectures). `tools/dist.sh` is the plain dist build with them. `tools/dist-pgo.sh` puts them
+on both its builds, and the train's PGO crash builds take them too. Release and debug builds
+(tests) are unchanged.
+
+```sh
+crates/pg-engine/tools/dist.sh                       # plain dist: <target>/dist/roll-engine (heavy.sh, ~30 min)
+crates/pg-engine/tools/dist-pgo.sh --out <dir>       # PGO, as before, now padded
+```
+
+**Why.** On Skylake to Cascade Lake cores (this host's Xeon W-2295; also AWS c5 / m5 / r5),
+the microcode fix for erratum SKX102 keeps a 32-byte window's code out of the decoded-uop cache
+when a jump crosses or ends on its boundary. A hot loop that happens to sit across one runs from
+the legacy decoders. Agent 234 saw unchanged q01 / q06 code lose 4-10% cycles only because its
+loop moved. With the padding, placement no longer decides that.
+
+**Measured** (pairs and an interleaved design, both builds, every class; user cycles):
+- PGO: TPC-H SF1 -4.6%, -6.9% (pairs) and -5.2% (interleaved), every pair and rep negative
+  (q01 -15%, q06 -21%, q12 -15%, q15 -17%). Range reads -2.8 / -2.3 / -0.9% at 1 / 8 / 32
+  clients (quiet lane, 5 pairs). Point reads and short transactions within their noise, with medians
+  of both signs across runs (-3% to +5%; the CPU-bound short-transaction diagnostic -1.2 / -0.2%). Bulk script
+  neutral (-1.7% over 17 runs, nearly all flagged; the 2 clean runs +2.0 / +0.7%).
+- Plain dist: TPC-H -3.0% (interleaved, every rep; -1.4 / -2.4% in pairs), bulk -3.5% (4
+  clean pairs), range reads -0.6 / -0.7% at 8 / 32 (every pair at 32), point reads -0.1 / -0.2%,
+  short transactions -0.4% (7 clean turns). The one number against: the CPU-bound diagnostic
+  (`short_txn` with `synchronous_commit = off`) +1.3% (10 turns) and +3.6% (6).
+- Cost: `.text` +2.45% (plain), +2.76% (PGO), the stripped binary +1.45%, instructions per
+  operation +2-4% (nops and prefixes, by design), no memory difference measured (fresh server
+  8.2 MB both; TPC-H peak and post-run memory within the spread; 100 idle sessions 37.5 MB plain and 46.9 MB PGO, padded or not).
+
+**CPUs without the erratum** (Ice Lake and later Intel, every AMD Zen: AWS c6i / m6i / c7i,
+c5a / m6a / c7a). There was no such CPU here to measure on, so this is an estimate from the
+counts. The padding is NOPs and redundant prefixes: the same +2.0-4.3% retired instructions on
+any x86-64 (instruction counts don't depend on the CPU), and +2.5% code size for the i-cache and
+iTLB. A core without the erratum gains nothing in its uop cache. It pays for decoding and retiring
+the filler, which takes issue slots but no execution units. At this engine's IPC (1.2-1.3 on
+TPC-H, 0.4-0.65 on OLTP) a few percent more cheap instructions cost at most about the instruction
+increase, so expect 0-2% more cycles on TPC-H-like loops and about 0% on OLTP, whose cycles go
+mostly to cache misses. Recheck this before relying on it on such a CPU: build `tools/dist.sh`
+with and without `DIST_RUSTFLAGS` and compare TPC-H cycles.
+
+**Measured and not kept** (BENCH.md has the numbers; the flags are in
+`~/.cache/a236/patches/flags.txt`):
+- `-Ctarget-cpu=x86-64-v2`: TPC-H +3.7% cycles at equal instructions. No gain.
+- `-Ctarget-cpu=x86-64-v3`: TPC-H -1.25% cycles (every pair), -0.6% instructions. Too small to
+  require AVX2 of every production CPU: a v3 binary dies with SIGILL on a CPU without it.
+- Padding only conditional and fused jumps (`-x86-align-branch=fused+jcc`): about the same as
+  the full set (TPC-H -3.2%), only 0.13 MB less code.
+- `-align-loops=32`: TPC-H -0.7% (+-6%), bulk +7.9% in both clean pairs, +0.9 MB of code.
+- `-align-all-functions=5`: TPC-H +0.0%, bulk -1.4% (pairs from +8.5 to -11.3).
+- mimalloc `purge_delay` 100 ms (`MIMALLOC_PURGE_DELAY`, default 10): TPC-H -2.5% (2 clean
+  pairs) but +11 / +16 MB after short transactions at 8 / 32 clients.
+- `codegen-units = 1` and fat LTO stay as they were (already the dist profile, not re-measured).
+
+**How performance agents measure from now on.**
+- "Plain dist" is `tools/dist.sh`. A bare `cargo build --profile dist` has no padding, so its
+  hot loops sit wherever the last change put them. Keep comparing builds of the same kind.
+- Interleave the arms when the lanes are busy: both servers up at once on the lane's CPUs,
+  alternating a b b a run by run (`~/.cache/a236/h/ilv.sh` for lane A, `ilvc.sh` for TPC-H and
+  bulk on lane C, `isum.py` / `sum.py` for the tables). Pass-by-pass pairs 5-6 minutes apart
+  scattered 10-20% in OLTP cycles on lane A under 1-3 foreign cores. Interleaving cut that to
+  a few percent when the load drifted slowly. Bursty load still flags turns.
+- At 1 client, cycles per transaction rise with throughput (waits and spins), so judge 1 client by
+  throughput. Socket polling is under 1% of connection-thread cycles (measured), not the cause.
+- With fsync on, short transactions measure the shared disk as much as the code.
+  `synchronous_commit = off` (`ALTER DATABASE bench SET ...`) gives a CPU-bound view of the same
+  code path. Report it as a diagnostic next to the real class, not instead of it.
+
+**Left:**
+1. Pad the C code too (mimalloc, zstd, lz4, SQLite): `CFLAGS="-O3 -Wa,-mbranches-within-32B-boundaries"`
+   for the cc builds. Built (`djc`, with dj's Rust flags), not measured. mimalloc's malloc /
+   free are 5-8% of point-read cycles.
+2. Measure on a CPU without the erratum (see above) before choosing per-CPU builds.
+3. BOLT (agent 225: not in the toolchain) would place hot code by profile and make most of this moot.
+
+Verification: the verification train on the rebased head (`d64a27697` on origin's `bf9366246`,
+`TRAIN_NO_CHECKOUT=1`) with `TRAIN_ENGINE_BIN` / `TRAIN_PGO_PROFDATA` from `tools/dist-pgo.sh` of
+that head (the padded PGO build, binary `66a5e67e`): release crate tests pass; Clippy 20 warnings
+(as before); crash_random seeds 1-30 x 4 and the power stage (power_cut 4 passed, seeds 1-30 x 4
+with `CRASH_POWER=1`, with and without `CRASH_ASYNC=1`) built `--profile dist` with that profile
+and the padding (the flag on rustc's command line); regress against the padded PGO binary
+51,148 / 51,150 units, 0 newly differing; isolation 1647 / 1648 permutations; pg_dump_tap 14,609
+passed, 0 failed. Debug crate tests: all pass except `wire::big_bytea_values_go_out_in_linear_time`,
+21.9 s against its 20 s wall-clock bound at a load of 30-40 (debug builds take none of these
+flags; earlier trains overran it the same way, see above); alone at a load of 33 it passes. Pushed rebased again onto `c25ffbd79` (agent 239's storage
+format v2, none of whose files these commits touch) as `cf7c56ba2`; not trained a second time.
+
 ## Profile-guided build (agent 225)
 
 BENCH.md "Profile-guided build" has the tables. A profile-guided (PGO) build of roll-engine is
@@ -10088,7 +10180,8 @@ crates/pg-engine/tools/dist-pgo.sh --profdata <file> --out <dir>   # reuse a pro
 ```
 
 Plain `cargo build --profile dist` is unchanged (no `.cargo/config`, no profile rustflags: the
-flags exist only in these builds' RUSTFLAGS). `target-cpu` is not set (the x86-64 baseline, as
+flags exist only in these builds' RUSTFLAGS). (Since agent 236 both builds also take
+`tools/dist-flags.sh`, the JCC-erratum padding, as `tools/dist.sh` does: "Build flags".) `target-cpu` is not set (the x86-64 baseline, as
 plain dist); `codegen-units = 1` and fat LTO were already the dist profile's. BOLT not tried:
 `llvm-bolt` is not in the toolchain's `llvm-tools` nor on the host, and it needs `--emit-relocs`
 and LBR profiles of the running server: not simple or reproducible here.
