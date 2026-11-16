@@ -279,6 +279,12 @@ fn deploy_over(v: &Value) -> bool {
     matches!(v["status"].as_str(), Some("active" | "ready" | "failed" | "canceled" | "superseded" | "removed" | "inactive"))
 }
 
+/// A job that ended (roll apps' `succeeded`, `failed`, `skipped`, `timed_out`, `canceled`):
+/// anything but `running`.
+fn job_over(v: &Value) -> bool {
+    v["status"].as_str().is_some_and(|s| s != "running")
+}
+
 /// An approval a person decided (or that expired): anything but `pending`.
 fn decided(v: &Value) -> bool {
     v["state"].as_str().is_some_and(|s| s != "pending")
@@ -884,6 +890,16 @@ static TOOLS: &[Tool] = &[
     t("apps_job_logs", "Job logs", "A job's output (it ends with the job).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/logs", &[SERVICE, ENV, req("job", "Job id"), q("tail", Ty::Int, "Last lines")]),
     t("apps_list_jobs", "List jobs", "An environment's one-off jobs, newest first: command, status, exit code, when.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs", &[SERVICE, ENV]),
     t("apps_get_job", "Get a job", "One job: its status, exit code and timing; poll it until it ends, then read apps_job_logs.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs/{job}", &[SERVICE, ENV, req("job", "Job id")]),
+    t(
+        "apps_wait_job",
+        "Wait for a job to finish",
+        "A job once it ends (succeeded, failed, skipped, timed out or canceled), with its exit code. A client that runs MCP tasks gets a task that waits as long as it takes; otherwise this answers the status now (call again to keep waiting).",
+        "apps",
+        "GET",
+        "/v1/apps/services/{service}/environments/{env}/jobs/{job}",
+        &[SERVICE, ENV, req("job", "Job id")],
+    )
+    .until(job_over),
     t("apps_cancel_job", "Cancel a job", "Stop a running job (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/cancel", &[SERVICE, ENV, req("job", "Job id")]),
     t("apps_events", "App events", "What happened to services (deploys going live or failing, crash loops, failed cron runs and jobs, memory, error and latency alerts, and audit.* changes to settings, variables, domains and links), in order after a cursor.", "apps", "GET", "/v1/apps/events", &[q("after", Ty::Int, "The last answer's next"), q("limit", Ty::Int, "At most this many")]),
     t("apps_list_variables", "List variables", "An environment's variables, values masked. A sealed variable is never readable again by anyone (only the running service gets it): set a new value or delete it, never look for the old one.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/variables", &[SERVICE, ENV]),

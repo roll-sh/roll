@@ -270,7 +270,7 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
       or a status message. There's one input request per approval, keyed by the approval's id, so
       a client shows it once however often the task waits again. Once a person decides, it runs.
     - **Waiting tools:** a tool that waits for something up to a request's limit (`tasks_wait_run`'s
-      run, `access_wait_approval`'s decision, `apps_wait_deploy`'s deploy) waits on as a task. Its answer is checked (a tool's
+      run, `access_wait_approval`'s decision, `apps_wait_deploy`'s deploy, `apps_wait_job`'s job) waits on as a task. Its answer is checked (a tool's
       `until`), and while it says the wait isn't over the task asks again every 2 s, so it waits
       as long as it takes. Such a call becomes a task as soon as its first answer isn't final.
     - **Polling:** `tasks/get` answers from any node, with the result inline once `completed` (a
@@ -635,6 +635,7 @@ previews are listed once those products are on.
 | `apps_job_logs` | A job's output. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}/logs` |
 | `apps_list_jobs` | An environment's one-off jobs, newest first. | `GET /v1/apps/services/{service}/environments/{env}/jobs` |
 | `apps_get_job` | One job: status, exit code, timing. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}` |
+| `apps_wait_job` | A job once it ends: a task that waits as long as it takes for a client that runs tasks, its status now for any other. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}` |
 | `apps_cancel_job` | Stop a running job (production: deploy). | `POST /v1/apps/services/{service}/environments/{env}/jobs/{job}/cancel` |
 | `apps_events` | What happened to services, in order after a cursor. | `GET /v1/apps/events` |
 | `apps_list_variables` | An environment's variables, values masked. | `GET /v1/apps/services/{service}/environments/{env}/variables` |
