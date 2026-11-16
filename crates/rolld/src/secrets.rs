@@ -349,6 +349,18 @@ fn sweeper(s: Arc<Secrets>, what: &'static str, pass: fn(&Secrets) -> roll_secre
     });
 }
 
+/// The provider for a kind roll apps links with credentials of its own (a bucket's key, a
+/// stream's or a NoSQL database's), over rolld's own API: issued and revoked as roll secrets'
+/// managed links are (`apps::RollResources`).
+pub fn link_provider(api: &Api, kind: &str) -> Option<Arc<dyn LinkProvider>> {
+    match kind {
+        "bucket" => Some(Arc::new(Bucket(api.clone()))),
+        "stream" => Some(Arc::new(Stream(api.clone()))),
+        "nosql" => Some(Arc::new(Nosql(api.clone()))),
+        _ => None,
+    }
+}
+
 /// The link providers of every product rolld serves.
 fn links(api: Api) -> Links {
     let mut l = Links::default();
@@ -949,6 +961,26 @@ impl apps_control::integrations::SecretSource for ForApps {
             Ok(d) => Ok(Some(d)),
             Err(roll_secrets::Error::NotFound(_)) => Ok(None),
             Err(e) => Err(e.into()),
+        })
+        .await?
+    }
+
+    /// A new apps environment's own in roll secrets (`qa`), made as roll apps: a standard
+    /// environment, no keys. The defaults (`production`, `staging`, `development`) come with the
+    /// project whenever it's first used, so they're left to that.
+    async fn ensure(&self, project: &str, env: &str) -> anyhow::Result<()> {
+        let Some((secrets, _)) = self.0.get().cloned() else { return Ok(()) };
+        if roll_secrets::DEFAULT_ENVIRONMENTS.iter().any(|(slug, _)| *slug == env) {
+            return Ok(());
+        }
+        let (project, env) = (project.to_string(), env.to_string());
+        tokio::task::spawn_blocking(move || {
+            let caller = roll_secrets::Caller::consumer("roll:apps");
+            match secrets.environments(&project, &caller) {
+                Ok(_) => secrets.ensure_environment(&project, &env, roll_secrets::Ensure::default(), &caller).map(drop).map_err(anyhow::Error::from),
+                Err(roll_secrets::Error::NotFound(_)) => Ok(()),
+                Err(e) => Err(e.into()),
+            }
         })
         .await?
     }

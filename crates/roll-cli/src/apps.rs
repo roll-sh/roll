@@ -62,6 +62,13 @@ pub struct Deploy {
     /// Deploy this public image instead of the service's source.
     #[arg(long)]
     pub image: Option<String>,
+    /// Deploy an image built on this machine, with no registry (Fly's `--local-only`):
+    /// `docker save` runs here and its archive is uploaded.
+    #[arg(long, conflicts_with_all = ["image", "revision", "image_file"])]
+    pub local_image: Option<String>,
+    /// Or an archive `docker save` wrote (`.tar`, gzipped or not).
+    #[arg(long, conflicts_with_all = ["image", "revision"])]
+    pub image_file: Option<PathBuf>,
     /// Build and health-check it without putting it live: it answers on its own URL
     /// (`<id>--<host>`), and `roll apps rollback <id>` puts it live.
     #[arg(long)]
@@ -160,6 +167,13 @@ pub enum Domains {
         #[command(flatten)]
         target: Target,
     },
+    /// Change the environment's name on the roll domain (`<name>.<domain>`); the old one stops
+    /// answering at once.
+    Rename {
+        name: String,
+        #[command(flatten)]
+        target: Target,
+    },
     /// Make a custom domain redirect to another of the environment's hostnames (308), or serve
     /// again with `--to none`.
     Redirect {
@@ -186,13 +200,20 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
-    /// Make a service from a repo (`--repo owner/name`) or an image (`--image`).
+    /// Make a service from a repo (`--repo owner/name`), a public Git URL (`--git
+    /// https://github.com/owner/name`) or an image (`--image`).
     Create {
         name: String,
         #[arg(long, short = 'p')]
         project: String,
-        #[arg(long, conflicts_with = "image")]
+        #[arg(long, conflicts_with_all = ["image", "git"])]
         repo: Option<String>,
+        /// A public Git repository's URL: each new commit on its branch deploys.
+        #[arg(long, conflicts_with = "image")]
+        git: Option<String>,
+        /// The branch production follows (the repo's default when not given).
+        #[arg(long)]
+        branch: Option<String>,
         /// A subdirectory of the repo to build.
         #[arg(long)]
         root: Option<String>,
@@ -588,6 +609,11 @@ pub enum AppsCmd {
         /// Print the values (never a sealed one's).
         #[arg(long)]
         reveal: bool,
+        /// Keep these revealable: a new variable whose name reads as a secret (`*_KEY`, `*TOKEN*`,
+        /// `*PASSWORD*`, `*SECRET*`) is sealed unless it's named here (Vercel's sensitive by
+        /// default).
+        #[arg(long, value_name = "NAME")]
+        plain: Vec<String>,
         /// Set every `KEY=value` line of a `.env` file (`export`, comments and quotes as in a
         /// shell's).
         #[arg(long, value_name = "PATH")]
@@ -1522,7 +1548,10 @@ async fn watch(api: &Api, svc: &Value, env: &str, dep: &Value) -> anyhow::Result
             }
             Ok(())
         }
-        Some(st) => bail!("the deploy is {st}: {}", d["error"].as_str().unwrap_or("see the log above")),
+        Some(st) => match d["fix"].as_str() {
+            Some(f) => bail!("the deploy is {st}: {}\n  fix: {f}", d["error"].as_str().unwrap_or("see the log above")),
+            None => bail!("the deploy is {st}: {}", d["error"].as_str().unwrap_or("see the log above")),
+        },
         None => bail!("the deploy has no status"),
     }
 }
@@ -1622,7 +1651,7 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
 
 // ── a project in one file: `roll up --all` ──
 
-use apps_build::project::{compose_to_toml, entry_kind, entry_run, parse_project, ProjectFile};
+use apps_build::project::{compose_to_toml, entry_kind, entry_run, entry_source, parse_project, ProjectFile};
 
 /// What `--all` will do, as lines: `+` made, `=` already there, `~` linked, `↑` deployed.
 fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Value>, dbs: &std::collections::BTreeMap<(String, String), String>, links: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<String> {
@@ -1632,16 +1661,20 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
         out.push(format!("{} {} database {n}", if have { "=" } else { "+" }, d.kind));
     }
     for (n, a) in &f.apps {
-        let from = match (&a.repo, &a.image, &a.root) {
-            (Some(r), _, root) => format!("repo {r}{}", root.as_ref().map(|d| format!(" at {d}")).unwrap_or_default()),
+        let from = match (a.repo.as_ref().or(a.git.as_ref()), &a.image, &a.root) {
+            (Some(r), _, root) => format!("{} {r}{}", entry_kind(a), root.as_ref().map(|d| format!(" at {d}")).unwrap_or_default()),
             (None, Some(i), _) => format!("image {i}"),
             (None, None, r) => format!("from {}", r.as_deref().unwrap_or(".")),
         };
         let have = services.get(n);
         out.push(format!("{} service {n} ({from})", if have.is_some() { "=" } else { "+" }));
         for l in &a.links {
-            let kind = &f.databases[l].kind;
-            let linked = dbs.get(&(kind.clone(), l.clone())).is_some_and(|r| links.get(n).is_some_and(|ls| ls.contains(r)));
+            // A database by its name, or another app of the project (its service's id).
+            let target = match apps_build::project::link_kind(f, l) {
+                "service" => services.get(l).map(|s| s["id"].as_str().unwrap_or("").to_string()),
+                kind => dbs.get(&(kind.to_string(), l.clone())).cloned(),
+            };
+            let linked = target.is_some_and(|r| links.get(n).is_some_and(|ls| ls.contains(&r)));
             if !linked {
                 out.push(format!("~ link {n} to {l}"));
             }
@@ -1654,8 +1687,12 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
                 out.push(format!("~ settings {n} ({})", differs.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")));
             }
         }
+        for e in a.environments.keys() {
+            let there = have.is_some_and(|s| s["environments"].as_array().is_some_and(|l| l.iter().any(|x| x["name"] == e.as_str())));
+            out.push(format!("{} environment {e} of {n}", if there { "~" } else { "+" }));
+        }
         let image_moved = a.image.as_ref().is_some_and(|i| have.is_some_and(|s| s["source"]["image"].as_str() != Some(i.as_str())));
-        if (a.root.is_some() && a.repo.is_none()) || image_moved {
+        if entry_kind(a) == "upload" || image_moved {
             out.push(format!("↑ deploy {n}"));
         }
     }
@@ -1699,6 +1736,29 @@ fn fill_vars(app: &str, vars: &std::collections::BTreeMap<String, apps_build::pr
         out.insert(k.clone(), json!(value));
     }
     Ok(out)
+}
+
+/// Whether a variable's name reads as a secret, as the dashboard's `looksSecret` does.
+fn looks_secret(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    let words = ["SECRET", "TOKEN", "PASSWORD", "PASSWD", "PASS", "PRIVATE_KEY", "API_KEY", "ACCESS_KEY", "KEY", "CREDENTIAL", "CREDENTIALS", "DSN"];
+    let parts: Vec<&str> = n.split('_').collect();
+    // A whole word of the name (`DB_PASS`, `API_KEY`), or anywhere for the plain ones.
+    words.iter().any(|w| {
+        let wp: Vec<&str> = w.split('_').collect();
+        parts.windows(wp.len()).any(|win| win == wp.as_slice())
+    }) || ["SECRET", "PASSWORD", "TOKEN"].iter().any(|w| n.contains(w))
+}
+
+/// How long ago, as a person reads it (`12s ago`, `3m ago`, `5h ago`, `2d ago`).
+fn ago(ms: i64) -> String {
+    let s = ms.max(0) / 1000;
+    match s {
+        0..60 => format!("{s}s ago"),
+        60..3600 => format!("{}m ago", s / 60),
+        3600..86400 => format!("{}h ago", s / 3600),
+        _ => format!("{}d ago", s / 86400),
+    }
 }
 
 fn local_plan(dir: &Path, env: &str) -> anyhow::Result<apps_build::Plan> {
@@ -1751,6 +1811,14 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
             dbs.insert(("redis".to_string(), s(&d["name"])), s(&d["id"]));
         }
     }
+    // Buckets go by their name; streams and NoSQL databases by their id.
+    for (kind, path, id) in [("bucket", "/v1/storage/buckets", "name"), ("stream", "/v1/streams", "id"), ("nosql", "/v1/nosql/databases", "id")] {
+        if wants(kind) {
+            for d in api.get(path).await?.as_array().into_iter().flatten().filter(|d| placed.contains(&(kind.to_string(), s(&d[id])))) {
+                dbs.insert((kind.to_string(), s(&d["name"])), s(&d[id]));
+            }
+        }
+    }
     // A service the file names with another source is a mistake to stop at, not to convert.
     for (n, a) in &f.apps {
         if let Some(svc) = services.get(n) {
@@ -1785,31 +1853,27 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
         }
         let made = match d.kind.as_str() {
             "postgres" => api.post("/v1/projects", json!({ "name": n })).await?,
-            _ => api.post("/v1/redis/databases", json!({ "name": n })).await?,
+            "redis" => api.post("/v1/redis/databases", json!({ "name": n })).await?,
+            "bucket" => api.post("/v1/storage/buckets", json!({ "name": n })).await?,
+            "stream" => api.post("/v1/streams", json!({ "name": n })).await?,
+            _ => api.post("/v1/nosql/databases", json!({ "name": n })).await?,
         };
-        let r = s(&made["id"]);
+        let r = if d.kind == "bucket" { s(&made["name"]) } else { s(&made["id"]) };
         let _ = api.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/resources/{}/{}", enc(&project), d.kind, enc(&r)), Some(json!({ "x": 48 + 320 * i as i64, "y": 340 }))).await;
-        eprintln!("made {} database {n}", d.kind);
+        eprintln!("made {} {n}", if d.kind == "bucket" || d.kind == "stream" { d.kind.clone() } else { format!("{} database", d.kind) });
         dbs.insert((d.kind.clone(), n.clone()), r);
     }
     let mut out = Vec::new();
+    // Every app's service id, for links between them (made once all are made).
+    let mut ids: std::collections::BTreeMap<String, String> = services.iter().map(|(n, svc)| (n.clone(), s(&svc["id"]))).collect();
+    let db_links = |a: &apps_build::project::AppEntry| a.links.iter().filter(|l| f.databases.contains_key(*l)).cloned().collect::<Vec<_>>();
     for (n, a) in &f.apps {
         let fresh = !services.contains_key(n);
         let svc = match services.get(n) {
             Some(svc) => svc.clone(),
             None => {
-                let source = match (&a.repo, &a.image) {
-                    (Some(r), _) => {
-                        let mut src = json!({ "kind": "repo", "repo": r });
-                        if let Some(root) = &a.root {
-                            src["root"] = json!(root);
-                        }
-                        src
-                    }
-                    (None, Some(i)) => json!({ "kind": "image", "image": i }),
-                    (None, None) => json!({ "kind": "upload" }),
-                };
-                let made_links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "ref": dbs[&(f.databases[l].kind.clone(), l.clone())] })).collect();
+                let source = entry_source(a);
+                let made_links: Vec<Value> = db_links(a).iter().map(|l| json!({ "kind": f.databases[l].kind, "ref": dbs[&(f.databases[l].kind.clone(), l.clone())] })).collect();
                 let mut body = json!({ "project": project, "name": n, "source": source, "links": made_links });
                 // Production follows it from the first deploy (not the default branch's head first).
                 if let Some(b) = &a.branch {
@@ -1820,7 +1884,18 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                     body["run"] = Value::Object(run);
                 }
                 if !a.variables.is_empty() {
-                    body["variables"] = Value::Object(fill_vars(n, &a.variables)?);
+                    let vars = fill_vars(n, &a.variables)?;
+                    // Secrets made for it, and names that read as secrets, sealed from the start
+                    // (as the dashboard's import seals them); a reference reads as what it reads.
+                    let sealed: Vec<&String> = vars
+                        .iter()
+                        .filter(|(k, v)| matches!(a.variables.get(*k), Some(apps_build::project::VarSpec::Generate(_))) || (looks_secret(k) && !v.as_str().unwrap_or("").contains("${{")))
+                        .map(|(k, _)| k)
+                        .collect();
+                    if !sealed.is_empty() {
+                        body["sealed"] = json!(sealed);
+                    }
+                    body["variables"] = Value::Object(vars);
                 }
                 let svc = api.post("/v1/apps/services", body).await?;
                 eprintln!("made service {n}");
@@ -1836,7 +1911,7 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                 api.call(reqwest::Method::PATCH, &format!("/v1/apps/services/{}", enc(&id)), Some(json!({ "run": differs }))).await?;
                 eprintln!("set {n}'s settings");
             }
-            for l in &a.links {
+            for l in &db_links(a) {
                 let kind = &f.databases[l].kind;
                 let r = &dbs[&(kind.clone(), l.clone())];
                 if !links.get(n).is_some_and(|ls| ls.contains(r)) {
@@ -1846,7 +1921,7 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
             }
         }
         let dep = match (&a.root, &a.image) {
-            (Some(root), _) if a.repo.is_none() => {
+            (Some(root), _) if entry_kind(a) == "upload" => {
                 let tree = dir.join(root);
                 let bundle = tokio::task::spawn_blocking(move || pack(&tree)).await??;
                 let mut req = api.http.post(format!("{}{}/deploys", api.base, env_path(&svc, &u.target.env))).header("content-type", "application/gzip").body(bundle);
@@ -1877,6 +1952,35 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
             }
             out.push(json!({ "service": n, "deployment": d["id"] }));
         }
+        ids.insert(n.clone(), s(&svc["id"]));
+        // Its other environments: each put (made, or its branch and run settings set again),
+        // a new one's variables set as they are.
+        for (e, env) in &a.environments {
+            let there = svc["environments"].as_array().is_some_and(|l| l.iter().any(|x| x["name"] == e.as_str()));
+            let mut body = json!({});
+            if let Some(b) = &env.branch {
+                body["branch"] = json!(b);
+            }
+            if let Some(r) = &env.run {
+                body["run"] = serde_json::to_value(r)?;
+            }
+            let path = format!("/v1/apps/services/{}/environments/{}", enc(&s(&svc["id"])), enc(e));
+            api.call(reqwest::Method::PUT, &path, Some(body)).await?;
+            if !there && !env.variables.is_empty() {
+                api.call(reqwest::Method::PATCH, &format!("{path}/variables"), Some(json!({ "set": env.variables }))).await?;
+            }
+            eprintln!("{} {n}'s {e} environment", if there { "set" } else { "made" });
+        }
+    }
+    // Links to other apps of the file: their URLs (each made by now).
+    for (n, a) in &f.apps {
+        for l in a.links.iter().filter(|l| !f.databases.contains_key(*l)) {
+            let (Some(id), Some(target)) = (ids.get(n), ids.get(l)) else { continue };
+            if !links.get(n).is_some_and(|ls| ls.contains(target)) {
+                api.call(reqwest::Method::PUT, &format!("/v1/apps/services/{}/links/service/{}", enc(id), enc(target)), Some(json!({}))).await?;
+                eprintln!("linked {n} to {l}");
+            }
+        }
     }
     if json_out {
         println!("{}", serde_json::to_string_pretty(&json!({ "project": pname, "deploys": out }))?);
@@ -1888,13 +1992,43 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
 
 pub async fn deploy(api: &Api, json_out: bool, d: Deploy) -> anyhow::Result<()> {
     let svc = service(api, &d.target).await?;
-    let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true), "no_cache": d.no_cache.then_some(true) });
-    let dep = api.post(&format!("{}/deploys", env_path(&svc, &d.target.env)), body).await?;
+    let dep = if d.local_image.is_some() || d.image_file.is_some() {
+        upload_image(api, &svc, &d).await?
+    } else {
+        let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true), "no_cache": d.no_cache.then_some(true) });
+        api.post(&format!("{}/deploys", env_path(&svc, &d.target.env)), body).await?
+    };
     if json_out || d.detach {
         println!("{}", serde_json::to_string_pretty(&dep)?);
         return Ok(());
     }
     watch(api, &svc, &d.target.env, &dep).await
+}
+
+/// An image from this machine as a deploy: `docker save`'s archive (or the file given), sent
+/// as it is; rolld takes its names out before loading it.
+async fn upload_image(api: &Api, svc: &Value, d: &Deploy) -> anyhow::Result<Value> {
+    const MAX: usize = 512 << 20;
+    let bytes = match (&d.local_image, &d.image_file) {
+        (Some(image), _) => {
+            eprintln!("saving {image}…");
+            let out = tokio::process::Command::new("docker").args(["save", image]).output().await.context("can't run docker here")?;
+            anyhow::ensure!(out.status.success(), "docker save {image} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+            out.stdout
+        }
+        (None, Some(path)) => std::fs::read(path).with_context(|| format!("can't read {}", path.display()))?,
+        (None, None) => unreachable!("an image to upload"),
+    };
+    anyhow::ensure!(bytes.len() <= MAX, "the image is {} MiB: at most {} MiB goes up this way (push it to a registry and deploy it with --image)", bytes.len() >> 20, MAX >> 20);
+    eprintln!("uploading {} MiB…", bytes.len() >> 20);
+    let mut req = api.http.post(format!("{}{}/deploys", api.base, env_path(svc, &d.target.env))).header("content-type", "application/x-docker-image").body(bytes);
+    if let Some(k) = &api.key {
+        req = req.bearer_auth(k);
+    }
+    let res = req.send().await.with_context(|| format!("can't reach {}", api.base))?;
+    let (ok, v) = (res.status().is_success(), res.json::<Value>().await.unwrap_or(Value::Null));
+    anyhow::ensure!(ok, "{}", v["error"].as_str().unwrap_or("the upload failed"));
+    Ok(v)
 }
 
 pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
@@ -2011,6 +2145,15 @@ pub async fn domains(api: &Api, json_out: bool, d: Domains) -> anyhow::Result<()
             api.call(reqwest::Method::DELETE, &format!("{}/domains/{}", env_path(&svc, &target.env), enc(&hostname)), None).await?;
             json!({ "removed": hostname })
         }
+        Domains::Rename { name, target } => {
+            let svc = service(api, &target).await?;
+            let e = api.call(reqwest::Method::PUT, &env_path(&svc, &target.env), Some(json!({ "hostname": name }))).await?;
+            if !json_out {
+                println!("{}  (redeploy to give the app its new ROLL_PUBLIC_URL)", s(&e["url"]));
+                return Ok(());
+            }
+            e
+        }
         Domains::Redirect { hostname, to, target } => {
             let svc = service(api, &target).await?;
             let to = if to == "none" { Value::Null } else { json!(to) };
@@ -2056,14 +2199,31 @@ fn human(v: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// An environment's or instance's state in words: a web service that's stopped is asleep (the
+/// next request wakes it), a frozen one resumes in milliseconds, `none` was never deployed.
+fn state_word(state: &str, kind: &str) -> String {
+    match (state, kind) {
+        ("stopped", "web") => "asleep".into(),
+        ("stopped", "cron") => "idle".into(),
+        ("suspended", _) => "frozen".into(),
+        ("none", _) => "not deployed".into(),
+        (s, _) => s.to_string(),
+    }
+}
+
 fn print_service(v: &Value) {
-    println!("{}  {}  {}", s(&v["id"]), s(&v["name"]), s(&v["run"]["type"]));
+    let kind = s(&v["run"]["type"]);
+    println!("{:<16} {:<7} {}", s(&v["name"]), kind, s(&v["id"]));
     for e in v["environments"].as_array().into_iter().flatten() {
         let latest = match e["latest"]["status"].as_str() {
             Some(st) if st != "active" => format!("  (latest deploy {st})"),
             _ => String::new(),
         };
-        println!("  {:<12} {:<10} {}{latest}", s(&e["name"]), s(&e["state"]), s(&e["url"]));
+        // Only a web service answers at a URL (a worker's and a cron's would only 404).
+        let url = if kind == "web" { s(&e["url"]) } else { String::new() };
+        // A static site's live deployment has no instance: `none` with one live is its files.
+        let state = if s(&e["state"]) == "none" && !e["active"].is_null() { "serving files".to_string() } else { state_word(&s(&e["state"]), &kind) };
+        println!("  {:<12} {:<13} {url}{latest}", s(&e["name"]), state);
     }
 }
 
@@ -2088,19 +2248,21 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             if !json_out {
                 print_service(&svc);
                 let e = api.get(&env_path(&svc, &target.env)).await?;
+                let kind = s(&svc["run"]["type"]);
                 for i in e["instances"].as_array().into_iter().flatten() {
-                    println!("    {}  {}  {} in flight", s(&i["id"]), s(&i["state"]), s(&i["in_flight"]));
+                    println!("    {}  {}  {} in flight", s(&i["id"]), state_word(&s(&i["state"]), &kind), s(&i["in_flight"]));
                 }
                 return Ok(());
             }
             svc
         }
-        AppsCmd::Create { name, project, repo, root, image, kind, port, schedule, timezone } => {
-            let source = match (repo, image) {
-                (Some(r), None) => json!({ "kind": "repo", "repo": r, "root": root }),
-                (None, Some(i)) => json!({ "kind": "image", "image": i }),
-                (None, None) => json!({ "kind": "upload" }),
-                _ => bail!("--repo or --image, not both"),
+        AppsCmd::Create { name, project, repo, git, branch, root, image, kind, port, schedule, timezone } => {
+            let source = match (repo, git, image) {
+                (Some(r), None, None) => json!({ "kind": "repo", "repo": r, "root": root }),
+                (None, Some(u), None) => json!({ "kind": "git", "url": u, "root": root }),
+                (None, None, Some(i)) => json!({ "kind": "image", "image": i }),
+                (None, None, None) => json!({ "kind": "upload" }),
+                _ => bail!("one of --repo, --git or --image"),
             };
             let mut run = serde_json::Map::new();
             if let Some(k) = kind {
@@ -2116,7 +2278,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 run.insert("schedule".into(), sch.into());
             }
             let project = project_id(api, &project).await?;
-            let v = api.post("/v1/apps/services", json!({ "project": project, "name": name, "source": source, "run": run })).await?;
+            let mut body = json!({ "project": project, "name": name, "source": source, "run": run });
+            if let Some(b) = branch {
+                body["branch"] = json!(b);
+            }
+            let v = api.post("/v1/apps/services", body).await?;
             if !json_out {
                 print_service(&v);
                 return Ok(());
@@ -2579,7 +2745,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     let by = d["actor"].as_str().map(|a| format!("  ({})", a.strip_prefix("git:").unwrap_or(a))).unwrap_or_default();
                     // A pruned one is history only (its image is gone): nothing to roll back to.
                     let status = if d["pruned_at"].is_i64() { "pruned".to_string() } else { s(&d["status"]) };
-                    println!("{}  {status:<10} {:<8} {rev:<8} {}{by}", s(&d["id"]), s(&d["trigger"]), s(&d["message"]));
+                    let age = d["created_at"].as_i64().map(|t| ago(chrono::Utc::now().timestamp_millis() - t)).unwrap_or_default();
+                    println!("{}  {status:<10} {:<8} {rev:<8} {age:>8}  {}{by}", s(&d["id"]), s(&d["trigger"]), s(&d["message"]));
+                    if let Some(f) = d["fix"].as_str() {
+                        println!("    fix: {f}");
+                    }
                 }
                 return Ok(());
             }
@@ -2629,9 +2799,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             } else {
                 let v = api.get(&base).await?;
                 if !json_out {
+                    let states = if schedules.is_empty() { Value::Null } else { api.get(&env_path(&svc, &target.env)).await.map(|e| e["schedules"].clone()).unwrap_or(Value::Null) };
                     for x in &schedules {
                         let zone = x["timezone"].as_str().map(|z| format!(" ({z})")).unwrap_or_default();
-                        println!("on a schedule: {} at {}{zone}: {}", s(&x["name"]), s(&x["schedule"]), s(&x["command"]));
+                        let st = states.as_array().and_then(|a| a.iter().find(|st| st["name"] == x["name"]));
+                        let next = st.and_then(|st| st["next_run_at"].as_i64()).map(|t| format!(", next in {}", ago(t - chrono::Utc::now().timestamp_millis()).trim_end_matches(" ago"))).unwrap_or_default();
+                        let last = st.and_then(|st| st["last"]["status"].as_str()).map(|l| format!(", last {l}")).unwrap_or_default();
+                        println!("on a schedule: {} at {}{zone}{next}{last}: {}", s(&x["name"]), s(&x["schedule"]), s(&x["command"]));
                     }
                     for j in v.as_array().into_iter().flatten() {
                         let at = j["started_at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
@@ -2790,7 +2964,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Vars { target, set, unset, seal, reveal, from_file, deploy } => {
+        AppsCmd::Vars { target, set, unset, mut seal, reveal, from_file, deploy, plain } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/variables", env_path(&svc, &target.env));
             let mut m = serde_json::Map::new();
@@ -2807,6 +2981,14 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     let (k, v) = kv.split_once('=').ok_or_else(|| anyhow::anyhow!("{kv}: set variables as KEY=value"))?;
                     m.insert(k.to_string(), v.into());
                 }
+                // New ones whose names read as secrets are sealed unless `--plain` keeps them; one
+                // already there keeps what it was.
+                let there: std::collections::HashSet<String> = api.get(&base).await.ok().and_then(|v| v["vars"].as_array().map(|a| a.iter().filter_map(|x| x["name"].as_str().map(str::to_string)).collect())).unwrap_or_default();
+                let auto: Vec<String> = m.keys().filter(|k| !there.contains(*k) && !plain.contains(*k) && !seal.contains(*k) && looks_secret(k)).cloned().collect();
+                if !auto.is_empty() && !json_out {
+                    eprintln!("sealed as secrets (--plain NAME keeps one revealable): {}", auto.join(", "));
+                }
+                seal.extend(auto);
                 api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset, "seal": seal }))).await?;
                 if deploy {
                     let dep = api.post(&format!("{}/redeploy", env_path(&svc, &target.env)), json!({})).await?;
