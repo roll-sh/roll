@@ -470,7 +470,9 @@ no route out. Its service containers join that network instead of the default br
 publish no port. roll's proxy reaches each one at its address on that network, and a container
 reaches roll's products at that network's gateway (`host.docker.internal` points there, not at
 `docker0`). The screenshot run already joins the service's network, so the page's own code
-can't reach out either.
+can't reach out either; it finds the app's port on the container's `sh.roll.code.port` label,
+since nothing is published (screenshots failed under `"roll"` until 2026-11-16: the live check
+now takes one there).
 
 Why this way, rather than the alternatives:
 
@@ -490,8 +492,18 @@ Changing it restarts the services (it's part of what they're deployed with). Liv
 `scripts/preview-cost.sh`: the service reached 1.1.1.1 with `open`, then ran on
 `roll-previews-net-<id>`, was still served through roll, and got "network unreachable".
 
-Next: a list of allowed hosts (`egress: ["api.stripe.com"]`) through a forwarding proxy on the
-network's gateway, the only way out, with what it refused said in the activity.
+**Allowed hosts:** with `"roll"`, `egress_hosts` lists the hosts outside roll its code may still
+reach (`api.stripe.com`, `*.sentry.io` for its subdomains; at most 20, names only). The
+preview's services then get `HTTPS_PROXY`/`HTTP_PROXY` pointing at its egress proxy: a small
+container (`roll-previews-egress-<id>`, the screenshot image's Node running `egress.js`) on the
+preview's network as `roll-egress` and on Docker's default network. It passes on HTTPS tunnels
+and plain HTTP to a listed host on port 443 or 80 only, and refuses anything else with a 403.
+Each pass, what it refused is said in the preview's activity, each host once. Code that ignores
+the variables still can't get out, because the network has no route. A sidecar rather than a
+listener on the host, because containers can't always reach the host (they can't on ai-server:
+its firewall), while container to container always works. Changing the list restarts the
+services, and the proxy goes with the preview's last service. Live: github.com reached through
+it, example.com refused and said in the activity.
 
 ## Safety
 
@@ -985,6 +997,7 @@ type Settings = {
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
   egress: "open" | "roll";            // what its services' code may reach: anything ("open"), or only roll's products on a network with no route out (see "Egress")
+  egress_hosts?: string[];            // with "roll": hosts outside roll still reachable through its egress proxy (api.stripe.com, *.sentry.io; at most 20)
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
   env_for: Record<string, Record<string, string>>; // branch glob → variables, over env, under a preview's own ({})
   seed: Job | null;                   // once on fresh data
@@ -1392,7 +1405,9 @@ Ranked by what a person notices first. Done so far:
 - the other browsers' run alongside Chromium's (a screenshot run 12–14 s instead of about 21 s),
   each run's time in rolld's log and the activity, and a node's screenshot slots from its cores
   (one every 8, 1 to 4; `ROLL_PREVIEWS_SCREENSHOT_SLOTS` to set it), the browsers image built once
-  at a time whatever runs side by side;
+  at a time whatever runs side by side, and one screenshot task per preview at a time (two
+  refused each other's container name under load: main's baseline then never got one, and
+  changes weren't compared with it; fixed 2026-11-16);
 - dynamic credentials (roll secrets' leases) issued to each start of a service and each job,
   renewed while it runs, revoked when it stops (a sleeping preview holds none);
 - with roll apps' #26 on main: Promote (a trusted change's preview's build deployed to
@@ -1411,6 +1426,8 @@ Ranked by what a person notices first. Done so far:
   element for a public preview;
 - egress rules: `egress: "roll"` runs a preview's services on a Docker network of their own with
   no route out (roll's products and roll's proxy still reach them);
+- allowed outside hosts (`egress_hosts`) through a per-preview egress proxy, what it refused said
+  in the activity;
 - only the pages a push can change are taken again (Chromatic's TurboSnap): another service that
   runs what it ran at the push before (its revision, what it's deployed with, the same data)
   keeps its pages, checks and all, without a browser run;
@@ -1559,18 +1576,18 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Pull-request previews of Git URL services, roll apps' side** (feature/roll-apps-next after
-   #99): previews' side is built (`GitPull`, `POST …/approve`); rolld hands on `pull: None` until
-   roll apps' hook reads GitHub's `pull_request` and GitLab's merge request events into it. Then
-   one live check in `scripts/preview-apps.sh` with a fork's event.
+1. **Pull-request previews of Git URL services, roll apps' side** (#115): previews' side is
+   built (`GitPull`, `POST …/approve`); rolld hands on `pull: None` until roll apps' hook reads
+   GitHub's `pull_request` and GitLab's merge request events into it (`GitPushes::takes_pulls`).
+   Then one live check in `scripts/preview-apps.sh` with a fork's event.
 2. **A Git URL service's preview reported to its repository** (Vercel's deployment status and
    comment on the pull request): a roll code repo's previews reach GitHub through roll code; a
    Git URL service's reach only roll. Agreed with the apps thread: a Git URL service on github.com
-   connects through roll's GitHub App (`github: { installation }`, admin, only an installation
-   already connected to the same owner, its repo in it: rolld's `GitHubInstallations` port decides,
-   never apps or previews). Previews' `GitReport` port then posts `roll/preview` and the preview
-   comment with a short-lived token for that one repo (`GitHubInstallations::token`); the
-   service's `git_login` is never used to write. Waits on apps' port.
+   connects through roll's GitHub App (`Service.github: { installation, repo }`, operator-only, an
+   installation already connected to the same owner). Previews' `GitReport` then posts
+   `roll/preview` with `Code::github_commit_status` and the pull request's comment with
+   `Code::github_comment` (an upsert by id), the installation read from the service, never the
+   event; the service's `git_login` is never used to write. Waits on apps' #120.
 3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
@@ -1599,6 +1616,7 @@ Ranked by what a person notices first. Done so far:
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.
+
 
 Looked at and kept: previews' copy of a preview's variables in its roll apps environment, next
 to the `pv-` secrets environment roll apps reads itself (#31's `ForApps`). roll apps reads

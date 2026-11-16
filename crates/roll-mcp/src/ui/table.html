@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>roll</title>
+<style>
+  :root { --bg: #000; --fg: #ededed; --muted: #a1a1a1; --line: #1f1f1f; --panel: #0a0a0a; --accent: #4c8dff; }
+  :root[data-theme="light"] { --bg: #fff; --fg: #171717; --muted: #666; --line: #eaeaea; --panel: #fafafa; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, "Geist", sans-serif; }
+  main { padding: 12px; }
+  header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+  h1 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
+  .count, .note { color: var(--muted); font-size: 12px; }
+  .wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
+  th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 500; font-size: 12px; }
+  tr:last-child td { border-bottom: 0; }
+  td.mono, dd.mono { font-family: ui-monospace, "Geist Mono", monospace; font-size: 12px; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  .error { color: #e5484d; }
+  a { color: var(--accent); text-decoration: none; cursor: pointer; }
+  a:hover { text-decoration: underline; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: grid; gap: 8px; }
+  .card p { margin: 0; }
+  .card .what { font-family: ui-monospace, "Geist Mono", monospace; font-size: 12px; color: var(--muted); }
+  button { justify-self: start; font: inherit; font-size: 12px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header><h1 id="title">roll</h1><span class="count" id="count"></span></header>
+  <div id="view"><p class="note">Waiting for the result…</p></div>
+</main>
+<script>
+// roll's MCP App view (io.modelcontextprotocol/ui): a tool's result as a table. It talks to its
+// host only (JSON-RPC over postMessage), has no network, and writes every value as text.
+(() => {
+  let next = 1;
+  const pending = new Map();
+  const send = (msg) => window.parent.postMessage({ jsonrpc: "2.0", ...msg }, "*");
+  const request = (method, params) => new Promise((resolve, reject) => {
+    const id = next++;
+    pending.set(id, { resolve, reject });
+    send({ id, method, params });
+  });
+  const notify = (method, params) => send({ method, params });
+
+  const el = (tag, text, cls) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; };
+  const show = (v) => v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+  // A time a route answers as Unix milliseconds (or seconds) under a `…_at` key, as a UTC time a
+  // person reads; the raw value stays in the cell's title.
+  const when = (k, v) => {
+    if (typeof v !== "number" || !/(_at$|^ts$)/.test(k)) return null;
+    const ms = v > 1e12 && v < 1e14 ? v : v > 1e9 && v < 1e11 ? v * 1000 : null;
+    return ms === null ? null : new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  };
+  const cell = (k, v) => when(k, v) ?? show(v);
+  // A link roll answered (an approval's page, a preview, a deploy): the host opens it, if it can.
+  let canOpen = false;
+  const isLink = (k, v) => typeof v === "string" && /^(url|link|.*_url)$/.test(k) && /^https?:\/\//.test(v);
+  const open = (url) => request("ui/open-link", { url }).catch(() => {});
+  const link = (url, text) => { const a = el("a", text ?? url); a.title = url; a.addEventListener("click", (e) => { e.preventDefault(); open(url); }); return a; };
+  const value = (tag, k, v) => {
+    const node = el(tag, undefined, mono(k, v) ? "mono" : "");
+    if (canOpen && isLink(k, v)) node.append(link(v)); else node.textContent = cell(k, v);
+    node.title = show(v);
+    return node;
+  };
+  const blank = (v) => v === null || v === undefined || v === "";
+  const mono = (k, v) => typeof v === "number" || /(^id$|_id$|^ts$|_at$|hash|sha|offset)/.test(k);
+  // The content's own size: the document's can't be smaller than the frame it's in.
+  const resize = () => {
+    const box = document.querySelector("main").getBoundingClientRect();
+    notify("ui/notifications/size-changed", { width: Math.ceil(box.width), height: Math.ceil(box.height) });
+  };
+
+  function render(result, toolName) {
+    const view = document.getElementById("view");
+    view.replaceChildren();
+    document.getElementById("title").textContent = toolName || "roll";
+    const data = result && (result.structuredContent ?? result);
+    if (result && result.isError) {
+      view.append(el("p", show(data && (data.error ?? data)), "error"));
+      return resize();
+    }
+    // A call waiting for a person: what waits, and roll's page where they decide it. Never a
+    // button that decides it.
+    if (data && data.status === "approval_pending") {
+      const card = el("div", undefined, "card");
+      card.append(el("p", "Waiting for a person's approval"));
+      if (data.approval) card.append(el("p", show(data.approval), "what"));
+      card.append(el("p", "A person decides it on roll's page. Nothing in this view can.", "note"));
+      if (canOpen && isLink("url", data.url)) { const b = el("button", "Open in roll"); b.addEventListener("click", () => open(data.url)); card.append(b); }
+      else if (data.url) card.append(el("p", show(data.url), "what"));
+      view.append(card);
+      document.getElementById("count").textContent = "";
+      return resize();
+    }
+    // The first list of objects in the answer is the table; the answer itself if it's one.
+    const rows = Array.isArray(data) ? data : Object.values(data || {}).find((v) => Array.isArray(v) && v.length && typeof v[0] === "object" && !Array.isArray(v[0]));
+    if (Array.isArray(rows) && rows.length && typeof rows[0] === "object") {
+      // Columns with a value in some row (an always-empty one is noise), at most 12.
+      const sample = rows.slice(0, 200);
+      const cols = [...new Set(sample.flatMap((r) => Object.keys(r)))].filter((c) => sample.some((r) => !blank(r[c]))).slice(0, 12);
+      const table = el("table"), head = el("tr");
+      cols.forEach((c) => head.append(el("th", c)));
+      table.append(el("thead").appendChild(head).parentNode);
+      const body = el("tbody");
+      rows.slice(0, 500).forEach((r) => {
+        const tr = el("tr");
+        cols.forEach((c) => tr.append(value("td", c, r[c])));
+        body.append(tr);
+      });
+      table.append(body);
+      const wrap = el("div", undefined, "wrap"); wrap.append(table); view.append(wrap);
+      document.getElementById("count").textContent = rows.length > 500 ? `first 500 of ${rows.length}` : `${rows.length} ${rows.length === 1 ? "row" : "rows"}`;
+    } else if (data && typeof data === "object") {
+      const dl = el("dl");
+      Object.entries(data).slice(0, 60).forEach(([k, v]) => { dl.append(el("dt", k), value("dd", k, v)); });
+      view.append(dl);
+      document.getElementById("count").textContent = "";
+    } else {
+      view.append(el("p", show(data)));
+    }
+    resize();
+  }
+
+  let tool = "";
+  window.addEventListener("message", (e) => {
+    if (e.source !== window.parent) return;
+    const m = e.data;
+    if (!m || m.jsonrpc !== "2.0") return;
+    if (m.id !== undefined && pending.has(m.id)) {
+      const p = pending.get(m.id); pending.delete(m.id);
+      return m.error ? p.reject(m.error) : p.resolve(m.result);
+    }
+    if (m.method === "ui/notifications/tool-result") render(m.params, tool);
+    if (m.method === "ui/notifications/host-context-changed" && m.params && m.params.theme) document.documentElement.dataset.theme = m.params.theme;
+  });
+
+  // The MCP Apps protocol version this view speaks (the ext-apps SDK's LATEST_PROTOCOL_VERSION):
+  // hosts validate the request, and one without it is refused.
+  request("ui/initialize", { protocolVersion: "2026-01-26", appInfo: { name: "roll", version: "1" }, appCapabilities: { availableDisplayModes: ["inline"] } })
+    .then((r) => {
+      const ctx = (r && r.hostContext) || {};
+      if (ctx.theme) document.documentElement.dataset.theme = ctx.theme;
+      canOpen = !!(r && r.hostCapabilities && r.hostCapabilities.openLinks);
+      if (ctx.toolInfo && ctx.toolInfo.tool) tool = ctx.toolInfo.tool.name || tool;
+      notify("ui/notifications/initialized", {});
+      resize();
+    })
+    .catch(() => notify("ui/notifications/initialized", {}));
+})();
+</script>
+</body>
+</html>

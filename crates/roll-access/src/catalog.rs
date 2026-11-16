@@ -1216,6 +1216,8 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/secrets/projects/{project}/identities/{id}/jwks", "secrets", ADMIN, one(&["project"], "project")),
     // Renewing a lease extends a credential whoever could read it holds.
     row("POST", "/v1/secrets/projects/{project}/leases/{id}/renew", "secrets", REVEAL, one(&["project"], "project")),
+    // Ending a credential only takes access away: whoever could reveal it may.
+    row("DELETE", "/v1/secrets/projects/{project}/leases/{id}", "secrets", REVEAL, one(&["project"], "project")),
     // Exporting an environment's folder shares it with another project.
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/exports", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     // Who and what can read a folder: the project's credentials, as the tokens list (a project admin's).
