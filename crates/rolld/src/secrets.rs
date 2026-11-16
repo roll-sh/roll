@@ -897,6 +897,36 @@ impl roll_workspace::Owners for People {
     }
 }
 
+/// After a product's own route changes a resource's credential (a password reset, a restore),
+/// tell roll secrets, so every folder linking it live moves its digest at once (watches, syncs,
+/// apps' redeploys and conditional reads see it). Without this they'd still see it within
+/// seconds: a digest reads live values' fingerprints. Only the route's pattern is looked at.
+pub async fn source_changes(axum::extract::State(s): axum::extract::State<Arc<Secrets>>, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let changed = (req.method() == Method::POST).then(|| changed_source(req.uri().path())).flatten();
+    let resp = next.run(req).await;
+    if let Some((kind, r#ref)) = changed
+        && resp.status().is_success()
+    {
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = s.source_changed(kind, &r#ref) {
+                tracing::warn!(%kind, "telling roll secrets a credential changed failed: {e}");
+            }
+        });
+    }
+    resp
+}
+
+/// The link kind and resource a credential-changing product route names.
+fn changed_source(path: &str) -> Option<(&'static str, String)> {
+    let p: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match p.as_slice() {
+        ["v1", "redis", "databases", id, "password" | "restore"] => Some(("redis", id.to_string())),
+        ["v1", "nosql", "databases", id, "password" | "reset" | "restore"] => Some(("nosql", id.to_string())),
+        ["v1", "projects", id, "branches", _, "restore" | "reset"] => Some(("postgres", id.to_string())),
+        _ => None,
+    }
+}
+
 /// roll secrets for roll apps' deploys (`apps_control::integrations::SecretSource`), set once the
 /// store is open (it opens after roll apps starts).
 #[derive(Clone, Default)]

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -45,6 +46,8 @@ type appServiceModel struct {
 	MaxInstances types.Int64  `tfsdk:"max_instances"`
 	MemoryMB     types.Int64  `tfsdk:"memory_mb"`
 	URL          types.String `tfsdk:"url"`
+	GitUsername  types.String `tfsdk:"git_username"`
+	GitToken     types.String `tfsdk:"git_token"`
 }
 
 // The API's service, as much of it as the resource keeps.
@@ -71,6 +74,9 @@ type appServiceAnswer struct {
 		Name string `json:"name"`
 		URL  string `json:"url"`
 	} `json:"environments"`
+	GitLogin *struct {
+		Username string `json:"username"`
+	} `json:"git_login"`
 }
 
 func newAppServiceResource() resource.Resource { return &appServiceResource{} }
@@ -101,6 +107,8 @@ func (r *appServiceResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			"max_instances": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: keepInt},
 			"memory_mb":     schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: keepInt},
 			"url":           schema.StringAttribute{Computed: true, PlanModifiers: keep, Description: "Production's URL."},
+			"git_username":  schema.StringAttribute{Optional: true, Description: "With git_url: a private repository's login (a deploy token's user, say)."},
+			"git_token":     schema.StringAttribute{Optional: true, Sensitive: true, Description: "With git_username: its token or app password. Sealed by roll, sent only to the URL's host, never read back."},
 		},
 	}
 }
@@ -131,6 +139,24 @@ func (m *appServiceModel) source() map[string]any {
 		return with(map[string]any{"kind": "git", "url": m.GitURL.ValueString()})
 	}
 	return map[string]any{"kind": "upload"}
+}
+
+// checkLogin: a login is both halves, on a Git URL.
+func (m *appServiceModel) checkLogin(d *diag.Diagnostics) {
+	if given(m.GitUsername) != given(m.GitToken) {
+		d.AddAttributeError(path.Root("git_token"), "half a login", "git_username and git_token go together")
+	}
+	if given(m.GitUsername) && !given(m.GitURL) {
+		d.AddAttributeError(path.Root("git_username"), "a login without a Git URL", "a login is for a git_url source")
+	}
+}
+
+// gitLogin is the private repository's login, when both halves are given.
+func (m *appServiceModel) gitLogin() map[string]any {
+	if !given(m.GitURL) || !given(m.GitUsername) || !given(m.GitToken) {
+		return nil
+	}
+	return map[string]any{"username": m.GitUsername.ValueString(), "password": m.GitToken.ValueString()}
 }
 
 func (m *appServiceModel) run() map[string]any {
@@ -168,6 +194,12 @@ func (m *appServiceModel) fill(s *appServiceAnswer) {
 	m.MinInstances, m.MaxInstances, m.MemoryMB = types.Int64Value(s.Run.MinInstances), types.Int64Value(s.Run.MaxInstances), types.Int64Value(s.Run.MemoryMB)
 	m.Image, m.Repo, m.GitURL, m.Root = optional(s.Source.Image), optional(s.Source.Repo), optional(s.Source.URL), optional(s.Source.Root)
 	m.Start = optional(s.Run.Start)
+	// A login removed elsewhere shows as a change (its token is never read back: the state's stays).
+	if s.GitLogin != nil {
+		m.GitUsername = types.StringValue(s.GitLogin.Username)
+	} else {
+		m.GitUsername = types.StringNull()
+	}
 	m.URL = types.StringValue("")
 	for _, e := range s.Environments {
 		if e.Name == "production" {
@@ -183,10 +215,14 @@ func (r *appServiceResource) Create(ctx context.Context, req resource.CreateRequ
 	if !ok {
 		resp.Diagnostics.AddAttributeError(path.Root("project"), "which project?", "set project here or on the provider (ROLL_PROJECT)")
 	}
+	m.checkLogin(&resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	body := map[string]any{"project": p, "name": m.Name.ValueString(), "source": m.source(), "run": m.run()}
+	if login := m.gitLogin(); login != nil {
+		body["git_login"] = login
+	}
 	if given(m.Branch) {
 		body["branch"] = m.Branch.ValueString()
 	}
@@ -224,6 +260,7 @@ func (r *appServiceResource) Update(ctx context.Context, req resource.UpdateRequ
 	var m, prior appServiceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &m)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
+	m.checkLogin(&resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -232,6 +269,25 @@ func (r *appServiceResource) Update(ctx context.Context, req resource.UpdateRequ
 	if err := r.c.call(ctx, http.MethodPatch, appService(prior.ID.ValueString()), body, &s); err != nil {
 		resp.Diagnostics.AddError("updating the service", err.Error())
 		return
+	}
+	// The login: set again when it or the URL changed (another host drops it), removed when it's gone.
+	login, path := m.gitLogin(), appService(prior.ID.ValueString())+"/git-login"
+	changed := !m.GitUsername.Equal(prior.GitUsername) || !m.GitToken.Equal(prior.GitToken) || !m.GitURL.Equal(prior.GitURL)
+	if login != nil && changed {
+		if err := r.c.call(ctx, http.MethodPut, path, login, &s); err != nil {
+			// The rest is changed: the state says so, with the login as it was, so the next
+			// plan sets it again.
+			m.fill(&s)
+			m.GitToken = prior.GitToken
+			resp.Diagnostics.Append(resp.State.Set(ctx, m)...)
+			resp.Diagnostics.AddError("setting the Git login", err.Error())
+			return
+		}
+	} else if login == nil && given(prior.GitUsername) && given(m.GitURL) {
+		if err := r.c.call(ctx, http.MethodDelete, path, nil, &s); err != nil && !notFound(err) {
+			resp.Diagnostics.AddError("removing the Git login", err.Error())
+			return
+		}
 	}
 	m.fill(&s)
 	resp.Diagnostics.Append(resp.State.Set(ctx, m)...)

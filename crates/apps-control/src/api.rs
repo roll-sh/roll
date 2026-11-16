@@ -73,6 +73,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/notifications/{nid}/test", post(test_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries", get(deliveries))
         .route("/v1/apps/services/{id}/registry", put(put_registry).delete(delete_registry))
+        .route("/v1/apps/services/{id}/git-login", put(put_git_login).delete(delete_git_login))
         .route("/v1/apps/services/{id}/environments", get(environments))
         .route(env, get(get_env).put(put_env).delete(delete_env))
         .route(&format!("{env}/deploys"), get(deploys).post(create_deploy).layer(DefaultBodyLimit::max(apps.cfg.upload_max)))
@@ -182,9 +183,9 @@ async fn import(State(apps): S, b: Bytes) -> R {
                 return Err(Error::BadRequest("give one of repo or git".into()));
             }
             crate::git_source::check_url(url, apps.cfg.allow_private).map_err(Error::BadRequest)?;
-            let client = crate::git_source::client(apps.cfg.allow_private);
-            let (sha, branch) = crate::git_source::head(&client, url, text("branch")).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
-            let bytes = crate::git_source::read_root_file(&client, url, &sha, "roll.toml").await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
+            let remote = crate::git_source::Remote::public(apps.cfg.allow_private, url);
+            let (sha, branch) = crate::git_source::head(&remote, text("branch")).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
+            let bytes = crate::git_source::read_file(&remote, &sha, "roll.toml").await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
             let bytes = bytes.ok_or_else(|| Error::BadRequest(format!("{url} has no roll.toml at its root to deploy from")))?;
             Some((url.to_string(), branch, String::from_utf8(bytes).map_err(|_| Error::BadRequest(format!("{url}'s roll.toml isn't UTF-8")))?))
         }
@@ -260,9 +261,9 @@ async fn plan(State(apps): S, b: Bytes) -> R {
     }
     // A roll code repo at a revision, or a public Git URL at its branch's head (fetched as its
     // deploy would fetch it), before anything is made.
-    enum From {
+    enum From<'a> {
         Repo(Arc<dyn crate::integrations::Sources>, String, String),
-        Git(code_git::Client, String, String),
+        Git(crate::git_source::Remote<'a>, String),
     }
     let from = match (v.get("repo").and_then(Value::as_str), v.get("git").and_then(Value::as_str)) {
         (Some(repo), None) => {
@@ -276,9 +277,14 @@ async fn plan(State(apps): S, b: Bytes) -> R {
         }
         (None, Some(url)) => {
             crate::git_source::check_url(url, apps.cfg.allow_private).map_err(Error::BadRequest)?;
-            let client = crate::git_source::client(apps.cfg.allow_private);
-            let (sha, _) = crate::git_source::head(&client, url, v.get("branch").and_then(Value::as_str)).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
-            From::Git(client, url.to_string(), sha)
+            // A private repository's: the login the service would be made with.
+            let login = match (v["git_login"]["username"].as_str(), v["git_login"]["password"].as_str()) {
+                (Some(u), Some(p)) => Some((u.to_string(), p.to_string())),
+                _ => None,
+            };
+            let remote = crate::git_source::Remote::new(apps.cfg.allow_private, url, login);
+            let (sha, _) = crate::git_source::head(&remote, v.get("branch").and_then(Value::as_str)).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
+            From::Git(remote, sha)
         }
         _ => return Err(Error::BadRequest("one of repo, git or files is required".into())),
     };
@@ -287,8 +293,8 @@ async fn plan(State(apps): S, b: Bytes) -> R {
     let result = async {
         match &from {
             From::Repo(sources, repo, sha) => sources.materialize(repo, sha, &dir).await?,
-            From::Git(client, url, sha) => {
-                crate::git_source::materialize(client, url, sha, &dir).await?;
+            From::Git(remote, sha) => {
+                crate::git_source::materialize(remote, sha, &dir).await?;
             }
         }
         // `roots`: the tree's folders that build on their own, to choose one from (a monorepo).
@@ -360,7 +366,15 @@ async fn create_service(State(apps): S, ext: Extensions, b: Bytes) -> R {
         apps.check_references(project, name, crate::model::PRODUCTION, &values, asker(&ext)).await?;
     }
     let s = apps.create_service(b, actor(&ext)).await?;
+    created_audit(&apps, &s, &ext).await;
     Ok((StatusCode::CREATED, Json(s)).into_response())
+}
+
+/// A service made with a private repository's login: the login's audit entry, as `PUT …/git-login`'s.
+async fn created_audit(apps: &Arc<Apps>, s: &crate::model::Service, ext: &Extensions) {
+    if let Some(l) = &s.git_login {
+        apps.audit("git_login.set", &s.id, "", actor(ext), json!({ "host": l.host })).await;
+    }
 }
 
 async fn create_project_service(State(apps): S, Path(project): Path<String>, ext: Extensions, b: Bytes) -> R {
@@ -372,6 +386,7 @@ async fn create_project_service(State(apps): S, Path(project): Path<String>, ext
     }
     v["project"] = Value::String(project);
     let s = apps.create_service(v, actor(&ext)).await?;
+    created_audit(&apps, &s, &ext).await;
     Ok((StatusCode::CREATED, Json(s)).into_response())
 }
 
@@ -545,6 +560,18 @@ async fn changes(State(apps): S, Path(id): Path<String>) -> R {
         Some((Ok::<_, Infallible>(Event::default().event(e).data("{}")), rx))
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response())
+}
+
+async fn put_git_login(State(apps): S, Path(id): Path<String>, ext: Extensions, b: Bytes) -> R {
+    let s = apps.put_git_login(&id, body(&b)?).await?;
+    apps.audit("git_login.set", &id, "", actor(&ext), json!({ "host": s.git_login.as_ref().map(|l| l.host.clone()) })).await;
+    ok(s)
+}
+
+async fn delete_git_login(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    let s = apps.delete_git_login(&id).await?;
+    apps.audit("git_login.removed", &id, "", actor(&ext), json!({})).await;
+    ok(s)
 }
 
 async fn put_registry(State(apps): S, Path(id): Path<String>, ext: Extensions, b: Bytes) -> R {
@@ -930,9 +957,21 @@ async fn hook_on_owner(State(apps): S, req: Request, next: Next) -> Response {
     cluster.dispatch(&lease_key(&id), req, |req, _guard| next.run(req)).await
 }
 
-async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, String)>, Query(q): Query<HookQuery>, ext: Extensions, b: Bytes) -> R {
-    // A JSON body is a repository's push webhook (anything else: a plain deploy).
-    let payload = serde_json::from_slice::<Value>(&b).ok().filter(Value::is_object);
+async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, String)>, Query(q): Query<HookQuery>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
+    // A repository's webhook: JSON, or GitHub's default form encoding (`payload=<JSON>`), and
+    // the event its platform names. Anything else is a plain deploy.
+    let event = ["x-github-event", "x-gitlab-event", "x-event-key"].iter().find_map(|h| headers.get(*h)).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let form = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("application/x-www-form-urlencoded"));
+    let json = if form {
+        url::form_urlencoded::parse(&b).find(|(k, _)| k == "payload").and_then(|(_, v)| serde_json::from_str::<Value>(&v).ok())
+    } else {
+        serde_json::from_slice::<Value>(&b).ok()
+    };
+    let payload = match (json.filter(Value::is_object), event) {
+        (Some(body), event) => Some(crate::hooks::Webhook { body, event }),
+        (None, Some(event)) => Some(crate::hooks::Webhook { body: json!({ "event": event }), event: Some(event) }),
+        (None, None) => None,
+    };
     let d = match apps.run_hook(&id, &env, &token, q.image, payload).await? {
         crate::hooks::HookOutcome::Deployed(d) => *d,
         crate::hooks::HookOutcome::Ignored(why) => return ok(json!({ "ignored": why })),
