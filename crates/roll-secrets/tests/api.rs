@@ -902,12 +902,35 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
     // A reader ends its own lease (Terraform's ephemeral reads close theirs with a read token), but
     // not another's: that would drop a running service's credential.
-    let reader = api.ok(Method::POST, "/tokens", Some(json!({ "name": "tf", "environments": ["staging"], "actions": ["read", "reveal"] }))).await;
-    let mine = api.req(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "app:web" })), reader["token"].as_str()).await.1;
+    // A roll-access token reading staging, as rolld's gate passes its requests on.
+    let reader = {
+        use roll_auth::scope::{Action as A, Effect, Resources, Rule, Scope, Selector};
+        let rule = Rule {
+            product: "secrets".into(),
+            resources: Resources::Some(vec![Selector::Project { project: api.project.clone() }]),
+            environments: Some(vec!["staging".into()]),
+            paths: None,
+            actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]),
+        };
+        roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_tf".into(), name: "tf".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) }
+    };
+    let as_reader = |method: Method, path: String, body: Option<Value>| {
+        let mut req = Request::builder().method(method).uri(format!("/v1/secrets/projects/{}{path}", api.project)).header("content-type", "application/json").body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).unwrap();
+        req.extensions_mut().insert(roll_auth::Operator);
+        req.extensions_mut().insert(reader.clone());
+        let router = api.router.clone();
+        async move {
+            let resp = router.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+        }
+    };
+    let mine = as_reader(Method::POST, "/environments/staging/resolve".into(), Some(json!({ "consumer": "app:web" }))).await.1;
     let other = b["leases"][0].as_str().unwrap();
-    assert_eq!(api.req(Method::DELETE, &format!("/leases/{other}"), None, reader["token"].as_str()).await.0, StatusCode::FORBIDDEN);
-    assert_eq!(api.req(Method::POST, &format!("/leases/{other}/renew"), None, reader["token"].as_str()).await.0, StatusCode::FORBIDDEN, "nor keep it alive");
-    assert_eq!(api.req(Method::DELETE, &format!("/leases/{}", mine["leases"][0].as_str().unwrap()), None, reader["token"].as_str()).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(as_reader(Method::DELETE, format!("/leases/{other}"), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(as_reader(Method::POST, format!("/leases/{other}/renew"), None).await.0, StatusCode::FORBIDDEN, "nor keep it alive");
+    assert_eq!(as_reader(Method::DELETE, format!("/leases/{}", mine["leases"][0].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
     // Whoever may delete there ends any.
     api.ok(Method::DELETE, &format!("/leases/{other}"), None).await;
