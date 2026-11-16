@@ -1,14 +1,18 @@
 import { FileUp } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { appsApi, type Link, type ProjectImport, type Service } from "@/lib/apps-api";
+import { appsApi, type Link, type ProjectImport, type Service, type Source } from "@/lib/apps-api";
+import { looksSecret } from "@/lib/secret-names";
+import type { Template } from "@/lib/templates";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { redisApi } from "@/lib/redis-api";
-import { api } from "@/lib/roll-api";
+import { nosqlApi } from "@/lib/nosql-api";
+import { api, streams } from "@/lib/roll-api";
+import { storageApi } from "@/lib/storage-api";
 import { freeSpot, service as serviceView } from "@/lib/workspace-resources";
 import { PlaceError, refreshInventory, workspace } from "@/lib/workspace-store";
 import { Label } from "../workspace/inspector";
 
-type Db = "postgres" | "redis";
+type Db = ProjectImport["databases"][string]["kind"];
 
 /** One line of what an import does, as `roll up --all` prints it: `+` made, `=` there, `~`
  *  changed, `↑` deployed, `!` stops it. */
@@ -20,6 +24,7 @@ export type ImportStep =
   | { op: "link"; service: string; db: string }
   | { op: "settings"; service: string; keys: string[] }
   | { op: "deploy"; service: string }
+  | { op: "environment"; service: string; env: string; make: boolean }
   | { op: "conflict"; service: string; text: string }
   | { op: "note"; service: string; text: string };
 
@@ -30,6 +35,8 @@ export interface ImportHave {
 }
 
 const dbKey = (kind: string, name: string) => `${kind}:${name}`;
+/** `postgres database db`, `bucket uploads`, `stream events`. */
+const dbLabel = (kind: string) => (kind === "bucket" || kind === "stream" ? kind : `${kind} database`);
 const an = (kind: string) => `${kind === "image" || kind === "upload" ? "an" : "a"} ${kind}`;
 
 /** Equal as JSON values, whatever their keys' order. */
@@ -45,6 +52,7 @@ function same(a: unknown, b: unknown): boolean {
 function fromLabel(source: ProjectImport["apps"][string]["source"] | Service["source"]) {
   if (source.kind === "repo") return `repo ${source.repo}${source.root ? ` at ${source.root}` : ""}`;
   if (source.kind === "image") return `image ${source.image}`;
+  if (source.kind === "git") return `${source.url}${source.root ? ` at ${source.root}` : ""}`;
   return "root" in source ? `from ${source.root}` : "uploaded";
 }
 
@@ -60,8 +68,10 @@ export function planImport(imp: ProjectImport, have: ImportHave): ImportStep[] {
     if (!there) {
       out.push({ op: "make-service", name, from, upload: a.source.kind === "upload" });
       for (const l of a.links) out.push({ op: "link", service: name, db: l.name });
+      for (const env of Object.keys(a.environments ?? {})) out.push({ op: "environment", service: name, env, make: true });
       continue;
     }
+    // A link's target: a database by its name, or another app of the project.
     if (there.service.source.kind !== a.source.kind) {
       out.push({ op: "conflict", service: name, text: `${name} has ${an(there.service.source.kind)} source; the file makes it ${an(a.source.kind)} one: rename one of them` });
       continue;
@@ -71,13 +81,15 @@ export function planImport(imp: ProjectImport, have: ImportHave): ImportStep[] {
     if (a.source.kind === "repo" && there.service.source.kind === "repo" && (a.source.repo !== there.service.source.repo || (a.source.root ?? "") !== (there.service.source.root ?? "")))
       out.push({ op: "note", service: name, text: `the file says ${from}; its source stays (Settings changes it)` });
     for (const l of a.links) {
-      const ref = have.dbs.get(dbKey(l.kind, l.name));
+      const ref = l.kind === "service" ? have.services.get(l.name)?.service.id : have.dbs.get(dbKey(l.kind, l.name));
       if (!ref || !there.links.some((x) => x.kind === l.kind && x.ref === ref)) out.push({ op: "link", service: name, db: l.name });
     }
     const run = there.service.run as unknown as Record<string, unknown>;
     const keys = Object.entries(a.run).filter(([k, v]) => !same(run[k], v)).map(([k]) => k);
     if (keys.length) out.push({ op: "settings", service: name, keys });
     if (a.source.kind === "image" && there.service.source.kind === "image" && there.service.source.image !== a.source.image) out.push({ op: "deploy", service: name });
+    // Its environments: made when missing, else brought to the file's branch and run settings.
+    for (const env of Object.keys(a.environments ?? {})) out.push({ op: "environment", service: name, env, make: !there.service.environments.some((e) => e.name === env) });
   }
   return out;
 }
@@ -85,9 +97,9 @@ export function planImport(imp: ProjectImport, have: ImportHave): ImportStep[] {
 export function stepLine(s: ImportStep): { mark: string; text: string } {
   switch (s.op) {
     case "make-db":
-      return { mark: "+", text: `${s.kind} database ${s.name}` };
+      return { mark: "+", text: `${dbLabel(s.kind)} ${s.name}` };
     case "have-db":
-      return { mark: "=", text: `${s.kind} database ${s.name}` };
+      return { mark: "=", text: `${dbLabel(s.kind)} ${s.name}` };
     case "make-service":
       return { mark: "+", text: `service ${s.name} (${s.from})${s.upload ? ": `roll up --all` uploads its code" : ""}` };
     case "have-service":
@@ -98,6 +110,8 @@ export function stepLine(s: ImportStep): { mark: string; text: string } {
       return { mark: "~", text: `settings ${s.service} (${s.keys.join(", ")})` };
     case "deploy":
       return { mark: "↑", text: `deploy ${s.service}` };
+    case "environment":
+      return { mark: s.make ? "+" : "~", text: `environment ${s.env} of ${s.service}` };
     case "conflict":
       return { mark: "!", text: s.text };
     case "note":
@@ -118,6 +132,16 @@ function fileOf(text: string, filename: string): { roll_toml: string } | { compo
  * against what the project has (as `roll up --all` plans it), and applied with the usual calls:
  * databases made and placed first, so their variables are in the services' first deploys.
  */
+/** A service's environments as the file says: each put (made, or its branch and run settings
+ *  set again), and a new one's variables set as they are. */
+async function applyEnvironments(id: string, envs: ProjectImport["apps"][string]["environments"], have: Set<string>, step: (s: string) => void) {
+  for (const [env, e] of Object.entries(envs ?? {})) {
+    step(`Setting up ${env}…`);
+    await appsApi.putEnvironment(id, env, { ...(e.branch ? { branch: e.branch } : {}), ...(Object.keys(e.run).length ? { run: e.run } : {}) });
+    if (!have.has(env) && Object.keys(e.variables).length) await appsApi.setVariables(id, env, { set: e.variables });
+  }
+}
+
 /** 32 random bytes in hex: a `generate = "secret"` variable, made here, once. */
 export function secretValue(): string {
   const b = new Uint8Array(32);
@@ -133,8 +157,24 @@ export function variablesFor(app: ProjectImport["apps"][string], answers: Record
   return out;
 }
 
-/** `repo`: its own roll.toml (a "deploy to roll" link), read at once, with no file to paste. */
-export function ImportPane({ project, spot, onDone, repo }: { project: WorkspaceProject; spot: { x: number; y: number }; onDone: (made: Service[]) => void; repo?: string }) {
+/**
+ * Which of a new service's variables are sealed from the start: the secrets made for it, and any
+ * whose name reads as a secret (as New variable pre-checks it). A reference stays as it is: it
+ * reads as sealed when what it reads is.
+ */
+export function sealedFor(app: ProjectImport["apps"][string], variables: Record<string, string>): string[] {
+  const made = new Set(app.generate ?? []);
+  return Object.entries(variables)
+    .filter(([k, v]) => made.has(k) || (looksSecret(k) && !v.includes("${{")))
+    .map(([k]) => k);
+}
+
+/**
+ * `repo`: its own roll.toml (a "deploy to roll" link), `git`: a public repository's by URL, or
+ * `template`: a starter's; any of them read at
+ * once, with no file to paste.
+ */
+export function ImportPane({ project, spot, onDone, repo, git, template }: { project: WorkspaceProject; spot: { x: number; y: number }; onDone: (made: Service[]) => void; repo?: string; git?: string; template?: Template }) {
   const [answers, setAnswers] = useState<Record<string, Record<string, string>>>({});
   const [text, setText] = useState("");
   const [filename, setFilename] = useState("");
@@ -151,7 +191,7 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
     setBusy("reading");
     setError(null);
     try {
-      const imp = await appsApi.importProject(repo ? { repo } : fileOf(text, filename));
+      const imp = await appsApi.importProject(repo ? { repo } : git ? { git } : template ? { roll_toml: template.rollToml } : fileOf(text, filename));
       const services = new Map<string, { service: Service; links: Link[] }>();
       for (const s of await appsApi.services(project.id)) services.set(s.name, { service: s, links: await appsApi.links(s.id) });
       // Its databases are the ones on its canvas (another project's `db` is never this one's),
@@ -161,6 +201,9 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
       const names = new Map<string, string>();
       if (kinds.has("postgres")) for (const p of await api.projects()) names.set(`postgres:${p.id}`, p.name);
       if (kinds.has("redis")) for (const d of await redisApi.list()) names.set(`redis:${d.id}`, d.name);
+      if (kinds.has("bucket")) for (const b of await storageApi.buckets()) names.set(`bucket:${b.name}`, b.name);
+      if (kinds.has("stream")) for (const s of await streams.list()) names.set(`stream:${s.id}`, s.name);
+      if (kinds.has("nosql")) for (const d of await nosqlApi.list()) names.set(`nosql:${d.id}`, d.name);
       const dbs = new Map<string, string>();
       for (const r of project.resources) {
         const n = names.get(`${r.kind}:${r.ref}`);
@@ -189,7 +232,7 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
       const dbs = new Map(have.dbs);
       for (const [name, d] of Object.entries(imp.databases)) {
         if (dbs.has(dbKey(d.kind, name))) continue;
-        setStep(`Making the ${d.kind} database ${name}…`);
+        setStep(`Making the ${dbLabel(d.kind)} ${name}…`);
         const at = freeSpot(taken);
         taken.push(at);
         const ref = await workspace.make(project.id, d.kind, name, at).catch((e: unknown) => {
@@ -198,20 +241,38 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
         });
         dbs.set(dbKey(d.kind, name), ref);
       }
+      // Links to other apps wait until every app is made (one may name an app made after it).
+      const ids = new Map([...have.services].map(([n, s]) => [n, s.service.id]));
+      const later: { id: string; target: string; there?: Link[] }[] = [];
       for (const [name, a] of Object.entries(imp.apps)) {
-        const links = a.links.map((l) => ({ kind: l.kind, ref: dbs.get(dbKey(l.kind, l.name))! }));
+        const links = a.links.filter((l) => l.kind !== "service").map((l) => ({ kind: l.kind, ref: dbs.get(dbKey(l.kind, l.name))! }));
         const there = have.services.get(name);
+        const toApps = a.links.filter((l) => l.kind === "service").map((l) => l.name);
         if (!there) {
           setStep(`Making ${name}…`);
           const at = taken.length === project.resources.length + 1 ? spot : freeSpot(taken);
           taken.push(at);
-          const source = a.source.kind === "repo" ? { kind: "repo" as const, repo: a.source.repo, ...(a.source.root ? { root: a.source.root } : {}) } : a.source.kind === "image" ? { kind: "image" as const, image: a.source.image } : { kind: "upload" as const };
+          const root = "root" in a.source && a.source.root ? { root: a.source.root } : {};
+          const source: Source =
+            a.source.kind === "repo"
+              ? { kind: "repo", repo: a.source.repo, ...root }
+              : a.source.kind === "git"
+                ? { kind: "git", url: a.source.url, ...root }
+                : a.source.kind === "image"
+                  ? { kind: "image", image: a.source.image }
+                  : { kind: "upload" };
           const variables = variablesFor(a, answers[name] ?? {});
-          const s = await appsApi.create({ project: project.id, name, source, ...(Object.keys(a.run).length ? { run: a.run } : {}), ...(Object.keys(variables).length ? { variables } : {}), ...(links.length ? { links } : {}), ...(a.branch ? { branch: a.branch } : {}), ...at });
+          const sealed = sealedFor(a, variables);
+          const s = await appsApi.create({ project: project.id, name, source, ...(Object.keys(a.run).length ? { run: a.run } : {}), ...(Object.keys(variables).length ? { variables } : {}), ...(sealed.length ? { sealed } : {}), ...(links.length ? { links } : {}), ...(a.branch ? { branch: a.branch } : {}), ...at });
           workspace.added(project.id, serviceView(s), at.x, at.y);
           made.push(s);
+          ids.set(name, s.id);
+          for (const t of toApps) later.push({ id: s.id, target: t });
+          await applyEnvironments(s.id, a.environments, new Set(), setStep);
           continue;
         }
+        await applyEnvironments(there.service.id, a.environments, new Set(there.service.environments.map((e) => e.name)), setStep);
+        for (const t of toApps) later.push({ id: there.service.id, target: t, there: there.links });
         const id = there.service.id;
         const run = there.service.run as unknown as Record<string, unknown>;
         const differs = Object.fromEntries(Object.entries(a.run).filter(([k, v]) => !same(run[k], v)));
@@ -228,6 +289,12 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
           await appsApi.update(id, { source: { kind: "image", image: a.source.image } });
         }
       }
+      for (const l of later) {
+        const ref = ids.get(l.target);
+        if (!ref || l.there?.some((x) => x.kind === "service" && x.ref === ref)) continue;
+        setStep(`Linking to ${l.target}…`);
+        await appsApi.link(l.id, "service", ref);
+      }
       void refreshInventory();
       onDone(made);
     } catch (e) {
@@ -241,11 +308,12 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
     }
   };
 
-  // A repo's file is read at once: nothing to paste.
+  // A repo's or a template's file is read at once: nothing to paste.
+  const given = repo ?? git ?? template?.id;
   useEffect(() => {
-    if (repo) void look();
-    // Once per repo.
-  }, [repo]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (given) void look();
+    // Once per repo or template.
+  }, [given]); // eslint-disable-line react-hooks/exhaustive-deps
   // Questions for the services it makes (one already here keeps its variables).
   const asks = read ? Object.entries(read.imp.apps).filter(([n]) => !read.have.services.has(n)).flatMap(([n, a]) => (a.ask ?? []).map((q) => ({ app: n, ...q }))) : [];
   const madeSecrets = read ? Object.entries(read.imp.apps).filter(([n]) => !read.have.services.has(n)).flatMap(([n, a]) => (a.generate ?? []).map((g) => `${n}: ${g}`)) : [];
@@ -255,10 +323,15 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
 
   return (
     <>
-      {repo ? (
+      {repo || git ? (
         <p className="text-[12px] text-muted">
-          <span className="font-mono text-fg">{repo}</span>'s roll.toml, read by rolld; nothing is made until you apply.
+          <span className="font-mono text-fg">{repo ?? git}</span>'s roll.toml, read by rolld; nothing is made until you apply.
         </p>
+      ) : template ? (
+        <details className="text-[12px] text-muted">
+          <summary className="cursor-pointer select-none">The {template.name} template's roll.toml: nothing is made until you apply</summary>
+          <pre className="mt-2 overflow-x-auto rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-[11.5px] leading-relaxed text-fg">{template.rollToml}</pre>
+        </details>
       ) : (
       <>
       <Label>
@@ -305,7 +378,7 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
       </div>
       </>
       )}
-      {repo && busy === "reading" && <p className="mt-2 text-[12px] text-subtle"><span className="shimmer">Reading it…</span></p>}
+      {given && busy === "reading" && <p className="mt-2 text-[12px] text-subtle"><span className="shimmer">Reading it…</span></p>}
       {error && <p className="mt-2 text-[11.5px] text-danger">{error}</p>}
       {read && (
         <div className="rise mt-3">
@@ -342,6 +415,7 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
                       onChange={(e) => setAnswers((all) => ({ ...all, [q.app]: { ...all[q.app], [q.name]: e.target.value } }))}
                       spellCheck={false}
                       autoComplete="off"
+                      type={looksSecret(q.name) ? "password" : "text"}
                       aria-label={`${q.name} for ${q.app}`}
                       className="mt-1 h-8 w-full rounded-md border border-line-2 bg-canvas px-2 font-mono text-[12px] outline-none focus:border-accent/60"
                     />
@@ -351,7 +425,7 @@ export function ImportPane({ project, spot, onDone, repo }: { project: Workspace
             </div>
           )}
           {madeSecrets.length > 0 && <p className="mt-2 text-[11px] text-subtle">Made for you, once, never shown: {madeSecrets.join(", ")}</p>}
-          {!repo && "compose" in fileOf(text, filename) && (
+          {!given && "compose" in fileOf(text, filename) && (
             <a
               href={`data:text/plain;charset=utf-8,${encodeURIComponent(read.imp.roll_toml)}`}
               download="roll.toml"

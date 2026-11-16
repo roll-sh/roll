@@ -14,6 +14,9 @@ use code_sql::{Db, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+/// How many hours of hourly metrics are kept past the week of minutes (90 days in all).
+pub const HOURS_KEPT: i64 = 83 * 24;
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS services (
     id TEXT PRIMARY KEY,
@@ -241,6 +244,24 @@ CREATE TABLE IF NOT EXISTS metrics (
     cold_start_ms REAL NOT NULL,
     PRIMARY KEY (service, env, minute)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS metrics_hourly (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    hour INTEGER NOT NULL,
+    requests INTEGER NOT NULL,
+    errors INTEGER NOT NULL,
+    p50_ms REAL NOT NULL,
+    p95_ms REAL NOT NULL,
+    p99_ms REAL NOT NULL,
+    cpu REAL NOT NULL,
+    memory_bytes INTEGER NOT NULL,
+    instances INTEGER NOT NULL,
+    cold_starts INTEGER NOT NULL,
+    cold_start_ms REAL NOT NULL,
+    egress_bytes INTEGER NOT NULL,
+    over_capacity INTEGER NOT NULL,
+    PRIMARY KEY (service, env, hour)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS usage (
     service TEXT NOT NULL,
     env TEXT NOT NULL,
@@ -419,6 +440,8 @@ pub struct MinuteRow {
     pub cold_starts: i64,
     pub cold_start_ms: f64,
     pub egress_bytes: i64,
+    /// Requests that found every instance busy at `max_instances`.
+    pub over_capacity: i64,
 }
 
 /// What an hour of an environment used.
@@ -559,6 +582,8 @@ fn run_row(r: &code_sql::Row<'_>) -> code_sql::Result<CronRun> {
 fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
     let status: String = r.get(3)?;
     let plan: Option<String> = r.get(8)?;
+    let (error, error_detail): (Option<String>, Option<String>) = (r.get(10)?, r.get(19)?);
+    let fix = error.as_deref().and_then(|e| crate::model::fix_for(e, error_detail.as_deref()));
     Ok(Deployment {
         id: r.get(0)?,
         service: r.get(1)?,
@@ -570,7 +595,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         image: r.get(7)?,
         plan: plan.map(|p| json(&p)).transpose()?,
         rollback_of: r.get(9)?,
-        error: r.get(10)?,
+        error,
         created_at: r.get(11)?,
         started_at: r.get(12)?,
         finished_at: r.get(13)?,
@@ -579,7 +604,8 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         vars_hash: r.get(16)?,
         actor: r.get(17)?,
         pruned_at: r.get(18)?,
-        error_detail: r.get(19)?,
+        error_detail,
+        fix,
         steps: Vec::new(),
     })
 }
@@ -618,6 +644,8 @@ impl Store {
         db.add_column("env_access", "bypass_hash", "TEXT")?;
         // Bytes answered a minute (what egress is billed by), for Metrics.
         db.add_column("metrics", "egress_bytes", "INTEGER NOT NULL DEFAULT 0")?;
+        // Requests past every instance's concurrency at max_instances a minute (saturation).
+        db.add_column("metrics", "over_capacity", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("deployments", "actor", "TEXT")?;
         db.add_column("deployments", "pruned_at", "INTEGER")?;
         db.add_column("deployments", "retired_at", "INTEGER")?;
@@ -1832,8 +1860,8 @@ impl Store {
             for m in rows {
                 c.execute("DELETE FROM metrics WHERE service = ? AND env = ? AND minute = ?", params![service, env, m.minute])?;
                 c.execute(
-                    "INSERT INTO metrics (service, env, minute, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms, egress_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![service, env, m.minute, m.requests, m.errors, m.p50_ms, m.p95_ms, m.p99_ms, m.cpu, m.memory_bytes, m.instances, m.cold_starts, m.cold_start_ms, m.egress_bytes],
+                    "INSERT INTO metrics (service, env, minute, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms, egress_bytes, over_capacity) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![service, env, m.minute, m.requests, m.errors, m.p50_ms, m.p95_ms, m.p99_ms, m.cpu, m.memory_bytes, m.instances, m.cold_starts, m.cold_start_ms, m.egress_bytes, m.over_capacity],
                 )?;
             }
             Ok(())
@@ -1842,7 +1870,7 @@ impl Store {
 
     pub fn minutes(&self, service: &str, env: &str, since_minute: i64) -> Result<Vec<MinuteRow>> {
         Ok(self.db.query(
-            "SELECT minute, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms, egress_bytes FROM metrics WHERE service = ? AND env = ? AND minute >= ? ORDER BY minute",
+            "SELECT minute, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms, egress_bytes, over_capacity FROM metrics WHERE service = ? AND env = ? AND minute >= ? ORDER BY minute",
             params![service, env, since_minute],
             |r| {
                 Ok(MinuteRow {
@@ -1858,14 +1886,63 @@ impl Store {
                     cold_starts: r.get(9)?,
                     cold_start_ms: r.get(10)?,
                     egress_bytes: r.get(11)?,
+                    over_capacity: r.get(12)?,
                 })
             },
         )?)
     }
 
+    /// Minutes before `before_minute` go, rolled up into hours first (counts summed, the rest
+    /// their peak) in the same transaction; hours are kept [`HOURS_KEPT`].
     pub fn prune_metrics(&self, before_minute: i64) -> Result<()> {
-        self.db.execute("DELETE FROM metrics WHERE minute < ?", [before_minute])?;
-        Ok(())
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO metrics_hourly (service, env, hour, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms, egress_bytes, over_capacity) \
+                 SELECT service, env, minute / 60, SUM(requests), SUM(errors), MAX(p50_ms), MAX(p95_ms), MAX(p99_ms), MAX(cpu), MAX(memory_bytes), MAX(instances), SUM(cold_starts), MAX(cold_start_ms), SUM(egress_bytes), SUM(over_capacity) \
+                 FROM metrics WHERE minute < ? GROUP BY service, env, minute / 60 \
+                 ON CONFLICT (service, env, hour) DO UPDATE SET \
+                 requests = metrics_hourly.requests + excluded.requests, errors = metrics_hourly.errors + excluded.errors, \
+                 cold_starts = metrics_hourly.cold_starts + excluded.cold_starts, egress_bytes = metrics_hourly.egress_bytes + excluded.egress_bytes, \
+                 over_capacity = metrics_hourly.over_capacity + excluded.over_capacity, \
+                 p50_ms = CASE WHEN excluded.p50_ms > metrics_hourly.p50_ms THEN excluded.p50_ms ELSE metrics_hourly.p50_ms END, \
+                 p95_ms = CASE WHEN excluded.p95_ms > metrics_hourly.p95_ms THEN excluded.p95_ms ELSE metrics_hourly.p95_ms END, \
+                 p99_ms = CASE WHEN excluded.p99_ms > metrics_hourly.p99_ms THEN excluded.p99_ms ELSE metrics_hourly.p99_ms END, \
+                 cpu = CASE WHEN excluded.cpu > metrics_hourly.cpu THEN excluded.cpu ELSE metrics_hourly.cpu END, \
+                 memory_bytes = CASE WHEN excluded.memory_bytes > metrics_hourly.memory_bytes THEN excluded.memory_bytes ELSE metrics_hourly.memory_bytes END, \
+                 instances = CASE WHEN excluded.instances > metrics_hourly.instances THEN excluded.instances ELSE metrics_hourly.instances END, \
+                 cold_start_ms = CASE WHEN excluded.cold_start_ms > metrics_hourly.cold_start_ms THEN excluded.cold_start_ms ELSE metrics_hourly.cold_start_ms END",
+                [before_minute],
+            )?;
+            c.execute("DELETE FROM metrics WHERE minute < ?", [before_minute])?;
+            c.execute("DELETE FROM metrics_hourly WHERE hour < ?", [before_minute / 60 - HOURS_KEPT])?;
+            Ok(())
+        })
+    }
+
+    /// An environment's hourly rollups since `since_hour`, as rows whose `minute` is the hour's
+    /// first.
+    pub fn hours(&self, service: &str, env: &str, since_hour: i64) -> Result<Vec<MinuteRow>> {
+        Ok(self.db.query(
+            "SELECT hour, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms, egress_bytes, over_capacity FROM metrics_hourly WHERE service = ? AND env = ? AND hour >= ? ORDER BY hour",
+            params![service, env, since_hour],
+            |r| {
+                Ok(MinuteRow {
+                    minute: r.get::<_, i64>(0)? * 60,
+                    requests: r.get(1)?,
+                    errors: r.get(2)?,
+                    p50_ms: r.get(3)?,
+                    p95_ms: r.get(4)?,
+                    p99_ms: r.get(5)?,
+                    cpu: r.get(6)?,
+                    memory_bytes: r.get(7)?,
+                    instances: r.get(8)?,
+                    cold_starts: r.get(9)?,
+                    cold_start_ms: r.get(10)?,
+                    egress_bytes: r.get(11)?,
+                    over_capacity: r.get(12)?,
+                })
+            },
+        )?)
     }
 
     /// Idempotency keys are for retries, which come within minutes: keep them a day.
@@ -1982,6 +2059,18 @@ impl Store {
     pub fn set_paused(&self, service: &str, env: &str, on: bool) -> Result<()> {
         self.db.execute("UPDATE environments SET paused = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
         Ok(())
+    }
+
+    /// A new generated name for an environment: refused when another environment has it.
+    pub fn set_slug(&self, service: &str, env: &str, slug: &str) -> Result<()> {
+        self.db.write(|c| {
+            let taken = c.query_row("SELECT 1 FROM environments WHERE slug = ? AND NOT (service = ? AND name = ?)", params![slug, service, env], |_| Ok(())).optional()?.is_some();
+            if taken {
+                return Err(Error::Conflict(format!("{slug} is taken")));
+            }
+            c.execute("UPDATE environments SET slug = ? WHERE service = ? AND name = ?", params![slug, service, env])?;
+            Ok(())
+        })
     }
 
     pub fn set_maintenance(&self, service: &str, env: &str, message: Option<&str>) -> Result<()> {

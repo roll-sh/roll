@@ -178,6 +178,7 @@ pub async fn run_check(isolation: &Arc<dyn Isolation>, spec: &CheckSpec, dir: &P
         change: None,
         deadline: PREPARE_TIMEOUT + spec.timeout + Duration::from_secs(60),
         cache: None,
+        network: None,
     };
     let name = job.name.clone();
     let tail = Arc::new(Mutex::new(Tail::new(SUMMARY_BYTES)));

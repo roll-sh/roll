@@ -1,6 +1,6 @@
 import { AlertTriangle, Plus, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { isProduction, previewsApi, type PreviewBypass, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
+import { isProduction, previewsApi, unmaskedNote, type PageState, type PreviewBypass, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
 import type { PlacedResource } from "@/lib/workspace-api";
 import { KIND_LABEL, resourceKey } from "@/lib/workspace-resources";
 import { Dialog } from "../agents/ui/dialog";
@@ -10,6 +10,17 @@ const field = "rounded-lg border border-line-2 bg-canvas px-2.5 outline-none tra
 const GIB = 1024 ** 3;
 
 /** The project's preview rules (docs/previews.md `Settings`): saved as a patch of what changed. */
+/** The page states field's JSON (empty: none); anything that isn't a list goes to roll as is,
+ * which says what's wrong with it. */
+function parseStates(text: string): PageState[] {
+  if (!text.trim()) return [];
+  try {
+    return JSON.parse(text) as PageState[];
+  } catch {
+    return [{ name: "", page: "", steps: [] }];
+  }
+}
+
 export function PreviewSettingsDialog({
   projectId,
   resources,
@@ -77,22 +88,47 @@ function Form({
   onSaved: (s: PreviewSettings) => void;
 }) {
   const [s, setS] = useState(saved);
+  const budget = s.github.budget ?? { load_ms: 0, bytes: 0 };
   const [branches, setBranches] = useState(saved.branches.join(", "));
   const [paths, setPaths] = useState(saved.paths.join(", "));
   const [ignorePaths, setIgnorePaths] = useState(saved.ignore_paths.join(", "));
+  const [pages, setPages] = useState((saved.github.pages ?? []).join(", "));
+  const [widths, setWidths] = useState((saved.github.widths ?? []).join(", "));
+  const [openapi, setOpenapi] = useState(saved.github.openapi ?? "");
+  const [endpoints, setEndpoints] = useState((saved.github.endpoints ?? []).join(", "));
+  // Selectors can hold commas: one per line.
+  const [hide, setHide] = useState((saved.github.hide ?? []).join("\n"));
+  const [states, setStates] = useState(saved.github.states?.length ? JSON.stringify(saved.github.states, null, 2) : "");
   const [env, setEnv] = useState<[string, string][]>(Object.entries(saved.env));
+  // `env_for` as rows of (branch glob, name, value).
+  const [perBranch, setPerBranch] = useState<[string, string, string][]>(Object.entries(saved.env_for ?? {}).flatMap(([g, vars]) => Object.entries(vars).map(([k, v]) => [g, k, v] as [string, string, string])));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof PreviewSettings>(k: K, v: PreviewSettings[K]) => setS((x) => ({ ...x, [k]: v }));
 
-  useEffect(() => setError(null), [s, branches, paths, ignorePaths, env]);
+  useEffect(() => setError(null), [s, branches, paths, ignorePaths, pages, widths, openapi, endpoints, states, hide, env, perBranch]);
 
   const next: PreviewSettings = {
     ...s,
     branches: words(branches),
     paths: words(paths),
     ignore_paths: words(ignorePaths),
+    github: {
+      ...s.github,
+      pages: words(pages),
+      widths: words(widths).map(Number),
+      openapi: openapi.trim() || null,
+      endpoints: words(endpoints),
+      states: parseStates(states),
+      hide: hide
+        .split("\n")
+        .map((x) => x.trim())
+        .filter(Boolean),
+    },
     env: Object.fromEntries(env.filter(([k]) => k.trim()).map(([k, v]) => [k.trim(), v])),
+    env_for: perBranch
+      .filter(([g, k]) => g.trim() && k.trim())
+      .reduce<Record<string, Record<string, string>>>((m, [g, k, v]) => ({ ...m, [g.trim()]: { ...(m[g.trim()] ?? {}), [k.trim()]: v } }), {}),
   };
   const patch = settingsPatch(saved, next);
   const changed = Object.keys(patch).length > 0;
@@ -153,6 +189,7 @@ function Form({
               const masks = Object.entries(s.masking?.[id] ?? {})
                 .map(([col, f]) => `${col} = ${f}`)
                 .join("\n");
+              const unmasked = unmaskedNote(r.kind, rule ?? (s.data === "branch" ? "branch" : schema ? "schema" : "skip"), Object.keys(s.masking?.[id] ?? {}).length);
               return (
                 <div key={id} className="border-t border-line first:border-t-0">
                   <div className="flex items-center gap-2 px-2.5 py-1.5">
@@ -177,12 +214,13 @@ function Form({
                       <option value="skip">Skip</option>
                     </select>
                   </div>
-                  {(r.kind === "nosql" || r.kind === "postgres") && (
+                  {unmasked && <p className="px-2.5 pb-1.5 text-[11px] text-soft">{unmasked}</p>}
+                  {(r.kind === "nosql" || r.kind === "postgres" || r.kind === "search") && (
                     <div className="px-2.5 pb-2">
                       <textarea
-                        aria-label={`Masked columns of ${names.get(id) ?? r.ref}`}
+                        aria-label={`Masked ${r.kind === "search" ? "fields" : "columns"} of ${names.get(id) ?? r.ref}`}
                         defaultValue={masks}
-                        placeholder={r.kind === "postgres" ? "public.users.email = email" : "app.users.email = mask_default()"}
+                        placeholder={r.kind === "postgres" ? "public.users.email = email" : r.kind === "search" ? "users.email = email" : "app.users.email = mask_default()"}
                         rows={Math.max(1, masks.split("\n").length)}
                         onBlur={(e) => {
                           const cols: Record<string, string> = {};
@@ -201,7 +239,9 @@ function Form({
                       <p className="mt-1 text-[11px] text-subtle">
                         {r.kind === "postgres"
                           ? "Rewritten in each preview's branch before anything serves it, one column per line: schema.table.column = null, redact, hash, email or fixed:<value>. The parent is untouched."
-                          : "Masked in previews, one column per line: keyspace.table.column = mask function. The parent is untouched."}
+                          : r.kind === "search"
+                            ? "Rewritten in each preview's branch before anything serves it, one field per line: index.field (nested: index.a.b) = redact, remove or email. The parent is untouched."
+                            : "Masked in previews, one column per line: keyspace.table.column = mask function. The parent is untouched."}
                       </p>
                     </div>
                   )}
@@ -210,6 +250,15 @@ function Form({
             })}
           </div>
         )}
+        <Field label="Data as of" note="Branch the data as it was then, where the product keeps history (Postgres, NoSQL): -24h, -30m, -7d or a time. Empty: now.">
+          <input
+            value={s.data_at ?? ""}
+            onChange={(e) => set("data_at", e.target.value.trim() || null)}
+            placeholder="now"
+            className={`${field} h-8 w-full font-mono text-[12px]`}
+            spellCheck={false}
+          />
+        </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Reset every" note="Hours; 0 never.">
             <Num value={s.reset_every_hours} onChange={(v) => set("reset_every_hours", v)} />
@@ -285,9 +334,47 @@ function Form({
             </button>
           </div>
         </Field>
+        <Field group label="Per branch" note="For previews of branches a glob matches (feat/payments-*), over the variables above.">
+          <div className="space-y-1.5">
+            {perBranch.map(([g, k, v], i) => (
+              <div key={i} className="flex gap-1.5">
+                <input
+                  aria-label="Branches"
+                  placeholder="feat/*"
+                  value={g}
+                  onChange={(e) => setPerBranch(perBranch.map((x, j) => (j === i ? [e.target.value, x[1], x[2]] : x)))}
+                  className={`${field} h-8 w-1/4 min-w-0 font-mono text-[12px]`}
+                  spellCheck={false}
+                />
+                <input
+                  aria-label="Name"
+                  placeholder="NAME"
+                  value={k}
+                  onChange={(e) => setPerBranch(perBranch.map((x, j) => (j === i ? [x[0], e.target.value.toUpperCase(), x[2]] : x)))}
+                  className={`${field} h-8 w-1/4 min-w-0 font-mono text-[12px]`}
+                  spellCheck={false}
+                />
+                <input
+                  aria-label="Value"
+                  placeholder="value"
+                  value={v}
+                  onChange={(e) => setPerBranch(perBranch.map((x, j) => (j === i ? [x[0], x[1], e.target.value] : x)))}
+                  className={`${field} h-8 min-w-0 flex-1 font-mono text-[12px]`}
+                  spellCheck={false}
+                />
+                <button type="button" aria-label="Remove" onClick={() => setPerBranch(perBranch.filter((_, j) => j !== i))} className="grid size-8 shrink-0 place-items-center rounded-md text-muted hover:bg-white/[0.05] hover:text-fg">
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            ))}
+            <button type="button" onClick={() => setPerBranch([...perBranch, ["", "", ""]])} className="flex h-7 items-center gap-1 rounded-md px-1.5 text-[12px] text-muted hover:bg-white/[0.05] hover:text-fg">
+              <Plus className="size-3.5" /> Add one for a branch
+            </button>
+          </div>
+        </Field>
       </Section>
 
-      <Section title="Seed and release">
+      <Section title="Seed, release and teardown">
         <Job
           label="Seed"
           note="Runs once on a preview's fresh data, before its services start: anonymise rows, load fixtures."
@@ -302,6 +389,13 @@ function Form({
           placeholder={["node:22", "npm ci && npm run migrate"]}
           onChange={(j) => set("release", j)}
         />
+        <Job
+          label="Teardown"
+          note="Runs once when a preview goes, before its services and branches: remove what its code made outside roll (test webhooks, OAuth redirect URIs). A failure is logged; the preview goes anyway."
+          job={s.teardown ?? null}
+          placeholder={["node:22", "node scripts/unregister-webhooks.js"]}
+          onChange={(j) => set("teardown", j)}
+        />
       </Section>
 
       <Section title="Who can open them">
@@ -309,15 +403,108 @@ function Form({
           <Choice value={s.access} options={["link", "public"]} onChange={(v) => set("access", v)} labels={{ link: "Private link", public: "Anyone with the URL" }} />
         </Field>
         {s.access === "link" && <Bypass projectId={projectId} />}
+        <Field group label="Mail" note="Previews run on copies of production's people. Caught: their services send mail to roll, where it's listed on the preview and goes no further (mail providers' API keys are removed).">
+          <Choice value={s.mail ?? "catch"} options={["catch", "deliver"]} onChange={(v) => set("mail", v)} labels={{ catch: "Caught by roll", deliver: "Delivered" }} />
+        </Field>
+        <Field group label="Reaches" note="What a preview's code may call. Roll only: its services run on a network of their own that reaches roll's products (its branches) and nothing on the internet, so a webhook or a live payment API can't be called from a change.">
+          <Choice value={s.egress ?? "open"} options={["open", "roll"]} onChange={(v) => set("egress", v)} labels={{ open: "Anything", roll: "Roll only" }} />
+        </Field>
       </Section>
 
       <Section title="GitHub pull requests">
         <Toggle label="A comment with the URLs and cost" checked={s.github.comment} onChange={(v) => set("github", { ...s.github, comment: v })} />
         <Toggle label="A commit status (roll/preview)" checked={s.github.status} onChange={(v) => set("github", { ...s.github, status: v })} />
         <Toggle label="A deployment" checked={s.github.deployment} onChange={(v) => set("github", { ...s.github, deployment: v })} />
-        <Toggle label="A screenshot of the first service at each push" checked={!!s.github.screenshot} onChange={(v) => set("github", { ...s.github, screenshot: v })} />
         <Toggle label="Warm after each push" note="Its services start as soon as a push is deployed, so the pull request's link opens at once." checked={s.warm} onChange={(v) => set("warm", v)} />
         <Toggle label="A feedback button on its pages" note="For people who open it through roll: a note pinned to the page posts on the change." checked={s.feedback} onChange={(v) => set("feedback", v)} />
+      </Section>
+
+      <Section title="Screenshots and checks">
+        <Toggle label="A screenshot of each push" note="The first service's page at desktop and phone widths, timed and checked for errors and accessibility, in roll and the pull request." checked={!!s.github.screenshot} onChange={(v) => set("github", { ...s.github, screenshot: v })} />
+        {s.github.screenshot && (
+          <Toggle
+            label="Compare each change with the default branch (roll keeps a preview of it)"
+            checked={s.github.baseline !== false}
+            onChange={(v) => set("github", { ...s.github, baseline: v })}
+          />
+        )}
+        {s.github.screenshot && (
+          <Field group label="Visual review" note="A change whose pages differ from the default branch's waits for someone to accept it, at each push (the roll/visual status); required also keeps it from landing in roll.">
+            <Choice
+              value={s.visual_review ?? "off"}
+              options={["off", "check", "required"]}
+              onChange={(v) => set("visual_review", v)}
+              labels={{ off: "Off", check: "A check", required: "Required to land" }}
+            />
+          </Field>
+        )}
+        {s.github.screenshot && (
+          <Field label="Other pages" note="Taken with / at each push and compared the same way (up to 10: /pricing, or another service's, admin:/users).">
+            <input value={pages} onChange={(e) => setPages(e.target.value)} placeholder="/ only" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+          </Field>
+        )}
+        {s.github.screenshot && (
+          <Field label="More widths" note="The first page at these widths too, each compared and reviewed like a page (up to 3: 768 for a tablet, 1920).">
+            <input value={widths} onChange={(e) => setWidths(e.target.value)} placeholder="desktop and phone only" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+          </Field>
+        )}
+        {s.github.screenshot && (
+          <Field label="Endpoints" note="GET paths of the first service's, timed on the preview's data (the median of 10) and compared with main's: up to 5.">
+            <input value={endpoints} onChange={(e) => setEndpoints(e.target.value)} placeholder="/api/users, /api/orders" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+          </Field>
+        )}
+        {s.github.screenshot && (
+          <Field label="API document" note="A path of the first service's serving its OpenAPI document as JSON: its operations are compared with main's, a removed one named as breaking.">
+            <input value={openapi} onChange={(e) => setOpenapi(e.target.value)} placeholder="/openapi.json" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+          </Field>
+        )}
+        {s.github.screenshot && (
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Speed budget (ms)" note="Over it, roll/speed fails. 0 is no limit.">
+              <Num value={s.github.budget?.load_ms ?? 0} onChange={(v) => set("github", { ...s.github, budget: { ...budget, load_ms: v } })} />
+            </Field>
+            <Field label="Size budget (KB)" note="The first page and what it loads.">
+              <Num value={Math.round(budget.bytes / 1024)} onChange={(v) => set("github", { ...s.github, budget: { ...budget, bytes: v * 1024 } })} />
+            </Field>
+            <Field label="LCP budget (ms)" note="Largest contentful paint; Core Web Vitals call up to 2500 good.">
+              <Num value={budget.lcp_ms ?? 0} onChange={(v) => set("github", { ...s.github, budget: { ...budget, lcp_ms: v } })} />
+            </Field>
+            <Field label="Layout shift budget" note="Cumulative layout shift; up to 0.1 is good.">
+              <Num value={budget.cls ?? 0} step="any" onChange={(v) => set("github", { ...s.github, budget: { ...budget, cls: v } })} />
+            </Field>
+          </div>
+        )}
+        {s.github.screenshot && (
+          <Field label="Visual threshold (%)" note="A page counts as changed for the visual review only past this share of its pixels (up to 50). 0: any change counts.">
+            <Num value={s.github.visual_threshold ?? 0} step="any" onChange={(v) => set("github", { ...s.github, visual_threshold: Math.min(v, 50) })} />
+          </Field>
+        )}
+        {s.github.screenshot && (
+          <Field label="Other browsers" note="The first page in Firefox and WebKit too (and WebKit at a phone's size, mobile Safari's engine), each compared with main's in that browser and reviewed like a page.">
+            <div className="flex gap-4">
+              {(["firefox", "webkit", "webkit-phone"] as const).map((b) => (
+                <label key={b} className="flex items-center gap-1.5 text-[12px] text-soft">
+                  <input
+                    type="checkbox"
+                    checked={(s.github.browsers ?? []).includes(b)}
+                    onChange={(e) => set("github", { ...s.github, browsers: e.target.checked ? [...(s.github.browsers ?? []).filter((x) => x !== b), b] : (s.github.browsers ?? []).filter((x) => x !== b) })}
+                  />
+                  {b === "firefox" ? "Firefox" : b === "webkit" ? "WebKit" : "WebKit at a phone's size"}
+                </label>
+              ))}
+            </div>
+          </Field>
+        )}
+        {s.github.screenshot && (
+          <Field label="Page states" note="Pages reached by a few steps (a cart open, a dialog), each screenshotted and reviewed like a page: a JSON list of {name, page, steps}, steps {click: selector}, {type: [selector, text]}, {press: key} or {wait: ms}. Up to 3.">
+            <textarea value={states} onChange={(e) => setStates(e.target.value)} rows={3} placeholder='[{"name": "cart", "page": "/", "steps": [{"click": "#open-cart"}]}]' className={`${field} w-full py-1.5 font-mono text-[12px]`} spellCheck={false} />
+          </Field>
+        )}
+        {s.github.screenshot && (
+          <Field label="Hidden in screenshots" note="CSS selectors blanked before each screenshot (a clock, an ad), one per line; animations always stop first.">
+            <textarea value={hide} onChange={(e) => setHide(e.target.value)} rows={2} placeholder=".clock" className={`${field} w-full py-1.5 font-mono text-[12px]`} spellCheck={false} />
+          </Field>
+        )}
       </Section>
 
       {error && <p className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</p>}

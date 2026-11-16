@@ -705,14 +705,28 @@ pub struct CompensatedSum {
 }
 
 impl CompensatedSum {
+    /// `delta` is 0.0 or another sum's `delta`, never -0.0 (see [`add`](Self::add)).
     pub fn new(value: f64, delta: f64) -> CompensatedSum {
+        debug_assert!(delta != 0.0 || delta.is_sign_positive(), "a compensated sum's delta is never -0.0");
         CompensatedSum { value, delta }
     }
 
-    /// `add(value)`.
+    /// `add(value)`, which Java computes as `add(value, 0.0)`. `self.delta + 0.0` is
+    /// `self.delta` unless that is -0.0, which it never is: a new delta (a difference) is -0.0
+    /// only when `corrected` is, and a sum is -0.0 only when both terms are, so a delta that
+    /// starts as 0.0 stays clear of -0.0. The addition is left out: one dependent
+    /// floating-point add less per value.
     #[inline]
     pub fn add(&mut self, v: f64) {
-        self.add_with_delta(v, 0.0)
+        if !v.is_finite() {
+            self.value += v;
+        }
+        if self.value.is_finite() {
+            let corrected = v + self.delta;
+            let updated = self.value + corrected;
+            self.delta = corrected - (updated - self.value);
+            self.value = updated;
+        }
     }
 
     /// `add(value, delta)`: Kahan summation; infinities and NaN take over the sum.

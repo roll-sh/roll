@@ -572,9 +572,8 @@ impl Secrets {
 
     /// The digest, and what it can't vouch for: whether reading the folder would issue a dynamic
     /// credential (one of its keys, or a key a reference reaches, links dynamically: the digest
-    /// doesn't move when its lease ends). A live link counts its value's fingerprint as its
-    /// product answers (at most [`LIVE_FP_TTL`] old), so the digest moves however the credential
-    /// changed: roll rotating it, a password reset through the product, SQL.
+    /// doesn't move when its lease ends). A live link counts its value's fingerprint as its product answers (at most [`LIVE_FP_TTL`] old), so the digest moves
+    /// however the credential changed: roll rotating it, a password reset through the product, SQL.
     pub(crate) fn digest_of(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<(String, Unvouched)> {
         use sha2::{Digest, Sha256};
         let path = names::path(path)?;

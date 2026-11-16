@@ -58,12 +58,12 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    roll secrets promote --from staging --to production STRIPE_KEY
    roll secrets envs protect production --approvals 1
    ```
-6. **CI and services** get a scoped token for one project, some environments, some folders and
-   only the actions they need, with an expiry:
+6. **CI and services** get a roll token (roll-access's, docs/permissions.md) with one rule on the
+   project: some environments, some folders and only the actions they need, with an expiry:
 
    ```
    roll secrets tokens create ci --for-env staging --action read --action reveal --ttl-days 90
-   ROLL_TOKEN=rlst_… roll run -e staging -- make test
+   ROLL_TOKEN=rlt_… roll run -e staging -- make test
    ```
 
    Or push an environment out with a **sync** (GitHub Actions secrets, a sealed webhook, a deploy
@@ -164,7 +164,39 @@ steps:
   values the token may reveal), and each stored value found fails the check with an annotation on
   its file and line naming the key and environment, never the value.
 ## Kubernetes
-Two ways, as the best products offer:
+Three ways, as the best products offer:
+- **Mounted (`sdk/csi-provider`)**: a provider for the [Secrets Store CSI
+  Driver](https://secrets-store-csi-driver.sigs.k8s.io), as Vault's, AWS', Azure's, GCP's and
+  Infisical's: a pod's volume gets an environment's values as files when it starts, and no
+  Kubernetes Secret is made (nothing in etcd) unless the SecretProviderClass asks the driver to
+  sync one. Each pod logs in with its own service account token (the driver's `tokenRequests`,
+  audience the API's URL) through a workload identity, so a pod reads only what its service
+  account's identity allows; the cluster's keys can be pinned (#57) where roll can't reach its
+  issuer. Without an identity, a roll token from the volume's `nodePublishSecretRef` (`token`).
+  The read is strict: a value that doesn't resolve fails the mount (the pod waits and the event
+  names the key), and on the driver's rotation the files keep what they had. Dynamic credentials
+  only with `dynamic: "true"` (nothing renews their leases: each ends with its TTL). The folder's
+  digest is each file's version.
+  ```yaml
+  apiVersion: secrets-store.csi.x-k8s.io/v1
+  kind: SecretProviderClass
+  metadata: { name: shop-production }
+  spec:
+    provider: roll
+    parameters:
+      api: https://api.roll.example
+      identity: idn_…            # the pod's service account logs in (roll secrets identities add)
+      environment: production
+      path: /                    # the folder
+      format: dotenv             # files (one per key: the default), dotenv or json
+      file: .env                 # dotenv's and json's file name
+      keys: "DATABASE_URL=db-url STRIPE_KEY"   # optional: which keys, renamed with `=`
+  ```
+  Install the driver with `tokenRequests[0].audience=<the API's URL>`, then the provider
+  (`sdk/csi-provider/chart`, or `deploy/provider.yaml`): a DaemonSet that writes `roll.sock` into
+  the driver's provider directory. It needs no Kubernetes permissions. A pod's token goes only to
+  an `https://` API (`-allow-http` for a cluster-local rolld), and `-api` (the chart's `apis`) pins
+  which APIs SecretProviderClasses may name; a mount, login and read together, takes 30 s at most.
 - **Pull (`sdk/kubernetes-operator`)**: a `RollSecret` names an environment and a folder (and a
   project or an identity, when not the operator's own), and the operator keeps a Secret beside it
   in step. It logs in with its own service account token through a workload identity, so roll
@@ -1977,17 +2009,20 @@ It is the operator (`Everything`), a roll-access grant (`GrantGrants`, for `rlt_
 `rlo_…` OAuth connections: `ask` inside the product is a no), or one of the project's own tokens.
 
 Secrets accepts the operator (`roll_auth::Operator`, or any request when rolld has no operator
-token), signed-in people on their own projects (below), roll-access's grants, and its own **scoped tokens** (`rlst_…`, created under `…/tokens`) for one project, a list of
-environments (or all), a list of path prefixes (or all), the actions above and an optional expiry.
-A token can be pinned to client addresses (`allowed_ips`: up to 20 addresses or CIDRs, IPv4 or
-IPv6): from anywhere else it's refused (403), checked on every request against the connection's
-peer address (or `X-Forwarded-For` where rolld trusts it), as Infisical's trusted IPs and Doppler's
-IP restrictions do. An identity can be pinned the same way: a login from elsewhere is refused, and
-the token it gets carries the same list. `roll secrets tokens create … --allow-ip 203.0.113.0/24`.
-Tokens are stored as SHA-256 hashes, looked up on every request and never cached. roll-access's
-scoped tokens (`rlt_…`) and OAuth connections (`rlo_…`) reach secrets too: rolld's gate classifies
-the request, and secrets asks the same `Grant` for every second check (`GrantGrants`). The `rlst_`
-tokens are to become roll-access's (Next).
+token), signed-in people on their own projects (below), and roll-access's grants: there is one
+permission system (docs/permissions.md). A token for CI or a service is a roll token (`rlt_…`)
+with one rule on the project's secrets (environments or all, folder prefixes or all, the actions
+above), an optional expiry and client addresses (up to 20 addresses or CIDRs; from anywhere else
+it's refused), made through `POST /v1/access/tokens`: `roll secrets tokens create … --allow-ip
+203.0.113.0/24`, or the project's Access tab, which lists them from `GET
+/v1/access/tokens?product=secrets&resource=<project>` (one at a time: the list also holds tokens
+made in the access builder, so nothing here revokes them in bulk). roll-access stores them hashed,
+looks them up on every request and never caches them; OAuth connections (`rlo_…`) reach secrets
+the same way. rolld's gate classifies each request, and secrets asks the same `Grant` for every
+second check (`GrantGrants`); a read of the project as a whole (its environments' names, health,
+findings) takes part for a rule limited to some environments or folders, answering only what it
+reaches. An identity can be pinned to client addresses too: a login from elsewhere is refused, and
+the token it gets carries the same list.
 
 #### People (signed-in accounts)
 
@@ -2054,7 +2089,7 @@ on Postgres. The audit is read once per project and filtered in memory (it was a
 ### Workload identities (OIDC)
 
 A CI job or a cluster logs in with its own short-lived OpenID Connect token instead of holding a
-`rlst_` token, as Infisical's OIDC auth, Doppler's identities and Vault's JWT auth do: nothing
+long-lived token, as Infisical's OIDC auth, Doppler's identities and Vault's JWT auth do: nothing
 long-lived sits in a CI system's settings, and a leaked log or fork can't reuse a login past its
 minutes.
 
@@ -2100,10 +2135,13 @@ minutes.
   checks the signature against the issuer's keys (RS256 or ES256; its discovery document's
   `jwks_uri`, fetched over the guarded client: HTTPS, public addresses, no redirects, bounded reads;
   cached an hour, fetched again early for a new key id, kept a day if the issuer is down), `iss`,
-  `aud`, `exp` and `nbf` (60 s leeway), the subject and the claims, then mints an `rlst_` token
-  with the identity's scope for its TTL. The token is looked up on every request like any other;
-  its principal is `identity:<id>`, so the audit log names the identity, and the login itself is
-  `identity.login` with the token's `sub`. Deleting the identity revokes every token it gave out.
+  `aud`, `exp` and `nbf` (60 s leeway), the subject and the claims; then roll-access mints a
+  `workload` token (`Access::mint_workload`: the identity's scope and client addresses for its
+  TTL, owned by whoever made the identity, refused once they can't sign in; 409 past 1,000 live
+  per owner). The token is looked up on every request like any other; secrets remembers which
+  login got it (`identity_logins`), so its requests are `identity:<id>` in the audit log, and the
+  login itself is `identity.login` with the token's `sub` and its id. Deleting the identity
+  revokes every token it gave out.
   An OIDC token can be exchanged more than once while it lives (as with Vault): each login is
   audited.
 - **The CLI.** With `ROLL_IDENTITY=idn_…` and no `ROLL_TOKEN`, `roll secrets …` and `roll run` log
@@ -2313,9 +2351,6 @@ isn't in the workspace is 404.
 | `GET /leases` | | `Lease[]` |
 | `DELETE /leases/{id}` | | 204 |
 | `POST /leases/{id}/renew` | `{ttl_minutes?}` | `Lease` (`reveal` on its environment) |
-| `GET /tokens` | | `Token[]` |
-| `POST /tokens` | `NewToken` | 201 `Token & {token}` (shown once) |
-| `DELETE /tokens/{id}` | | 204 |
 | `GET /identities` | | `Identity[]` (admin) |
 | `POST /identities` | `NewIdentity` | 201 `Identity` |
 | `DELETE /identities/{id}` | | 204 (its tokens revoked) |
@@ -2915,6 +2950,10 @@ secrets tests, roll-access's, clippy with `-D warnings`, `pnpm typecheck`, the d
 tests, `@roll/secrets`' and the VS Code extension's.
 
 Open pull requests after this one:
+
+- **#63, a Secrets Store CSI Driver provider** (after #62): `sdk/csi-provider`, a pod's volume
+  gets an environment's values as files with no Secret in etcd, each pod logged in with its own
+  service account; the driver's gRPC served with Go's standard library.
 
 - **#30, one permission system** (after #20 and #25): a project's tokens are roll-access grants,
   identities' logins get `workload` tokens, `rlst_` is gone.

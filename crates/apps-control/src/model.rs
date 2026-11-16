@@ -34,6 +34,13 @@ pub enum Source {
     Image { image: String },
     /// `roll up`: each deploy carries its own tree.
     Upload,
+    /// A public Git repository by URL (GitHub, GitLab, any smart-HTTP host), with no app
+    /// installed: each deploy fetches its branch's head (`git_source`).
+    Git {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+    },
 }
 
 impl Source {
@@ -64,6 +71,14 @@ impl Source {
                 Ok(())
             }
             Source::Upload => Ok(()),
+            // Its address is checked again where private ones may be allowed (`Apps::check_source`).
+            Source::Git { url, root } => {
+                crate::git_source::check_url(url, true).map_err(Error::BadRequest)?;
+                if let Some(r) = root {
+                    check_rel_path("source.root", r)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -483,6 +498,23 @@ pub struct Run {
     pub schedules: Vec<Scheduled>,
 }
 
+/// A schedule's state in an environment ([`Environment::schedules`]).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ScheduleState {
+    pub name: String,
+    /// The next due time (unix ms); none without a deployment or in a paused environment.
+    pub next_run_at: Option<i64>,
+    /// The job it last started, and how that went.
+    pub last: Option<ScheduleRun>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ScheduleRun {
+    pub job: String,
+    pub status: RunStatus,
+    pub started_at: i64,
+}
+
 /// A volume's measured size ([`Environment::volume_used`]).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct VolumeUsed {
@@ -601,6 +633,10 @@ pub struct Alerts {
     pub error_pct: u8,
     /// p95 latency at or above this in three of the five minutes.
     pub p95_ms: u32,
+    /// Requests that found every instance busy at `max_instances`, at or above this share of
+    /// the five minutes' requests (at least 20 of them): `alert.capacity` (Cloud Run's
+    /// max-instances warning, Heroku's queue time).
+    pub capacity_pct: u8,
     /// Text its output (stdout and stderr, any case) holds at least `log_count` times in the
     /// five minutes: `alert.log` (the pattern and the count, never a line).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -610,7 +646,7 @@ pub struct Alerts {
 
 impl Default for Alerts {
     fn default() -> Self {
-        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, log_match: None, log_count: 10 }
+        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10 }
     }
 }
 
@@ -656,8 +692,8 @@ impl Run {
     /// The checked settings, with what the type implies filled in (a worker runs at least one
     /// instance; a volume allows one).
     pub fn normalized(mut self) -> Result<Run> {
-        if self.alerts.memory_pct > 100 || self.alerts.error_pct > 100 {
-            return Err(Error::BadRequest("alerts.memory_pct and alerts.error_pct are 0–100 (0 is off)".into()));
+        if self.alerts.memory_pct > 100 || self.alerts.error_pct > 100 || self.alerts.capacity_pct > 100 {
+            return Err(Error::BadRequest("alerts.memory_pct, alerts.error_pct and alerts.capacity_pct are 0–100 (0 is off)".into()));
         }
         if self.alerts.log_match.as_ref().is_some_and(|m| m.trim().is_empty() || m.len() > 200) || !(1..=10_000).contains(&self.alerts.log_count) {
             return Err(Error::BadRequest("alerts.log_match is 1–200 characters, alerts.log_count 1–10000".into()));
@@ -927,6 +963,10 @@ pub struct Environment {
     pub private: bool,
     /// A cron service's next scheduled run (unix ms), once it has a deployment.
     pub next_run_at: Option<i64>,
+    /// Its schedules (`run.schedules`) as they stand: the next due time and the job each last
+    /// started (Heroku Scheduler's "Next due", Vercel's last run).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub schedules: Vec<ScheduleState>,
     /// How full its volume was when last measured (hourly), when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume_used: Option<VolumeUsed>,
@@ -1323,6 +1363,10 @@ pub struct Deployment {
     /// owner, never in a commit status or a notification.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_detail: Option<String>,
+    /// How to fix a known failure (a private image's login, more memory, a lockfile): read from
+    /// its error, never stored ([`fix_for`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
     /// When it was pruned (unix ms): out of what's kept, its image gone; history only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pruned_at: Option<i64>,
@@ -1434,6 +1478,27 @@ pub struct Domain {
 /// A hostname a user may add: lowercase labels of `[a-z0-9-]`, at least two, at most 253
 /// characters, not an IP address and not under roll's own domains; or `*.` and one (a wildcard:
 /// every name one label under it).
+/// Generated names nobody takes: they'd read as roll's own on its shared domain.
+const RESERVED_LABELS: [&str; 12] = ["www", "api", "app", "admin", "dashboard", "status", "mail", "roll", "edge", "cdn", "docs", "help"];
+
+/// An environment's generated name (`<name>.<domain>`, Railway's editable domain): 3–56 of
+/// a–z, 0–9 and `-`, not starting or ending with one, never `--` (a deployment's own name is
+/// `<id>--<name>`), and not one of roll's.
+pub fn check_slug(s: &str) -> Result<()> {
+    let ok = (3..=56).contains(&s.len())
+        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && !s.contains("--");
+    if !ok {
+        return Err(Error::BadRequest("hostname is 3–56 of a-z, 0-9 and -, not starting or ending with -, without --".into()));
+    }
+    if RESERVED_LABELS.contains(&s) {
+        return Err(Error::BadRequest(format!("{s} is roll's own")));
+    }
+    Ok(())
+}
+
 pub fn check_hostname(h: &str, reserved: &[&str]) -> Result<String> {
     let h = h.trim().trim_end_matches('.').to_ascii_lowercase();
     if let Some(base) = h.strip_prefix("*.") {
@@ -1690,6 +1755,10 @@ mod tests {
         assert!(check_hostname("www.example.com", &["roll.site"]).is_ok());
         assert!(check_hostname("x.up.roll.site", &["roll.site"]).is_err());
         assert!(check_hostname("localhost", &[]).is_err());
+        assert!(check_slug("shop-eu").is_ok());
+        for bad in ["ab", "Shop", "-shop", "shop-", "dep--shop", "www", "shop.eu"] {
+            assert!(check_slug(bad).is_err(), "{bad}");
+        }
         assert!(check_hostname("1.2.3.4", &[]).is_err());
         assert!(check_name("service", "My-App").is_err());
         assert!(check_var_name("DATABASE_URL").is_ok() && check_var_name("1X").is_err());
@@ -1765,3 +1834,43 @@ mod domain_diagnosis_tests {
     }
 }
 
+
+/// What to change for a failure roll knows (Heroku's error codes, Render's pointers): one line
+/// naming the setting and its command. None for anything else: the error and its detail say it.
+pub fn fix_for(error: &str, detail: Option<&str>) -> Option<String> {
+    let all = format!("{error}\n{}", detail.unwrap_or("")).to_lowercase();
+    let has = |w: &str| all.contains(w);
+    let fix = if has("docker pull") && (has("denied") || has("unauthorized") || has("not found") || has("manifest unknown") || has("failed")) {
+        "The registry wouldn't give the image: check its name and tag; a private image needs its registry login (Settings → Source, `roll apps registry`)."
+    } else if has("exit 137") || has("out of memory") || has("oomkilled") || has("javascript heap out of memory") {
+        "It ran out of memory: give it more (Settings → Size, `roll apps set --memory 1024`)."
+    } else if has("the build took longer than") {
+        "The build passed its time limit: make it lighter (a lockfile for cached installs, fewer steps), or build an image elsewhere and deploy that."
+    } else if has("npm ci") && (has("package-lock") || has("lockfile") || has("in sync")) {
+        "`npm ci` needs a package-lock.json that matches package.json: commit one (`npm install`), or set the install command to `npm install` (Settings → Build)."
+    } else if has("frozen-lockfile") || has("lockfile needs to be updated") {
+        "The lockfile doesn't match package.json: run the install locally and commit the lockfile, or drop `--frozen-lockfile` from the install command (Settings → Build)."
+    } else if has("health check didn't pass") || has("didn't answer in time") || has("health check") && has("failed") {
+        "It never answered its health check: it must listen on 0.0.0.0 at $PORT; if it boots slowly, raise the health timeout (Settings → Health, `roll apps set --health-timeout 120`)."
+    } else if has("no start command") || has("nothing says how to start") || has("doesn't know how to start") {
+        "Nothing says how to start it: set a start command (Settings → Run, `roll apps set --start \"…\"`) or a Procfile's `web:`."
+    } else if has("couldn't tell how to build this") {
+        "roll couldn't tell how to build it: add a Dockerfile, set the root directory to the app's, or set the build and start commands (Settings → Build)."
+    } else {
+        return None;
+    };
+    Some(fix.to_string())
+}
+
+#[cfg(test)]
+mod fix_tests {
+    #[test]
+    fn known_failures_say_what_to_change() {
+        let f = |e: &str, d: Option<&str>| super::fix_for(e, d).unwrap_or_default();
+        assert!(f("docker pull ghcr.io/acme/app:1 failed", Some("error from registry: denied")).contains("registry login"));
+        assert!(f("it was killed (exit 137: out of memory, or a SIGKILL)", None).contains("--memory"));
+        assert!(f("the health check didn't pass within 60 s", None).contains("$PORT"));
+        assert!(f("the build failed (docker build exited with 1)", Some("npm ci can only install packages when your package.json and package-lock.json are in sync")).contains("package-lock.json"));
+        assert_eq!(super::fix_for("a reason nobody wrote down", None), None);
+    }
+}
