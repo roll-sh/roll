@@ -288,6 +288,14 @@ pub struct GitLogin {
     pub username: String,
 }
 
+/// A Git URL service connected to roll's GitHub App (`PUT …/github`): the installation that sees
+/// `repo` (`owner/name`). Fetches and commit statuses go through it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GitHubLink {
+    pub installation: u64,
+    pub repo: String,
+}
+
 /// A relative path inside a tree: no `..`, not absolute, plain characters.
 pub fn check_rel_path(what: &str, p: &str) -> Result<()> {
     let ok = !p.is_empty()
@@ -905,6 +913,8 @@ pub struct Service {
     pub registry: Option<Registry>,
     /// The private Git repository login its source fetches with (never the password).
     pub git_login: Option<GitLogin>,
+    /// roll's GitHub App, when the service is connected to it.
+    pub github: Option<GitHubLink>,
     /// What it links (the canvas draws them), without their variables.
     pub links: Vec<LinkRef>,
     pub created_at: i64,

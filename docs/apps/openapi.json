@@ -3352,6 +3352,62 @@
         "x-roll-action": "write"
       }
     },
+    "/v1/apps/services/{id}/github": {
+      "delete": {
+        "description": "Answers `Service`.",
+        "operationId": "deleteServicesIdGithub",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Service`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete github",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "operator only"
+      },
+      "put": {
+        "description": "Answers `Service` (a Git URL service on roll's GitHub App's host connected to the installation that sees its repository: fetches use the installation's short-lived tokens, deploys post commit statuses; 409 without the App or when no installation sees the repository; dropped when the source moves to another repository).",
+        "operationId": "putServicesIdGithub",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Service` (a Git URL service on roll's GitHub App's host connected to the installation that sees its repository: fetches use the installation's short-lived tokens, deploys post commit statuses; 409 without the App or when no installation sees the repository; dropped when the source moves to another repository)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Set github",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "operator only (installations span tenants)"
+      }
+    },
     "/v1/apps/services/{id}/links": {
       "get": {
         "description": "Answers `Link[]`.",

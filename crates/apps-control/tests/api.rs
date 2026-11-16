@@ -3995,6 +3995,78 @@ async fn a_private_git_url_fetches_with_its_login() {
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}/git-login"), None).await.1["git_login"], Value::Null);
 }
 
+/// roll's GitHub App, faked: it sees `acme/site` (installation 42), hands out one token, and
+/// records the commit statuses posted through it.
+struct FakeGitHub {
+    host: String,
+    statuses: Mutex<Vec<(u64, String, String, String)>>,
+}
+
+#[async_trait]
+impl apps_control::integrations::GitHubApp for FakeGitHub {
+    fn host(&self) -> Option<String> {
+        Some(self.host.clone())
+    }
+    async fn installation_for(&self, owner: &str, repo: &str) -> anyhow::Result<Option<u64>> {
+        Ok((owner, repo) == ("acme", "site")).map(|seen| seen.then_some(42))
+    }
+    async fn git_login(&self, installation: u64, _owner: &str, _repo: &str) -> anyhow::Result<(String, String)> {
+        anyhow::ensure!(installation == 42, "not the installation");
+        Ok(("x-access-token".into(), "ghs_installation".into()))
+    }
+    async fn status(&self, installation: u64, owner: &str, repo: &str, _sha: &str, s: &apps_control::integrations::CommitStatus) -> anyhow::Result<()> {
+        self.statuses.lock().push((installation, format!("{owner}/{repo}"), s.context.clone(), s.state.to_string()));
+        Ok(())
+    }
+}
+
+/// A private repository on roll's GitHub App's host: made without its first deploy, connected to
+/// the App (only when it sees the repository), then fetched with the installation's token, its
+/// deploys posting commit statuses through it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_git_url_service_connects_to_rolls_github_app() {
+    let w = world().await;
+    let git = Arc::new(GitHost::default());
+    *git.login.lock() = Some(("x-access-token".into(), "ghs_installation".into()));
+    let first = git.commit(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http')")]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+    // GitHub's paths are `/<owner>/<repo>`; the fake host's are under `/git/`.
+    let inner = code_git::router(git.clone(), code_git::ServerConfig::default());
+    let app = axum::Router::new().fallback(move |mut req: Request<Body>| {
+        let inner = inner.clone();
+        async move {
+            let to = format!("/git{}", req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/"));
+            *req.uri_mut() = to.parse().unwrap();
+            inner.oneshot(req).await.unwrap()
+        }
+    });
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let gh = Arc::new(FakeGitHub { host: host.clone(), statuses: Mutex::new(Vec::new()) });
+    w.apps.set_github_app(gh.clone());
+    let make = |name: &str, repo: &str| json!({ "project": w.project, "name": name, "source": {"kind": "git", "url": format!("http://{host}/acme/{repo}")} });
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(make("site", "site"))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    assert_eq!(svc["environments"][0]["latest"], Value::Null, "nothing deployed before it's connected: {svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    // One the App doesn't see isn't connected.
+    let (_, other) = call(&w.api, "POST", "/v1/apps/services", Some(make("other", "other"))).await;
+    let (st, v) = call(&w.api, "PUT", &format!("/v1/apps/services/{}/github", other["id"].as_str().unwrap()), None).await;
+    assert!(st == StatusCode::CONFLICT && v["error"].as_str().unwrap().contains("isn't installed on acme/other"), "{v}");
+    let (st, s) = call(&w.api, "PUT", &format!("/v1/apps/services/{id}/github"), None).await;
+    assert_eq!((st, &s["github"]), (StatusCode::OK, &json!({"installation": 42, "repo": "acme/site"})), "{s}");
+    let (st, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    assert_eq!((d["status"].as_str(), d["revision"].as_str()), (Some("active"), Some(first.as_str())), "{d}");
+    let posted = gh.statuses.lock().clone();
+    assert!(posted.iter().any(|(i, r, c, s)| (*i, r.as_str(), c.as_str(), s.as_str()) == (42, "acme/site", "roll/apps/site/production", "success")), "{posted:?}");
+    // Disconnected: no token, so the private repository can't be read.
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}/github"), None).await;
+    let (st, v) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+}
+
 /// The dashboard's starter templates (apps/dashboard/src/lib/templates) read as the import reads
 /// them, on public images only, with run settings a service takes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

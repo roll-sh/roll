@@ -66,6 +66,11 @@ CREATE TABLE IF NOT EXISTS registry_auth (
     username TEXT NOT NULL,
     sealed TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS git_github (
+    service TEXT PRIMARY KEY,
+    installation INTEGER NOT NULL,
+    repo TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS git_auth (
     service TEXT PRIMARY KEY,
     host TEXT NOT NULL,
@@ -764,7 +769,7 @@ impl Store {
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1791,6 +1796,25 @@ impl Store {
     pub fn git_login_secret(&self, service: &str) -> Result<Option<(GitLogin, String)>> {
         let row: Option<(String, String, String)> = self.db.query_row("SELECT host, username, sealed FROM git_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
         row.map(|(host, username, sealed)| Ok((GitLogin { host, username }, self.sealer.open(&format!("git:{service}"), &sealed)?))).transpose()
+    }
+
+    // ── roll's GitHub App on a Git URL service ──
+
+    pub fn set_git_github(&self, service: &str, installation: u64, repo: &str) -> Result<()> {
+        self.db.execute(
+            "INSERT INTO git_github (service, installation, repo) VALUES (?, ?, ?) ON CONFLICT (service) DO UPDATE SET installation = excluded.installation, repo = excluded.repo",
+            params![service, installation as i64, repo],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_git_github(&self, service: &str) -> Result<()> {
+        self.db.execute("DELETE FROM git_github WHERE service = ?", [service])?;
+        Ok(())
+    }
+
+    pub fn git_github(&self, service: &str) -> Result<Option<GitHubLink>> {
+        Ok(self.db.query_row("SELECT installation, repo FROM git_github WHERE service = ?", [service], |r| Ok(GitHubLink { installation: r.get::<_, i64>(0)? as u64, repo: r.get(1)? })).optional()?)
     }
 
     // ── private environments ──

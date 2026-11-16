@@ -74,6 +74,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries", get(deliveries))
         .route("/v1/apps/services/{id}/registry", put(put_registry).delete(delete_registry))
         .route("/v1/apps/services/{id}/git-login", put(put_git_login).delete(delete_git_login))
+        .route("/v1/apps/services/{id}/github", put(put_github).delete(delete_github))
         .route("/v1/apps/services/{id}/environments", get(environments))
         .route(env, get(get_env).put(put_env).delete(delete_env))
         .route(&format!("{env}/deploys"), get(deploys).post(create_deploy).layer(DefaultBodyLimit::max(apps.cfg.upload_max)))
@@ -571,6 +572,18 @@ async fn put_git_login(State(apps): S, Path(id): Path<String>, ext: Extensions, 
 async fn delete_git_login(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
     let s = apps.delete_git_login(&id).await?;
     apps.audit("git_login.removed", &id, "", actor(&ext), json!({})).await;
+    ok(s)
+}
+
+async fn put_github(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    let s = apps.put_github(&id).await?;
+    apps.audit("github.connected", &id, "", actor(&ext), json!({ "repo": s.github.as_ref().map(|g| g.repo.clone()), "installation": s.github.as_ref().map(|g| g.installation) })).await;
+    ok(s)
+}
+
+async fn delete_github(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    let s = apps.delete_github(&id).await?;
+    apps.audit("github.disconnected", &id, "", actor(&ext), json!({})).await;
     ok(s)
 }
 

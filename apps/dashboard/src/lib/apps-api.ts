@@ -134,6 +134,8 @@ export interface Service {
   registry: { server: string; username: string } | null;
   /** A private Git repository's login, bound to the source URL's host (the password is never returned). */
   git_login: { host: string; username: string } | null;
+  /** Connected to roll's GitHub App: fetches use its installation's tokens, deploys post statuses. */
+  github: { installation: number; repo: string } | null;
   /** What it links (the canvas draws them). */
   links?: { kind: LinkKind; ref: string }[];
   created_at: number;
@@ -835,6 +837,8 @@ export const appsApi = {
   deleteRegistry: (id: string) => call<Service>("DELETE", `${svc(id)}/registry`),
   putGitLogin: (id: string, body: { username: string; password: string }) => call<Service>("PUT", `${svc(id)}/git-login`, body),
   deleteGitLogin: (id: string) => call<Service>("DELETE", `${svc(id)}/git-login`),
+  connectGitHub: (id: string) => call<Service>("PUT", `${svc(id)}/github`),
+  disconnectGitHub: (id: string) => call<Service>("DELETE", `${svc(id)}/github`),
   putEnvironment: (id: string, e: string, body: EnvironmentPut) => call<Environment>("PUT", env(id, e), body),
   removeEnvironment: (id: string, e: string) => call<null>("DELETE", env(id, e)),
 

@@ -216,6 +216,8 @@ pub struct Apps {
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
     /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
     pub(crate) pushes: std::sync::OnceLock<Arc<dyn integrations::GitPushes>>,
+    /// roll's GitHub App ([`Apps::set_github_app`]).
+    github: std::sync::OnceLock<Arc<dyn integrations::GitHubApp>>,
     /// Email to projects' owners (`notify`), once rolld has accounts.
     mail: std::sync::OnceLock<Arc<dyn integrations::Mailbox>>,
     /// Log drains whose batch came back (the drainer sends the next).
@@ -372,6 +374,7 @@ impl Apps {
             capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
             pushes: std::sync::OnceLock::new(),
+            github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
@@ -522,6 +525,7 @@ impl Apps {
             Some(Value::String(b)) if matches!(source, Source::Repo { .. } | Source::Git { .. }) && !b.is_empty() && b.len() <= 255 => Some(b.clone()),
             Some(_) => return Err(Error::BadRequest("branch is a repo or Git source's branch name".into())),
         };
+        let mut await_connection = false;
         let branch = match (&source, &self.deps.sources) {
             (Source::Repo { repo, .. }, Some(src)) => {
                 let _ = src.resolve(repo, named.as_deref()).await.map_err(|e| Error::BadRequest(format!("repo {repo}: {e}")))?;
@@ -534,8 +538,17 @@ impl Apps {
             // A Git URL's branch must exist now (its default when none is named), as a repo's must.
             (Source::Git { url, .. }, _) => {
                 let remote = git_source::Remote::new(self.cfg.allow_private, url, git_login.as_ref().map(|(_, l)| l.clone()));
-                let (_, b) = git_source::head(&remote, named.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e}")))?;
-                Some(b)
+                match git_source::head(&remote, named.as_deref()).await {
+                    Ok((_, b)) => Some(b),
+                    // A private repository on roll's GitHub App's host: made without its first
+                    // deploy, to be connected to the App (the operator's) or given a login. The
+                    // App isn't asked here: whether it sees a repository is no tenant's to learn.
+                    Err(_) if git_login.is_none() && self.github.get().and_then(|a| a.host()).is_some_and(|h| git_host(url).as_ref() == Some(&h)) => {
+                        await_connection = true;
+                        Some(named.clone().unwrap_or_else(|| "main".into()))
+                    }
+                    Err(e) => return Err(Error::BadRequest(format!("{url}: {e}"))),
+                }
             }
             _ => None,
         };
@@ -580,8 +593,9 @@ impl Apps {
         }
         // The project's owner hears what needs someone from its first service on.
         self.offer_email(&row.project).await;
-        // A repo, a Git URL or an image deploys at once; an upload waits for `roll up`.
-        if !matches!(source, Source::Upload) {
+        // A repo, a Git URL or an image deploys at once; an upload waits for `roll up`, a private
+        // repository on the GitHub App's host for its connection or login.
+        if !matches!(source, Source::Upload) && !await_connection {
             self.deploy(&row.id, PRODUCTION, json!({}), By { trigger: Trigger::Api, actor: actor.clone() }, None, None).await?;
         }
         self.service(&row.id).await
@@ -642,9 +656,9 @@ impl Apps {
             summaries.push(self.summary(e).await?);
         }
         let id = r.id.clone();
-        let (registry, git_login, links) = self.db(move |s| Ok((s.registry(&id)?, s.git_login(&id)?, s.links(&id)?))).await?;
+        let (registry, git_login, github, links) = self.db(move |s| Ok((s.registry(&id)?, s.git_login(&id)?, s.git_github(&id)?, s.links(&id)?))).await?;
         let links = links.into_iter().map(|(kind, r#ref, _)| LinkRef { kind, r#ref }).collect();
-        Ok(Service { id: r.id, project: r.project, name: r.name, source: r.source, build: r.build, run: r.run, registry, git_login, links, created_at: r.created_at, environments: summaries })
+        Ok(Service { id: r.id, project: r.project, name: r.name, source: r.source, build: r.build, run: r.run, registry, git_login, github, links, created_at: r.created_at, environments: summaries })
     }
 
     /// `PUT …/registry`: the login a service's image pulls with. `server` defaults to the image's
@@ -710,9 +724,56 @@ impl Apps {
         self.service(service).await
     }
 
-    /// The repository a Git URL service fetches from: with its login when the login is for this
-    /// URL's host (a login never goes to another host).
+    /// `PUT …/github`: connect a Git URL service on the App's host to roll's GitHub App, through
+    /// the installation that sees its repository (admin: installations span tenants). Fetches
+    /// then use the installation's short-lived tokens, and deploys post commit statuses.
+    pub async fn put_github(self: &Arc<Self>, service: &str) -> Result<Service> {
+        let app = self.github.get().cloned().ok_or_else(|| Error::Conflict("roll's GitHub App isn't set up on this node".into()))?;
+        let sid = service.to_string();
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        let Source::Git { url, .. } = &svc.source else { return Err(Error::Conflict("only a Git URL source connects to GitHub".into())) };
+        let host = app.host().ok_or_else(|| Error::Conflict("roll's GitHub App isn't set up on this node".into()))?;
+        let (owner, repo) = github_repo(url, &host).ok_or_else(|| Error::BadRequest(format!("{url} isn't a repository on {host}")))?;
+        let installation = app
+            .installation_for(&owner, &repo)
+            .await
+            .map_err(|e| Error::Internal(format!("asking GitHub: {e:#}")))?
+            .ok_or_else(|| Error::Conflict(format!("roll's GitHub App isn't installed on {owner}/{repo}: install it there first")))?;
+        let (sid, full) = (service.to_string(), format!("{owner}/{repo}"));
+        self.db(move |s| s.set_git_github(&sid, installation, &full)).await?;
+        self.service(service).await
+    }
+
+    pub async fn delete_github(self: &Arc<Self>, service: &str) -> Result<Service> {
+        let sid = service.to_string();
+        self.db(move |s| s.delete_git_github(&sid)).await?;
+        self.service(service).await
+    }
+
+    /// Where roll's GitHub App is, once rolld has it. Set once.
+    pub fn set_github_app(&self, app: Arc<dyn integrations::GitHubApp>) {
+        let _ = self.github.set(app);
+    }
+
+    /// A Git URL service's GitHub connection still for this URL's repository, with the App.
+    pub(crate) async fn github_for(self: &Arc<Self>, service: &str, url: &str) -> Option<(Arc<dyn integrations::GitHubApp>, u64, String, String)> {
+        let app = self.github.get().cloned()?;
+        let sid = service.to_string();
+        let link = self.db(move |s| s.git_github(&sid)).await.ok().flatten()?;
+        let (owner, repo) = github_repo(url, &app.host()?)?;
+        link.repo.eq_ignore_ascii_case(&format!("{owner}/{repo}")).then_some((app, link.installation, owner, repo))
+    }
+
+    /// The repository a Git URL service fetches from: through roll's GitHub App when it's
+    /// connected (a short-lived installation token), else with its login when the login is for
+    /// this URL's host (a login never goes to another host).
     pub(crate) async fn git_remote<'a>(self: &Arc<Self>, service: &str, url: &'a str) -> git_source::Remote<'a> {
+        if let Some((app, installation, owner, repo)) = self.github_for(service, url).await {
+            match app.git_login(installation, &owner, &repo).await {
+                Ok(login) => return git_source::Remote::new(self.cfg.allow_private, url, Some(login)),
+                Err(e) => tracing::warn!(service, error = %e, "apps: roll's GitHub App gave no token; fetching without it"),
+            }
+        }
         let sid = service.to_string();
         let login = self.db(move |s| s.git_login_secret(&sid)).await.ok().flatten();
         let login = login.filter(|(l, _)| Some(&l.host) == git_host(url).as_ref()).map(|(l, password)| (l.username, password));
@@ -834,6 +895,7 @@ impl Apps {
             }
             if forget_git {
                 s.delete_git_login(&r.id)?;
+                s.delete_git_github(&r.id)?;
             }
             Ok(())
         })
@@ -2641,6 +2703,18 @@ fn free_spot(ws: &roll_workspace::Workspace, project: &str) -> (f64, f64) {
         }
     }
     (48.0, 48.0)
+}
+
+/// `owner` and `repo` of a Git URL on `host` (`https://github.com/owner/repo[.git]`), if it's one.
+fn github_repo(url: &str, host: &str) -> Option<(String, String)> {
+    if git_host(url)?.as_str() != host {
+        return None;
+    }
+    let u = url::Url::parse(url).ok()?;
+    let path = u.path().trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, repo) = path.split_once('/')?;
+    (!owner.is_empty() && !repo.is_empty() && !repo.contains('/')).then(|| (owner.to_string(), repo.to_string()))
 }
 
 /// A Git URL's repository, to compare: its host and path, without a trailing `/` or `.git`.
