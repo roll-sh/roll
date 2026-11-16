@@ -37,6 +37,11 @@ fn offered(tools: &[String]) -> Vec<Skill> {
         "How to use roll over MCP: ids, permissions, approvals and what to do when a call is refused. Use it before acting in roll.".into(),
         include_str!("guide.md"),
     )];
+    out.push(skill(
+        "set-up-ci".into(),
+        "How to set up a repository's CI (GitHub Actions, GitLab CI) to deploy, migrate or read through roll with CI's own identity, nothing stored in CI. Use when the user wants CI to use roll.".into(),
+        include_str!("skills/set-up-ci.md"),
+    ));
     for crate::prompts::Workflow { name, title, description, text, args, tools: needs } in crate::prompts::workflows(tools) {
         let mut body = format!("# {title}\n\n{text}\n");
         if !args.is_empty() {

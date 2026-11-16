@@ -408,8 +408,10 @@ commands:
   unoffered URI is `-32602`.
 - **Reading:** `resources/read` of `skill://roll/<name>/SKILL.md` answers the file. `resources/list`
   lists them too.
-- **What's served:** `using-roll` (the guide) for everyone, plus one skill per workflow the
-  connection's tools allow, its arguments written as `<project>`. The listing is per connection
+- **What's served:** `using-roll` (the guide) and `set-up-ci` (a repository's CI signing in with
+  its own identity: the one command the person runs, the workflow step the agent writes) for
+  everyone, plus one skill per workflow the connection's tools allow, its arguments written as
+  `<project>`. The listing is per connection
   (`cacheScope: "private"`).
 - **Safety:** skills come only from roll's binary, never from tenant text. They name no
   `allowed-tools` and nothing to run, and the gate decides every tool call they lead to.
