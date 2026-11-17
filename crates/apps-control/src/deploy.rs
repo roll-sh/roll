@@ -1364,8 +1364,22 @@ impl Apps {
             target: svc.build.target.clone().filter(|_| plan.provider == apps_build::Provider::Dockerfile),
             layers,
         };
+        // The same inputs built before in this project (Railway's skipped builds): the same tree,
+        // Dockerfile, target and build variables, and its image still kept. Never with `no_cache`.
+        let build_key = if job.no_cache { None } else { Some(build_key(&job, &plan.dockerfile, self.deps.builder.name()).await?) };
+        let reused = match build_key.clone() {
+            Some(k) => {
+                let p = svc.project.clone();
+                self.db(move |s| s.built_image(&p, &k)).await?
+            }
+            None => None,
+        };
+        let image = if let Some((from, image)) = reused {
+            log.line(format!("{from} was built from the same source, settings and build variables: its image goes on, no build"));
+            image
+        } else {
         log.line(format!("building with {}", self.deps.builder.name()));
-        let image = match self.deps.builder.build(&job, log, cancel.clone()).await {
+        match self.deps.builder.build(&job, log, cancel.clone()).await {
             Ok(i) => i,
             // What failed, as BuildKit said it (the step, its last words), not only its exit code.
             Err(e) if !cancel.is_cancelled() => {
@@ -1376,6 +1390,7 @@ impl Apps {
                 });
             }
             Err(e) => return Err(e),
+        }
         };
         // Each base's digest as the registry says it now (what the build just resolved): all
         // asked at once, ten seconds for the lot.
@@ -1392,7 +1407,14 @@ impl Apps {
             plan_json["bases"] = serde_json::Value::Array(pinned);
         }
         let (id, img, r) = (d.id.clone(), image.clone(), run.clone());
-        self.db(move |s| s.set_built(&id, &img, Some(&plan_json), Some(&r))).await?;
+        self.db(move |s| {
+            s.set_built(&id, &img, Some(&plan_json), Some(&r))?;
+            match &build_key {
+                Some(k) => s.set_build_key(&id, k),
+                None => Ok(()),
+            }
+        })
+        .await?;
         Ok((image, run))
     }
 
@@ -2769,4 +2791,58 @@ mod skip_tests {
         assert_eq!(super::skip_tag("readme [deploy skip]"), Some("[deploy skip]"));
         assert_eq!(super::skip_tag("skip the cache"), None);
     }
+}
+
+/// What a build's image depends on: every file of its context (path, kind and bytes, in order),
+/// its Dockerfile, target, build variables and builder. Two builds with the same key make the
+/// same image, so the second reuses the first's. roll's names for the service itself
+/// (`ROLL_SERVICE`, `ROLL_SERVICE_ID`, `ROLL_PRIVATE_HOST`, `ROLL_PUBLIC_URL`) are left out, so a
+/// web service and a worker of one repository share a build; the environment's name
+/// (`ROLL_ENVIRONMENT`) is in, so a preview's build is never production's.
+async fn build_key(job: &BuildJob, dockerfile: &str, builder: &str) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+    let context = job.context.clone();
+    let mut h = tokio::task::spawn_blocking(move || -> anyhow::Result<Sha256> {
+        let mut h = Sha256::new();
+        let mut stack = vec![context.clone()];
+        let mut files = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir)? {
+                let e = e?;
+                let (p, t) = (e.path(), e.file_type()?);
+                if t.is_dir() {
+                    stack.push(p);
+                } else {
+                    files.push((p, t.is_symlink()));
+                }
+            }
+        }
+        files.sort();
+        for (p, link) in files {
+            h.update(p.strip_prefix(&context).unwrap_or(&p).to_string_lossy().as_bytes());
+            h.update([0, link as u8]);
+            if link {
+                h.update(std::fs::read_link(&p)?.to_string_lossy().as_bytes());
+            } else {
+                let mut f = std::fs::File::open(&p)?;
+                std::io::copy(&mut f, &mut h)?;
+            }
+            h.update([0]);
+        }
+        Ok(h)
+    })
+    .await??;
+    for part in [dockerfile, job.target.as_deref().unwrap_or(""), builder, if job.own_dockerfile { "own" } else { "generated" }] {
+        h.update(part.as_bytes());
+        h.update([0]);
+    }
+    let mut vars: Vec<&(String, String)> = job.env.iter().filter(|(k, _)| !["ROLL_SERVICE", "ROLL_SERVICE_ID", "ROLL_PRIVATE_HOST", "ROLL_PUBLIC_URL"].contains(&k.as_str())).collect();
+    vars.sort();
+    for (k, v) in vars {
+        h.update(k.as_bytes());
+        h.update([0]);
+        h.update(v.as_bytes());
+        h.update([0]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
