@@ -180,6 +180,38 @@ pub struct Shot {
     pub crops: Vec<(String, Vec<u8>)>,
 }
 
+/// A push to a branch of a roll apps service built from a Git URL that none of its environments
+/// follows (roll apps' push hook, checked against the repository before it's handed on): the
+/// branch's preview is made or moved to `sha`, or goes when `sha` is `None` (the branch was
+/// deleted). It may come more than once for the same sha.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitPush {
+    /// The roll apps service (`svc_…`).
+    pub service: String,
+    pub url: String,
+    pub branch: String,
+    pub sha: Option<String>,
+    /// The push's commit message (`[skip preview]` in it skips one).
+    pub message: String,
+    /// The pull request the push is of (GitHub's `pull_request`, GitLab's merge request events),
+    /// every claim checked against the repository's refs by roll apps first. A fork's is
+    /// `branch: "pull/<n>"`; a same-repo one names its real branch. `sha: None` with a pull: it
+    /// closed.
+    pub pull: Option<GitPull>,
+}
+
+/// A pull request of a Git URL service's repository, as roll apps hands it on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitPull {
+    pub number: u64,
+    /// Untrusted text from the pull request: shown as plain words only, at most 200 characters.
+    pub title: String,
+    /// The pull request's page, built by roll apps from the provider's host and the number.
+    pub url: String,
+    /// From another repository (its head repo isn't the base's): it runs only once approved.
+    pub fork: bool,
+}
+
 /// A note's element to crop in a screenshot run: its page and its selector, both checked.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CropAsk {

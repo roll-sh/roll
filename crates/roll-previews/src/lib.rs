@@ -136,6 +136,17 @@ impl Mode {
     }
 }
 
+/// A Git URL service's pull request, as its preview shows it. A fork's runs only at the head a
+/// writer approved (`POST …/approve`); a new head waits again.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GitPullView {
+    pub number: i64,
+    pub url: String,
+    pub fork: bool,
+    pub approved_head: Option<String>,
+    pub approved_by: Option<String>,
+}
+
 /// Where a preview is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -214,6 +225,10 @@ pub struct Preview {
     pub release: Option<ReleaseRun>,
     /// Kept past its TTL until then (`POST …/keep`); a landed or closed change still ends it.
     pub kept_until: Option<i64>,
+    /// The pull request a Git URL service's preview is of (roll apps' push hook): `None` for a
+    /// branch's and for roll code's (theirs is `number`/`github_pr`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pull: Option<GitPullView>,
     /// When it goes unless it's used or kept, said once that's close (a day, or a quarter of a
     /// shorter TTL): the change, its pull request and the sheet warn.
     pub goes_at: Option<i64>,
