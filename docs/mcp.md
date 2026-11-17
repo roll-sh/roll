@@ -740,9 +740,8 @@ waits on a sibling PR reaching main is last.
    - Access requests: a token asks for one rule for a while with a reason (`POST
      /v1/access/requests`, `access_request_access`; Teleport's and Entra PIM's model); approved,
      it's a temporary rule. A refused MCP call tells the agent it can ask, arguments filled in.
-   - Next on it: chat approvers mapped to accounts (so a chat press can count for a gate as that
-     person), a screenshot of an access request's card, and the dashboard's own "Request access"
-     for a person's token.
+   - Chat approvers linked to their accounts (`people`): a press counts for a gate as that person.
+   - Next on it: a screenshot of an access request's card, and a review of access requests.
 3. **`roll_machine_client` in the Terraform provider:** built on `feature/roll-mcp-terraform-clients`
    (6bc1979b9, on #114; with the secrets thread for review). `TF_ACC=1 go test` is green against the fake
    rolld, and so is a run against a real rolld (`live/tf-machine-client.sh`: create with GitHub's
