@@ -975,6 +975,27 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
 - **What roll pays for idle**: locally nothing but disk (images, stopped containers). On the
   fleet, the image in ECR ($0.10/GB-month) and the warm window's Fargate seconds.
 
+## Errors
+
+An environment's errors, grouped from its log with nothing to install (Cloud Run's Error
+Reporting; `errors.rs`): `GET …/errors?minutes=`, the Metrics tab's Errors panel (the newest of
+each opens whole), `roll apps errors [--sample]`.
+
+- **A trace is one error.** Each instance's and stream's lines are followed: Python's
+  `Traceback (most recent call last):` to its last line (`ZeroDivisionError: …`), a JVM's
+  `Exception …` or `com.acme.Oops: …` with its `at`, `Caused by:` and `... N more` lines,
+  Node's `TypeError: …` with its `at` lines, Go's `panic:` with its goroutines; another
+  instance's lines in between don't break it.
+- **The same error is one group:** a trace's error type and first three frames, with line
+  numbers, addresses, ids and quoted values taken out (so `line 10` and `line 42` of the same
+  bug count together); an error line with no trace (its level `error` or worse; a JSON line's
+  `msg`) by its message the same way (`payment 17 failed` and `payment 98 failed`).
+- **Each group:** its count, first and last seen, how many instances, and the newest whole as
+  its sample (8 KiB). The most frequent first, at most 50, from at most the newest 100,000 lines.
+
+`errors.rs`' unit test joins and groups Python, Node, JVM and Go traces and JSON error lines;
+`api.rs::errors_group_from_the_environments_log` reads them back over the API.
+
 ## Log levels
 
 An app's line says its level the way its logger writes it (Cloud Run's severity, Railway's
@@ -2509,9 +2530,10 @@ put items 1–11 first. A second review that day (after #78, against the same si
    doesn't follow and every pull request (`GitPush`, `GitPull`), each checked against the
    repository's refs; previews builds the environments, comments and gates forks behind a
    writer's approval (its side is the previews thread's, stacked on this).
-2. **Stack traces as one entry, grouped** (Cloud Run's Error Reporting): continuation lines joined to
-   their error per instance and stream, fingerprinted and counted (`…/errors`, first and last seen),
-   an `error.new` event for notifications.
+2. **A new error tells someone** (Sentry's and Error Reporting's new-issue alerts): an `error.new`
+   event when a fingerprint first appears (a group's first sighting kept per environment), for
+   notifications and webhooks; and the log's own view showing a trace as one entry. The grouping
+   itself is built ("Errors").
 3. **Wait for CI and statuses on Git URL services**: check runs read through the GitHub App, GitLab
    and Bitbucket statuses through the Git login (through `PublicOnly`), so `wait_for_ci` and commit
    statuses work beyond roll code repos.

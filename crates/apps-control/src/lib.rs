@@ -27,6 +27,7 @@ pub mod registry;
 pub mod config;
 pub mod cron;
 pub mod deploy;
+pub mod errors;
 pub mod drains;
 pub mod export;
 pub mod git_source;

@@ -12,11 +12,11 @@
 
 import { Table2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary, type Vital, type VitalName, type Vitals, type AppMetrics, type AppSeries } from "@/lib/apps-api";
+import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary, type Vital, type VitalName, type Vitals, type AppMetrics, type AppSeries, type ErrorGroup } from "@/lib/apps-api";
 import { formatBytes } from "@/lib/roll-api";
 import { btn, CopyButton, panel, useCopy } from "../ui";
 import { usePageVisible } from "./live";
-import { clock, message } from "./shared";
+import { clock, message, since } from "./shared";
 
 const W = 300;
 const H = 84;
@@ -312,6 +312,36 @@ function shown(s: AppSeries) {
   return `${n}${s.unit && s.unit !== "1" ? ` ${s.unit}` : ""}${s.shows === "per_second" ? "/s" : ""}`;
 }
 
+/** Its errors, grouped from its log (Cloud Run's Error Reporting): the newest of each opens whole. */
+function Errors({ groups }: { groups: ErrorGroup[] }) {
+  return (
+    <section className={`${panel} overflow-hidden`} aria-label="Errors">
+      <div className="border-b border-line px-4 py-2.5">
+        <p className="text-[12px] text-muted">
+          Errors <span className="text-subtle">· from its log, stack traces joined and grouped</span>
+        </p>
+      </div>
+      <ul className="divide-y divide-line">
+        {groups.slice(0, 15).map((g) => (
+          <li key={g.fingerprint} className="px-4 py-2">
+            <details>
+              <summary className="flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 text-[12px] [&::-webkit-details-marker]:hidden">
+                <span className="w-12 text-right font-mono text-danger">{count(g.count)}×</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-[11.5px]">{g.title}</span>
+                <span className="text-[11px] text-subtle">
+                  {g.kind === "line" ? "line" : `${g.kind} trace`} · {since(g.last_seen)}
+                  {g.instances > 1 ? ` · ${g.instances} instances` : ""}
+                </span>
+              </summary>
+              <pre className="mt-2 max-h-72 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] leading-relaxed text-muted">{g.sample}</pre>
+            </details>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 /** The app's own metrics, from its OpenTelemetry SDK (traces on). */
 function AppMetricsPanel({ m }: { m: AppMetrics }) {
   return (
@@ -481,6 +511,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
   const [visitors, setVisitors] = useState<Analytics | null>(null);
   const [speed, setSpeed] = useState<Vitals | null>(null);
   const [appMetrics, setAppMetrics] = useState<AppMetrics | null>(null);
+  const [errorGroups, setErrorGroups] = useState<ErrorGroup[]>([]);
   const [traces, setTraces] = useState<TraceSummary[] | null>(null);
   const size = raw ? Math.max(1, Math.ceil(raw.minutes.length / MAX_POINTS)) : 1;
   const m = useMemo(() => (raw ? bucketed(raw, size) : null), [raw, size]);
@@ -505,7 +536,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
     const load = async () => {
       try {
         // The deploys only mark the charts: metrics still show without them.
-        const [next, deps, byRoute, seen, traced, measured, own] = await Promise.all([
+        const [next, deps, byRoute, seen, traced, measured, own, errs] = await Promise.all([
           appsApi.metrics(service, env, range.minutes),
           appsApi.deploys(service, env).catch(() => null),
           appsApi.routes(service, env).catch(() => null),
@@ -513,6 +544,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
           appsApi.traces(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
           appsApi.vitals(service, env, Math.min(Math.max(range.minutes, 60), 10_080)).catch(() => null),
           appsApi.appMetrics(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
+          appsApi.errors(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
         ]);
         if (alive) {
           setM(next);
@@ -522,6 +554,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
           if (traced) setTraces(traced.traces);
           if (measured) setSpeed(measured);
           if (own) setAppMetrics(own);
+          if (errs) setErrorGroups(errs.groups);
           setError(null);
         }
       } catch (e) {
@@ -658,6 +691,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
         </div>
       )}
       {routes && <Routes stats={routes} />}
+      {errorGroups.length > 0 && <Errors groups={errorGroups} />}
       {speed && speed.samples > 0 && <Speed v={speed} />}
       {appMetrics && appMetrics.series.length > 0 && <AppMetricsPanel m={appMetrics} />}
       {visitors && visitors.page_views > 0 && <Visitors a={visitors} />}

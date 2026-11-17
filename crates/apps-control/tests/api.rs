@@ -524,6 +524,28 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
     assert_eq!(get("/dash".into(), Some(session), true).await.0, StatusCode::FOUND);
 }
 
+/// Errors grouped from the log (Cloud Run's Error Reporting): a trace's lines are one error, the
+/// same error at another line is one group, the newest is its sample.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn errors_group_from_the_environments_log() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let log = w.apps.logs.sink(format!("env:{id}/production"), apps_control::logs::Stream::Stderr).instance("roll-apps-x-0", "dep_x");
+    for line in [10, 42] {
+        for l in ["Traceback (most recent call last):".to_string(), format!("  File \"/app/main.py\", line {line}, in charge"), "ZeroDivisionError: division by zero".into()] {
+            log.line(l);
+        }
+    }
+    log.line(r#"{"level":"error","msg":"payment 17 failed"}"#);
+    let (st, e) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/errors?minutes=60"), None).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let g = &e["groups"][0];
+    assert_eq!((g["kind"].as_str(), g["title"].as_str(), g["count"].as_u64(), g["instances"].as_u64()), (Some("python"), Some("ZeroDivisionError: division by zero"), Some(2), Some(1)), "{e}");
+    assert!(g["sample"].as_str().is_some_and(|s| s.contains("line 42")), "the newest is the sample: {e}");
+    assert_eq!((e["groups"][1]["kind"].as_str(), e["groups"][1]["title"].as_str()), (Some("line"), Some("payment 17 failed")), "{e}");
+}
+
 /// Secret files (Render's): a variable kept as a file is out of the instance's environment and
 /// in its files at its path; paths are checked; null puts it back, and unsetting it drops both.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

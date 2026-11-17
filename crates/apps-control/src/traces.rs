@@ -181,7 +181,7 @@ impl Apps {
             let t = if p.time > 0 { (p.time / 1_000_000) as i64 } else { l.t };
             let e = series.entry(key).or_insert_with(|| (p.clone(), Default::default(), 0));
             e.2 += 1;
-            // The bucket's last point (lines are read newest first: keep the newest).
+            // The bucket's last point (its newest by its own time).
             let b = e.1.entry(t - t.rem_euclid(step_ms)).or_insert_with(|| p.clone());
             if p.time > b.time {
                 *b = p.clone();

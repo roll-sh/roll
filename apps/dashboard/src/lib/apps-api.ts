@@ -668,6 +668,19 @@ export interface Span {
 }
 
 /** Visitors and page views from the access log (no script, no cookie). */
+/** An environment's errors, grouped from its log: a trace joined from its lines, or an error line. */
+export interface ErrorGroup {
+  fingerprint: string;
+  kind: "python" | "java" | "node" | "go" | "line";
+  title: string;
+  count: number;
+  first_seen: number;
+  last_seen: number;
+  instances: number;
+  /** The newest one, whole (at most 8 KiB). */
+  sample: string;
+}
+
 /** One series of the app's own metrics (OpenTelemetry, traces on): a name and its attributes. */
 export interface AppSeries {
   name: string;
@@ -1024,6 +1037,7 @@ export const appsApi = {
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),
   vitals: (id: string, e: string, minutes = 1440) => call<Vitals>("GET", `${env(id, e)}/vitals${qs({ minutes })}`),
+  errors: (id: string, e: string, minutes = 1440) => call<{ minutes: number; groups: ErrorGroup[]; scanned: number; cut: boolean }>("GET", `${env(id, e)}/errors${qs({ minutes })}`),
   appMetrics: (id: string, e: string, minutes = 60) => call<AppMetrics>("GET", `${env(id, e)}/app-metrics${qs({ minutes })}`),
   traces: (id: string, e: string, minutes = 60) => call<{ minutes: number; traces: TraceSummary[]; cut: boolean }>("GET", `${env(id, e)}/traces${qs({ minutes })}`),
   trace: (id: string, e: string, trace: string) => call<{ trace: string; spans: Span[] }>("GET", `${env(id, e)}/traces/${enc(trace)}`),
