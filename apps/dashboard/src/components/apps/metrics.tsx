@@ -12,7 +12,7 @@
 
 import { Table2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary } from "@/lib/apps-api";
+import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary, type Vital, type VitalName, type Vitals } from "@/lib/apps-api";
 import { formatBytes } from "@/lib/roll-api";
 import { btn, CopyButton, panel, useCopy } from "../ui";
 import { usePageVisible } from "./live";
@@ -291,6 +291,79 @@ function Visitors({ a }: { a: Analytics }) {
   );
 }
 
+const VITALS: { key: VitalName; label: string; unit: "ms" | "" }[] = [
+  { key: "lcp", label: "Largest paint", unit: "ms" },
+  { key: "inp", label: "Interaction", unit: "ms" },
+  { key: "cls", label: "Layout shift", unit: "" },
+  { key: "fcp", label: "First paint", unit: "ms" },
+  { key: "ttfb", label: "First byte", unit: "ms" },
+];
+
+const RATED: Record<Vital["rating"], string> = { good: "text-fg", "needs-improvement": "text-muted", poor: "text-danger" };
+
+function vital(v: Vital | undefined, unit: "ms" | "") {
+  if (!v) return "–";
+  return unit === "ms" ? (v.p75 >= 1000 ? `${(v.p75 / 1000).toFixed(2)} s` : `${Math.round(v.p75)} ms`) : v.p75.toFixed(3);
+}
+
+/** What visitors' browsers measured (Web Vitals on): each metric's p75, and the busiest routes'. */
+function Speed({ v }: { v: Vitals }) {
+  return (
+    <section className={`${panel} overflow-hidden`} aria-label="Speed">
+      <div className="border-b border-line px-4 py-2.5">
+        <p className="text-[12px] text-muted">
+          Speed <span className="text-subtle">· p75 of {count(v.samples)} page loads in visitors' browsers{v.cut ? ", the newest read" : ""}</span>
+        </p>
+      </div>
+      <div className="grid grid-cols-2 gap-px bg-line sm:grid-cols-5">
+        {VITALS.map((m) => {
+          const x = v.metrics[m.key];
+          return (
+            <div key={m.key} className="bg-panel px-4 py-3">
+              <p className="text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">{m.label}</p>
+              <p className={`mt-1 font-mono text-[18px] tracking-[-0.04em] ${x ? RATED[x.rating] : "text-subtle"}`}>{vital(x, m.unit)}</p>
+              <p className="text-[11px] text-subtle">{x ? x.rating.replace("-", " ") : "not measured yet"}</p>
+            </div>
+          );
+        })}
+      </div>
+      {v.routes.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[12px]">
+            <thead>
+              <tr className="text-left text-[11px] text-subtle">
+                <th className="px-4 py-2 font-medium">Route</th>
+                {VITALS.map((m) => (
+                  <th key={m.key} className="px-2 py-2 text-right font-medium uppercase">
+                    {m.key}
+                  </th>
+                ))}
+                <th className="px-4 py-2 text-right font-medium">Loads</th>
+              </tr>
+            </thead>
+            <tbody>
+              {v.routes.slice(0, 10).map((r) => (
+                <tr key={r.route} className="border-t border-line">
+                  <td className="max-w-[16rem] truncate px-4 py-1.5 font-mono text-[11.5px]">{r.route}</td>
+                  {VITALS.map((m) => {
+                    const x = r.metrics[m.key];
+                    return (
+                      <td key={m.key} className={`px-2 py-1.5 text-right font-mono ${x ? RATED[x.rating] : "text-subtle"}`}>
+                        {vital(x, m.unit)}
+                      </td>
+                    );
+                  })}
+                  <td className="px-4 py-1.5 text-right font-mono text-muted">{count(r.samples)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Routes({ stats }: { stats: RouteStats }) {
   const [sort, setSort] = useState<RouteSort>("requests");
   const rows = useMemo(() => {
@@ -359,6 +432,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
   const [deploys, setDeploys] = useState<Deployment[]>([]);
   const [routes, setRoutes] = useState<RouteStats | null>(null);
   const [visitors, setVisitors] = useState<Analytics | null>(null);
+  const [speed, setSpeed] = useState<Vitals | null>(null);
   const [traces, setTraces] = useState<TraceSummary[] | null>(null);
   const size = raw ? Math.max(1, Math.ceil(raw.minutes.length / MAX_POINTS)) : 1;
   const m = useMemo(() => (raw ? bucketed(raw, size) : null), [raw, size]);
@@ -383,12 +457,13 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
     const load = async () => {
       try {
         // The deploys only mark the charts: metrics still show without them.
-        const [next, deps, byRoute, seen, traced] = await Promise.all([
+        const [next, deps, byRoute, seen, traced, measured] = await Promise.all([
           appsApi.metrics(service, env, range.minutes),
           appsApi.deploys(service, env).catch(() => null),
           appsApi.routes(service, env).catch(() => null),
           appsApi.analytics(service, env, Math.min(Math.max(range.minutes, 60), 10_080)).catch(() => null),
           appsApi.traces(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
+          appsApi.vitals(service, env, Math.min(Math.max(range.minutes, 60), 10_080)).catch(() => null),
         ]);
         if (alive) {
           setM(next);
@@ -396,6 +471,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
           if (byRoute) setRoutes(byRoute);
           if (seen) setVisitors(seen);
           if (traced) setTraces(traced.traces);
+          if (measured) setSpeed(measured);
           setError(null);
         }
       } catch (e) {
@@ -532,6 +608,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
         </div>
       )}
       {routes && <Routes stats={routes} />}
+      {speed && speed.samples > 0 && <Speed v={speed} />}
       {visitors && visitors.page_views > 0 && <Visitors a={visitors} />}
       {traces && traces.length > 0 && <Traces service={service} env={env} traces={traces} />}
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-subtle">

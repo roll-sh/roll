@@ -709,6 +709,15 @@ pub enum AppsCmd {
         #[arg(long, default_value_t = 1440)]
         minutes: i64,
     },
+    /// How fast its pages are for real visitors (its environment's Web Vitals on, `roll apps env
+    /// --vitals true`): each metric's p75 and rating, and the busiest routes'.
+    Vitals {
+        #[command(flatten)]
+        target: Target,
+        /// How far back, in minutes (60–10080; default a day).
+        #[arg(long, default_value_t = 1440)]
+        minutes: i64,
+    },
     /// Recent traces the app's OpenTelemetry SDK sent once its environment's Traces switch is on
     /// (newest first; `--min-ms` keeps the slow ones); `--trace ID` prints one's spans.
     Traces {
@@ -931,6 +940,10 @@ pub enum AppsCmd {
         /// or not.
         #[arg(long)]
         redeploy_on_secrets: Option<bool>,
+        /// Measure its pages' Web Vitals in visitors' browsers (`true`: roll adds a small script
+        /// to its HTML pages), or not.
+        #[arg(long)]
+        vitals: Option<bool>,
         /// What its code may reach, from its next deploy: `roll` (roll's products, the
         /// project's services and the `--egress-host`s, nothing else) or `open`.
         #[arg(long, value_parser = ["roll", "open"])]
@@ -3190,6 +3203,30 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             a
         }
+        AppsCmd::Vitals { target, minutes } => {
+            let svc = service(api, &target).await?;
+            let v = api.get(&format!("{}/vitals?minutes={minutes}", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                let show = |m: &Value, name: &str| match m.get(name).filter(|x| !x.is_null()) {
+                    Some(x) if name == "cls" => format!("{:.3} ({})", x["p75"].as_f64().unwrap_or(0.0), s(&x["rating"])),
+                    Some(x) => format!("{} ms ({})", x["p75"].as_f64().unwrap_or(0.0).round(), s(&x["rating"])),
+                    None => "–".into(),
+                };
+                println!("p75 of {} page loads over {} minutes{}", v["samples"], v["minutes"], if v["cut"] == true { " (the newest read)" } else { "" });
+                for (name, label) in [("lcp", "largest paint"), ("inp", "interaction"), ("cls", "layout shift"), ("fcp", "first paint"), ("ttfb", "first byte")] {
+                    println!("  {label:<14} {}", show(&v["metrics"], name));
+                }
+                let routes = v["routes"].as_array().cloned().unwrap_or_default();
+                if !routes.is_empty() {
+                    println!("\nroutes (LCP, INP, CLS)");
+                    for r in routes.iter().take(10) {
+                        println!("  {:>6}  {:<40} {}  {}  {}", r["samples"], s(&r["route"]), show(&r["metrics"], "lcp"), show(&r["metrics"], "inp"), show(&r["metrics"], "cls"));
+                    }
+                }
+                return Ok(());
+            }
+            v
+        }
         AppsCmd::Traces { target, minutes, min_ms, trace } => {
             let svc = service(api, &target).await?;
             let base = env_path(&svc, &target.env);
@@ -3634,7 +3671,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, error_page, maintenance_page, roll_pages } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, error_page, maintenance_page, roll_pages } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -3651,6 +3688,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(r) = redeploy_on_secrets {
                 body.insert("redeploy_on_secrets".into(), json!(r));
+            }
+            if let Some(v) = vitals {
+                body.insert("vitals".into(), json!(v));
             }
             if let Some(f) = follow_tag {
                 body.insert("follow_tag".into(), json!(f));

@@ -986,8 +986,17 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             Some(dest) => dest.eq_ignore_ascii_case("document"),
             None => req.headers().get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/html")),
         };
-    let feedback = target.is_some() && page_load;
-    if feedback {
+    // Web Vitals: its script and beacons on the environment's own host, and its tag on pages.
+    if gate.vitals && req.uri().path() == crate::vitals::SCRIPT_PATH && req.method() == axum::http::Method::GET {
+        return crate::vitals::script();
+    }
+    if gate.vitals && req.uri().path() == crate::vitals::BEACON && req.method() == axum::http::Method::POST {
+        let country = req.headers().get("cf-ipcountry").and_then(|v| v.to_str().ok()).filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_alphabetic())).map(|c| c.to_ascii_uppercase());
+        let Ok(body) = axum::body::to_bytes(req.into_body(), crate::vitals::MAX_BODY).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
+        return apps.vitals_beacon(service, env, &body, country).into_response();
+    }
+    let feedback = Tags { feedback: target.is_some() && page_load, vitals: gate.vitals && page_load };
+    if feedback.feedback || feedback.vitals {
         // The page as the app wrote it, so the tag can go in as it streams.
         req.headers_mut().insert(header::ACCEPT_ENCODING, HeaderValue::from_static("identity"));
     }
@@ -1036,7 +1045,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     let cache_key = (deployment.is_none()
         && bucket.is_none()
         && live.canary().is_none()
-        && !feedback
+        && !feedback.feedback
         && !rewritten
         && matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
         && !req.headers().contains_key(header::AUTHORIZATION)
@@ -1059,7 +1068,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         match hit {
             Some(crate::resp_cache::Hit::Fresh(r)) => {
                 served(&r);
-                return r;
+                return with_feedback(feedback, r);
             }
             Some(crate::resp_cache::Hit::Stale { response, refresh }) => {
                 served(&response);
@@ -1076,7 +1085,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
                     }
                     tokio::spawn(refresh_cached(apps.clone(), service.to_string(), env.to_string(), again, cache_host.clone(), k.clone()));
                 }
-                return response;
+                return with_feedback(feedback, response);
             }
             None => {}
         }
@@ -1375,8 +1384,16 @@ fn refresh_cached(apps: Arc<Apps>, service: String, env: String, req: Request, h
     })
 }
 
-fn with_feedback(on: bool, r: Response) -> Response {
-    if on { crate::feedback::add(r) } else { r }
+/// roll's own scripts a page gets: the feedback button (a preview's link visitors), Web Vitals.
+#[derive(Clone, Copy)]
+struct Tags {
+    feedback: bool,
+    vitals: bool,
+}
+
+fn with_feedback(t: Tags, r: Response) -> Response {
+    let r = if t.feedback { crate::feedback::add(r) } else { r };
+    if t.vitals { crate::feedback::tag(r, crate::vitals::TAG, false) } else { r }
 }
 
 /// Meters a request when its body is sent (or the client went away).

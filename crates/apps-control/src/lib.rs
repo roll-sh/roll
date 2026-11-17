@@ -49,6 +49,7 @@ pub mod spend;
 pub mod store;
 pub mod traces;
 pub mod visit;
+pub mod vitals;
 pub mod traffic;
 
 use integrations::{DomainTls, Resolver, Resources, SecretSource, Sources};
@@ -246,6 +247,8 @@ pub struct Apps {
     access_gen: std::sync::atomic::AtomicU64,
     /// Signed-in visitors' sessions this node has looked up, by their hash.
     visits: Mutex<HashMap<String, visit::Seen>>,
+    /// Web Vitals beacons kept this minute, by environment: (minute, count).
+    pub(crate) vitals_seen: Mutex<HashMap<String, (i64, u32)>>,
     /// Each environment's `needs_deploy` as last worked out (it decrypts every variable and asks
     /// each linked product for its own): when, the settings generation and active deployment it
     /// was for, and the answer. Good for a minute, or until either moves.
@@ -403,6 +406,7 @@ impl Apps {
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
             visits: Mutex::new(HashMap::new()),
+            vitals_seen: Mutex::new(HashMap::new()),
             needs: Mutex::new(HashMap::new()),
             settings_gen: std::sync::atomic::AtomicU64::new(0),
             changes: tokio::sync::broadcast::channel(256).0,
@@ -1293,6 +1297,7 @@ impl Apps {
                 self.db(move |s| s.trace_token(&sid, &e)).await.ok().flatten().is_some()
             },
             feedback: r.feedback,
+            vitals: r.vitals,
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             paused: r.paused,
             held_after: r.held_by.clone(),
@@ -1333,7 +1338,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused", "held", "hostname", "traces", "egress"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused", "held", "hostname", "traces", "egress", "vitals"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1531,7 +1536,7 @@ impl Apps {
                 svc.for_env(&row).map_err(|e| Error::BadRequest(e.to_string().replace("no longer fit", "don't fit")))?;
             }
         }
-        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces"] {
+        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals"] {
             if !matches!(o.get(k), None | Some(Value::Null | Value::Bool(_))) {
                 return Err(Error::BadRequest(format!("{k} is a boolean")));
             }
@@ -1665,6 +1670,13 @@ impl Apps {
         if let Some(limit) = rate_limit {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_rate_limit(&sid, &e, limit.as_ref())).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        // Web Vitals: the proxy tags its pages from the next request on.
+        if let Some(Value::Bool(on)) = o.get("vitals") {
+            let (sid, e, on) = (service.to_string(), env.to_string(), *on);
+            self.db(move |s| s.set_vitals(&sid, &e, on)).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
         }
@@ -2655,7 +2667,7 @@ impl Apps {
         let (sid, e) = (live.service.clone(), live.env.clone());
         let (row, traces) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.traces_on(&sid, &e)?))).await?;
         let allow = row.allow_ips.iter().filter_map(|r| r.cidr.parse::<ipnet::IpNet>().ok()).collect();
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, traces });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, traces, vitals: row.vitals });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }

@@ -375,6 +375,46 @@ async fn traces_sent_by_instances_read_back() {
     assert!(vars.get("OTEL_SERVICE_NAME").is_none(), "{vars}");
 }
 
+/// Web Vitals: turned on, an environment's pages carry roll's tag and its script is served from
+/// its own host; the browser's beacons are kept checked (a route, bounded numbers) and read back
+/// as p75s rated by web.dev's thresholds, overall and by route; turned off, nothing is tagged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_vitals_from_visitors_read_back_as_p75s() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "site", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let h = host(&svc["environments"][0]["url"]);
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let req = |method: &str, path: &str, accept: &str, body: Option<String>| {
+        let r = Request::builder().method(method).uri(path).header("host", h.clone()).header("accept", accept).header("cf-ipcountry", "de").body(body.map(Body::from).unwrap_or_else(Body::empty)).unwrap();
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(r).await.unwrap();
+            (resp.status(), String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    assert!(!req("GET", "/page", "text/html", None).await.1.contains("vitals.js"), "off by default");
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"vitals": true}))).await;
+    assert_eq!((st, &e["vitals"]), (StatusCode::OK, &json!(true)), "{e}");
+    let (st, page) = req("GET", "/page", "text/html", None).await;
+    assert!(st == StatusCode::OK && page.ends_with(r#"<script src="/__roll/vitals.js" defer></script></body></html>"#), "{page}");
+    let (st, js) = req("GET", "/__roll/vitals.js", "*/*", None).await;
+    assert!(st == StatusCode::OK && js.contains("PerformanceObserver") && js.contains("/__roll/vitals"), "{js}");
+    for (path, lcp, cls) in [("/products/1", 1200, 0.01), ("/products/2", 1800, 0.02), ("/products/3", 3100, 0.3), ("/products/4", 5200, 0.05), ("/", 900, 0.0)] {
+        let (st, _) = req("POST", "/__roll/vitals", "*/*", Some(json!({ "path": path, "lcp": lcp, "cls": cls, "ttfb": 120 }).to_string())).await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+    }
+    assert_eq!(req("POST", "/__roll/vitals", "*/*", Some(r#"{"path":"/x"}"#.into())).await.0, StatusCode::BAD_REQUEST, "nothing measured");
+    let (_, v) = call(&w.api, "GET", &format!("{env}/vitals?minutes=60"), None).await;
+    assert_eq!(v["samples"], 5, "{v}");
+    assert_eq!(v["metrics"]["lcp"], json!({ "p75": 3100.0, "rating": "needs-improvement", "samples": 5 }), "{v}");
+    assert_eq!(v["metrics"]["cls"]["rating"], "good", "{v}");
+    assert_eq!((v["routes"][0]["route"].as_str(), v["routes"][0]["samples"].as_u64()), (Some("/products/:id"), Some(4)), "{v}");
+    call(&w.api, "PUT", &env, Some(json!({"vitals": false}))).await;
+    assert!(!req("GET", "/page", "text/html", None).await.1.contains("vitals.js"));
+    assert_eq!(req("POST", "/__roll/vitals", "*/*", Some(json!({"path": "/", "lcp": 1}).to_string())).await.0, StatusCode::OK, "off, the path is the app's own");
+}
+
 /// Signing in to an environment: a page load with no session goes to roll's dashboard; a person
 /// signed in there gets a one-use ticket to a page at one of the environment's names (a token
 /// gets none); the ticket opens a host-only session, which the app never sees; changing the
