@@ -166,7 +166,9 @@ async fn connect_once(a: Agent, token: String) -> End {
     let Ok(auth) = format!("Bearer {token}").parse() else { return End::Revoked("the token isn't a header value".into()) };
     req.headers_mut().insert("authorization", auth);
     let config = WebSocketConfig::default().max_message_size(Some(MAX_MESSAGE)).max_frame_size(Some(MAX_MESSAGE));
-    let ws = match tokio_tungstenite::connect_async_with_config(req, Some(config), false).await {
+    // No Nagle: an `opened` or a window grant is a small frame that would otherwise wait for
+    // roll's delayed ACK (about 40 ms) whenever an earlier frame is still unacknowledged.
+    let ws = match tokio_tungstenite::connect_async_with_config(req, Some(config), true).await {
         Ok((ws, _)) => ws,
         Err(tokio_tungstenite::tungstenite::Error::Http(r)) if [401, 403, 404].contains(&r.status().as_u16()) => {
             let body = r.body().as_deref().map(String::from_utf8_lossy).unwrap_or_default().chars().take(300).collect::<String>();
@@ -249,6 +251,7 @@ async fn dial(mux: Mux, id: u32, open: proto::Open, allow: Arc<AllowList>, log: 
     for addr in addrs.iter().take(4) {
         match tokio::time::timeout(DIAL_WAIT, tokio::net::TcpStream::connect(addr)).await {
             Ok(Ok(t)) => {
+                let _ = t.set_nodelay(true);
                 tcp = Some((t, *addr));
                 break;
             }

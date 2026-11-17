@@ -703,7 +703,11 @@ async fn run() -> anyhow::Result<()> {
         serving.push(Box::pin(a.serve()));
     }
 
-    let listener = tokio::net::TcpListener::bind(args.api).await?;
+    // No Nagle: a WebSocket's small frames (a gateway's `open`, roll code's events) would otherwise
+    // wait for the peer's delayed ACK.
+    let listener = axum::serve::ListenerExt::tap_io(tokio::net::TcpListener::bind(args.api).await?, |tcp| {
+        let _ = tcp.set_nodelay(true);
+    });
     info!(addr = %args.api, products = %on, "control API listening");
     let (close, closed) = tokio::sync::oneshot::channel::<()>();
     // Client addresses reach handlers (roll code counts anonymous event streams per address).

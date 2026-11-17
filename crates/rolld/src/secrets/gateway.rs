@@ -618,6 +618,10 @@ mod tests {
             let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets.clone())).merge(hub.router()).layer(axum::middleware::from_fn_with_state(tokens.clone(), gate));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
+            // As rolld's API listener: no Nagle.
+            let listener = axum::serve::ListenerExt::tap_io(listener, |tcp| {
+                let _ = tcp.set_nodelay(true);
+            });
             tokio::spawn(async move { axum::serve(listener, router).await });
             let http = reqwest::Client::new();
             let p: Json = http.post(format!("{url}/v1/workspace/projects")).json(&json!({ "name": "shop" })).send().await.unwrap().json().await.unwrap();

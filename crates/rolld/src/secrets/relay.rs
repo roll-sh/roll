@@ -20,6 +20,7 @@ pub(super) async fn pinned(remote: Box<dyn Io>, limit: u64) -> Result<std::net::
     let (local, accepted) = tokio::join!(tokio::net::TcpStream::connect(at), listener.accept());
     let local = local.map_err(|e| e.to_string())?;
     let (inner, peer) = accepted.map_err(|e| e.to_string())?;
+    let _ = local.set_nodelay(true);
     if Some(peer) != local.local_addr().ok() {
         return Err("another process took the relay's connection".into());
     }
@@ -46,6 +47,7 @@ pub(super) async fn listen(remote: Box<dyn Io>) -> Result<SocketAddr, String> {
 }
 
 async fn relay(inner: tokio::net::TcpStream, remote: Box<dyn Io>, limit: u64) {
+    let _ = inner.set_nodelay(true);
     let _ = tokio::time::timeout(TIMEOUT, async move {
         let (mut from_server, mut to_server) = tokio::io::split(remote);
         let (mut from_client, mut to_client) = inner.into_split();
