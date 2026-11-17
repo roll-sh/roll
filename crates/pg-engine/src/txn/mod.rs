@@ -175,6 +175,15 @@ pub struct Database {
 
 type DetachViewEntry = (u64, Vec<(u32, u32)>, bool, Arc<Catalog>);
 
+/// Its indexes' caches (`index_am::evict_database`) go with it: they hold its store, and an
+/// hnsw index's graph or an ivfflat index's lists every entry, which a database the engine
+/// closed (idle, dropped, renamed) kept in memory until an index was loaded again.
+impl Drop for Database {
+    fn drop(&mut self) {
+        crate::ext::index_am::evict_database(self.instance);
+    }
+}
+
 impl Database {
     pub fn open(name: &str, oid: u32, store: Arc<Store>, owner: &str) -> Result<Arc<Database>> {
         let ts = store.visible_ts();

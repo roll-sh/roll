@@ -426,6 +426,13 @@ pub fn evict(instance: u64, prefix: &[u8]) {
     crate::ext::bloom::evict(instance, prefix);
 }
 
+/// Every cache native index methods keep of database `instance`'s indexes let go (`evict`
+/// of all its keys, and the updated rows' sets): the database itself went (`Database`'s drop).
+pub fn evict_database(instance: u64) {
+    evict(instance, &[]);
+    updated_cache().lock().retain(|k, _| k.0 != instance);
+}
+
 /// An index's records: under the index's key prefix and relfilenode (so TRUNCATE and REINDEX,
 /// which give it a new relfilenode, start an empty set, and their rollback finds the old one),
 /// written at once rather than at commit, as PostgreSQL writes index pages.

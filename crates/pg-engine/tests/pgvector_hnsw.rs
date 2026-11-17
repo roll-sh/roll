@@ -194,8 +194,11 @@ fn truncate_reindex_and_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let q = vec_lit(123, 8);
     let before;
-    {
-        let mut s = session(dir.path());
+    let first = {
+        let store = open_store(dir.path());
+        let first = std::sync::Arc::downgrade(&store);
+        let mut s = engine_session(store, "b");
+        exec(&mut s, "CREATE EXTENSION IF NOT EXISTS vector");
         exec(&mut s, "CREATE TABLE t (id int, v vector(8))");
         fill(&mut s, "t", 0, 1000, 8);
         exec(&mut s, "CREATE INDEX t_v ON t USING hnsw (v vector_l2_ops)");
@@ -211,7 +214,15 @@ fn truncate_reindex_and_reopen() {
         exec(&mut s, "TRUNCATE t");
         assert!(knn(&mut s, "t", "<->", &q, 10, true).is_empty());
         fill(&mut s, "t", 0, 1000, 8);
+        first
+    };
+    // The database gone, its store goes with it: the index's cached graph held it (and the
+    // graph every vector). (Its background flush, if one runs, ends first.)
+    let t = std::time::Instant::now();
+    while first.upgrade().is_some() && t.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    assert!(first.upgrade().is_none(), "the closed database's store is kept");
     // The store opened again: the index read back from its records.
     let mut s = session(dir.path());
     let after = knn(&mut s, "t", "<->", &q, 10, true);
