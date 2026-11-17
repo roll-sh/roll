@@ -70,6 +70,87 @@ over rounds with the min–max spread; trust a difference only where the spreads
   request (sum of the process's threads' `schedstat` run time) of two binaries loaded with the
   same data and measured interleaved.
 
+## knn on merged segments (2026-11-17)
+
+Round 9's remaining vector losses were so_vector's 8-client tasks on the force-merged index
+(`concurrency` 2.80x, `random-10-percent` 2.32x): with 8 clients on 2 cores, latency follows
+server CPU per query. Profiles of one query (perf through `roll-perf-tools`, one segment per
+shard, after #156's parser fix) found the CPU outside the graph:
+
+- **`concurrency`** (434 matching docs, about 217 per shard; 14.7M instructions per query): 31%
+  went to a filtered graph search that ran out of accepted nodes, and 31% to the exact search it
+  then fell back to, which tested all 100k vectors of the segment through the filter (a call per
+  vector) to score 217.
+- **`random-10-percent`** (95% of the docs match; 5.2M): the graph search was 38%. Each request
+  parsed its `knn` section five times (once for the request, twice per shard for names and
+  `inner_hits` it didn't have), cloning a 768-number JSON array each time (18%), and
+  `check_rulesets` looked for `ruleset_id` by comparing every 10-byte window of the body (3%).
+
+Changes (`search-codec`, `search-index`, `search-es`):
+
+- exact search over a filter scores only the filter's ordinals (same hits);
+- a filter accepting at most `ef · ln(n)` vectors of a segment is searched exactly. That is the
+  point where Lucene's own estimate of a filtered search's visits (`ln(n) · ef / selectivity`,
+  `FilteredHnswGraphSearcher.bitSet`) reaches the whole graph. Hits change only to the exact
+  ones;
+- the shards no longer parse the `knn` sections again unless one has `_name` or `inner_hits`;
+- `check_rulesets` searches with `memmem`.
+
+Instructions per query (perf stat, 300 queries, native server; base `e76e90cd0` is origin/main
+with #156; both builds with `-Cllvm-args=-x86-branches-within-32B-boundaries` so code placement
+doesn't decide the comparison):
+
+| track | task | base | change |
+|---|---|---:|---:|
+| so_vector, force-merged | `10-50-concurrency` | 14.74M | 2.88M |
+| so_vector, force-merged | `10-50-random-10-percent` | 5.17M | 4.26M |
+| so_vector, force-merged | `default-match-all` | 4.08M | 3.18M |
+| so_vector, force-merged | `10-50-java` | 8.86M | 7.94M |
+| so_vector, force-merged | `10-50-css` | 12.55M | 11.64M |
+| so_vector, force-merged | `100-300-match-all` | 10.86M | 9.98M |
+| dense_vector, force-merged | `10-100` | 2.53M | 2.40M |
+| dense_vector, force-merged | `100-1000` | 16.64M | 16.51M |
+
+Lane b (server `10,11,28,29`, client `12,13,30,31`, 4 GiB, Docker), two runs of 3 alternating
+rounds, 300 queries after 100 of warm-up; `:8` is 8 clients. Each run also had the change's
+binary with a switch restoring the old paths (same code placement), which measured like the
+base. Server CPU ms per query and p50 ms, median (min-max):
+
+| task | run | CPU, base | CPU, change | p50, base | p50, change |
+|---|---|---:|---:|---:|---:|
+| `10-50-concurrency:8` | 1 | 2.83 (2.77-3.15) | 1.05 (1.04-1.43) | 6.43 (6.40-6.94) | 2.75 (2.60-4.42) |
+| `10-50-concurrency:8` | 2 | 3.51 (3.41-3.77) | 1.33 (1.16-1.37) | 8.70 (8.36-18.03) | 4.98 (3.63-5.42) |
+| `10-50-concurrency` | 1 | 4.04 (3.70-4.13) | 1.72 (1.61-1.78) | 4.11 (3.93-4.23) | 2.06 (1.89-2.22) |
+| `10-50-random-10-percent:8` | 1 | 1.41 (1.40-1.48) | 1.29 (1.28-1.36) | 3.61 (3.29-3.81) | 3.40 (2.83-4.33) |
+| `10-50-random-10-percent:8` | 2 | 1.78 (1.65-1.87) | 1.67 (1.59-1.68) | 6.23 (3.98-8.31) | 5.21 (4.59-5.75) |
+| `default-match-all:8` | 1 | 1.17 (1.14-1.18) | 0.99 (0.97-1.07) | 3.15 (3.02-3.46) | 3.31 (2.93-3.52) |
+| `default-match-all:8` | 2 | 1.37 (1.33-1.39) | 1.20 (1.16-1.25) | 4.26 (3.78-4.31) | 4.00 (3.96-4.00) |
+| `10-50-java` | 2 | 2.81 (2.75-2.98) | 2.72 (2.66-2.77) | 3.22 (3.07-3.37) | 3.15 (3.04-3.21) |
+| `10-50-css` | 2 | 3.60 (3.46-3.78) | 3.54 (3.49-3.64) | 3.92 (3.88-4.16) | 4.04 (3.97-4.08) |
+| `100-300-match-all` | 2 | 3.88 (3.83-3.98) | 3.79 (3.77-3.89) | 4.18 (4.17-4.33) | 4.28 (4.27-4.33) |
+| dense_vector `10-100` | 2 | 1.54 (1.37-1.63) | 1.50 (1.35-1.53) | 1.87 (1.61-2.03) | 1.86 (1.58-1.89) |
+| dense_vector `100-1000` | 2 | 6.70 (6.47-6.78) | 6.63 (6.21-6.74) | 7.43 (6.31-7.56) | 7.73 (5.98-7.75) |
+
+Run 2 had a busier host. In run 1 dense_vector measured about 10% more CPU with the change's
+binary, but the same binary with the old paths measured the same, and run 2 is a tie.
+`concurrency:8`'s p50 (2.75-4.98 ms) is now below Elasticsearch's 6.09 ms from Round 9.
+
+Hits are byte-identical to the base on every task of both tracks except `concurrency`, where 2
+of 100 queries changed to the exact hits (recall 0.998 → 1.0). On the vectors lane's 1M x 384
+corpus (7 segments, default options), recall is unchanged unfiltered (0.9515) and with the 10%
+filter (0.9725, identical hits), and rises with the 1% filter (0.7975 → 0.813), whose segments
+are now searched exactly.
+
+**Measured, not adopted:** an AVX2 kernel for the one-bit estimate (`plane_dots`: `pshufb`
+nibble counts, the four query planes weighted per byte, `psadbw`): identical estimates, 11-19%
+fewer instructions on so_vector (`100-300-match-all` 10.0M → 8.1M), but on lane b it tied the
+same binary with the scalar kernel (`random-10-percent:8` 1.63 against 1.61 ms CPU,
+`100-300-match-all` 3.71 against 3.73).
+
+**Where the rest goes:** dense_vector's force-merged `100-1000` spends about a quarter of its
+16.5M instructions in zstd, decompressing stored-field chunks to read 100 hits' `_id`;
+Elasticsearch's stored fields use LZ4.
+
 ## Round 8: every Rally track again (2026-11-14, `83fac5982`)
 
 The branch head `83fac5982` (sort by bands, `auto_date_histogram` counted from the points tree,
