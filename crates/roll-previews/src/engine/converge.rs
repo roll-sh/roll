@@ -66,6 +66,22 @@ impl Engine {
         if problems.is_empty() { Ok(()) } else { Err(crate::Error::BadRequest(problems.join("; "))) }
     }
 
+    /// A head nobody approved yet: nothing of it runs (its services sleep) until a writer does.
+    async fn await_approval(&self, r: &Row) -> anyhow::Result<()> {
+        for svc in self.store.services(&r.id)? {
+            self.apps.sleep(&r.id, &svc.name).await;
+            self.store.set_service(&r.id, &svc.name, ServiceState::Sleeping, None, None)?;
+        }
+        let row = self.store.update(&r.id, |row| {
+            row.state = State::AwaitingApproval;
+            row.next_at = if row.generation == r.generation { SETTLED } else { 0 };
+            row.attempts = 0;
+            row.error = None;
+        })?;
+        self.report(row).await;
+        Ok(())
+    }
+
     /// Bring one active preview to its desired state.
     pub(super) async fn converge(&self, r: &Row) -> anyhow::Result<()> {
         let s = self.store.settings(&r.project_id)?;
@@ -82,19 +98,10 @@ impl Engine {
                 return Ok(());
             }
             if !c.may_run() {
-                for svc in self.store.services(&r.id)? {
-                    self.apps.sleep(&r.id, &svc.name).await;
-                    self.store.set_service(&r.id, &svc.name, ServiceState::Sleeping, None, None)?;
-                }
-                let row = self.store.update(&r.id, |row| {
-                    row.state = State::AwaitingApproval;
-                    row.next_at = if row.generation == r.generation { SETTLED } else { 0 };
-                    row.attempts = 0;
-                    row.error = None;
-                })?;
-                self.report(row).await;
-                return Ok(());
+                return self.await_approval(r).await;
             }
+        } else if !self.git_head_may_run(r)? {
+            return self.await_approval(r).await;
         }
         if r.state == State::Queued {
             self.store.update(&r.id, |row| row.next_at = if row.generation == r.generation { SETTLED } else { 0 })?;
@@ -307,8 +314,23 @@ impl Engine {
             }
             anyhow::bail!("this preview may not inherit the production environment {:?}", s.secrets.base);
         }
-        let vars = self.preview_vars(r, &s).await?;
+        let mut vars = self.preview_vars(r, &s).await?;
         let branches = self.branch_vars(&r.id).await?;
+        // A link of the base to a parent the preview branched, under a name of its own
+        // (`STAGING_PGPASS`): set from the branch as the environment's own key, so whoever
+        // resolves it (roll apps too, which reads the environment itself) gets the branch's value,
+        // never the parent's. Read from the base's list (links, no values): nothing resolved.
+        // Unreadable: the converge fails (tried again) rather than let roll apps resolve a
+        // renamed link to the parent.
+        let links = self.secrets.links(&r.project_id, &s.secrets.base).await.map_err(|e| anyhow::anyhow!("secrets: reading the base's links: {e:#}"))?;
+        for (key, kind, parent, field) in links {
+            if vars.iter().any(|(k, _)| *k == key) {
+                continue;
+            }
+            if let Some((_, _, own)) = branches.iter().find(|(k, p, _)| *k == kind && *p == parent) {
+                vars.push((key, crate::names::follow(kind, &field, own.clone())));
+            }
+        }
         let (access_token, bypass) = match self.store.access(&r.id)? {
             Some(crate::store::Access { token: t, required: true, bypass }) if !t.is_empty() => (Some(t), bypass),
             _ => (None, None),
@@ -317,7 +339,9 @@ impl Engine {
         // preview nobody converges any more lets it lapse.
         let trusted = s.secrets.allow_production && r.trusted;
         let expires_at = self.store.now_ms()? + SECRETS_ENV_MARGIN_MS;
-        self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, trusted, expires_at).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // What it branched: roll secrets resolves nothing of those parents' (`followed`).
+        let branched: Vec<(Kind, String)> = self.store.resources(&r.id)?.into_iter().map(|x| (x.kind, x.parent)).collect();
+        self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, trusted, expires_at, &branched).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
 
         // 3b. The project's seed, once on fresh data, before anything serves it.
         if let Some(seed) = &s.seed
@@ -353,7 +377,14 @@ impl Engine {
         // (spec, repo, revision, whether roll apps runs it)
         let mut wanted: Vec<(ServiceSpec, String, String, bool)> = Vec::new();
         let head_of = |repo: String| async move {
-            if repo == r.repo { Ok::<_, anyhow::Error>(Some(r.build().to_string())) } else { self.head_for(&repo, r.branch.as_deref(), None).await }
+            if repo == r.repo {
+                Ok::<_, anyhow::Error>(Some(r.build().to_string()))
+            } else if repo.starts_with("git:") {
+                // Another Git URL service of the project: its own (production's) build.
+                Ok(Some(String::new()))
+            } else {
+                self.head_for(&repo, r.branch.as_deref(), None).await
+            }
         };
         match self.apps.catalog(&r.project_id).await.map_err(|e| anyhow::anyhow!("reading the project's services: {e:#}"))? {
             Some(catalog) if !catalog.is_empty() => {
@@ -416,7 +447,14 @@ impl Engine {
             // A deploy the backend is still on is asked about again (until it's live or fails).
             let in_flight = self.deploying_since.lock().contains_key(&(r.id.clone(), spec.name.clone()));
             if svc.deployed.as_deref() != Some(&rev) || reset_any || config_moved || in_flight {
-                let git = if repo.is_empty() || rev.is_empty() { None } else { self.source.git_commit(&repo, &rev).await? };
+                // A Git URL service's revision is its git commit already.
+                let git = if repo.is_empty() || rev.is_empty() {
+                    None
+                } else if repo.starts_with("git:") {
+                    Some(rev.clone())
+                } else {
+                    self.source.git_commit(&repo, &rev).await?
+                };
                 let t = Target {
                     project: r.project_id.clone(),
                     preview: r.id.clone(),
@@ -1014,6 +1052,7 @@ impl Engine {
         }
         self.usage_read.lock().remove(&r.id);
         self.secrets_told.lock().remove(&r.id);
+        self.egress_told.lock().remove(&r.id);
         info!(preview = %r.id, "previews: deleted");
         Ok(())
     }
