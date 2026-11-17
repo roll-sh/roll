@@ -466,12 +466,18 @@ pub enum Item {
 /// The level of a row no stage is left to run on.
 pub const ALL: u8 = u8::MAX;
 
-/// Scratch for `run_stages`: per stage, its matches (a lookup's: its rows) and the key
-/// vector.
+/// Outer rows a lookup stage gathers before it reads their inner rows together
+/// (`Lookup::batch`).
+const LOOKUP_BATCH: usize = 64;
+
+/// Scratch for `run_stages`: per stage, its matches (a lookup's: its rows), the outer rows a
+/// lookup stage holds for its next batch and their results, and the key vector.
 #[derive(Default)]
 pub struct Scratch {
     matches: Vec<Vec<u32>>,
     rows: Vec<Vec<Row>>,
+    held: Vec<Vec<Row>>,
+    got: Vec<Vec<super::lookup::Got>>,
     key: Vec<Value>,
     lookups: Vec<super::lookup::LookupScratch>,
 }
@@ -485,39 +491,104 @@ impl Scratch {
             }
         }
     }
+
+    /// Rows held for a lookup stage's batch dropped (a chunk given up).
+    pub fn forget(&mut self) {
+        for h in &mut self.held {
+            h.clear();
+        }
+    }
+
+    fn size(&mut self, n: usize) {
+        if self.matches.len() < n {
+            self.matches.resize_with(n, Vec::new);
+            self.rows.resize_with(n, Vec::new);
+            self.held.resize_with(n, Vec::new);
+            self.got.resize_with(n, Vec::new);
+            self.lookups.resize_with(n, Default::default);
+        }
+    }
 }
 
 /// `row` (through stages `..from`) through `stages[from..]`; each row that comes out goes
 /// to `emit` with the stages it went through (all of them, or fewer where a kernel left
-/// one to the executor's thread). The last stage's rows come as they are (`Joined`).
+/// one to the executor's thread), in the order the rows came in. The last stage's rows come
+/// as they are (`Joined`). A lookup stage holds its outer rows until it has a batch
+/// (`LOOKUP_BATCH`): `drain` puts out what the stages hold.
 pub fn run_stages(stages: &[Arc<Stage>], from: usize, row: Row, s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
     if from == stages.len() {
         emit(Joined::Row(row), from as u8);
         return;
     }
-    if s.matches.len() < stages.len() {
-        s.matches.resize_with(stages.len(), Vec::new);
-        s.rows.resize_with(stages.len(), Vec::new);
-        s.lookups.resize_with(stages.len(), Default::default);
-    }
+    s.size(stages.len());
     match &*stages[from] {
         Stage::Hash(p) => {
             let mut matches = std::mem::take(&mut s.matches[from]);
             match p.matches(&row, &mut s.key, &mut matches) {
-                false => emit(Joined::Row(row), from as u8),
+                false => {
+                    // (The rows the stages after hold came before this one.)
+                    drain_from(stages, from + 1, s, emit);
+                    emit(Joined::Row(row), from as u8)
+                }
                 true => p.emit(row, &matches, &mut |j| onward(stages, from, j, s, emit)),
             }
             s.matches[from] = matches;
         }
+        Stage::Lookup(lk) if lk.batches() => {
+            s.held[from].push(row);
+            if s.held[from].len() >= LOOKUP_BATCH {
+                lookup_batch(stages, from, s, emit);
+            }
+        }
         Stage::Lookup(lk) => {
             let mut rows = std::mem::take(&mut s.rows[from]);
             match lk.rows(&row, &mut rows, &mut s.lookups[from]) {
-                false => emit(Joined::Row(row), from as u8),
+                false => {
+                    drain_from(stages, from + 1, s, emit);
+                    emit(Joined::Row(row), from as u8)
+                }
                 true => lk.emit(row, &rows, &mut |j| onward(stages, from, j, s, emit)),
             }
             s.rows[from] = rows;
         }
     }
+}
+
+/// Every row the stages hold, through the stages after them, to `emit` (before a row
+/// that skips them goes, and as a chunk ends).
+pub fn drain(stages: &[Arc<Stage>], s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
+    drain_from(stages, 0, s, emit);
+}
+
+/// `drain` of stages `from..` (the rows a stage holds came after those of the stages
+/// above it, which go first).
+fn drain_from(stages: &[Arc<Stage>], from: usize, s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
+    for st in from..stages.len().min(s.held.len()) {
+        if !s.held[st].is_empty() {
+            lookup_batch(stages, st, s, emit);
+        }
+    }
+}
+
+/// Lookup stage `from`'s held outer rows, their inner rows read together, joined in order.
+fn lookup_batch(stages: &[Arc<Stage>], from: usize, s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
+    let Stage::Lookup(lk) = &*stages[from] else { return };
+    let mut ls = std::mem::take(&mut s.held[from]);
+    let mut got = std::mem::take(&mut s.got[from]);
+    let mut rows = std::mem::take(&mut s.rows[from]);
+    lk.batch(&ls, &mut got, &mut rows, &mut s.lookups[from]);
+    for (l, g) in ls.drain(..).zip(got.iter()) {
+        match *g {
+            super::lookup::Got::Left => {
+                drain_from(stages, from + 1, s, emit);
+                emit(Joined::Row(l), from as u8)
+            }
+            super::lookup::Got::Rows(a, b) => lk.emit(l, &rows[a as usize..b as usize], &mut |j| onward(stages, from, j, s, emit)),
+        }
+    }
+    s.held[from] = ls;
+    s.got[from] = got;
+    s.rows[from] = rows;
 }
 
 /// A row stage `from` made, to the stage after it (or out, after the last).

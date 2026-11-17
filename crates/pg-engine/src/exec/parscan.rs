@@ -1199,6 +1199,8 @@ fn run_rows<'d>(
     held: Option<&mut Option<super::partial::Partials<'d>>>,
 ) -> bool {
     {
+        // (Rows a run given up left in the stages.)
+        scratch.forget();
         if let Some(spec) = &d.spec {
             return work_partial(scan, &out, d, spec, stopped, scratch, lazy, held);
         }
@@ -1361,17 +1363,23 @@ fn run_rows<'d>(
                     None => t.seen += 1,
                 }
             }
-            if !done || d.stages.is_empty() {
+            let to_batch: &mut dyn FnMut(super::pipe::Joined, u8) = &mut |r, lvl| batch.push((r.into_row(), lvl, true, std::mem::take(&mut read)));
+            if d.stages.is_empty() {
+                batch.push((row, 0, done, std::mem::take(&mut read)));
+            } else if !done {
+                // (After the rows the stages hold, which came before it.)
+                super::pipe::drain(&d.stages, scratch, to_batch);
                 batch.push((row, 0, done, std::mem::take(&mut read)));
             } else {
-                super::pipe::run_stages(&d.stages, 0, row, scratch, &mut |r, lvl| {
-                    batch.push((r.into_row(), lvl, true, std::mem::take(&mut read)));
-                });
+                super::pipe::run_stages(&d.stages, 0, row, scratch, to_batch);
             }
             if batch.len() >= BATCH && out.send(Msg::Rows(std::mem::replace(&mut batch, Vec::with_capacity(BATCH)))).is_err() {
                 // (The scan was dropped: nothing reads on.)
                 return false;
             }
+        }
+        if !d.stages.is_empty() {
+            super::pipe::drain(&d.stages, scratch, &mut |r, lvl| batch.push((r.into_row(), lvl, true, std::mem::take(&mut read))));
         }
         if !batch.is_empty() && out.send(Msg::Rows(batch)).is_err() {
             return false;
@@ -1569,8 +1577,23 @@ fn partial_chunk<'d>(
             return (false, pa);
         }
     }
+    // (The rows the stages hold, in their place.)
+    if !d.stages.is_empty() {
+        super::pipe::drain(&d.stages, scratch, &mut |r, lvl| joined_to(&mut pa, &mut serial, top, r, lvl));
+        if !serial.is_empty() && (!send_part(&mut pa, &mut read) || out.send(Msg::Seg(Seg::Rows(std::mem::take(&mut serial)))).is_err()) {
+            return (false, pa);
+        }
+    }
     scratch.flush(&d.stages);
     (send_part(&mut pa, &mut read) && out.send(Msg::Done(0, 0)).is_ok(), pa)
+}
+
+/// A joined row of an aggregating scan's stages, aggregated while nothing went to the
+/// serial path before it, else queued in `serial` after it, in its place.
+fn joined_to(pa: &mut super::partial::Partials, serial: &mut Vec<(Row, u8, bool)>, top: u8, r: super::pipe::Joined, lvl: u8) {
+    if !serial.is_empty() || lvl != top || !pa.row(&r) {
+        serial.push((r.into_row(), lvl, true));
+    }
 }
 
 /// Whether aggregating scans read fills as column batches (`vector`; tests compare both).
@@ -1679,7 +1702,13 @@ fn partial_row(
     let Some((row, pass)) = row? else { return Ok(()) };
     match pass {
         Some(false) => {}
-        None => serial.push((row, 0, false)),
+        None => {
+            // (After the rows the stages hold, which came before it.)
+            if !d.stages.is_empty() {
+                super::pipe::drain(&d.stages, scratch, &mut |r, lvl| joined_to(pa, serial, top, r, lvl));
+            }
+            serial.push((row, 0, false))
+        }
         Some(true) if d.stages.is_empty() => {
             // (One read in place was offered to the part already.)
             if offered || !pa.row(&row) {
@@ -1689,11 +1718,7 @@ fn partial_row(
         Some(true) => {
             // (Each joined row in order: aggregated while nothing went to the serial
             // path before it, else after it, in its place.)
-            super::pipe::run_stages(&d.stages, 0, row, scratch, &mut |r, lvl| {
-                if !serial.is_empty() || lvl != top || !pa.row(&r) {
-                    serial.push((r.into_row(), lvl, true));
-                }
-            });
+            super::pipe::run_stages(&d.stages, 0, row, scratch, &mut |r, lvl| joined_to(pa, serial, top, r, lvl));
         }
     }
     Ok(())

@@ -59,6 +59,54 @@ pub struct LookupScratch {
     /// (`Scan::reseek`): its sources aren't made again, and a lookup landing in the block
     /// the last one read reads on in it.
     entries: Option<crate::storage::Scan>,
+    /// `Lookup::batch`'s buffers.
+    batch: BatchBufs,
+}
+
+/// A batch's outer row, as `Lookup::batch` found it: left to the executor's thread, or its
+/// inner rows (a range of the batch's rows).
+#[derive(Clone, Copy)]
+pub enum Got {
+    Left,
+    Rows(u32, u32),
+}
+
+/// `Lookup::batch`'s buffers, kept from batch to batch.
+#[derive(Default)]
+struct BatchBufs {
+    /// The outer rows' index keys, end to end (`Want::key`: spans).
+    starts: Vec<u8>,
+    wants: Vec<Want>,
+    /// The outer rows to read, by key.
+    order: Vec<u32>,
+    /// The entries' row keys, end to end (`espans`: spans; `Want::ents`: a range of them).
+    ekeys: Vec<u8>,
+    espans: Vec<(u32, u32)>,
+    /// The batch's distinct row keys (spans of `ekeys`), ascending: the multi-get's.
+    sorted: Vec<(u32, u32)>,
+}
+
+/// One outer row of a batch: its index key, how it is read, and its entries.
+#[derive(Clone, Copy)]
+struct Want {
+    key: (u32, u32),
+    how: How,
+    ents: (u32, u32),
+    /// A unique index's probed entry: its row's visibility not checked yet (the multi-get
+    /// checks it).
+    probed: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum How {
+    /// A kernel left a key to `eval`.
+    Left,
+    /// A NULL key: nothing found.
+    Null,
+    /// Its entries, then their rows with the batch's.
+    Batch,
+    /// On its own (`rows`): one the batch couldn't read or decide.
+    Alone,
 }
 
 /// One nested loop's inner index scans.
@@ -405,6 +453,192 @@ impl Lookup {
         }
     }
 
+    /// Whether outer rows are looked up a batch at a time (`batch`): an inner or left join's
+    /// of a table not kept (`LookupScratch::cache`). A semi or anti join's stops at its first
+    /// match, mostly in its first entry's block, which the reader holds from the lookup before:
+    /// a batch's sorts and searches cost it more than the misses it overlaps.
+    pub fn batches(&self) -> bool {
+        !self.cache && matches!(self.kind, JoinKind::Inner | JoinKind::Left)
+    }
+
+    /// `rows` of each of the outer rows `ls`, into `got` (each one's) and `out`: the index
+    /// keys made, the entries read in key order (the entries' scan sought on from one key to
+    /// the next), then every entry's row read by one sorted multi-get
+    /// (`PointReader::get_sorted`: the cache misses of different outer rows' rows overlap,
+    /// where one outer row's rows, adjacent, have few to overlap), and each outer row's rows
+    /// taken in its entries' order, filtered and counted as `rows` does.
+    pub fn batch(&self, ls: &[Row], got: &mut Vec<Got>, out: &mut Vec<Row>, sc: &mut LookupScratch) {
+        got.clear();
+        out.clear();
+        let mut b = std::mem::take(&mut sc.batch);
+        let BatchBufs { starts, wants, order, ekeys, espans, sorted } = &mut b;
+        starts.clear();
+        wants.clear();
+        order.clear();
+        ekeys.clear();
+        espans.clear();
+        sorted.clear();
+        // The index keys.
+        for l in ls {
+            let at = starts.len() as u32;
+            starts.extend_from_slice(&self.prefix);
+            let mut how = How::Batch;
+            for (k, desc, nulls_first, coll, pad) in &self.keys {
+                let Some(v) = k.run(l) else {
+                    how = How::Left;
+                    break;
+                };
+                if v.is_null() {
+                    how = How::Null;
+                    break;
+                }
+                let v = super::scan::padded(v, *pad);
+                encode_index_value(starts, &v, *desc, *nulls_first, coll.as_ref());
+            }
+            wants.push(Want { key: (at, starts.len() as u32), how, ents: (0, 0), probed: false });
+        }
+        // The entries, in key order.
+        let span = |s: &(u32, u32)| s.0 as usize..s.1 as usize;
+        order.extend((0..wants.len() as u32).filter(|&i| wants[i as usize].how == How::Batch));
+        order.sort_by(|&x, &y| starts[span(&wants[x as usize].key)].cmp(&starts[span(&wants[y as usize].key)]));
+        let mut ok = true;
+        for &i in order.iter() {
+            let w = &mut wants[i as usize];
+            let e0 = espans.len() as u32;
+            match entry_spans(&self.store, self.ts, self.unique, &starts[span(&w.key)], sc, ekeys, espans) {
+                Some(probed) => {
+                    w.ents = (e0, espans.len() as u32);
+                    w.probed = probed;
+                }
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        // Every entry's row, by one multi-get.
+        let mut rows: Vec<Option<bytes::Bytes>> = Vec::new();
+        if ok && !espans.is_empty() {
+            sorted.extend_from_slice(espans);
+            ok = self.multi_get(ekeys, sorted, &mut rows, sc);
+        }
+        // Each outer row's rows, in turn.
+        let mut one = Vec::new();
+        for (l, w) in ls.iter().zip(wants.iter()) {
+            let n = out.len() as u32;
+            let mut how = w.how;
+            if how == How::Batch {
+                match ok.then(|| self.take(l, ekeys, espans, sorted, &rows, w, out, sc)).flatten() {
+                    Some(true) => got.push(Got::Rows(n, out.len() as u32)),
+                    Some(false) => {
+                        out.truncate(n as usize);
+                        got.push(Got::Left);
+                    }
+                    // (A unique key's entry whose row the snapshot doesn't see, or a read
+                    // that failed: read as `rows` reads it.)
+                    None => {
+                        out.truncate(n as usize);
+                        how = How::Alone;
+                    }
+                }
+            }
+            match how {
+                How::Batch => {}
+                How::Left => got.push(Got::Left),
+                How::Null => {
+                    // (An equality with NULL finds nothing: the scan still counts.)
+                    sc.loops += 1;
+                    got.push(Got::Rows(n, n));
+                }
+                How::Alone => match self.rows(l, &mut one, sc) {
+                    true => {
+                        out.append(&mut one);
+                        got.push(Got::Rows(n, out.len() as u32));
+                    }
+                    false => got.push(Got::Left),
+                },
+            }
+        }
+        sc.batch = b;
+    }
+
+    /// The rows of the row keys `sorted` names (spans of `ekeys`; sorted and deduplicated
+    /// here) into `rows`, by one multi-get through the worker's reader. False: a read failed.
+    fn multi_get(&self, ekeys: &[u8], sorted: &mut Vec<(u32, u32)>, rows: &mut Vec<Option<bytes::Bytes>>, sc: &mut LookupScratch) -> bool {
+        let span = |s: &(u32, u32)| &ekeys[s.0 as usize..s.1 as usize];
+        sorted.sort_unstable_by(|x, y| span(x).cmp(span(y)));
+        sorted.dedup_by(|x, y| span(x) == span(y));
+        let keys: Vec<&[u8]> = sorted.iter().map(span).collect();
+        let r = sc.reader.get_or_insert_with(|| self.store.point_reader(self.ts, false));
+        match r.get_sorted(&keys, true) {
+            Ok(r) => {
+                *rows = r;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// `batch`'s rows for outer row `l` (`w`) from the multi-get's `rows` (of the `sorted`
+    /// keys), filtered and counted as `rows` does, into `out`. Some(false): left to the
+    /// executor's thread; None (nothing counted): a unique key's entry whose row the snapshot
+    /// doesn't see.
+    #[allow(clippy::too_many_arguments)]
+    fn take(
+        &self,
+        l: &[Value],
+        ekeys: &[u8],
+        espans: &[(u32, u32)],
+        sorted: &[(u32, u32)],
+        rows: &[Option<bytes::Bytes>],
+        w: &Want,
+        out: &mut Vec<Row>,
+        sc: &mut LookupScratch,
+    ) -> Option<bool> {
+        let span = |s: &(u32, u32)| &ekeys[s.0 as usize..s.1 as usize];
+        let ents = &espans[w.ents.0 as usize..w.ents.1 as usize];
+        let row_of = |e: &(u32, u32)| -> Option<&bytes::Bytes> {
+            let d = span(e);
+            let j = sorted.binary_search_by(|s| span(s).cmp(d)).ok()?;
+            rows[j].as_ref()
+        };
+        let mut read = 0u64;
+        for e in ents {
+            let Some(v) = row_of(e) else {
+                if w.probed {
+                    return None;
+                }
+                continue;
+            };
+            let Ok(row) = self.decode.row(span(e), v) else { return Some(false) };
+            read += 1;
+            let view = Joined::Pair { l, r: super::pipe::Inner::plain(&row), keep: None };
+            let mut pass = true;
+            for k in [&self.filter, &self.cond].into_iter().flatten() {
+                match k.passes(&view) {
+                    Some(true) => {}
+                    Some(false) => {
+                        pass = false;
+                        break;
+                    }
+                    None => {
+                        // (Left to the executor's thread: every visible row counted, as
+                        // `rows` counts them.)
+                        sc.loops += 1;
+                        sc.fetched += ents.iter().filter(|e| row_of(e).is_some()).count() as u64;
+                        return Some(false);
+                    }
+                }
+            }
+            if pass {
+                out.push(row);
+            }
+        }
+        sc.loops += 1;
+        sc.fetched += read;
+        Some(true)
+    }
+
     /// A worker's counts, into the stage's (`flush` counts them).
     pub fn take_counts(&self, sc: &mut LookupScratch) {
         self.loops.fetch_add(std::mem::take(&mut sc.loops), Ordering::Relaxed);
@@ -479,6 +713,45 @@ fn entry_keys(store: &Arc<Store>, ts: u64, unique: bool, start: &[u8], sc: &mut 
         sc.dkeys.push(e.ok()?.1.to_vec());
     }
     Some(())
+}
+
+/// `entry_keys` for `Lookup::batch`: the row keys appended to `ekeys` (each one's span to
+/// `espans`). A unique key's probed entry is taken without its row's visibility checked
+/// (Some(true): the multi-get checks it). None: a read failed.
+fn entry_spans(
+    store: &Arc<Store>,
+    ts: u64,
+    unique: bool,
+    start: &[u8],
+    sc: &mut LookupScratch,
+    ekeys: &mut Vec<u8>,
+    espans: &mut Vec<(u32, u32)>,
+) -> Option<bool> {
+    let mut push = |k: &[u8]| {
+        let at = ekeys.len() as u32;
+        ekeys.extend_from_slice(k);
+        espans.push((at, ekeys.len() as u32));
+    };
+    let end = prefix_end(start);
+    if unique {
+        use crate::storage::point::First;
+        let r = sc.reader.get_or_insert_with(|| store.point_reader(ts, false));
+        match store.first_with(r, start, &end, false).ok()? {
+            First::Row(_, v) => {
+                push(&v);
+                return Some(true);
+            }
+            First::None => return Some(false),
+            First::Unknown => {}
+        }
+    }
+    if !sc.entries.as_mut().is_some_and(|s| s.reseek(start, &end, ts)) {
+        sc.entries = Some(store.scan(start, &end, ts));
+    }
+    for e in sc.entries.iter_mut().flatten() {
+        push(&e.ok()?.1);
+    }
+    Some(false)
 }
 
 /// Row `d` visible at `ts`, through `reader` (None inside: not visible; None: a read failed).
