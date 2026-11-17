@@ -839,7 +839,13 @@ static TOOLS: &[Tool] = &[
         b("maintenance", Ty::Any, "true, {message} or false: answer a maintenance page instead of the app"),
         b("allow_ips", Ty::Arr, "Only these addresses get in: [cidr or {cidr, description}]"),
         b("rate_limit", Ty::Obj, "{per_minute, burst?}: requests a client address may make"),
-        b("firewall", Ty::Arr, "[{action: allow|deny, path?, methods?, user_agent?}], first match wins"),
+        b("firewall", Ty::Arr, "[{action: allow|deny|limit, path?, methods?, user_agent?, per_minute?, burst?}], first match wins; limit holds a client to per_minute (1-100000) on what it matches"),
+        b("routes", Ty::Arr, "[{path, service}] (at most 20): a path (a prefix ends in *) another service of the project answers, by name, or null for none"),
+        b("egress", Ty::Any, "{mode: roll|open, hosts?}: roll lets its code reach roll and only these hosts (at most 20, *. for subdomains), from the next deploy; null is open"),
+        b("vitals", Ty::Bool, "Measure its pages' Web Vitals in visitors' browsers (read them with apps_vitals)"),
+        b("traces", Ty::Bool, "Send its OpenTelemetry traces and metrics to roll (OTEL_EXPORTER_OTLP_* from the next deploy)"),
+        b("redeploy_on_secrets", Ty::Bool, "Redeploy (the same image, new values) when the project's roll secrets change"),
+        b("pages", Ty::Obj, "{error?, maintenance?}: its own HTML for roll's error and maintenance pages (null puts roll's back)"),
         b("headers", Ty::Any, "Response header rules: [{path?, set: {name: value}, replace?}] (at most 20), or null for none"),
         b("paused", Ty::Bool, "Pause it (no deploys on push, nothing running) or resume it"),
         // A rollback holds deploys (apps #26): false lets pushes and hooks deploy again.
@@ -886,6 +892,15 @@ static TOOLS: &[Tool] = &[
     t("apps_wake", "Wake", "Start a sleeping environment's instances.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/wake", &[SERVICE, ENV]),
     t("apps_usage", "Service usage", "An environment's usage and cost per day.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/usage", &[SERVICE, ENV, q("days", Ty::Int, "Days back")]),
     t("apps_restart", "Restart a service", "Restart an environment's instances.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/restart", &[SERVICE, ENV]),
+    t(
+        "apps_purge_cache",
+        "Purge cached answers",
+        "Drop answers roll's cache keeps for a web service (on-demand revalidation): some paths (a trailing * a prefix), answers carrying some cache tags, or neither for everything. Answers how many went. Production is a \"deploy\" action.",
+        "apps",
+        "POST",
+        "/v1/apps/services/{service}/environments/{env}/cache/purge",
+        &[SERVICE, ENV, b("paths", Ty::Arr, "1-100 absolute paths (any query; a trailing * is a prefix)"), b("tags", Ty::Arr, "1-100 cache tags its answers carried (any case)")],
+    ),
     t("apps_restart_instance", "Restart one instance", "Replace one instance of a web service (a fresh one answers before this one drains; if it doesn't start, this one keeps serving). Instance names are in apps_get_environment. Production is a \"deploy\" action.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/instances/{name}/restart", &[SERVICE, ENV, req("name", "Instance id (instances[].id in apps_get_environment)")]),
     t("apps_redeploy", "Redeploy", "Deploy what's running again with the current settings and variables (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/redeploy", &[SERVICE, ENV, b("message", Ty::Str, "Why")]),
     t(
@@ -947,6 +962,7 @@ static TOOLS: &[Tool] = &[
     )
     .until(deploy_over),
     t("apps_list_links", "List links", "The databases, buckets, streams and other services a service is linked to.", "apps", "GET", "/v1/apps/services/{service}/links", &[SERVICE]),
+    t("apps_vitals", "Web Vitals", "What visitors' browsers measured on an environment's pages (with vitals on): LCP, INP, CLS, FCP and TTFB p75s rated good, needs-improvement or poor, overall and for the 20 routes with the most page loads.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/vitals", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 60-10080 (default 1440)")]),
     t("apps_route_stats", "Route stats", "An environment's routes from its access log over the last minutes (5-60, default 60): requests, 5xx and 4xx errors, p50/p95/max latency per route (ids folded as :id), the busiest, most failing and slowest 50 of each. Start here when a service is slow or failing.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/routes", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-60 (default 60)")]),
     t("apps_list_cron_runs", "Cron runs", "A cron service's runs, newest first.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
     t("apps_get_cron_run", "Get a cron run", "One cron run: its status, exit code, start and end.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs/{run}", &[SERVICE, ENV, req("run", "Run id")]),

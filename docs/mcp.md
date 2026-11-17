@@ -677,6 +677,7 @@ previews are listed once those products are on.
 | `apps_wake` | Start a sleeping environment's instances. | `POST /v1/apps/services/{service}/environments/{env}/wake` |
 | `apps_usage` | An environment's usage and cost per day. | `GET /v1/apps/services/{service}/environments/{env}/usage` |
 | `apps_restart` | Restart an environment's instances. | `POST /v1/apps/services/{service}/environments/{env}/restart` |
+| `apps_purge_cache` | Drop a web service's cached answers: some paths, answers with some cache tags, or everything (production: deploy). | `POST /v1/apps/services/{service}/environments/{env}/cache/purge` |
 | `apps_restart_instance` | Replace one instance, a fresh one answering first (production: deploy). | `POST /v1/apps/services/{id}/environments/{env}/instances/{name}/restart` |
 | `apps_redeploy` | Deploy what's running again with the current settings and variables. | `POST /v1/apps/services/{service}/environments/{env}/redeploy` |
 | `apps_run_job` | Run a one-off command in an environment's image with its variables. | `POST /v1/apps/services/{service}/environments/{env}/jobs` |
@@ -690,6 +691,7 @@ previews are listed once those products are on.
 | `apps_set_variables` | Set or unset an environment's variables (production is a "deploy" action). | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_plan` | How roll would build and run a repo, before making a service (a dry run). | `POST /v1/apps/plan` |
+| `apps_vitals` | What visitors' browsers measured on an environment's pages: Web Vitals p75s, rated, overall and per route. | `GET /v1/apps/services/{service}/environments/{env}/vitals` |
 | `apps_route_stats` | An environment's routes over the last minutes: requests, errors, p50/p95/max latency (apps-next). | `GET /v1/apps/services/{id}/environments/{env}/routes` |
 | `apps_import` | What a roll.toml or compose file would make, making nothing (apps-next). | `POST /v1/apps/import` |
 | `apps_export_project` | A project as a roll.toml, variables by name only (apps #26). | `POST /v1/apps/projects/{project}/export` |
