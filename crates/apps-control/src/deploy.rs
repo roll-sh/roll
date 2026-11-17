@@ -457,8 +457,24 @@ impl Apps {
 
     /// Old deployments of the services this node owns, past what each environment keeps
     /// (`keep_deployments`): pruned in the store, then their images (once no deployment names
-    /// them), static sites and build logs go. Every ten minutes.
+    /// them), static sites and build logs go; and deleted services kept past
+    /// [`crate::DELETED_KEPT_MS`] are deleted for good (by their owner, a node taking the lease
+    /// of one nobody holds). Every ten minutes.
     pub async fn prune(self: &Arc<Self>) {
+        let now = code_sql::now_ms();
+        if let Ok(deleted) = self.db(|s| s.deleted_services(None)).await {
+            for (svc, at) in deleted.into_iter().filter(|(_, at)| now - at >= crate::DELETED_KEPT_MS) {
+                let key = lease_key(&svc.id);
+                if !self.deps.cluster.owns(&key) && self.deps.cluster.preferred(&key).is_none_or(|n| n.id == self.deps.cluster.node_id()) {
+                    let _ = self.deps.cluster.lease(&key).await;
+                }
+                if self.owns(&svc.id)
+                    && let Err(e) = self.purge_service(&svc.id).await
+                {
+                    warn!(service = %svc.id, deleted_at = at, error = %e, "apps: deleting a deleted service for good failed");
+                }
+            }
+        }
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         let (keep, day_ago) = (self.cfg.keep_deployments.max(1), code_sql::now_ms() - self.cfg.keep_recent.as_millis() as i64);
         for svc in services.into_iter().filter(|s| self.owns(&s.id)) {
@@ -1578,6 +1594,11 @@ impl Apps {
         // Lost again before this ran (a lease that changed hands twice): what runs is the next
         // owner's now, on a runtime the nodes share.
         if !self.owns(service) {
+            return;
+        }
+        // A deleted service runs nothing (its lease is held only to delete it for good).
+        let sid = service.to_string();
+        if self.db(move |s| s.service(&sid)).await.is_err() {
             return;
         }
         // The database's now: what started before is a previous owner's (or nobody's).

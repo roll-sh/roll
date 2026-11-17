@@ -71,6 +71,8 @@ use std::time::{Duration, Instant};
 
 /// How long a host's answer is kept on a node that didn't change it ([`Apps::env_for_host`]).
 const HOST_TTL: Duration = Duration::from_secs(1);
+/// How long a deleted service is kept, stopped, for a restore (Railway's 48 hours).
+pub const DELETED_KEPT_MS: i64 = 48 * 3600 * 1000;
 use store::{EnvRow, ServiceRow, Store};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -667,21 +669,21 @@ impl Apps {
         for (kind, r, body) in links {
             // A link that doesn't check out makes no service: nothing to clean up by hand.
             if let Err(e) = self.put_link(&row.id, &kind, &r, body).await {
-                let _ = self.delete_service(&row.id).await;
+                let _ = self.purge_service(&row.id).await;
                 return Err(e);
             }
         }
         if let Some((g, _)) = git_login
             && let Err(e) = self.put_git_login(&row.id, g).await
         {
-            let _ = self.delete_service(&row.id).await;
+            let _ = self.purge_service(&row.id).await;
             return Err(e);
         }
         if let Some(r) = registry
             && let Err(e) = self.put_registry(&row.id, r).await
         {
             // A login that doesn't check out makes no service: nothing to clean up by hand.
-            let _ = self.delete_service(&row.id).await;
+            let _ = self.purge_service(&row.id).await;
             return Err(e);
         }
         // The project's owner hears what needs someone from its first service on.
@@ -1124,11 +1126,96 @@ impl Apps {
         self.service(id).await
     }
 
-    pub async fn delete_service(self: &Arc<Self>, id: &str) -> Result<()> {
+    /// `DELETE …/services/{id}`: the service stops and is hidden, kept for
+    /// [`DELETED_KEPT_MS`] (its environments, volumes, images, backups, domains and name) for
+    /// [`Apps::restore_service`]; the prune sweep deletes it for good after that. A deleted
+    /// service's delete deletes it for good now.
+    pub async fn delete_service(self: &Arc<Self>, id: &str, actor: Option<String>) -> Result<()> {
+        let sid = id.to_string();
+        let (_, deleted) = self.db(move |s| s.service_any(&sid)).await?;
+        if deleted.is_some() {
+            return self.purge_service(id).await;
+        }
+        // Nothing it queued builds or goes live behind the delete.
+        let sid = id.to_string();
+        for d in self.db(move |s| s.pending_deployments(&sid)).await? {
+            self.cancel(id, &d.environment, &d.id).await.ok();
+        }
+        let (sid, now) = (id.to_string(), self.store.now()?);
+        if !self.db(move |s| s.set_deleted(&sid, Some(now))).await? {
+            return Ok(());
+        }
+        // From here no request, hostname, hook or sweep finds it: what runs stops.
+        self.hosts_changed();
+        let sid = id.to_string();
+        for e in self.db(move |s| s.environments(&sid)).await? {
+            self.teardown_live(id, &e.name).await;
+        }
+        for name in self.deps.runtime.list(Some(id)).await {
+            self.deps.runtime.remove(&name).await;
+        }
+        self.settings_changed();
+        self.audit("deleted", id, "", actor, json!({})).await;
+        self.unplace(id).await;
+        Ok(())
+    }
+
+    /// `POST …/services/{id}/restore`: a deleted service back as it was, its environments'
+    /// live deployments loaded again (each wakes or starts as it would after a restart).
+    pub async fn restore_service(self: &Arc<Self>, id: &str, actor: Option<String>) -> Result<Service> {
+        let sid = id.to_string();
+        let (row, deleted) = self.db(move |s| s.service_any(&sid)).await?;
+        if deleted.is_none() {
+            return Err(Error::Conflict(format!("{} isn't deleted", row.name)));
+        }
+        let sid = id.to_string();
+        if !self.db(move |s| s.set_deleted(&sid, None)).await? {
+            return Err(Error::Conflict(format!("{} isn't deleted", row.name)));
+        }
+        self.hosts_changed();
+        self.settings_changed();
+        if let Some(ws) = self.deps.workspace.clone() {
+            let (sid, project) = (id.to_string(), row.project.clone());
+            let _ = tokio::task::spawn_blocking(move || {
+                let (x, y) = free_spot(&ws, &project);
+                ws.place(roll_workspace::Scope::All, &project, roll_workspace::Kind::Service, &sid, x, y)
+            })
+            .await;
+        }
+        self.audit("restored", id, "", actor, json!({})).await;
+        self.resume_service(id).await;
+        self.service(id).await
+    }
+
+    /// The deleted services (of a project, or all), newest first: when each was deleted and
+    /// when it goes for good.
+    pub async fn deleted_services(self: &Arc<Self>, project: Option<String>) -> Result<Value> {
+        let rows = self.db(move |s| s.deleted_services(project.as_deref())).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(r, at)| json!({ "id": r.id, "project": r.project, "name": r.name, "deleted_at": at, "purge_at": at + DELETED_KEPT_MS }))
+            .collect())
+    }
+
+    /// The service's place on its project's canvas goes (a restore places it again).
+    async fn unplace(self: &Arc<Self>, id: &str) {
+        if let Some(ws) = self.deps.workspace.clone() {
+            let sid = id.to_string();
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Some(p) = ws.list(roll_workspace::Scope::All).ok().and_then(|ps| ps.into_iter().find(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Service && r.r#ref == sid))) {
+                    let _ = ws.remove(roll_workspace::Scope::All, &p.id, roll_workspace::Kind::Service, &sid);
+                }
+            })
+            .await;
+        }
+    }
+
+    /// Delete a service for good, and everything that belongs to it.
+    pub async fn purge_service(self: &Arc<Self>, id: &str) -> Result<()> {
         let sid = id.to_string();
         let envs = self.db(move |s| s.environments(&sid)).await?;
         let sid = id.to_string();
-        let row = self.db(move |s| s.service(&sid)).await?;
+        let (row, _) = self.db(move |s| s.service_any(&sid)).await?;
         let project = row.project.clone();
         for e in &envs {
             self.teardown_live(id, &e.name).await;
@@ -1181,15 +1268,7 @@ impl Apps {
             self.drop_network_if_unused(&project, &e.name, id).await;
         }
         self.release_domains(&domains).await;
-        if let Some(ws) = self.deps.workspace.clone() {
-            let sid = id.to_string();
-            let _ = tokio::task::spawn_blocking(move || {
-                if let Some(p) = ws.list(roll_workspace::Scope::All).ok().and_then(|ps| ps.into_iter().find(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Service && r.r#ref == sid))) {
-                    let _ = ws.remove(roll_workspace::Scope::All, &p.id, roll_workspace::Kind::Service, &sid);
-                }
-            })
-            .await;
-        }
+        self.unplace(id).await;
         self.deps.cluster.retire(&lease_key(id));
         Ok(())
     }
@@ -2743,11 +2822,11 @@ impl Apps {
     /// The active custom domain a hostname is: its own, else the wildcard one label above it.
     async fn active_domain(self: &Arc<Self>, host: &str) -> Option<(String, String, Domain)> {
         let exact = host.to_string();
-        if let Some(d) = self.db(move |s| s.domain_owner(&exact)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active) {
+        if let Some(d) = self.db(move |s| s.serving_domain(&exact)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active) {
             return Some(d);
         }
         let wild = crate::model::covering_wildcard(host)?;
-        self.db(move |s| s.domain_owner(&wild)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active)
+        self.db(move |s| s.serving_domain(&wild)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active)
     }
 
     /// Write the audit trail's entry for a change someone made (`audit.<what>`): who, and what

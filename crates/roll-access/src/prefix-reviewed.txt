@@ -48,6 +48,7 @@ GET /v1/apps/services/{id}/environments/{env}/variables
 PATCH /v1/apps/services/{id}/environments/{env}/variables
 GET /v1/apps/services/{id}/environments/{env}/volume/backups
 GET /v1/apps/services/{id}/links
+POST /v1/apps/services/{id}/restore
 GET /v1/code/agents/{owner}/automations
 POST /v1/code/agents/{owner}/automations
 GET /v1/code/agents/{owner}/automations/catalog
