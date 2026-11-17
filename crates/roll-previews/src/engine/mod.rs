@@ -24,6 +24,8 @@ pub fn preview_key(id: &str) -> String {
 }
 
 /// Settled previews aren't converged again until something changes.
+/// The most refused hosts a preview's activity names (the rest are counted).
+const EGRESS_TOLD_MAX: usize = 50;
 const SETTLED: i64 = i64::MAX;
 /// How long a converge holds a preview (its `next_at` meanwhile); a crash is retried after it.
 const CONVERGE_LEASE_MS: i64 = 300_000;
@@ -543,7 +545,17 @@ impl Engine {
                 let refused = self.apps.egress_refused(&r.id).await;
                 let mut told = self.egress_told.lock();
                 let seen = told.entry(r.id.clone()).or_default();
-                refused.into_iter().filter(|h| seen.insert(h.clone())).collect()
+                // At most `EGRESS_TOLD_MAX` hosts said per preview: code trying made-up names
+                // mustn't grow this, or push the rest of the activity out.
+                let room = EGRESS_TOLD_MAX.saturating_sub(seen.len());
+                let mut fresh: Vec<String> = refused.into_iter().filter(|h| !seen.contains(h)).collect();
+                let more = fresh.len().saturating_sub(room);
+                fresh.truncate(room);
+                seen.extend(fresh.iter().cloned());
+                if more > 0 && seen.len() >= EGRESS_TOLD_MAX && seen.insert("…".into()) {
+                    let _ = self.store.log(&r.id, &format!("its code tried {more} more hosts outside roll (refused); only the first {EGRESS_TOLD_MAX} are named"));
+                }
+                fresh
             };
             // `<host> private`: listed, but it resolves only to private addresses.
             let (private, unlisted): (Vec<String>, Vec<String>) = fresh.into_iter().partition(|h| h.ends_with(" private"));
