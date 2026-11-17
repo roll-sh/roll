@@ -1209,6 +1209,9 @@ pub enum FirewallAction {
     Deny,
     /// Let in at `per_minute` a client (Vercel's rate-limit rules), a 429 past it.
     Limit,
+    /// Let in a browser that has passed a proof of work this hour (Vercel's Attack Challenge
+    /// Mode, `challenge.rs`); anything else gets the page that works it out.
+    Challenge,
 }
 
 /// The most rules an environment has.
@@ -1258,6 +1261,9 @@ impl FirewallRule {
         }
         if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() {
             return bad("a rule matches on a path, methods or a user agent");
+        }
+        if self.action == FirewallAction::Challenge && !self.methods.is_empty() && self.methods.iter().any(|m| m != "GET") {
+            return bad("a challenge is a page a browser opens: GET only");
         }
         match (self.action, self.per_minute) {
             (FirewallAction::Limit, Some(n)) => RateLimit { per_minute: n, burst: self.burst }.check().map_err(|_| Error::BadRequest("firewall: a limit is 1–100000 a minute, its burst 1–100000".into()))?,

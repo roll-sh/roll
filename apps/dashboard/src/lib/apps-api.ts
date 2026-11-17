@@ -283,7 +283,7 @@ export function describePending(p: Pending): string | null {
 
 export interface FirewallRule {
   /** `limit`: let in at `per_minute` a client, a 429 past it. */
-  action: "allow" | "deny" | "limit";
+  action: "allow" | "deny" | "limit" | "challenge";
   per_minute?: number;
   burst?: number;
   /** A path, or a prefix ending in `*`. */
@@ -301,7 +301,7 @@ export function parseFirewall(text: string): FirewallRule[] {
     .filter((l) => l && !l.startsWith("#"))
     .map((l) => {
       const [action, ...words] = l.split(/\s+/);
-      const rule: FirewallRule = { action: action === "allow" ? "allow" : action === "limit" ? "limit" : "deny" };
+      const rule: FirewallRule = { action: action === "allow" ? "allow" : action === "limit" ? "limit" : action === "challenge" ? "challenge" : "deny" };
       let rest = words;
       // `limit N[:BURST] …`
       if (rule.action === "limit") {

@@ -3714,6 +3714,26 @@ async fn firewall_rules_decide_in_order() {
     assert_eq!(req("HEAD", "/report", "curl").await, StatusCode::FORBIDDEN, "HEAD is a GET");
     assert_eq!(req("GET", "/", "Mozilla badbot/2").await, StatusCode::FORBIDDEN);
     assert_eq!(req("GET", "/", "Mozilla").await, StatusCode::OK, "nothing matching lets it in");
+    // A challenge: a browser that worked out the page's proof gets in, nothing else does.
+    let (st, e) = call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "challenge", "path": "/*"}]}))).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let page = w.public.clone().oneshot(Request::builder().uri("/shop?x=1").header("host", h.as_str()).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(page.status(), StatusCode::FORBIDDEN);
+    let html = String::from_utf8(page.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    let seed = html.split("const seed=\"").nth(1).and_then(|r| r.split('"').next()).unwrap_or_else(|| panic!("{html}")).to_string();
+    assert!(html.contains("\"/shop?x=1\""), "it goes back where it was asked: {html}");
+    use sha2::Digest;
+    let ok = |n: &u64| sha2::Sha256::digest(format!("{seed}:{n}").as_bytes()).iter().take(3).fold((0u32, true), |(z, go), b| if !go { (z, false) } else if *b == 0 { (z + 8, true) } else { (z + b.leading_zeros(), false) }).0 >= apps_control::challenge::BITS;
+    let nonce = (0u64..).find(ok).unwrap();
+    let answer = |nonce: u64| Request::builder().method("POST").uri(apps_control::challenge::PATH).header("host", h.as_str()).header("content-type", "application/x-www-form-urlencoded").body(Body::from(format!("seed={seed}&nonce={nonce}"))).unwrap();
+    assert_eq!(w.public.clone().oneshot(answer(nonce + 1)).await.unwrap().status(), StatusCode::FORBIDDEN, "a wrong answer");
+    let passed = w.public.clone().oneshot(answer(nonce)).await.unwrap();
+    assert_eq!(passed.status(), StatusCode::NO_CONTENT);
+    let cookie = passed.headers()["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    let with = w.public.clone().oneshot(Request::builder().uri("/shop").header("host", h.as_str()).header("cookie", &cookie).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(with.status(), StatusCode::OK, "in with its pass");
+    let seen: Value = serde_json::from_slice(&with.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(!seen["cookie"].as_str().unwrap_or("").contains("roll_pass_"), "the pass is roll's: {seen}");
     // A limit rule: its own rate a client, the rest of the site untouched.
     let (st, e) = call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "limit", "path": "/login", "per_minute": 1, "burst": 2}]}))).await;
     assert_eq!(st, StatusCode::OK, "{e}");
