@@ -22,21 +22,36 @@ pub trait Shoot: Send + Sync {
     async fn shoot(&self, service: &str, env: &str, opts: &ShotOptions) -> anyhow::Result<Option<Shot>>;
 }
 
-/// [`SHOT`], for the other nodes' hops (checked as signed by one of the cluster's nodes).
+/// Screenshot runs a node takes for other nodes at once (each a browser container of 1 GiB).
+const SLOTS: usize = 2;
+
+struct Holder {
+    local: Arc<dyn Shoot>,
+    slots: tokio::sync::Semaphore,
+}
+
+/// [`SHOT`], for the other nodes' hops: only a request a node of the cluster signed gets in
+/// (`require_signed`; rolld's gate lets `/internal` through without a token), only for a
+/// preview's environment (`pv-…`), at most [`SLOTS`] at once.
 pub fn internal_router(local: Arc<dyn Shoot>, cluster: Arc<Cluster>) -> axum::Router {
     axum::Router::new()
         .route(SHOT, axum::routing::post(shot))
-        .with_state(local)
-        .layer(axum::middleware::from_fn_with_state(cluster, roll_cluster::accept_forwarded))
+        .route_layer(axum::middleware::from_fn_with_state(cluster, roll_cluster::require_signed))
+        .with_state(Arc::new(Holder { local, slots: tokio::sync::Semaphore::new(SLOTS) }))
 }
 
 /// What a holder is asked: `{service, env, opts}`.
-async fn shot(axum::extract::State(local): axum::extract::State<Arc<dyn Shoot>>, axum::Json(ask): axum::Json<serde_json::Value>) -> axum::response::Response {
+async fn shot(axum::extract::State(h): axum::extract::State<Arc<Holder>>, axum::Json(ask): axum::Json<serde_json::Value>) -> axum::response::Response {
     use axum::response::IntoResponse;
     let (Some(service), Some(env), Ok(opts)) = (ask["service"].as_str(), ask["env"].as_str(), serde_json::from_value::<ShotOptions>(ask["opts"].clone())) else {
         return (axum::http::StatusCode::BAD_REQUEST, "expected {service, env, opts}").into_response();
     };
-    match local.shoot(service, env, &opts).await {
+    // Only a preview's environment: never production's or another one a person made.
+    if !env.starts_with("pv-") {
+        return (axum::http::StatusCode::BAD_REQUEST, "only a preview's environment (pv-…)").into_response();
+    }
+    let Ok(_slot) = h.slots.acquire().await else { return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response() };
+    match h.local.shoot(service, env, &opts).await {
         Ok(shot) => axum::Json(shot).into_response(),
         Err(e) => (axum::http::StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     }
@@ -113,5 +128,10 @@ mod tests {
         assert_eq!((shot.png, shot.phone, shot.crops), (vec![137, 80, 78, 71], Some(vec![1, 2]), vec![("n1".to_string(), vec![3])]), "the pictures come back whole");
         let here = shoot(Some(&a), &Here("a"), &ours, "pv-1", &opts).await.unwrap().unwrap();
         assert!(here.text.unwrap().starts_with("a took"), "a service this node holds is taken here");
+        // Not a node's signed hop: refused, whatever it asks; a node's, only for a preview's environment.
+        let b_url = b.nodes().into_iter().find(|n| n.id == "b").unwrap().url;
+        let unsigned = reqwest::Client::builder().no_proxy().build().unwrap().post(format!("{b_url}{SHOT}")).json(&serde_json::json!({ "service": theirs, "env": "pv-1", "opts": {} })).send().await.unwrap();
+        assert_eq!(unsigned.status(), 401, "an unsigned request never runs a browser");
+        assert!(shoot(Some(&a), &Here("a"), &theirs, "production", &opts).await.is_err(), "only a preview's environment");
     }
 }

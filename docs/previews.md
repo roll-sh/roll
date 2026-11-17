@@ -1452,7 +1452,7 @@ Ranked by what a person notices first. Done so far:
   production as is, through roll apps' own promote with `expect`, as the person), screenshots of a
   roll apps service in its instance's network (`Apps::reachable`), and the feedback button on its
   environment. On a fleet the instance runs on its service's holder (lease `apps:service:<id>`),
-  so the preview's node sends the run there as a signed hop to `/internal/previews/apps-shot`.
+  so the preview's node sends the run there as a signed hop to `/internal/previews/apps-shot` (`require_signed`: rolld's gate lets `/internal` through without a token, so an unsigned request is refused there; only a `pv-` environment; two runs at once per node).
   This is the way roll search sends a cluster's REST requests to its owner. The holder takes it
   in its own Docker and answers the `Shot` as JSON (its PNGs base64). Fargate still has no
   container to join, and that's left to the cloud thread;
