@@ -1901,7 +1901,9 @@ mod tests {
         let mut spec = ClusterSpec::new("c");
         spec.max_in_flight = max;
         catalog.insert(spec);
-        Node::new(catalog, Arc::new(MemoryStores::new()), NodeConfig { default_cluster: Some("c".into()), ..NodeConfig::default() })
+        // The node-wide cap defaults to twice the CPUs: on one CPU it would queue a third request
+        // that these tests of the cluster's own limit hold at once.
+        Node::new(catalog, Arc::new(MemoryStores::new()), NodeConfig { default_cluster: Some("c".into()), max_running: 64, ..NodeConfig::default() })
     }
 
     #[tokio::test]
