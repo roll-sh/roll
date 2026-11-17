@@ -4112,7 +4112,10 @@ async fn errors_and_latency_read_by_route() {
     // The same requests by the deployment and the instance that answered.
     let live = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["active"]["id"].clone();
     assert_eq!((&v["deployments"][0]["deployment"], v["deployments"][0]["requests"].as_u64(), v["deployments"][0]["errors"].as_u64()), (&live, Some(4), Some(1)), "{v}");
-    assert_eq!((v["instances"][0]["instance"].as_str(), v["instances"][0]["requests"].as_u64()), (Some(inst.as_str()), Some(4)), "{v}");
+    // By instance: all four, the first instance's among them (a busy machine may wake a second).
+    let insts = v["instances"].as_array().unwrap();
+    assert_eq!(insts.iter().map(|i| i["requests"].as_u64().unwrap()).sum::<u64>(), 4, "{v}");
+    assert!(insts.iter().any(|i| i["instance"] == inst.as_str()), "{v}");
 }
 
 /// What runs is billed: requests through the proxy and the instance's CPU and memory reach the
