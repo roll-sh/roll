@@ -175,7 +175,17 @@ export function approvalWhere(a: Pick<Approval, "environment" | "scope_path">): 
 }
 
 /** Whether approving it can be remembered: it's about one resource, and roll's policy doesn't ask several people for it. */
-export const rememberable = (a: Pick<Approval, "resource" | "gates">) => Boolean(a.resource && !a.resource.startsWith("new in ")) && !a.gates?.length;
+export const rememberable = (a: Pick<Approval, "resource" | "gates"> & { method?: string; args?: unknown }) => Boolean(a.resource && !a.resource.startsWith("new in ")) && !a.gates?.length && !accessRequest(a);
+
+/** An access request (a token asking for one more rule for a while): how long and why, or null for a request waiting to run. */
+export function accessRequest(a: { method?: string; args?: unknown }): { for: string; reason: string } | null {
+  if (a.method !== "GRANT") return null;
+  const args = (a.args ?? {}) as { for?: unknown; reason?: unknown };
+  return { for: String(args.for ?? ""), reason: String(args.reason ?? "") };
+}
+
+const FOR_LABEL: Record<string, string> = { "15m": "15 minutes", "1h": "an hour", "8h": "8 hours", "1d": "a day" };
+export const forLabel = (f: string) => FOR_LABEL[f] ?? f;
 
 /** The name an approval records for whoever is looking (`operator`, or a person's `usr_…`). */
 export function deciderName(me: Me | null): string | null {

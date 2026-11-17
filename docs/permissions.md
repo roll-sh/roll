@@ -651,20 +651,47 @@ secrets:reveal@production=2`, the overview's "Require several approvers…"):
 ] }
 ```
 
-- Each rule covering a request is a gate it must pass: `approvals` (1–10) from its `approvers`
-  (anyone who may decide when left out: `operator`, an admin's `usr_…`, a chat approver's
-  `slack:U…`). Left-out `actions` or `environments` mean all; a request about no one environment
-  is covered (the stricter reading). The names match roll secrets' protected environments, whose
-  change requests count approvals the same way.
+- Each rule covering a request is a gate it must pass: `approvals` (1–10) from its `approvers`.
+  Left-out `actions` or `environments` mean all; a request about no one environment is covered
+  (the stricter reading). The names match roll secrets' protected environments, whose change
+  requests count approvals the same way.
+- Who counts: with `approvers` left out, signed-in people (`usr_…`: admins, and a person for their
+  own tokens' requests, except as below). The operator's token (`operator`) and chat approvers
+  (`slack:U…`) count only where a rule names them: anyone may hold the token, and a chat id isn't
+  tied to an account, so one human could otherwise count twice, or approve their own token's
+  request from chat. A rule that names a chat id trusts the operator's choice of who's behind it.
+- A person named in `approvers` sees and decides the approvals naming them, admin or not.
 - An approver counts once; the person whose token asked never counts (as a change request's author
-  can't approve it). The operator's token is one approver, whoever holds it: two people sign in.
+  can't approve it). A token made with the operator's token has no person: the operator approving
+  its requests is the usual one-operator setup, so name people where that matters.
 - Approving adds to `approved_by`. The approval stays `pending` until every gate has its approvals
   (`gates: [{approvals, approvers?, approved}]` on a pending approval, from the policy as it is
   then); the request waits on as before, and runs once. Anyone who may decide can deny it.
 - Such a request is approved once: never remembered, since a rule for a while would let the next
-  ones through with fewer people.
+  ones through with fewer people. A rule remembered for a while before a gate covered it asks
+  again, and an approval approved before a gate came (one the same request would run with) asks
+  again too. Gates are about what asks: a token's own rules that allow outright don't ask.
 - The approvals page and chat cards say who has approved and how many more are needed, and the
   product hears everyone who approved (`Approved.by`).
+
+### Access requests
+
+A token can ask up front for one more rule for a while, saying why, as Teleport's access requests
+and Entra's Privileged Identity Management do: an agent that knows it will need to drop a scratch
+database asks once, rather than being refused or asking at every call.
+
+- `POST /v1/access/requests {product, action, resource?, environment?, path?, index?, for, reason}`
+  with the token itself (`access_request_access` over MCP); `for` is `15m`, `1h`, `8h` or `1d`, and
+  `reason` (up to 500 characters) is what the person reads. It answers `202` with the pending
+  approval (method `GRANT`, `args: {for, reason}`); the same request again is the one waiting.
+  Only a token asks, never the operator or a person (they change rules directly), and a workload's
+  token, which is fixed, never does.
+- It's decided like any approval: on the approvals page, from chat or the CLI, under the policy's
+  approval rules ("Two-person approvals"). Approved, it's the rule it asked for (one action, on that
+  resource or the product's every one, only where it named), until `for` from the approval, in the
+  token's `temporary` rules, named by the approval (taken back like any). It can't be remembered
+  for longer.
+- Nothing runs when it's approved: the agent waits with `access_wait_approval`, then goes on.
 
 ### What a product is told about an approval
 
@@ -1014,6 +1041,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
+| `POST /v1/access/requests` | the token itself | `{product, action, resource?, environment?, path?, index?, for, reason}`: ask for one more rule for a while ("Access requests"); `202` the pending approval |
 | `DELETE /v1/access/tokens/{id}/temporary/{approval}` | operator | take back what an approval allowed it for a while, and the approval if its request hasn't used it |
 | `POST /v1/access/tokens/{id}/tighten` | operator | `{from, days?}`: apply the proposal, made again now, if its rules are still `from` (else 409) → the grant |
 | `GET /v1/access/checkup` | access read | the live tokens that need attention: `[{grant, findings: [{kind, why, fix}]}]` ("Checkup") |

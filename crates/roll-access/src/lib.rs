@@ -894,7 +894,7 @@ impl Access {
             );
         }
         let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return };
-        let (me, a) = (self.clone(), a.clone());
+        let (me, a) = (self.clone(), self.gated(a.clone()));
         tokio::spawn(async move {
             match chat.post(install.clone(), channel.clone(), a.clone()).await {
                 Ok(ts) => {
@@ -919,6 +919,12 @@ impl Access {
         });
     }
 
+    /// Whether the policy names `user` as an approver of this pending approval (they see and
+    /// decide it though it isn't their token's).
+    pub fn names_approver(&self, a: &store::Approval, user: &str) -> bool {
+        a.state == "pending" && self.policy_now().gates(a).iter().any(|g| g.approvers.as_ref().is_some_and(|l| l.iter().any(|x| x == user)))
+    }
+
     /// A pending approval with what the policy asks of it (`gates`), for whoever reads it.
     pub fn gated(&self, mut a: store::Approval) -> store::Approval {
         if a.state == "pending" {
@@ -939,7 +945,7 @@ impl Access {
         let found = self.store.approval(id)?;
         let gates = self.policy().gates(&found);
         if approve && !gates.is_empty() {
-            let owner = self.store.get(&found.grant_id).ok().and_then(|g| g.user);
+            let owner = self.store.get(&found.grant_id)?.user;
             if owner.as_deref() == Some(by) {
                 return Err(Error::Forbidden("this was asked with your own token: someone else approves it".into()));
             }
@@ -1048,8 +1054,26 @@ impl ApprovalRule {
             }
     }
 
+    /// Whether `by` counts toward it: a name it lists, or, when it lists none, a signed-in person
+    /// (`usr_…`). The operator's token and chat approvers count only where a rule names them: they
+    /// aren't one person each (anyone may hold the token; a chat id isn't tied to an account), so
+    /// one human could otherwise count twice, or approve their own token's request from chat.
     pub fn may_approve(&self, by: &str) -> bool {
-        self.approvers.as_ref().is_none_or(|l| l.iter().any(|x| x == by))
+        match &self.approvers {
+            Some(l) => l.iter().any(|x| x == by),
+            None => by.starts_with("usr_"),
+        }
+    }
+
+    /// Whether it covers what `rule` allows (some of its actions, in some of its environments): a
+    /// rule an approval remembered for a while that a gate now covers asks again.
+    pub fn covers_rule(&self, rule: &roll_auth::scope::Rule) -> bool {
+        (self.product == "*" || rule.product == "*" || self.product == rule.product)
+            && (self.actions.is_empty() || rule.actions.keys().any(|a| self.actions.has(*a)))
+            && match (&self.environments, &rule.environments) {
+                (Some(gate), Some(envs)) => envs.iter().any(|e| gate.iter().any(|p| roll_auth::scope::env_covers(p, e) || roll_auth::scope::env_covers(e, p))),
+                _ => true,
+            }
     }
 
     /// Whether these approvers are enough for it.
@@ -1099,6 +1123,11 @@ impl<'de> serde::Deserialize<'de> for Actions {
 }
 
 impl Policy {
+    /// Whether a gate covers a rule remembered for a while (it asks again).
+    pub fn asks_again(&self, rule: &roll_auth::scope::Rule) -> bool {
+        self.approval_rules.iter().any(|gate| gate.covers_rule(rule))
+    }
+
     /// What's wrong with it, if anything.
     pub fn problems(&self) -> Option<String> {
         if self.max_days == Some(0) || self.max_idle_days == Some(0) {
@@ -1175,7 +1204,7 @@ impl roll_auth::Grants for Access {
             let people = self.people.get()?;
             people.person_now(user).ok()??;
         }
-        g.usable(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.effective_rules(code_sql::now_ms())), user: g.user.as_deref().map(Into::into), ask_otherwise: g.ask_otherwise })
+        g.usable(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.effective_rules(code_sql::now_ms(), |r| self.policy_now().asks_again(r))), user: g.user.as_deref().map(Into::into), ask_otherwise: g.ask_otherwise })
     }
 }
 

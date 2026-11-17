@@ -1,6 +1,6 @@
 import { Bell, Hand } from "lucide-react";
 import { useEffect, useState } from "react";
-import { accessApi, approvalWhere, deciderName, gateProgress, productName, REMEMBER, RISKY, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
+import { accessApi, accessRequest, approvalWhere, deciderName, forLabel, gateProgress, productName, REMEMBER, RISKY, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
 import { createIntegrationsApi, type ChatInstall } from "@/lib/integrations-api";
 import { call } from "@/lib/roll-api";
 import { useShownOwner } from "../agents/use-connection";
@@ -106,9 +106,16 @@ function Pending({ a, focused, refresh, viewer }: { a: Approval; focused: boolea
             {a.resource ?? productName(a.product)}
             {approvalWhere(a) && <span className="text-muted"> · {approvalWhere(a)}</span>}
           </h2>
-          <p className="mt-1 font-mono text-[11px] text-subtle">
-            {a.method} {a.route} · asked {relative(a.created_at)} · expires {relative(a.expires_at)}
-          </p>
+          {accessRequest(a) ? (
+            <p className="mt-1 text-[13px]">
+              <span className="text-muted">asks for {forLabel(accessRequest(a)!.for)}:</span> {accessRequest(a)!.reason}
+              <span className="font-mono text-[11px] text-subtle"> · asked {relative(a.created_at)} · expires {relative(a.expires_at)}</span>
+            </p>
+          ) : (
+            <p className="mt-1 font-mono text-[11px] text-subtle">
+              {a.method} {a.route} · asked {relative(a.created_at)} · expires {relative(a.expires_at)}
+            </p>
+          )}
           {gateProgress(a) && (
             <p className="mt-1 text-[12px] text-accent">
               {gateProgress(a)}
@@ -140,7 +147,7 @@ function Pending({ a, focused, refresh, viewer }: { a: Approval; focused: boolea
           </button>
         </div>
       </div>
-      {a.args !== null && a.args !== undefined && <Args args={a.args} />}
+      {a.args !== null && a.args !== undefined && !accessRequest(a) && <Args args={a.args} />}
       {denying && (
         <input
           autoFocus

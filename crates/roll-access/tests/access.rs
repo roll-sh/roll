@@ -1092,6 +1092,35 @@ async fn a_persons_token_past_the_policy_waits_for_an_admin() {
 /// A signed-in user's own token acts as them (docs/permissions.md, "Users' own tokens"): it
 /// reaches only what their account does, whatever its rules say; they see and manage only their
 /// own tokens and decide their own token's approvals; and it stops when their account does.
+async fn approve_with(d: &Daemon, who: &str, apr: &str, body: Value) -> (StatusCode, Value) {
+    d.as_user(who, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(body)).await
+}
+
+/// A token asks for one more rule for a while, saying why (docs/permissions.md, "Access
+/// requests"): a person approves it, the policy's gates apply, and it's a rule until it lapses.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_asks_for_access_for_a_while() {
+    let d = Daemon::new(50);
+    let (token, id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pa", None).await.0, StatusCode::FORBIDDEN);
+    let ask = json!({ "product": "postgres", "action": "delete", "resource": "pa", "for": "1h", "reason": "drop the scratch database I made" });
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(json!({ "product": "postgres", "action": "delete", "for": "1y", "reason": "x" }))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/requests", Some(ask.clone())).await.0, StatusCode::BAD_REQUEST, "only a token asks");
+    let (s, apr) = d.call(&token, Method::POST, "/v1/access/requests", Some(ask.clone())).await;
+    assert_eq!((s, apr["state"].as_str(), apr["args"]["reason"].as_str()), (StatusCode::ACCEPTED, Some("pending"), Some("drop the scratch database I made")), "{apr}");
+    let apr = apr["id"].as_str().unwrap().to_string();
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(ask)).await.1["id"], json!(apr), "the same request again is the one waiting");
+    // It can't be approved for longer, and a token never decides it.
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "always" }))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(d.call(&token, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await.1["state"], "approved");
+    // Now it may, on that one database, for the hour; never another.
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pa", None).await.0, StatusCode::OK);
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pb", None).await.0, StatusCode::FORBIDDEN);
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert_eq!(g["temporary"][0]["approval"], json!(apr), "{g}");
+}
+
 /// What roll's policy names needs several people (docs/permissions.md, "Two-person approvals"):
 /// each approves once, the person whose token asked never counts, it stays pending until there
 /// are enough, it's never remembered, and the product is told who approved it.
@@ -1118,6 +1147,9 @@ async fn two_people_approve_what_the_policy_names() {
         let (d, apr) = (&d, apr.clone());
         async move { d.as_user(who, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(body)).await }
     };
+    // The operator's token isn't one person: it counts only where a rule names it.
+    let (s, e) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
     // One person isn't enough, and approves once; it can't be remembered.
     let (s, a) = approve("usr_bob", json!({})).await;
     assert_eq!((s, a["state"].as_str(), a["approved_by"].clone()), (StatusCode::OK, Some("pending"), json!(["usr_bob"])), "{a}");
@@ -1134,12 +1166,27 @@ async fn two_people_approve_what_the_policy_names() {
     let (s, ran) = d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await;
     assert_eq!((s, ran["approved"]["by"].clone()), (StatusCode::OK, json!(["usr_bob", "usr_carol"])), "{ran}");
 
-    // Named approvers: only they count.
-    policy(json!([{ "product": "postgres", "actions": ["delete"], "approvals": 1, "approvers": ["usr_carol"] }])).await;
+    // A rule remembered for a while before a gate covered it asks again: the gate isn't skipped.
+    policy(json!([])).await;
+    let apr = d.call(&token, Method::DELETE, "/v1/projects/pr", None).await.1["approval"].as_str().unwrap().to_string();
+    assert_eq!(approve_with(&d, "usr_bob", &apr, json!({ "remember": "1h" })).await.0, StatusCode::OK);
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pr", None).await.0, StatusCode::OK, "remembered");
+    policy(json!([{ "product": "postgres", "actions": ["delete"], "approvals": 2 }])).await;
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pr", None).await.1["code"], "approval_pending", "a gate came since");
+    // Denied after one approval: denied.
+    let apr = d.call(&token, Method::DELETE, "/v1/projects/pd", None).await.1["approval"].as_str().unwrap().to_string();
+    approve_with(&d, "usr_bob", &apr, json!({})).await;
+    assert_eq!(d.as_user("usr_carol", Method::POST, &format!("/v1/access/approvals/{apr}/deny"), Some(json!({}))).await.1["state"], "denied");
+
+    // Named approvers: only they count, and a named person who isn't an admin sees and decides it.
+    policy(json!([{ "product": "postgres", "actions": ["delete"], "approvals": 1, "approvers": ["usr_carol", "usr_alice"] }])).await;
     let apr = d.call(&token, Method::DELETE, "/v1/projects/pb", None).await.1["approval"].as_str().unwrap().to_string();
     let (s, e) = d.as_user("usr_bob", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
     assert!(e["error"].as_str().is_some_and(|m| m.contains("usr_carol")), "{e}");
+    let (_, hers) = d.as_user("usr_alice", Method::GET, "/v1/access/approvals?state=pending", None).await;
+    assert!(hers.as_array().unwrap().iter().any(|x| x["id"] == json!(apr)), "{hers}");
+    assert_eq!(d.as_user("usr_alice", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await.1["state"], "approved");
 
     // A person's own token: someone else approves its request, never them.
     policy(json!([{ "product": "workspace", "actions": ["delete"], "approvals": 1 }])).await;

@@ -266,9 +266,18 @@ pub struct TempRule {
 impl Grant {
     /// What it may do now: its rules, and the temporary ones still live. Decisions use this; making
     /// tokens (`check_within`) uses `rules` alone, so a while never becomes for good.
-    pub fn effective_rules(&self, now: i64) -> Scope {
+    ///
+    /// `asks_again`: a rule for a while that roll's policy now asks several people for (a gate
+    /// covers it) asks again instead of allowing, so a gate added later isn't skipped.
+    pub fn effective_rules(&self, now: i64, asks_again: impl Fn(&roll_auth::scope::Rule) -> bool) -> Scope {
         let mut s = self.rules.clone();
-        s.0.extend(self.temporary.iter().filter(|t| t.until > now).map(|t| t.rule.clone()));
+        s.0.extend(self.temporary.iter().filter(|t| t.until > now).map(|t| {
+            let mut r = t.rule.clone();
+            if asks_again(&r) {
+                r.actions.values_mut().for_each(|e| *e = roll_auth::scope::Effect::Ask);
+            }
+            r
+        }));
         s
     }
 
@@ -408,7 +417,7 @@ fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> std::res
     T::deserialize(d).map(Some)
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Approval {
     pub id: String,
     pub grant_id: String,

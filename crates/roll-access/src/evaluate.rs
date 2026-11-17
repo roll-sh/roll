@@ -426,7 +426,8 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     if found.params.is_some() {
         ctx.route = row.route.to_string();
     }
-    let scope = Arc::new(ctx.grant.effective_rules(code_sql::now_ms()));
+    let policy = access.policy_now();
+    let scope = Arc::new(ctx.grant.effective_rules(code_sql::now_ms(), |r| policy.asks_again(r)));
     let (mut parts, body) = req.into_parts();
     let params: Vec<(String, String)> = match found.params {
         Some(p) => p,
@@ -904,8 +905,14 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
             if found.grant_id != ctx.grant.id || found.request_hash != request_hash {
                 return Err(Box::new(deny(StatusCode::FORBIDDEN, "approval_mismatch", format!("{id} was asked for another request"), json!({}))));
             }
-            found
+            Some(found)
         }
+        None => None,
+    };
+    // Approved by fewer people than roll's policy asks now (a gate came since): it asks again.
+    let approval = approval.filter(|a| a.state != "approved" || access.policy_now().gates(a).iter().all(|g| g.met(&approvers(a).iter().map(|b| b.to_string()).collect::<Vec<_>>())));
+    let approval = match approval {
+        Some(found) => found,
         None => {
             let args = args.unwrap_or_else(|| redact::body(row, body));
             let summary = redact::summary(row, action, &ctx.method, resource.as_deref(), ctx.mcp.as_ref().map(|m| &*m.tool));

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
+import { accessRequest, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -182,6 +182,12 @@ describe("two-person approvals", () => {
     expect(gateProgress({ gates: [] })).toBeNull();
     expect(gateProgress({ gates: [{ approvals: 2, approved: 1 }], approved_by: ["usr_bob"] })).toBe("approved by usr_bob · 1 more approval needed");
     expect(gateProgress({ gates: [{ approvals: 2, approved: 0, approvers: ["usr_a", "usr_b"] }] })).toBe("2 more approvals needed (from usr_a, usr_b)");
+  });
+  it("reads an access request's time and reason, and never offers to remember it", () => {
+    const asked = { method: "GRANT", resource: "pa", args: { for: "1h", reason: "drop scratch" } };
+    expect(accessRequest(asked)).toEqual({ for: "1h", reason: "drop scratch" });
+    expect(accessRequest({ method: "DELETE" })).toBeNull();
+    expect(rememberable(asked)).toBe(false);
   });
   it("names whoever is looking as an approval records them", () => {
     expect(deciderName({ kind: "operator", locked: true })).toBe("operator");
