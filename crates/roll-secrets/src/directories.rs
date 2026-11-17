@@ -243,8 +243,8 @@ fn password(flavor: Flavor) -> String {
 const FIELDS: &[Field] = &[
     Field { field: "username", label: "Username (DN)", modes: &[Mode::Managed, Mode::Dynamic], secret: false, suggest: "LDAP_BIND_DN", credential: Some("login") },
     Field { field: "password", label: "Password", modes: &[Mode::Managed, Mode::Dynamic], secret: true, suggest: "LDAP_PASSWORD", credential: Some("login") },
-    Field { field: "upn", label: "User principal name (Active Directory)", modes: &[Mode::Managed, Mode::Dynamic], secret: false, suggest: "LDAP_UPN", credential: Some("login") },
-    Field { field: "account_name", label: "Account name (sAMAccountName, Active Directory)", modes: &[Mode::Managed, Mode::Dynamic], secret: false, suggest: "LDAP_USERNAME", credential: Some("login") },
+    Field { field: "upn", label: "UPN", modes: &[Mode::Managed, Mode::Dynamic], secret: false, suggest: "LDAP_UPN", credential: Some("login") },
+    Field { field: "account_name", label: "sAMAccountName", modes: &[Mode::Managed, Mode::Dynamic], secret: false, suggest: "LDAP_USERNAME", credential: Some("login") },
 ];
 
 /// What only Active Directory issues.

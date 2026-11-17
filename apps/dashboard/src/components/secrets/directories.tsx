@@ -4,7 +4,7 @@ import type { Directory, DirectoryFlavor } from "@/lib/secrets-api";
 import { Segmented } from "../agents/ui/toggle-group";
 import { GatewayPicker } from "./gateways";
 import { useSecrets } from "./secrets-page";
-import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, useLoad } from "./ui";
+import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, textareaField, useLoad } from "./ui";
 
 const DN = /^[^\s=,][^\n\r]*=[^\n\r]+$/;
 const URL_RE = /^ldaps?:\/\/[^\s/?@]+\/?$/;
@@ -158,7 +158,7 @@ export function Directories() {
             </label>
             <label>
               <span className="mb-1 block text-[11px] font-medium text-subtle">Groups they join (one DN a line)</span>
-              <textarea value={groups} onChange={(e) => setGroups(e.target.value)} rows={2} placeholder="cn=readers,ou=groups,dc=example,dc=com" spellCheck={false} className={`${field} font-mono text-[12px]`} />
+              <textarea value={groups} onChange={(e) => setGroups(e.target.value)} rows={2} placeholder="cn=readers,ou=groups,dc=example,dc=com" spellCheck={false} className={`${textareaField} font-mono text-[12px]`} />
             </label>
           </div>
           <div className="sm:col-start-2 max-w-sm">
@@ -166,7 +166,7 @@ export function Directories() {
           </div>
           <details className="sm:col-start-2">
             <summary className="cursor-pointer text-[11px] text-subtle select-none">Server CA certificate (a private CA, as most domain controllers have)</summary>
-            <textarea value={ca} onChange={(e) => setCa(e.target.value)} rows={4} placeholder="-----BEGIN CERTIFICATE-----" spellCheck={false} className={`${field} mt-1 font-mono text-[11px]`} />
+            <textarea value={ca} onChange={(e) => setCa(e.target.value)} rows={4} placeholder="-----BEGIN CERTIFICATE-----" spellCheck={false} className={`${textareaField} mt-1 font-mono text-[11px]`} />
           </details>
           <div className="sm:col-start-2 flex gap-2">
             <button type="submit" className={primary} disabled={!ok || busy}>
