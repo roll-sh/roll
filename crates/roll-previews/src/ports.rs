@@ -441,7 +441,10 @@ pub trait Secrets: Send + Sync {
     /// allows production and the change is trusted). It expires by itself `expires_at` (ms) at the
     /// latest, so a teardown that never happened leaves nothing for long; each converge pushes
     /// that out.
-    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], trusted: bool, expires_at: i64) -> anyhow::Result<()>;
+    /// `branches`: what the preview branched (`(kind, parent)`): a link of the environment (or its
+    /// base) to one of those parents isn't resolved but comes back in [`Resolved::followed`].
+    #[allow(clippy::too_many_arguments)]
+    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], trusted: bool, expires_at: i64, branches: &[(Kind, String)]) -> anyhow::Result<()>;
     /// Every variable of `env`, inherited ones included, for `consumer` (a start of one service,
     /// a job): a dynamic link issues it a fresh credential under a lease ([`Resolved::leases`]),
     /// which the caller renews while it runs and revokes when it stops.
@@ -469,6 +472,9 @@ pub struct Resolved {
     pub problems: Vec<String>,
     /// The leases of the dynamic credentials among `values`.
     pub leases: Vec<String>,
+    /// Keys of links to a parent the preview branched, which roll secrets resolved nothing for:
+    /// `(name, kind, parent, field)`. The engine sets each from the branch ([`crate::names::follow`]).
+    pub followed: Vec<(String, Kind, String, String)>,
 }
 
 /// Until roll secrets lands: no environments, so services get the project's overrides and the
@@ -477,7 +483,7 @@ pub struct NoSecrets;
 
 #[async_trait]
 impl Secrets for NoSecrets {
-    async fn ensure(&self, _: &str, _: &str, _: &str, _: &[(String, String)], _: bool, _: i64) -> anyhow::Result<()> {
+    async fn ensure(&self, _: &str, _: &str, _: &str, _: &[(String, String)], _: bool, _: i64, _: &[(Kind, String)]) -> anyhow::Result<()> {
         Ok(())
     }
 
