@@ -130,7 +130,11 @@ impl roll_previews::ports::Apps for RollApps {
             Some(hash) => json!({ "token": token, "bypass_sha256": hash }),
             None => json!({ "token": token }),
         });
-        let mut body = json!({ "branch": null, "ephemeral": true, "access": access });
+        // The project's egress: with `roll`, roll apps runs it on a network with no route out (a
+        // runtime that can't is a 409, which fails the deploy rather than running it open).
+        let closed = t.egress == roll_previews::settings::EgressRule::Roll;
+        let egress = if closed { json!({ "mode": "roll", "hosts": t.egress_hosts }) } else { json!({ "mode": "open" }) };
+        let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress });
         if self.feedback {
             body["feedback"] = json!(t.feedback);
         }
@@ -168,12 +172,14 @@ impl roll_previews::ports::Apps for RollApps {
                 h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
             }
         }
+        // What it may reach is part of what's deployed: a changed rule deploys again.
         let key = format!(
-            "{}@{}@{h:016x}{}{}",
+            "{}@{}@{h:016x}{}{}{}",
             t.environment,
             t.git.as_deref().unwrap_or("image"),
             if t.access_token.is_some() { "p" } else { "" },
-            if self.feedback && t.feedback { "f" } else { "" }
+            if self.feedback && t.feedback { "f" } else { "" },
+            if closed { format!("e{}", t.egress_hosts.join(",")) } else { String::new() }
         );
         // The deployment previews last started for exactly this, still under way or live: wait on
         // it (or it's done). The engine asks again while a deploy is in flight, and a redeploy
@@ -260,13 +266,37 @@ impl roll_previews::ports::Apps for RollApps {
         None
     }
 
-    // roll apps' instances don't freeze and have no egress proxy.
+    // roll apps' instances don't freeze.
     fn warm(&self, _preview: &str, _service: &str) -> bool {
         false
     }
 
-    async fn egress_refused(&self, _preview: &str) -> Vec<String> {
-        Vec::new()
+    /// What the preview's environments' egress proxies refused, each host once: `<host>`, or
+    /// `<host> private` for a listed one that resolves only to private addresses.
+    async fn egress_refused(&self, preview: &str) -> Vec<String> {
+        // Every service with the preview's environment, as roll apps has them (not only those this
+        // process deployed: after a restart a preview that doesn't redeploy still says).
+        let env = roll_previews::engine::env_name(preview);
+        let all = self.api.get("/v1/apps/services").await.unwrap_or(Value::Null);
+        let ids: Vec<String> = all
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|x| x["environments"].as_array().is_some_and(|e| e.iter().any(|e| e["name"] == env.as_str())))
+            .filter_map(|x| s(&x["id"]))
+            .collect();
+        let mut out: Vec<String> = Vec::new();
+        for id in ids {
+            let Ok(e) = self.api.get(&Self::env_path(&id, &env)).await else { continue };
+            for r in e["egress_refused"].as_array().into_iter().flatten() {
+                let Some(host) = s(&r["host"]) else { continue };
+                let line = if r["private"] == true { format!("{host} private") } else { host };
+                if !out.contains(&line) {
+                    out.push(line);
+                }
+            }
+        }
+        out
     }
 }
 

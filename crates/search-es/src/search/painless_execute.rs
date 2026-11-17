@@ -184,7 +184,7 @@ impl OneDoc {
         let engine = private.index(ctx.cluster, &st, &meta)?;
         let table = engine.table();
         let stored = crate::write::stored_source(&meta, &table, &source, document);
-        let doc = crate::engine::convert::to_indexable(&table, &parsed, &crate::engine::convert::DocMeta { id: "_id", routing: None, tsid: None, source: stored })?;
+        let doc = crate::engine::convert::to_indexable(&table, &parsed, &crate::engine::convert::DocMeta { id: "_id", routing: None, tsid: None, source: stored, ignored_source: Vec::new() })?;
         let shard = engine.shard(0).clone();
         shard.shard.index(search_index::IndexOp::new(doc)).map_err(crate::engine::convert::index_error)?;
         shard.wrote();
