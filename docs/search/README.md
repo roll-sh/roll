@@ -278,9 +278,15 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    loses, ranked: noaa `range_field_conjunction_big_range_big_term_query` 5.12x Elasticsearch
    (49.4 against 9.6 ms; roll leads since `96c8d2fc5`, 2.7 against 13-14.5 ms, Rally rerun
    pending); nested inner hits `big_size` 2.25x Elasticsearch (49 against 22 ms;
-   `default` 1.20x; roll leads both since `7fe679918`, 13 against 22-26 ms, Rally rerun pending); dense_vector `knn-search-100-1000_multiple_segments` 2.09x; so_vector, 25 of
-   32 `knn` tasks 1.03-1.92x (filtered and `concurrency` worst; segments are searched
-   concurrently since, `66d16fce6`); nested `randomized-sorted-term-queries` 1.62x OpenSearch;
+   `default` 1.20x; roll leads both since `7fe679918`, 13 against 22-26 ms, Rally rerun pending); the vector tracks (Round 9: vectors, `807396e0b`, roll
+   against Elasticsearch 9.5.5): so_vector's 8-client tasks on the force-merged index,
+   `concurrency` 2.80x and `random-10-percent` 2.32x, then `concurrency-force-merge` 1.45x,
+   dense_vector `knn-search-100-1000` (merged) 1.17x and `random-10-percent-force-merge` 1.11x;
+   Round 8's `css` 1.92x and dense_vector `_multiple_segments` 2.09x are now ties (1.13x,
+   1.51x). Request parsing rescanned the body for field locations no message used (8-15M
+   instructions per so_vector query; fixed in #156, -25 to -61% server CPU per query on 16 of
+   20 lane-b tasks, hits identical, Rally rerun pending); Lucene's per-segment beam lowers recall on the 1M
+   corpus and an exact path for small filters lost to code placement (both measured, not adopted); nested `randomized-sorted-term-queries` 1.62x OpenSearch;
    noaa indexing (Elasticsearch 1.29x roll's docs/s: `double_range` kept every document off the
    direct parser; it takes them now, -34% server CPU per document, Rally rerun pending); nyc_taxis `distance_amount_agg` 1.27x Elasticsearch (103 against 81 ms: roll
    runs a shard on one thread, Elasticsearch splits its segments across threads at twice roll's
