@@ -1686,9 +1686,11 @@ Ranked by what a person notices first. Done so far:
    shown. Looked at and kept as it is: a preview's own variables and the project's `env` stay
    masked whole even when a value is plain (a region). They're revealed only by `reveal` routes
    and can be named anything, and under-masking is worse than an unreadable host.
-4. **Deploy a preview's roll apps services at once** (measured and not landed, 2026-11-17: within
-   the noise, two Docker builds of one repo share the CPU; branch
-   `feature/roll-previews-deploy-at-once`). Try it again with cached builds or prebuilt images.
+4. **Deploy a preview's roll apps services at once** (measured twice and not landed; branch
+   `feature/roll-previews-deploy-at-once`). With cold builds (2026-11-17), it was within the noise:
+   two Docker builds of one repo share the CPU. With a second push's cached builds (2026-11-18,
+   two services, load 49–57), both were live again in 4.7 and 4.9 s on main, and 4.9 and 3.4 s on
+   the branch: one faster run in two, not a win. Try it on an idle host, or with more services.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): a 1.4 GB pgbench parent branched in 0.97 s against 3.5 s for a copy, but a write
    copies the whole table file (764 MB after 30 s of pgbench). It needs a base per parent and a
