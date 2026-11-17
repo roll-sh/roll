@@ -1676,7 +1676,7 @@ Ranked by what a person notices first. Done so far:
    without its secret values and says `build_closed: true`. Previews' side is built (branch
    `feature/roll-previews-closed-builds`, gated): rolld's adapter deploys nothing to a closed
    environment that doesn't say so, and a Git URL fork's head is approved under Roll only again.
-   Its PR and live check follow #222 onto main.
+   Draft #234; its live check runs once #222 is on main.
 2. **A Git URL service's preview reported to its repository, in review (#232):** `roll/preview` and
    the pull request comment through roll's GitHub App (apps' #138). The live check against a fake
    GitHub (`scripts/lib/fake-github.py`) saw the fork's `roll/preview` go pending, then success,
