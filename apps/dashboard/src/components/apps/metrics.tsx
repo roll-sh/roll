@@ -12,7 +12,7 @@
 
 import { Table2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary, type Vital, type VitalName, type Vitals } from "@/lib/apps-api";
+import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary, type Vital, type VitalName, type Vitals, type AppMetrics, type AppSeries } from "@/lib/apps-api";
 import { formatBytes } from "@/lib/roll-api";
 import { btn, CopyButton, panel, useCopy } from "../ui";
 import { usePageVisible } from "./live";
@@ -291,6 +291,53 @@ function Visitors({ a }: { a: Analytics }) {
   );
 }
 
+function Sparkline({ points }: { points: [number, number][] }) {
+  if (points.length < 2) return <span className="text-[11px] text-subtle">–</span>;
+  const xs = points.map((p) => p[0]);
+  const ys = points.map((p) => p[1]);
+  const [x0, x1] = [Math.min(...xs), Math.max(...xs)];
+  const [y0, y1] = [Math.min(...ys), Math.max(...ys)];
+  const d = points.map((p, i) => `${i ? "L" : "M"}${(((p[0] - x0) / (x1 - x0 || 1)) * 120).toFixed(1)},${(22 - ((p[1] - y0) / (y1 - y0 || 1)) * 20).toFixed(1)}`).join("");
+  return (
+    <svg viewBox="0 0 120 24" className="h-6 w-[120px] text-muted" aria-hidden>
+      <path d={d} fill="none" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function shown(s: AppSeries) {
+  const v = s.points[s.points.length - 1]?.[1];
+  if (v === undefined) return "–";
+  const n = Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 1 ? v.toFixed(2) : v.toPrecision(2);
+  return `${n}${s.unit && s.unit !== "1" ? ` ${s.unit}` : ""}${s.shows === "per_second" ? "/s" : ""}`;
+}
+
+/** The app's own metrics, from its OpenTelemetry SDK (traces on). */
+function AppMetricsPanel({ m }: { m: AppMetrics }) {
+  return (
+    <section className={`${panel} overflow-hidden`} aria-label="App metrics">
+      <div className="border-b border-line px-4 py-2.5">
+        <p className="text-[12px] text-muted">
+          App metrics <span className="text-subtle">· from its OpenTelemetry SDK, {m.step_minutes}-minute points{m.cut ? ", the newest read" : ""}</span>
+        </p>
+      </div>
+      <ul className="divide-y divide-line">
+        {m.series.slice(0, 20).map((s) => (
+          <li key={s.name + s.attrs.map((a) => `|${a.key}=${a.value}`).join("")} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2 text-[12px]">
+            <span className="min-w-0 flex-1 truncate font-mono text-[11.5px]">
+              {s.name}
+              {s.attrs.length > 0 && <span className="text-subtle"> {s.attrs.map((a) => `${a.key}=${a.value}`).join(" ")}</span>}
+            </span>
+            <span className="text-[11px] text-subtle">{s.shows === "per_second" ? "rate" : s.shows === "mean" ? "mean" : s.kind}</span>
+            <Sparkline points={s.points} />
+            <span className="w-24 text-right font-mono">{shown(s)}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 const VITALS: { key: VitalName; label: string; unit: "ms" | "" }[] = [
   { key: "lcp", label: "Largest paint", unit: "ms" },
   { key: "inp", label: "Interaction", unit: "ms" },
@@ -433,6 +480,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
   const [routes, setRoutes] = useState<RouteStats | null>(null);
   const [visitors, setVisitors] = useState<Analytics | null>(null);
   const [speed, setSpeed] = useState<Vitals | null>(null);
+  const [appMetrics, setAppMetrics] = useState<AppMetrics | null>(null);
   const [traces, setTraces] = useState<TraceSummary[] | null>(null);
   const size = raw ? Math.max(1, Math.ceil(raw.minutes.length / MAX_POINTS)) : 1;
   const m = useMemo(() => (raw ? bucketed(raw, size) : null), [raw, size]);
@@ -457,13 +505,14 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
     const load = async () => {
       try {
         // The deploys only mark the charts: metrics still show without them.
-        const [next, deps, byRoute, seen, traced, measured] = await Promise.all([
+        const [next, deps, byRoute, seen, traced, measured, own] = await Promise.all([
           appsApi.metrics(service, env, range.minutes),
           appsApi.deploys(service, env).catch(() => null),
           appsApi.routes(service, env).catch(() => null),
           appsApi.analytics(service, env, Math.min(Math.max(range.minutes, 60), 10_080)).catch(() => null),
           appsApi.traces(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
           appsApi.vitals(service, env, Math.min(Math.max(range.minutes, 60), 10_080)).catch(() => null),
+          appsApi.appMetrics(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
         ]);
         if (alive) {
           setM(next);
@@ -472,6 +521,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
           if (seen) setVisitors(seen);
           if (traced) setTraces(traced.traces);
           if (measured) setSpeed(measured);
+          if (own) setAppMetrics(own);
           setError(null);
         }
       } catch (e) {
@@ -609,6 +659,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
       )}
       {routes && <Routes stats={routes} />}
       {speed && speed.samples > 0 && <Speed v={speed} />}
+      {appMetrics && appMetrics.series.length > 0 && <AppMetricsPanel m={appMetrics} />}
       {visitors && visitors.page_views > 0 && <Visitors a={visitors} />}
       {traces && traces.length > 0 && <Traces service={service} env={env} traces={traces} />}
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-subtle">

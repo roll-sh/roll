@@ -1144,6 +1144,43 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/app-metrics": {
+      "get": {
+        "description": "Answers `{ minutes, step_minutes, series: { name, kind: \"gauge\" | \"sum\" | \"histogram\", unit, attrs: {key, value}[], shows: \"value\" | \"per_second\" | \"mean\", points: [ms, number][] }[], cut }`: what the app's OpenTelemetry SDK sent as metrics (5–10,080 minutes, default 60), each series (a name and its attributes; at most 50, the busiest first) at most 60 points: a gauge's last value, a cumulative counter's rate a second, a histogram's mean.",
+        "operationId": "getServicesIdEnvironmentsEnvAppMetrics",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ minutes, step_minutes, series: { name, kind: \"gauge\" | \"sum\" | \"histogram\", unit, attrs: {key, value}[], shows: \"value\" | \"per_second\" | \"mean\", points: [ms, number][] }[], cut }`: what the app's OpenTelemetry SDK sent as metrics (5–10,080 minutes, default 60), each series (a name and its attributes; at most 50, the busiest first) at most 60 points: a gauge's last value, a cumulative counter's rate a second, a histogram's mean"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List app metrics",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/cache/purge": {
       "post": {
         "description": "Answers `{ purged }`: how many kept answers went (on-demand revalidation, \"Public traffic\").",
