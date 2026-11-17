@@ -1447,7 +1447,13 @@ async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
     // Each sign-in is in the audit log on the client's grant: who, with what (never a secret);
     // and its making is too, named for what it was.
     let wgrant = w["grant"]["id"].as_str().unwrap().to_string();
-    let log = d.audit_until(&format!("/v1/access/audit?grant={wgrant}"), |l| l.as_array().unwrap().iter().filter(|e| e["decision"] == "sign_in").count() >= 2).await;
+    // (Audit rows are written off the request: wait for the making's too, not only the sign-ins.)
+    let log = d
+        .audit_until(&format!("/v1/access/audit?grant={wgrant}"), |l| {
+            let rows = l.as_array().unwrap();
+            rows.iter().filter(|e| e["decision"] == "sign_in").count() >= 2 && rows.iter().any(|e| e["decision"] == "create_client")
+        })
+        .await;
     let sign_in = log.as_array().unwrap().iter().find(|e| e["decision"] == "sign_in").unwrap();
     assert_eq!((sign_in["args"]["by"].as_str(), sign_in["args"]["credential"].as_str()), (Some(wid.as_str()), Some("secret")), "{sign_in}");
     assert!(!log.to_string().contains(&wsecret), "no secret in the log");
