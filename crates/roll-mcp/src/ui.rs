@@ -26,6 +26,8 @@ pub fn declared(capabilities: &Value) -> bool {
 pub fn shows(name: &str, read_only: bool) -> bool {
     // Waiting for a person: the card with roll's approval page, then what the call answered.
     name == "access_wait_approval"
+        // A deploy or a job, waited on or read: its steps as a table, its fields beside.
+        || (read_only && ["apps_wait_", "apps_get_deploy", "apps_get_job"].iter().any(|w| name.starts_with(w)))
         || read_only
         && ["_list_", "_query", "_logs", "_read", "_peek", "_usage", "_activity", "_metrics", "_events", "_history"]
             .iter()
@@ -65,6 +67,7 @@ mod tests {
         assert!(shows("postgres_query", true) && shows("apps_list_services", true) && shows("apps_logs", true));
         assert!(!shows("postgres_execute", false) && !shows("postgres_get_project", true));
         assert!(shows("access_wait_approval", false));
+        assert!(shows("apps_wait_deploy", true) && shows("apps_get_job", true) && !shows("apps_get_service", true));
         assert!(declared(&json!({ "extensions": { EXT: { "mimeTypes": [MIME] } } })) && !declared(&json!({})));
     }
 }

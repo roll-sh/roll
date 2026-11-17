@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
+import { installLink, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -174,5 +174,18 @@ describe("a refusal's proposal", () => {
     expect(proposedRule("?add=postgres:everything&id=x", "allow")).toBeNull();
     expect(proposedRule("?add=*:admin", "allow")).toBeNull();
     expect(proposedRule("", "allow")).toBeNull();
+  });
+});
+
+describe("one-click installs", () => {
+  it("links Cursor and VS Code to the server's URL alone, and nothing else", () => {
+    const url = "https://api.roll.example/v1/mcp?tools=search";
+    const cursor = installLink("cursor", url)!;
+    const config = new URL(cursor.href).searchParams.get("config")!;
+    expect(cursor.href.startsWith("cursor://anysphere.cursor-deeplink/mcp/install?name=roll&")).toBe(true);
+    expect(JSON.parse(atob(config))).toEqual({ url });
+    const vscode = installLink("vscode", url)!;
+    expect(JSON.parse(decodeURIComponent(vscode.href.slice("vscode:mcp/install?".length)))).toEqual({ name: "roll", type: "http", url });
+    expect(installLink("claude-code", url)).toBeNull();
   });
 });

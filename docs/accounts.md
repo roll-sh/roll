@@ -146,17 +146,17 @@ the dashboard's origins pass.
 
 The gate (`roll_auth::check`) resolves the cookie, then:
 
-| caller | roll code and agents (`/v1/code`) | projects (`/v1/workspace`) | `/v1/accounts` | every other product |
-| --- | --- | --- | --- | --- |
-| operator token | admin | all projects | everything | everything |
-| admin user | admin (the gate adds `Operator`) | all projects | everything | everything |
-| other user | their own owner (`Caller::Owner`, token name `session`) | their own projects | their own account | `403` |
-| anonymous | public repos | `401` | sign-in routes | `401` |
+| caller | roll code and agents (`/v1/code`) | projects (`/v1/workspace`) | search (`/v1/search`) | `/v1/accounts` | every other product |
+| --- | --- | --- | --- | --- | --- |
+| operator token | admin | all projects | all clusters | everything | everything |
+| admin user | admin (the gate adds `Operator`) | all projects | all clusters | everything | everything |
+| other user | their own owner (`Caller::Owner`, token name `session`) | their own projects | their own clusters | their own account | `403` |
+| anonymous | public repos | `401` | `401` | sign-in routes | `401` |
 
 The 403 is:
 
 ```
-403 {"error": "your account can use roll code, agents and projects; this API is for roll's admins for now", "code": "operator_only"}
+403 {"error": "your account can use roll code, agents, projects and search; this API is for roll's admins for now", "code": "operator_only"}
 ```
 
 A route that takes a product's own credential (storage console sessions, tasks and stream API
@@ -375,6 +375,10 @@ Each product needs its resources to have an owner, and its routes to scope by th
   dashboard to it.
 - **Queues**: a vhost per user, and scope `/v1/queues` by vhost.
 - **NoSQL**: an owner on databases; scope `/v1/nosql`.
+- **Search**: done. A cluster's `owner` is the person who made it (none for the operator's and
+  admins'; a branch keeps its parent's); `/v1/search` is a `User` route that lists a person's own
+  clusters and answers 404 for another's; workspace `Owners` answers for `search` from it
+  (docs/search/README.md, "Who reaches it").
 - **Workspace**: done in phase 1.
 - **Billing** (Home's spend): per user once the above carry owners.
 - **Orgs**: users in roll code orgs, and invites into an org.

@@ -375,12 +375,33 @@ environment is a first-class kind, built to be cheap:
 - One call creates the environment together with its first secrets and links. roll previews
   writes its branched resources' addresses (the preview's Postgres branch, its Redis branch) as
   plain values: a branch is the preview's own resource, not a link to a parent on the canvas.
+- **Links to what the preview branched aren't followed.** An ephemeral environment carries
+  **branches**, `[{kind, parent}]`: the resources its preview branched (`{"kind": "postgres",
+  "parent": "pg_staging"}`). A key it reads, from its base or anywhere else (a reference, an import),
+  whose link names `(kind, ref)` with `ref` a branch's `parent` never resolves there: roll secrets
+  doesn't ask the product, issues nothing, takes no lease and decrypts no managed credential, in
+  any mode (`live`, `managed`, `dynamic`, a role's fields too). The key is left out of the values
+  and named in the answer's `followed`, `[{name, kind, parent, field}]` (`field`: the provider
+  field it's linked to, `url`, `password`, `role_url`…), and roll previews sets each from its
+  branch by field, blanking one its branch has no value for. So a preview's code, a fork's
+  included, never gets staging's database password through the base. A value of the
+  environment's own that references a followed key doesn't resolve either (a problem). This holds
+  for every read that returns values or tells of them (`…/values` and its formats, `…/resolve`
+  sealed or not, a key's reveal, a sync, roll apps' resolve, `…/digest` and the watches, caches,
+  External Secrets Operator, the operator and the CSI provider that read through these): a
+  followed key's part of the digest is fixed, so its parent rotating moves nothing and isn't
+  asked. Ensure sets the list with `branches`: given, it replaces the list; absent, it keeps it. A
+  standard environment refuses it (400). Only roll previews changes it (the operator, as its
+  adapter calls the API, or its in-process consumer `roll:previews`; 403 `forbidden` otherwise):
+  an added entry changes what previews must fill, and a removed one would hand the preview's code
+  the parent's values. An ensure that gives the same list, or none, needs nothing more. A backup keeps the list, and a
+  restore that can't set it doesn't restore the environment.
 - It is hidden from the overview grid's columns (the grid shows a "Previews" count instead), is
   never a promotion target, and can't be protected. Its slug is any free slug (`pr-117`).
 - **Ensuring one** is a single idempotent call, `PUT …/environments/{env}` with what it should be
   (`{base?, kind?, name?, labels?, expires_at? | ttl_minutes?, trusted?, path?, secrets?: Op[],
-  replace?}`). If the environment is missing, it's created (201). Otherwise its labels, expiry and
-  name are brought to what's given, and `secrets` are applied to its own keys at `path` as one
+  replace?, branches?}`). If the environment is missing, it's created (201). Otherwise its labels,
+  expiry, name and branches are brought to what's given, and `secrets` are applied to its own keys at `path` as one
   change, with `replace` also deleting the folder's other own keys (never a linked or personal
   one). An unchanged value is no change, so ensuring what's there records nothing (`change: null`).
   Its kind, base and trust aren't changed in place: 409 `mismatch`, delete it and ensure it again.
@@ -389,6 +410,54 @@ environment is a first-class kind, built to be cheap:
   runs a change's code, so reading it never reaches a protected environment (its base, an import, a
   reference), whoever reads it. A preview of a same-repo change in a project that allows it is made
   trusted; a fork's never is. `Environment.trusted` says which.
+
+#### For roll previews: branches and `followed`
+
+Each converge's ensure names what the preview branched, from the base's links (`ref` is the
+parent's id as the link names it):
+
+```json
+PUT /v1/secrets/projects/prj_1/environments/pv-42
+{
+  "base": "staging",
+  "labels": { "preview": "pv-42" },
+  "ttl_minutes": 1440,
+  "trusted": false,
+  "secrets": [{ "op": "set", "key": "DATABASE_URL", "value": "postgres://…pv-42…" }],
+  "replace": true,
+  "branches": [
+    { "kind": "postgres", "parent": "pg_staging" },
+    { "kind": "bucket", "parent": "assets" }
+  ]
+}
+```
+
+A resolve then leaves every key linked to those parents out of `values` (none of them was read or
+issued) and names it:
+
+```json
+POST /v1/secrets/projects/prj_1/environments/pv-42/resolve
+{ "path": "/", "consumer": "preview:pv-42/web", "untrusted": true, "dynamic": false }
+
+{
+  "values": { "API_URL": "https://staging.example.com", "DATABASE_URL": "postgres://…pv-42…" },
+  "problems": [],
+  "leases": [],
+  "dynamic": [],
+  "linked": [],
+  "withheld": [],
+  "sensitive": [],
+  "followed": [
+    { "name": "PGHOST", "kind": "postgres", "parent": "pg_staging", "field": "host" },
+    { "name": "PGPASSWORD", "kind": "postgres", "parent": "pg_staging", "field": "password" },
+    { "name": "S3_SECRET", "kind": "bucket", "parent": "assets", "field": "secret_access_key" }
+  ]
+}
+```
+
+Previews sets each `name` from its branch's `field` (blank where the branch has none). A sealed
+resolve carries the same `followed` beside the box, in the clear. An own key (`DATABASE_URL`
+above) wins over the base's as always, so a key previews already writes isn't followed.
 
 ### Folders
 
@@ -2315,7 +2384,7 @@ isn't in the workspace is 404.
 | `DELETE /environments?label=k=v` | | `{deleted: string[]}` (ephemeral only) |
 | `PUT /environments/order` | `{order: slug[]}` | `Environment[]` |
 | `GET /environments/{env}` | | `Environment` |
-| `PUT /environments/{env}` | `Ensure` | 201 or 200 `{environment, created, change}` (409 `mismatch`) |
+| `PUT /environments/{env}` | `Ensure` | 201 or 200 `{environment, created, change}` (409 `mismatch`; `branches` on a standard environment is a 400, an addition by anyone but roll previews or the operator a 403) |
 | `PATCH /environments/{env}` | `{slug?, name?, expires_at?, max_age_days?}` | `Environment` |
 | `DELETE /environments/{env}?confirm=` | | 204 |
 | `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?, notify_url?}` | `Environment` |
@@ -2346,7 +2415,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, projects it's shared with, folders that import it, readers in 30 days |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would; a live link counts its value's keyed fingerprint as the product answers, read at most every 10 s, and at once when roll rotates it or the product's own password, reset or restore route changes it) |
-| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` (`dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`) |
+| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked, followed}` (`dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`; a key linked to a resource the ephemeral environment branched is left out and named in `followed`, in the clear beside a sealed box: names only) |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
 | `POST /environments/{env}/diff` | `{dotenv} \| {json}, path?` | `{added, changed, same, missing, references, linked}`: a local copy against the folder by fingerprint, names only (`reveal`, audited) |
@@ -2458,12 +2527,16 @@ type Environment = {
   base: string | null; labels: Record<string, string>; expires_at: number | null;
   protected: boolean; approvals: number; approvers: string[]; created_at: number; secrets: number;
   max_age_days: number | null; notify: string | null; trusted: boolean; // trusted: an ephemeral one that may read a protected base
+  branches?: Branch[]; // an ephemeral one's branched resources (absent: none)
 };
-type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean }; // PUT /environments/{env}
+type Branch = { kind: string; parent: string }; // a resource a preview branched: links to it aren't followed
+type Followed = { name: string; kind: string; parent: string; field: string }; // a key left out for roll previews to set from its branch
+type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean }; // PUT /environments/{env}; branches: replaces the list, absent keeps it
 type NewEnvironment = {
   slug: string; name?: string; kind?: "standard" | "ephemeral"; base?: string; labels?: Record<string, string>;
   expires_at?: number; ttl_minutes?: number; secrets?: Op[]; // ephemeral: created in one call with its overrides
   trusted?: boolean; // ephemeral: may read a protected base (admin on it)
+  branches?: Branch[]; // ephemeral: the resources its preview branched (roll previews or the operator)
 };
 type Folder = { path: string; name: string; secrets: number; folders: number };
 type Import = { project?: string; environment: string; path: string }; // project: another project's shared folder
@@ -2488,8 +2561,8 @@ type Change = { seq: number; environment: string; path: string; message: string;
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; withheld: string[]; sensitive: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; digest?: string }; // digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; withheld: string[]; sensitive: string[]; followed: Followed[] }; // followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; followed: Followed[]; digest?: string }; // digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
 type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };

@@ -636,6 +636,16 @@ page's "Once ▾", `roll mcp approve --remember 1h`):
   (`DELETE /v1/access/tokens/{id}/temporary/{approval}`), and with it
   the approval when its request hasn't used it (the rule may have run that request instead).
 
+### What a product is told about an approval
+
+A request that runs because of an approval carries `roll_auth::Approved {id, by, until}` beside its
+`Grant` (`by`: who approved it, in order), so the product's own audit can say "revealed by token X, approved by Y" (roll secrets'
+audit and timeline do). `until` is `None` when the approval let this one request run, and when a
+rule remembered for a while allowed it, it's when that rule lapses (the longest-lasting one that
+covers it). A rule remembered for good is one of the grant's rules, so it names no approval; its
+change is in the access audit. The gate's own audit row names the approval either way. Only the
+node that decided sets it: a request forwarded to an owner after the decision doesn't carry it.
+
 ### Approvals in chat
 
 Approvals can also go to a Slack or Discord channel, through roll code's chat ops
@@ -776,8 +786,8 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   would: only routes their session may call (the gate's `User`, `Product` and `Public` rules, which
   it hands the evaluator as `roll_auth::RouteAccess`), as them (`roll_auth::SignedIn`, no
   `Operator`), then narrowed again by its rules. So roll code sees their own owner (git checks the
-  repo as them before it takes the gate's word), projects are their own, and every other product
-  answers `403 operator_only`, whatever the rules say.
+  repo as them before it takes the gate's word), projects and search clusters are their own, and
+  every other product answers `403 operator_only`, whatever the rules say.
 - They see and manage only their own tokens, connections, approvals and audit rows, and **they
   decide their own token's approvals** (a token never decides one). The operator sees everyone's.
 - A token or connection made from an admin's session is that admin's too: it acts as the operator
@@ -786,7 +796,7 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
 - A person holds at most 100 live tokens and connections (`USER_MAX_GRANTS`), so nobody signed in
   can fill everyone's room (10,000 live grants in all).
 - The builder and the consent screen offer only what they reach (`GET /v1/access` answers
-  `{kind: "user", reach: ["code", "agents", "workspace"]}`).
+  `{kind: "user", reach: ["code", "agents", "workspace", "search"]}`).
 - **Their tokens' news is mailed to them** (GitHub mails a token's owner), as well as posted
   where approvals go: a token, MCP client or device added to their account (at once, as GitHub
   mails "a new personal access token was added": what it may do, the network it came from and
