@@ -45,8 +45,9 @@ SKIP=",${QC_SKIP:-},"
 mkdir -p "$D"
 now() { date +%s; }
 skip() { case $SKIP in *",$1,"*) return 0 ;; esac; return 1; }
-# The path of a built test binary ("lib", a tests/ name, or crash_random@power).
-bin() { awk -v n="$1" '$1 == n {print $2}' "$D/bins"; }
+# The path of a built test binary ("lib", a tests/ name, or crash_random@power). (The first: a
+# binary the diff maps to and the crash step builds too, crash_random, is listed twice.)
+bin() { awk -v n="$1" '$1 == n {print $2; exit}' "$D/bins"; }
 # Run one: as cargo does, from the package's directory.
 run() { b=$(bin "$1"); shift; [ -n "$b" ] || { echo "no binary built"; return 1; }; (cd "$ROOT/crates/pg-engine" && "$b" "$@"); }
 
