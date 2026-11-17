@@ -777,7 +777,7 @@ fn instructions(ctx: &Ctx) -> Value {
     let who = match &ctx.principal {
         Principal::Operator => "You're connected as roll's operator: every tool is available.".to_string(),
         Principal::Grant(g) => format!(
-            "You're connected with the token \"{}\": it allows only what its owner chose, and tools/list shows only tools it can use. A call outside its rules fails with \"not allowed\": ask the user to widen the token rather than retrying.",
+            "You're connected with the token \"{}\": it allows only what its owner chose, and tools/list shows only tools it can use. A call outside its rules fails with \"not allowed\": rather than retrying, ask the user to widen the token, or ask for one rule for a while with access_request_access (saying why).",
             g.name
         ),
     };
@@ -1033,8 +1033,16 @@ async fn outcome(tool: &str, resp: Response) -> Value {
         let text = match status {
             StatusCode::UNAUTHORIZED => format!("{msg}: the token isn't valid any more (reconnect)"),
             // Where the person can allow it, when roll says (the token's page, the rule proposed).
+            // And what the agent can ask for itself, for a while (an access request).
             StatusCode::FORBIDDEN => match body.get("widen").and_then(Value::as_str) {
-                Some(w) => format!("not allowed: {msg}. If the user wants this token to be able to, they can allow it here: {w}"),
+                Some(w) => {
+                    let needs = &body["needs"];
+                    let mut ask = json!({ "product": needs["product"], "action": needs["action"], "for": "1h", "reason": "<why you need it>" });
+                    if let Some(r) = needs["resource"].as_str() {
+                        ask["resource"] = json!(r);
+                    }
+                    format!("not allowed: {msg}. If the user wants this token to be able to, they can allow it here: {w}. Or ask for it for a while yourself: call access_request_access with {ask}, then access_wait_approval.")
+                }
                 None => format!("not allowed: {msg}"),
             },
             StatusCode::NOT_FOUND => format!("not found: {msg}"),

@@ -212,6 +212,9 @@ async fn tools_follow_the_tokens_rules() {
     assert_eq!((ok["isError"].as_bool(), &ok["structuredContent"]["items"][0]["id"]), (Some(false), &json!("pa")));
     let refused = d.tool(&reader, "postgres_delete_project", json!({ "project": "pa" })).await;
     assert_eq!(refused["isError"], true);
+    // It says where the person can allow it, and what the agent can ask for itself.
+    let said = refused["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(said.contains("access_request_access") && said.contains(r#""action":"delete""#) && said.contains(r#""resource":"pa""#), "{said}");
     let bad = d.tool(&reader, "postgres_list_projects", json!({ "nope": 1 })).await;
     assert_eq!(bad["isError"], true);
 
