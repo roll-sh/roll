@@ -214,6 +214,11 @@ class Client:
         """Moves whenever ``env``'s values under ``path`` would; reads no value."""
         return self._call("GET", self._env(env) + "/digest" + _q(path))["digest"]
 
+    def transit(self, name: str) -> "Transit":
+        """The project's encryption key ``name`` (docs/secrets.md, "Encryption keys"): data is
+        encrypted, signed and HMACed by roll, and the key never leaves it."""
+        return Transit(self, name)
+
     def renew(self, lease: str, ttl_minutes: Optional[int] = None) -> Dict[str, Any]:
         """Pushes a dynamic lease's expiry out by ``ttl_minutes`` (its link's TTL by default)."""
         body = {"ttl_minutes": ttl_minutes} if ttl_minutes else {}
@@ -265,6 +270,44 @@ class Client:
                         self.renew(lease)
                     except Exception as e:  # noqa: BLE001
                         fail(e)
+
+
+class Transit:
+    """One encryption key, as ``@roll/secrets``' ``transit(name)``: bytes or text in, base64 on the
+    wire, bytes back from ``decrypt``."""
+
+    def __init__(self, client: Client, name: str):
+        self._client, self.name = client, name
+
+    def _at(self, op: str) -> str:
+        return f"/v1/secrets/projects/{urllib.parse.quote(self._client.project_id(), safe='')}/transit/{urllib.parse.quote(self.name, safe='')}/{op}"
+
+    @staticmethod
+    def _bytes(data: Any) -> bytes:
+        return data.encode() if isinstance(data, str) else bytes(data)
+
+    def encrypt(self, data: Any, context: Optional[str] = None) -> str:
+        """The ciphertext (``roll:v<n>:…``); ``context``, when given, must be given to decrypt it."""
+        return self._client._call("POST", self._at("encrypt"), {"plaintext": base64.b64encode(self._bytes(data)).decode(), "context": context})["ciphertext"]
+
+    def decrypt(self, ciphertext: str, context: Optional[str] = None) -> bytes:
+        """The plaintext (audited, as a reveal)."""
+        return base64.b64decode(self._client._call("POST", self._at("decrypt"), {"ciphertext": ciphertext, "context": context})["plaintext"])
+
+    def sign(self, data: Any) -> str:
+        """An Ed25519 signature over the bytes as given: anyone with ``public_keys`` checks it."""
+        return self._client._call("POST", self._at("sign"), {"input": base64.b64encode(self._bytes(data)).decode()})["signature"]
+
+    def verify(self, data: Any, signature: str) -> bool:
+        return bool(self._client._call("POST", self._at("verify"), {"input": base64.b64encode(self._bytes(data)).decode(), "signature": signature})["valid"])
+
+    def hmac(self, data: Any) -> str:
+        """HMAC-SHA256, the same for the same input: a lookup column over encrypted fields."""
+        return self._client._call("POST", self._at("hmac"), {"input": base64.b64encode(self._bytes(data)).decode()})["hmac"]
+
+    def public_keys(self) -> List[Dict[str, Any]]:
+        """An Ed25519 key's public halves, every version (``public_key``, ``pem``, ``jwk``)."""
+        return self._client._call("GET", self._at("public"))
 
 
 def login(api: str, identity: str, oidc_token: str) -> Client:
