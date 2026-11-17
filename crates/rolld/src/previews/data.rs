@@ -802,7 +802,11 @@ impl Search {
         let id = s(&v["id"]).unwrap_or_default();
         match self.0.post(&format!("/v1/search/clusters/{}/keys", seg(&id)), json!({ "name": format!("roll preview {name}"), "access": "data" })).await {
             Ok(k) if k["access"].as_str().is_some_and(|a| a != "data") => {
-                tracing::warn!(branch = %name, "previews: roll search made a {} key, not a data one: the branch's own login stays", k["access"]);
+                // Never kept: revoked at once, as roll secrets does with one.
+                if let Some(key) = s(&k["id"]) {
+                    let _ = self.0.delete(&format!("/v1/search/clusters/{}/keys/{}", seg(&id), seg(&key))).await;
+                }
+                tracing::warn!(branch = %name, "previews: roll search made a {} key, not a data one: revoked, and the branch's own login stays", k["access"]);
             }
             Ok(k) => {
                 if let Some(key) = s(&k["api_key"]) {
