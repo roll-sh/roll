@@ -818,17 +818,27 @@ impl VectorsReader {
         KnnResult { hits: self.hits(top), visited, complete: true }
     }
 
+    /// [`exact_search`](Self::exact_search) over the ordinals `filter` holds: the same hits,
+    /// scoring only the accepted vectors instead of testing every one.
+    pub fn exact_search_filtered(&self, q: &PreparedQuery, k: usize, filter: &OrdFilter) -> KnnResult {
+        let (top, visited) = self.top_k(k, filter.ords(), |ord| self.score(q, ord));
+        KnnResult { hits: self.hits(top), visited, complete: true }
+    }
+
     /// The `k` best accepted ordinals by `score` (best first) and the number scored.
     fn scan(&self, k: usize, accept: Option<&dyn Fn(u32) -> bool>, score: impl Fn(u32) -> f32) -> (Vec<Scored>, usize) {
+        match accept {
+            None => self.top_k(k, 0..self.count, score),
+            Some(a) => self.top_k(k, (0..self.count).filter(|&ord| a(self.doc(ord))), score),
+        }
+    }
+
+    /// The `k` best of `ords` by `score` (best first) and the number scored.
+    fn top_k(&self, k: usize, ords: impl Iterator<Item = u32>, score: impl Fn(u32) -> f32) -> (Vec<Scored>, usize) {
         let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<Scored>> = std::collections::BinaryHeap::new();
         let mut visited = 0;
         if k > 0 {
-            for ord in 0..self.count {
-                if let Some(a) = accept
-                    && !a(self.doc(ord))
-                {
-                    continue;
-                }
+            for ord in ords {
                 visited += 1;
                 let s = Scored { score: score(ord), ord };
                 if heap.len() < k {
@@ -949,7 +959,8 @@ impl VectorsReader {
     /// over rejected ones to their neighbors; wider filters use [`search`](Self::search).
     /// `visit_limit` is usually the filter's count: past it, exact search over the filter is
     /// cheaper (`complete == false`, also when fewer than `k` hits came back). A filter
-    /// accepting at most `k` vectors is searched exactly.
+    /// accepting at most `k` vectors, or too few for the graph to find them cheaply
+    /// ([`exact_is_cheaper`]), is searched exactly.
     pub fn search_filtered(
         &self,
         q: &PreparedQuery,
@@ -967,14 +978,14 @@ impl VectorsReader {
         if k == 0 || self.count == 0 || accepted == 0 {
             return KnnResult { hits: Vec::new(), visited: 0, complete: true };
         }
-        if accepted as usize <= k {
+        let ef = k.max(num_candidates);
+        if accepted as usize <= k || exact_is_cheaper(accepted as usize, ef, self.count as usize) {
             // Lucene: when the filter cannot even fill k, exact search is the answer.
-            return self.exact_search(q, k, Some(&accept_doc));
+            return self.exact_search_filtered(q, k, filter);
         }
         if accepted as u64 * 100 >= self.count as u64 * FILTERED_SEARCH_THRESHOLD {
             return self.search(q, k, num_candidates, Some(&accept_doc), visit_limit);
         }
-        let ef = k.max(num_candidates);
         let mut score = |ord: u32| self.steer_score(q, ord);
         let prefetch = |ord: u32| distance::prefetch(self.steer_bytes(q, ord));
         let (beam, visited, complete) = search_graph_filtered(
@@ -1012,6 +1023,29 @@ impl OrdFilter {
     fn get(&self, ord: u32) -> bool {
         self.words.get(ord as usize >> 6).is_some_and(|w| w >> (ord & 63) & 1 != 0)
     }
+
+    /// The accepted ordinals, ascending.
+    fn ords(&self) -> impl Iterator<Item = u32> + '_ {
+        self.words.iter().enumerate().flat_map(|(i, &w)| {
+            let mut w = w;
+            std::iter::from_fn(move || {
+                (w != 0).then(|| {
+                    let o = i as u32 * 64 + w.trailing_zeros();
+                    w &= w - 1;
+                    o
+                })
+            })
+        })
+    }
+}
+
+/// Whether scoring every accepted vector costs less than a filtered graph search for the best
+/// `ef`. Lucene sizes that search's visited set for `ln(n) · ef / (accepted / n)` nodes; once
+/// that reaches the whole graph (`accepted <= ef · ln(n)`), the search reads about every
+/// neighbor list to score about as many vectors as an exact search, and with so few accepted
+/// nodes it often stops short of `ef` and searches exactly anyway.
+fn exact_is_cheaper(accepted: usize, ef: usize, n: usize) -> bool {
+    (accepted as f64) <= ef as f64 * (n.max(1) as f64).ln()
 }
 
 /// Filters passing fewer than this percentage of a field's vectors use the filtered graph
