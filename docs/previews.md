@@ -1620,10 +1620,11 @@ Ranked by what a person notices first. Done so far:
   search data key (#153), a working day's freeze window (#174, measured: no database cost), a
   note's picture on the change page (#111), the Rules dialog's roll apps note (#135), a filter on the Previews list (#192).
 
-1. **Egress rules for previews hosted on roll apps** (apps' #143): previews' adapter is wired on
-   #143 (reviewed); after it merges, the live check in `scripts/preview-apps.sh` with
-   `egress: "roll"`: 1.1.1.1 unreachable from the pv- instance, a listed host through the proxy,
-   a refused one in the activity.
+1. **Roll only on roll apps, in review (#216):** apps' #143 is on main with previews' adapter, so
+   a preview hosted on roll apps gets Roll only and the allowed hosts. #216 drops the approval
+   refusal that assumed it didn't (#135, which said so in the Rules dialog, is closed). Its live
+   check runs the `pv-` instance closed: a direct connection fails, a listed host goes through,
+   an unlisted one is refused and said.
 2. **What a preview shows, masked** (#200, reviewed by the roll secrets thread; the page's words
    stacked on it as `feature/roll-previews-mask-pages`). Anyone who can read a preview reads its
    logs, its jobs' output (a teardown's goes into the pull request's comment) and what its page
@@ -1652,7 +1653,11 @@ Ranked by what a person notices first. Done so far:
 6. **Screenshots of roll apps' services on a fleet, in review (#214):** the run goes to the
    service's holder as a signed hop to `/internal/previews/apps-shot` and the `Shot` comes back as
    JSON (tested with two nodes in one process). Fargate is left to the cloud thread.
-7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+7. **A preview's request log, in review (#215):** its latest 200 requests through roll (method,
+   path without the query, status, time to headers), `GET …/requests` and the sheet's Requests
+   tab (Vercel's). A roll apps instance's requests are roll apps' own. MCP's `previews_requests`
+   follows once it's on main (the MCP thread).
+8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17 on ai-server's ext4): Docker's `local` volume driver mounts an overlay
    (`--opt type=overlay`, lower = a read-only base copy of the parent, upper = the branch's own),
    with no privileges beyond Docker's. A 1.4 GB pgbench parent (scale 50) branched this way was
@@ -1668,8 +1673,8 @@ Ranked by what a person notices first. Done so far:
      too long.
    - The cost: a full copy per parent (not per branch), and a replay at each branch.
    - Ranked below the fleet's needs: XFS volumes already share blocks.
-8. **Watch: pg-control's recovery to a time seconds old** (unowned).
-9. **Watch: a cold start on a Docker name conflict**: a preview's services each making its egress
+9. **Watch: pg-control's recovery to a time seconds old** (unowned).
+10. **Watch: a cold start on a Docker name conflict**: a preview's services each making its egress
    proxy under one name was fixed (#137); if it comes back, log both starts' container ids.
 
 Measured and not landed (2026-11-17): deploying a preview's roll apps services at once
