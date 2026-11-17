@@ -14453,3 +14453,172 @@ information_schema.columns still took the materialized views' columns the relati
 them where it is read. `cargo test --profile verify-checked -p pg-engine --test wire`: 74 passed;
 quick-check again on the rebased tree before handing it in again.
 
+## Behaviour gaps closed by agent 248 (2026-11-17)
+
+Recorded against a private PostgreSQL 18.6 (the reference image `postgres@sha256:77f58511...`;
+`a248-pgref`, default settings, for the wire cases). The kept cases are five new ones in the
+wire test `protocol_cases` (`plf_unread_outputs`, `plf_invalidation`, `guc_reset_all_order`,
+`explain_estimates`, `loc_lo_adv`; `tests/data/protocol_cases.out` recorded again with
+`PROTOCOL_RECORD`, the 213 old cases unchanged). Exploratory probes are in `~/.cache/a248/probe`
+(240's sets plus `inv.py` plan invalidation, `n1.py` GUC reports / advisory locks / large
+objects / NOTIFY / WITH HOLD cursors / prepared transactions, `gord.py` RESET ALL order,
+`loc2.py` error sites, `t4i.py` index expressions).
+
+- **Outputs of a view or sub-select nothing reads aren't planned** (`binder/unread.rs`). Postgres
+  pulls such a sub-select up and drops what nothing reads, or replaces those outputs with NULLs
+  (remove_unused_subquery_outputs), so their immutable PL/pgSQL calls never run while planning.
+  Before binding a FROM sub-select or view, the level above's names are collected from its
+  statement (every column reference, USING list; a `*`, a whole-row reference or a NATURAL join
+  reads everything; its own unread outputs left out, so nested views work), and an output whose
+  name (an alias's column name, a view's column) appears nowhere is bound with its calls left
+  (`skip_procs`); the projection nothing reads is dropped before anything runs. Not done for a
+  select with DISTINCT, GROUP BY, HAVING or ORDER BY (their keys are kept).
+- **A prepared statement is planned again only when its plan's objects changed**
+  (`session/plandeps.rs`, `Procs::calls`, `Binder::proc_memo`). The engine still binds a named
+  statement again after any catalog change (its plans stay correct), but when planning ran
+  immutable PL/pgSQL calls it keeps their values with what the plan depended on (plancache.c's
+  invalidation items: the relations it locks and reads, with their indexes, statistics, ACLs,
+  policies, triggers and file node; the functions it calls; the schemas and operators, whose
+  changes reset every plan) and, when none of that changed and the search path resolves to the
+  same schemas, takes the values instead of running the calls again: NOTICEs repeat only when
+  PostgreSQL's would (25 probe shapes: CREATE / DROP of other tables, functions, types,
+  sequences, roles, comments, ANALYZE / GRANT / index of another table don't replan; ALTER,
+  index, ANALYZE, VACUUM, GRANT, TRUNCATE of its own table, CREATE OR REPLACE / ALTER of its
+  functions, a schema or operator change do). EXECUTE's RevalidateCachedQuery check only
+  analyzes (its first EXECUTE ran the call twice: the generic binding and the custom plan).
+- **RESET ALL / DISCARD ALL in guc_nondef_list's order** (`Settings::order`, `reset_rank`): the
+  configuration file's parameters (datestyle, timezone), client_encoding, the startup packet's,
+  the role's and database's, then the session's SETs in the order each left its default (a
+  RESET takes it out); the reports and a rollback's restores follow from that order.
+- **pg_locks object locks** (`Ddl::lock_references`, DROP's deletion locks): the public schema
+  isn't pinned (IsPinnedObject), so CREATE TABLE in it holds its AccessShareLock; a new table's
+  row type is locked through its array type's dependency; DROP TABLE holds AccessExclusiveLock
+  on the row type and its array type.
+- **Error locations**: LockRelease's two "you don't own a lock" warnings (2110 not held, 2149
+  held by the transaction), be-fsstubs.c's descriptor errors per routine (be_lo_close, lo_read,
+  lo_write, be_lo_lseek(64), be_lo_tell(64), lo_truncate_internal), inv_open / be_lo_unlink's
+  "does not exist", inv_seek, Async_Notify's channel names, AtPrepare_Notify, twophase.c's
+  LockGXact / MarkAsPreparing, PrepareTransaction's temporary objects, DECLARE ... WITH HOLD
+  FOR UPDATE; PREPARE TRANSACTION outside a block names EndTransactionBlock's line as COMMIT
+  does.
+- **EXPLAIN plan choices and estimates** (`paths.rs`, `explain.rs`, `costs.rs`):
+  - a window over a table, and an aggregation without groups whose DISTINCT / ORDER BY
+    aggregates want one order, consider an index read in that order against sorting the
+    cheapest path (`ordered_scan`; create_window_paths, presorted aggregates);
+  - grouping sets: each rollup's groups (estimate_num_groups per set) and cost_agg as
+    create_groupingsets_path adds them (rows 11 for `rollup(g)` over 10 values, not 400);
+  - a table its own quals prove empty has 0-wide columns (the fallback of 4 bytes a column
+    no longer applies to it, nor to an inheritance Append, a VALUES or function scan nothing
+    reads columns of); a VALUES scan's and a record-returning function scan's width are those
+    of the columns read;
+  - AGG_PLAIN's final functions are startup cost; a function call costs its procost (115
+    built-ins have 10, 100 or 1000); casts PostgreSQL's pg_cast marks binary (oid / integer /
+    reg*, text to bpchar, xml, cidr, bit) cost nothing;
+  - `bit(n)` columns are `type_maximum_size` wide for a never-analyzed table's density;
+  - a boolean function called by name has function_selectivity's 0.3333333;
+  - array `@>` / `&&` against a constant use the column's most common elements
+    (calc_arraycontsel; `<@` keeps its default);
+  - tsvector columns get ts_typanalyze's statistics (Lossy Counting of lexemes into a
+    most-common-elements slot, the column taken as unique) and `@@` a constant tsquery uses
+    them (tsmatchsel's tsquery_opr_selec, prefix lexemes included);
+  - a PL/pgSQL Function Scan costs its call as startup (cost_functionscan, prorows);
+  - hash join keys' casts show the SQL type name (`::double precision`);
+  - only operators scalarltsel / scalarlesel / scalargtsel / scalargesel estimate pair into
+    range bounds (addRangeClause: a box's `<=` is areasel's 0.005, not 1/3); operators eqsel
+    or neqsel estimate under another name (point `~=`) go through the equality estimate;
+  - a user aggregate's transition and final functions cost their procost (100 for SQL / PL);
+  - a domain-typed value's width has no typmod.
+
+The wider EXPLAIN comparison (item 2): `~/.cache/a248/rx` runs every file of the regression
+schedule on both servers (autovacuum off, the suite's own setup, `run.sh <port> <label>`) with
+an `EXPLAIN` before each top-level SELECT / WITH / VALUES / TABLE statement (`xform.py`), and
+compares the 17,654 plans (`cmp.py`: shape, rows, width, cost; plans over system catalogs apart,
+their statistics are the engine's own; `causes.py` the deepest differing node; `show.py` a pair).
+On the base, 3,892 differ (1,252 over catalogs); after the first part 3,278 (1,125: 622
+more matching, 7 newly differing, all 7 fixed after: regclass to text is an I/O cast, a cast
+to `char(n)` keeps its length coercion, a domain's width), after the second (with the LOG2 and
+FROM-less changes since dropped) 3,205 (1,120; 73 more matching, none newly differing). By cause, what is left (counts of the deepest
+differing node): rows and costs of selectivity estimates without the engine's statistics
+(`jsonb @>`'s matchingsel, SP-GiST / GiST / BRIN index cost details), a never-analyzed table holding rows
+(PostgreSQL's 10-page assumption needs relpages 0 and the table's real block count), widths of
+array columns (ANALYZE's average off by one byte), set-returning functions in the select list
+(ProjectSet costs), JIT summaries (PostgreSQL's image is built with LLVM; the engine has no JIT,
+as a server built without it), equivalence-class clauses in an inner scan's Filter written
+`outer = inner` (18), `select ... where false` in a FROM-less query (PostgreSQL: a one-row
+Result with a gating qual; the engine's zero-column empty plan is also what a join's dummy
+becomes, so it can't tell them apart there), the last digit of sort and merge costs
+(costsize.c's LOG2 divides by a cut-short ln 2: tried, dropped, as a dummy input's sorted and
+hashed aggregations then differed by 1e-17 and the engine's exact cost comparison, unlike
+add_path's fuzz factor, took the hashed one: regress partition_aggregate, golden
+a6_dummy_rel_keys).
+TPC-H: `tools/bench/plancmp.py` base against new on SF 0.05 (both parts): 22 of 22 plans
+identical (shape and text, costs within 0.1%), so no TPC-H plan changed.
+
+Not done (still differing):
+- `select * from t0, fset(0)` with an empty t0: a PL/pgSQL Function Scan now costs its call as
+  startup (0.25), but a FROM function call stays a lateral item of its place in the FROM list
+  (`JoinMeta::from_call` is never reordered), so the join search never considers it as the
+  outer side; PostgreSQL's does (a Function Scan materializes itself and rescans at its run
+  cost: ExecMaterializesOutput, cost_rescan), and runs it first.
+- Index expressions' immutable calls: PostgreSQL folds them once per relcache load of the index
+  (`t4i.py`: CREATE INDEX shows 2 NOTICEs on an empty table and 3 on one with rows, the first
+  DML after it 1, later DML none, REINDEX 1); the engine binds index expressions per statement
+  with their calls left (233's security-restricted build) and runs them per row. A session
+  cache of folded index expressions keyed by the index definition's identity is the way in;
+  the CREATE INDEX counts need relcache's exact reload points.
+- Scroll cursors after page splits: not built (233's design stands).
+- pg_statio heap / index block counts of inserts: PostgreSQL counts one heap buffer access per
+  row on an existing page (none for the page an insert extends), index accesses by descent and
+  the rightmost-leaf fastpath, FSM pages besides (100 rows into an empty table with two
+  indexes: heap 99 hits, index 2 reads and 202 hits); the engine counts none. Needs the heap
+  and btree models to count buffer accesses as they place rows.
+- pg_locks: object locks of tables a CASCADE drops (only the roots' row types are locked), of
+  temporary tables (PostgreSQL locks pg_temp's entries too), and the xid a waiting ALTER TABLE
+  already has.
+- EXPLAIN: `jsonb @>` and the other matchingsel operators (the operator applied to the MCV
+  list and histogram), geometric and BRIN / SP-GiST cost details, a never-analyzed table
+  holding rows, ProjectSet costs, JIT summaries (by design: no JIT), presorted UNION ...
+  ORDER BY LIMIT arms (EXPLAIN models the union's paths itself), UNION ALL arms a table's own
+  qual proves empty (PostgreSQL drops them, and the Append with one arm left), a join's width
+  over a numeric column (27 against 24).
+- `lo_import` / server files stay refused (by design); GSSENCRequest as before.
+
+Probed and matching already: advisory locks (counts, shared / exclusive, transaction and
+session levels, pg_locks rows), large objects (descriptors, seeks, truncation, lo_get / lo_put,
+ACLs and comments), LISTEN / NOTIFY (duplicates folded in a transaction, payload and channel
+limits, savepoints, rollback), cursors WITH HOLD across commit and rollback (scroll and not,
+a failed FETCH, CLOSE ALL), prepared transactions' pg_prepared_xacts rows and errors (with
+max_prepared_transactions set), SET LOCAL / savepoint ParameterStatus sequences.
+
+Measured (lane A, 8 clients, plain dist builds: base `6d3b7e9e5`, agent 250's `tools/dist.sh`
+build of it, against these commits on it, `25fefd9aa`; alternating pairs, user instructions per
+operation from `perf stat` of the server; `~/.cache/a248/runs`, `bench/gate.py <tag> 5 base new`):
+point reads, two pairs (0.25 and 0.78 cores of foreign load on the lane): **-2.4% and -1.6%**
+user instructions per read (40,840 / 39,877 and 40,022 / 39,386), cycles -1.6% and +3.1%, ops/s
++3.2% and -21.3% (the second pair's run of the new build shared the lane with an unpinned model
+runner: CPU per read +11.6% with fewer instructions). Not finished: the other three point
+pairs and the short-transaction pairs, which waited more than three hours for the lane's lock
+(agents 247, 249 and 251's gates took every turn) and were stopped; a later run should
+redo them with `~/.cache/a248/bench/pairs.sh` (agent 240's harness: `bin/base` and `bin/new`
+plain dist builds by `tools/dist.sh`, the bench client in `bin/bench`) when the lane frees up.
+Nothing on the point-read or short-transaction path runs changed code: binding (only when a
+statement is bound: the FROM list's statement pointer, a field taken at the select list), the
+memo check only on a catalog version change, `Procs` cloned (an `Option<Arc>`) where it was
+copied; the rest is planning costs, EXPLAIN, ANALYZE, DDL, RESET ALL and error paths. The lane
+was shared with an unpinned model runner (about 7 cores at times) and four other agents' gates;
+`25fefd9aa` differs from the handed-in commits only in EXPLAIN and cost code since reverted (the
+LOG2 and FROM-less changes), none on those paths. TPC-H: plans unchanged (above).
+
+Verification: quick-check on the rebased tree (`974184c44` + these commits): build, clippy (16
+warnings, none new in changed files), regress 51,148 / 51,150 with 0 newly differing, isolation
+1647/1648, pg_dump 14,609 passed; its test step twice lost a run to the load (the lib's
+`server::tests::wait_spin_polls_only_for_a_quick_client`, a 20 ms sleeper against a 5 ms spin,
+and two `protocol_cases` sessions whose startup packet wasn't answered within the helper's
+quiet window; server.rs is untouched), so every test binary of the build was then run through
+heavy.sh: golden 3, kept_plans 11, heap_order_scan, big_tables, lib 233, wire 74, wire_waits,
+models_kept 6, parallel_scan 13, query_spill 5 all passing. Before the rebase the same code
+passed a whole quick-check (`ce6665920`). `--profile verify-checked` (debug assertions): golden
+3, wire 74, kept_plans 11 passing. Files of other agents changed on purpose: tests/wire.rs's
+`stat_counts` (agent 240's case) warms the statistics and lock views in its setup, its recorded
+output unchanged: their first expansion outlasted a step's 400 ms quiet window on a loaded
+machine (80 to 340 ms on an idle one, base build too).
