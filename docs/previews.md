@@ -112,8 +112,13 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   first: its container is paused (`docker pause`), keeping its memory (12–22 MiB for the
   measured service) and using no CPU, and it reads and costs as asleep. A visit in that window
   thaws it: 48–72 ms to the first response on this machine, where a cold start is 3.3–3.9 s.
-  After `ROLL_PREVIEWS_WARM_MINUTES` (30; 0 stops at once, as before) it's stopped for good, and
-  a node keeps at most `ROLL_PREVIEWS_WARM_MAX` (32) frozen, stopping the oldest past it. A
+  After `ROLL_PREVIEWS_WARM_MINUTES` (480, a working day; 0 stops at once) it's stopped for good,
+  and a node keeps at most `ROLL_PREVIEWS_WARM_MAX` (32) frozen, stopping the oldest past it, so
+  the window costs no more memory than 32 frozen services however long it is. A frozen service
+  doesn't hold its data up: measured (2026-11-17), the preview's Postgres branch suspended within
+  five minutes of its services freezing and stayed suspended while they were frozen, so a longer
+  window keeps the next visit at tens of milliseconds without keeping a database running (the
+  window was 30 minutes until then). A
   request that lands just as a service freezes thaws it again at once. A frozen service keeps
   its dynamic credentials renewed (its process comes back with them). Docker only: Fargate has
   no pause, so services there stop. Sleep asked for (`roll preview sleep`, the sheet's Sleep)
