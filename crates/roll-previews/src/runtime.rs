@@ -1055,7 +1055,8 @@ impl Apps for Runtime {
             }
         })
         .await;
-        let first = String::from_utf8_lossy(&said[..said.len().min(4096)]).lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().filter(|c| !c.is_control()).take(200).collect();
+        // Cut wide here: the engine masks it whole and then cuts it to 200 (a value isn't left half shown).
+        let first = String::from_utf8_lossy(&said[..said.len().min(4096)]).lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().filter(|c| !c.is_control()).take(2000).collect();
         Ok(Some((status, first)))
     }
 
