@@ -1115,24 +1115,42 @@ async fn approve_with(d: &Daemon, who: &str, apr: &str, body: Value) -> (StatusC
 #[tokio::test(flavor = "multi_thread")]
 async fn a_token_asks_for_access_for_a_while() {
     let d = Daemon::new(50);
-    let (token, id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
-    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pa", None).await.0, StatusCode::FORBIDDEN);
     let ask = json!({ "product": "postgres", "action": "delete", "resource": "pa", "for": "1h", "reason": "drop the scratch database I made" });
+    // A token made never to ask a person doesn't ask for more either.
+    let (fixed, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    assert_eq!(d.call(&fixed, Method::POST, "/v1/access/requests", Some(ask.clone())).await.0, StatusCode::FORBIDDEN);
+    let (token, id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }, { "product": "workspace", "resources": "*", "actions": { "delete": "ask" } }]), json!({})).await;
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pa", None).await.0, StatusCode::FORBIDDEN);
     assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(json!({ "product": "postgres", "action": "delete", "for": "1y", "reason": "x" }))).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/requests", Some(ask.clone())).await.0, StatusCode::BAD_REQUEST, "only a token asks");
+    let tokens = json!({ "product": "access", "action": "admin", "for": "15m", "reason": "let me fix my own rules" });
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(tokens)).await.0, StatusCode::FORBIDDEN, "never tokens and approvals");
     let (s, apr) = d.call(&token, Method::POST, "/v1/access/requests", Some(ask.clone())).await;
     assert_eq!((s, apr["state"].as_str(), apr["args"]["reason"].as_str()), (StatusCode::ACCEPTED, Some("pending"), Some("drop the scratch database I made")), "{apr}");
+    assert!(apr["summary"].as_str().is_some_and(|s| s.contains("every environment")), "the person reads its whole reach: {apr}");
     let apr = apr["id"].as_str().unwrap().to_string();
     assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(ask)).await.1["id"], json!(apr), "the same request again is the one waiting");
     // It can't be approved for longer, and a token never decides it.
     assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "always" }))).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(d.call(&token, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await.0, StatusCode::FORBIDDEN);
-    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await.1["state"], "approved");
+    // Decided anywhere (chat decides through the same call), it's the rule at once.
+    assert_eq!(d.access.decide(&apr, true, "operator", None).unwrap().state, "approved");
     // Now it may, on that one database, for the hour; never another.
     assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pa", None).await.0, StatusCode::OK);
     assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pb", None).await.0, StatusCode::FORBIDDEN);
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
     assert_eq!(g["temporary"][0]["approval"], json!(apr), "{g}");
+
+    // Under a two-person rule, what two people approved is usable: the gate doesn't ask again.
+    d.people.add("usr_bob", "bob");
+    d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "approval_rules": [{ "product": "postgres", "actions": ["delete"], "approvals": 2, "approvers": ["operator", "usr_bob"] }] }))).await;
+    let ask = json!({ "product": "postgres", "action": "delete", "resource": "pc", "for": "15m", "reason": "and this one" });
+    let apr = d.call(&token, Method::POST, "/v1/access/requests", Some(ask)).await.1["id"].as_str().unwrap().to_string();
+    assert_eq!(d.access.decide(&apr, true, "operator", None).unwrap().state, "pending");
+    assert_eq!(d.access.decide(&apr, true, "usr_bob", None).unwrap().state, "approved");
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pc", None).await.0, StatusCode::OK);
+    // And the one approved by one person before the gate asks again.
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pa", None).await.1["code"], "approval_pending");
 }
 
 /// What roll's policy names needs several people (docs/permissions.md, "Two-person approvals"):

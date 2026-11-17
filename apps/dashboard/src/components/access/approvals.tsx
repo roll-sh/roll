@@ -104,7 +104,7 @@ function Pending({ a, focused, refresh, viewer }: { a: Approval; focused: boolea
           </p>
           <h2 className="mt-1 truncate font-mono text-[14px]">
             {a.resource ?? productName(a.product)}
-            {approvalWhere(a) && <span className="text-muted"> · {approvalWhere(a)}</span>}
+            {(approvalWhere(a) || (accessRequest(a) && "every environment")) && <span className="text-muted"> · {approvalWhere(a) || "every environment"}</span>}
           </h2>
           {accessRequest(a) ? (
             <p className="mt-1 text-[13px]">

@@ -241,6 +241,9 @@ pub struct Grant {
     /// OAuth connection's tokens change every hour.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// Narrowed to reading for this request (`scope=read-only`): never asks.
+    #[serde(skip)]
+    pub read_only: bool,
 }
 
 /// Why a live token isn't honoured yet.
@@ -261,6 +264,10 @@ pub struct TempRule {
     /// The approval that allowed it (it can be taken back by this id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<String>,
+    /// Its approval met roll's policy's approval rules (an access request two people approved):
+    /// those gates don't make it ask again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gated: bool,
 }
 
 impl Grant {
@@ -271,12 +278,16 @@ impl Grant {
     /// covers it) asks again instead of allowing, so a gate added later isn't skipped.
     pub fn effective_rules(&self, now: i64, asks_again: impl Fn(&roll_auth::scope::Rule) -> bool) -> Scope {
         let mut s = self.rules.clone();
-        s.0.extend(self.temporary.iter().filter(|t| t.until > now).map(|t| {
+        s.0.extend(self.temporary.iter().filter(|t| t.until > now).filter_map(|t| {
             let mut r = t.rule.clone();
-            if asks_again(&r) {
+            if !t.gated && asks_again(&r) {
+                // A read-only token never asks: the rule just doesn't apply.
+                if self.read_only {
+                    return None;
+                }
                 r.actions.values_mut().for_each(|e| *e = roll_auth::scope::Effect::Ask);
             }
-            r
+            Some(r)
         }));
         s
     }
@@ -299,6 +310,7 @@ impl Grant {
         self.temporary.iter_mut().for_each(|t| narrow(&mut t.rule));
         self.temporary.retain(|t| !t.rule.actions.is_empty());
         self.ask_otherwise = false;
+        self.read_only = true;
     }
 
     /// Honoured now: live, and past its `not_before`.
@@ -687,6 +699,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         None => None,
     };
     Ok(Grant {
+        read_only: false,
         id: r.get(0)?,
         name: r.get(1)?,
         kind: match r.get::<_, String>(2)?.as_str() {
@@ -740,6 +753,16 @@ pub(crate) fn audit_row(r: &code_sql::Row<'_>) -> code_sql::Result<AuditEvent> {
         duration_ms: r.get(16)?,
         client: r.get(17)?,
     })
+}
+
+/// A rule for a while added to a grant's temporary ones (the lapsed ones, and an older copy of the
+/// same rule, dropped), inside a write.
+fn push_temp(c: &code_sql::Conn<'_>, grant: &str, temp: Option<String>, add: TempRule, now: i64) -> code_sql::Result<()> {
+    let mut list: Vec<TempRule> = temp.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    list.retain(|t| t.until > now && t.rule != add.rule);
+    list.push(add);
+    c.execute("UPDATE grants SET temp_rules = ? WHERE id = ?", params![serde_json::to_string(&list).unwrap_or_default(), grant])?;
+    Ok(())
 }
 
 const APPROVAL_COLUMNS: &str =
@@ -1226,12 +1249,7 @@ impl Store {
                     }
                     c.execute("UPDATE grants SET rules = ? WHERE id = ?", params![serde_json::to_string(&rules).unwrap_or_default(), id])?;
                 }
-                Some(until) => {
-                    let mut temp: Vec<TempRule> = temp.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-                    temp.retain(|t| t.until > now && t.rule != *rule);
-                    temp.push(TempRule { rule: rule.clone(), until, approval: Some(approval.to_string()) });
-                    c.execute("UPDATE grants SET temp_rules = ? WHERE id = ?", params![serde_json::to_string(&temp).unwrap_or_default(), id])?;
-                }
+                Some(until) => push_temp(c, id, temp, TempRule { rule: rule.clone(), until, approval: Some(approval.to_string()), gated: false }, now)?,
             }
             Ok(())
         })?;
@@ -1503,13 +1521,16 @@ impl Store {
     /// Decide a pending approval. Approving adds `by` to who approved it; it's approved once
     /// `enough` says they are (one person when no policy rule covers it), and stays pending until
     /// then. A person approves once. Denying decides at once.
-    pub fn decide(&self, id: &str, approve: bool, by: &str, reason: Option<&str>, enough: &dyn Fn(&[String]) -> bool) -> Result<Approval> {
+    ///
+    /// `grants`: an access request's rule, for how long, and whether gates covered it: added to the
+    /// token's rules for a while in the same write that approves it, however it was decided.
+    pub fn decide(&self, id: &str, approve: bool, by: &str, reason: Option<&str>, enough: &dyn Fn(&[String]) -> bool, grants: Option<(&roll_auth::scope::Rule, i64, bool)>) -> Result<Approval> {
         let now = code_sql::now_ms();
         let changed = self.db.write(|c| {
-            let row: Option<(String, i64, Option<String>)> = c
-                .query_row("SELECT state, expires_at, approved_by FROM approvals WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            let row: Option<(String, i64, Option<String>, String)> = c
+                .query_row("SELECT state, expires_at, approved_by, grant_id FROM approvals WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
                 .optional()?;
-            let Some((state, expires_at, so_far)) = row else { return Err(Error::NotFound(format!("no approval {id}"))) };
+            let Some((state, expires_at, so_far, grant_id)) = row else { return Err(Error::NotFound(format!("no approval {id}"))) };
             if state != "pending" || expires_at <= now {
                 return Ok(false);
             }
@@ -1532,6 +1553,12 @@ impl Store {
                     "UPDATE approvals SET state = 'approved', decided_at = ?, decided_by = ?, approved_by = ?, expires_at = ? WHERE id = ?",
                     params![now, by, list, now + APPROVAL_TTL_MS, id],
                 )?;
+                if let Some((rule, for_ms, gated)) = grants {
+                    let temp: Option<Option<String>> = c.query_row("SELECT temp_rules FROM grants WHERE id = ? AND revoked_at IS NULL", [&grant_id], |r| r.get(0)).optional()?;
+                    if let Some(temp) = temp {
+                        push_temp(c, &grant_id, temp, TempRule { rule: rule.clone(), until: now + for_ms, approval: Some(id.to_string()), gated }, now)?;
+                    }
+                }
             } else {
                 c.execute("UPDATE approvals SET approved_by = ? WHERE id = ?", params![list, id])?;
             }

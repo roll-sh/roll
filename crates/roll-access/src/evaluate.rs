@@ -565,11 +565,21 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
                 }
                 format!("{}/dashboard/access/tokens/{}?{}", access.web_url(), ctx.grant.id, q.finish())
             });
+            // What the token itself may ask for (an access request), when it was made to ask people
+            // and it's not about tokens and approvals.
+            let asks = ctx.grant.ask_otherwise || ctx.grant.rules.0.iter().any(|r| r.actions.values().any(|e| *e == roll_auth::scope::Effect::Ask));
+            let request = (widen.is_some() && asks && about != "access").then(|| {
+                let mut r = json!({ "product": about, "action": action, "for": "1h", "reason": "<why you need it>" });
+                if let Some(id) = &resource {
+                    r["resource"] = json!(id);
+                }
+                r
+            });
             return deny(
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 format!("this token can't {action} {what}"),
-                json!({ "needs": { "product": about, "action": action, "resource": resource }, "widen": widen }),
+                json!({ "needs": { "product": about, "action": action, "resource": resource }, "widen": widen, "request": request }),
             );
         }
         Outcome::Ask if decided_before => {}
@@ -986,7 +996,7 @@ async fn remembered(access: &Arc<Access>, grant: &Grant, scope: &Scope, target: 
     let t = grant
         .temporary
         .iter()
-        .filter(|t| t.until > now && t.approval.is_some() && Scope(vec![t.rule.clone()]).outcome(target, action) == Outcome::Allow)
+        .filter(|t| t.until > now && t.approval.is_some() && (t.gated || !access.policy_now().asks_again(&t.rule)) && Scope(vec![t.rule.clone()]).outcome(target, action) == Outcome::Allow)
         .max_by_key(|t| t.until)?;
     let (id, until) = (t.approval.clone()?, t.until);
     let (a, id2) = (access.clone(), id.clone());

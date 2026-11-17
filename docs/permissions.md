@@ -656,7 +656,8 @@ secrets:reveal@production=2`, the overview's "Require several approvers…"):
   (the stricter reading). The names match roll secrets' protected environments, whose change
   requests count approvals the same way.
 - Who counts: with `approvers` left out, signed-in people (`usr_…`: admins, and a person for their
-  own tokens' requests, except as below). The operator's token (`operator`) and chat approvers
+  own tokens' requests, except as below). With no accounts, a rule must name its approvers
+  (`operator`): the policy refuses one that doesn't. The operator's token (`operator`) and chat approvers
   (`slack:U…`) count only where a rule names them: anyone may hold the token, and a chat id isn't
   tied to an account, so one human could otherwise count twice, or approve their own token's
   request from chat. A chat approver the operator linked to their account ("Approvals in chat")
@@ -685,13 +686,19 @@ database asks once, rather than being refused or asking at every call.
   with the token itself (`access_request_access` over MCP); `for` is `15m`, `1h`, `8h` or `1d`, and
   `reason` (up to 500 characters) is what the person reads. It answers `202` with the pending
   approval (method `GRANT`, `args: {for, reason}`); the same request again is the one waiting.
-  Only a token asks, never the operator or a person (they change rules directly), and a workload's
-  token, which is fixed, never does.
+  Only a token asks, never the operator or a person (they change rules directly), and only one made
+  to involve people (with "ask for anything else" or a rule that asks), as only a token that asks
+  may make one that does; a workload's token, which is fixed, never does. A refusal says what the
+  token could ask for (`request`, beside `widen`) only when it may. Nothing on `access` (tokens and approvals) is ever asked for:
+  a token that could manage tokens could widen itself past any approval.
+- The person reads its whole reach: "every postgres resource in every environment" when it names
+  none.
 - It's decided like any approval: on the approvals page, from chat or the CLI, under the policy's
-  approval rules ("Two-person approvals"). Approved, it's the rule it asked for (one action, on that
+  approval rules ("Two-person approvals"). Approved (in the same write, however it's decided), it's the rule it asked for (one action, on that
   resource or the product's every one, only where it named), until `for` from the approval, in the
   token's `temporary` rules, named by the approval (taken back like any). It can't be remembered
-  for longer.
+  for longer. What two people approved under a gate is marked so (`gated`): that gate doesn't
+  make it ask again. A read-only token's rules for a while that a gate covers just don't apply.
 - Nothing runs when it's approved: the agent waits with `access_wait_approval`, then goes on.
 
 ### What a product is told about an approval

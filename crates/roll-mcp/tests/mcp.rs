@@ -212,9 +212,9 @@ async fn tools_follow_the_tokens_rules() {
     assert_eq!((ok["isError"].as_bool(), &ok["structuredContent"]["items"][0]["id"]), (Some(false), &json!("pa")));
     let refused = d.tool(&reader, "postgres_delete_project", json!({ "project": "pa" })).await;
     assert_eq!(refused["isError"], true);
-    // It says where the person can allow it, and what the agent can ask for itself.
+    // It says where the person can allow it; this token was made never to ask, so nothing more.
     let said = refused["content"][0]["text"].as_str().unwrap_or_default();
-    assert!(said.contains("access_request_access") && said.contains(r#""action":"delete""#) && said.contains(r#""resource":"pa""#), "{said}");
+    assert!(said.contains("allow it here") && !said.contains("access_request_access"), "{said}");
     let bad = d.tool(&reader, "postgres_list_projects", json!({ "nope": 1 })).await;
     assert_eq!(bad["isError"], true);
 
@@ -225,6 +225,10 @@ async fn tools_follow_the_tokens_rules() {
     let schema = |list: &Value, tool: &str| list["tools"].as_array().unwrap().iter().find(|t| t["name"] == tool).map(|t| t["inputSchema"]["properties"].clone()).unwrap();
     assert!(schema(&d.rpc(&asker, "tools/list", json!({})).await, "postgres_delete_project").get("approval").is_some());
     assert!(schema(&d.rpc(&reader, "tools/list", json!({})).await, "postgres_query").get("approval").is_none());
+    // A token made to ask people is also told it can ask for what it was refused, for a while.
+    let refused = d.tool(&asker, "postgres_list_projects", json!({})).await;
+    let said = refused["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(said.contains("access_request_access") && said.contains(r#""action":"read""#), "{said}");
     let pending = d.tool(&asker, "postgres_delete_project", json!({ "project": "pa" })).await;
     assert_eq!((pending["isError"].as_bool(), pending["structuredContent"]["status"].as_str()), (Some(false), Some("approval_pending")), "{pending}");
     let id = pending["structuredContent"]["approval"].as_str().unwrap();

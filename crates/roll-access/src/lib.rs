@@ -142,6 +142,7 @@ mod policy_tests {
         let p = super::Policy { max_idle_days: Some(30), ..Default::default() };
         let day = 86_400_000;
         let g = |created: i64, used: Option<i64>| crate::store::Grant {
+            read_only: false,
             id: "tok_a".into(),
             name: "a".into(),
             kind: "token",
@@ -951,10 +952,20 @@ impl Access {
             }
             if !gates.iter().any(|g| g.may_approve(by)) {
                 let names: Vec<&str> = gates.iter().filter_map(|g| g.approvers.as_ref()).flatten().map(String::as_str).collect();
-                return Err(Error::Forbidden(format!("roll's policy names who approves this: {}", names.join(", "))));
+                return Err(Error::Forbidden(if names.is_empty() {
+                    "roll's policy asks signed-in people to approve this (an admin, or a person it names): the operator's token and chat approvers not linked to an account don't count".into()
+                } else {
+                    format!("roll's policy names who approves this: {}", names.join(", "))
+                }));
             }
         }
-        self.store.decide(id, approve, by, reason, &|who| gates.iter().all(|g| g.met(who))).map(|a| self.gated(a))
+        // An access request becomes its rule in the same write that approves it, decided anywhere.
+        let rule = match crate::api::asked_for(&found) {
+            Some(for_ms) if approve => Some((crate::api::rule_of(&found)?, for_ms)),
+            _ => None,
+        };
+        let grants = rule.as_ref().map(|(r, ms)| (r, *ms, !gates.is_empty()));
+        self.store.decide(id, approve, by, reason, &|who| gates.iter().all(|g| g.met(who)), grants).map(|a| self.gated(a))
     }
 
     /// A press in chat: decide, when it came from the install approvals go to and from one of the

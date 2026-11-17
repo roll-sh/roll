@@ -1035,14 +1035,10 @@ async fn outcome(tool: &str, resp: Response) -> Value {
             // Where the person can allow it, when roll says (the token's page, the rule proposed).
             // And what the agent can ask for itself, for a while (an access request).
             StatusCode::FORBIDDEN => match body.get("widen").and_then(Value::as_str) {
-                Some(w) => {
-                    let needs = &body["needs"];
-                    let mut ask = json!({ "product": needs["product"], "action": needs["action"], "for": "1h", "reason": "<why you need it>" });
-                    if let Some(r) = needs["resource"].as_str() {
-                        ask["resource"] = json!(r);
-                    }
-                    format!("not allowed: {msg}. If the user wants this token to be able to, they can allow it here: {w}. Or ask for it for a while yourself: call access_request_access with {ask}, then access_wait_approval.")
-                }
+                Some(w) => match body.get("request").filter(|r| r.is_object()) {
+                    Some(ask) => format!("not allowed: {msg}. If the user wants this token to be able to, they can allow it here: {w}. Or ask for it for a while yourself: call access_request_access with {ask}, then access_wait_approval."),
+                    None => format!("not allowed: {msg}. If the user wants this token to be able to, they can allow it here: {w}"),
+                },
                 None => format!("not allowed: {msg}"),
             },
             StatusCode::NOT_FOUND => format!("not found: {msg}"),
