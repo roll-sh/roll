@@ -260,6 +260,7 @@ pub(crate) fn upsert_issue(code: &Code, r: &RepoRow, d: &WorkItemDraft) -> Resul
                     source: &d.external_id,
                     github_url: d.url.as_deref(),
                     state,
+                    outside: d.outside,
                 },
             )?;
             id
@@ -270,6 +271,7 @@ pub(crate) fn upsert_issue(code: &Code, r: &RepoRow, d: &WorkItemDraft) -> Resul
             w.labels = d.labels.clone();
             w.priority = priority(&d.labels);
             w.github_url = d.url.clone().or(w.github_url);
+            w.outside = d.outside;
             let finished = matches!(w.state, WorkState::Done | WorkState::Closed);
             match state {
                 // Reopened on GitHub: back in the queue.
@@ -735,6 +737,7 @@ async fn handle_repo(code: &Arc<Code>, hub: &Hub, r: &RepoRow, link: &Link, even
             }
             upsert_issue(code, r, &mapping::issue_draft(&e.issue))
         }
+        Event::CheckRun(e) if e.requested_action.is_some() => super::notify::visual_action(code, hub, r, link, e).await,
         Event::CheckRun(_) | Event::Status(_) => Ok(()),
         Event::Ping { .. } | Event::Ignored { .. } | Event::Installation { .. } | Event::InstallationRepositories { .. } => Ok(()),
     }

@@ -51,18 +51,18 @@ pub mod sinks;
 pub mod suggestions;
 mod sweep;
 pub mod syncs;
-mod tokens;
+mod caller;
 pub mod kms;
 mod write;
 
-pub use access::{Action, Caller, People, Person, Scope};
+pub use access::{Action, Caller, Minted, People, Person, Scope, Workloads, PREVIEWS};
 pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter};
-pub use envs::{EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
+pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
 pub use links::{Link, LinkProvider, Links, Mode};
-pub use read::{Grid, Problem, Secret, Source, Values, Version};
+pub use read::{Followed, Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
 pub use exports::Export;
 pub use identities::{Identity, Login, NewIdentity};
@@ -71,7 +71,6 @@ pub use shares::{NewShare, Peek, Share};
 pub use sweep::{Lease, Swept};
 pub use sinks::{Deliver, NewSink, Sink};
 pub use syncs::{NewSync, Push, SecretSync, SyncField, SyncKind, SyncTarget, Syncs};
-pub use tokens::{NewToken, Token};
 pub use write::{Applied, Batch, Change, ItemDiff, Op, Promote, Rollback, SecretType, Written};
 
 use code_sql::{Db, OptionalExtension, Target};
@@ -213,22 +212,6 @@ CREATE TABLE IF NOT EXISTS leases (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS leases_due ON leases (revoked_at, expires_at);
 CREATE INDEX IF NOT EXISTS leases_project ON leases (project_id, issued_at);
-CREATE TABLE IF NOT EXISTS tokens (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    hash TEXT NOT NULL UNIQUE,
-    prefix TEXT NOT NULL,
-    environments TEXT,
-    paths TEXT,
-    actions TEXT NOT NULL,
-    expires_at INTEGER,
-    created_at INTEGER NOT NULL,
-    created_by TEXT NOT NULL,
-    last_used_at INTEGER,
-    revoked_at INTEGER
-) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS tokens_project ON tokens (project_id);
 CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id TEXT NOT NULL,
@@ -243,6 +226,8 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 CREATE INDEX IF NOT EXISTS audit_project ON audit (project_id, id);
 CREATE INDEX IF NOT EXISTS audit_at ON audit (at);
+-- A conditional read's once-a-day row (read.rs, `unchanged`) is looked up on every 304.
+CREATE INDEX IF NOT EXISTS audit_revalidate ON audit (project_id, actor, env, path, at) WHERE action = 'secrets.revalidate';
 CREATE TABLE IF NOT EXISTS required (
     project_id TEXT NOT NULL,
     path TEXT NOT NULL,
@@ -327,6 +312,8 @@ pub struct Options {
     pub kms: Option<std::sync::Arc<dyn kms::ProjectKms>>,
     /// STS, for dynamic AWS credentials from roles projects register (aws.rs); `None`: none.
     pub sts: Option<std::sync::Arc<dyn aws::Sts>>,
+    /// Mints workload identities' short-lived tokens (roll-access); `None`: identities can't log in.
+    pub workloads: Option<std::sync::Arc<dyn access::Workloads>>,
     /// rolld has no operator token (loopback development): a request without a token is the
     /// operator's.
     pub open: bool,
@@ -355,6 +342,7 @@ pub struct Secrets {
     people: Option<Arc<dyn access::People>>,
     unwrap: kms::Unwrapper,
     sts: Option<Arc<dyn aws::Sts>>,
+    workloads: Option<Arc<dyn access::Workloads>>,
     open: bool,
     trust_forwarded_for: bool,
     web_url: Option<String>,
@@ -370,6 +358,8 @@ pub struct Secrets {
     public_api: Arc<std::sync::OnceLock<String>>,
     /// Signed CRLs by CA, with when they were made (pki.rs): the public route signs one a minute.
     crls: pki::Crls,
+    /// Live links' fingerprints as last read (read.rs): what digests count.
+    live_fps: read::LiveFps,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -405,10 +395,11 @@ impl Secrets {
         db.add_column("environments", "notify_host", "TEXT")?;
         db.add_column("syncs", "checked_at", "INTEGER")?;
         db.add_column("leases", "path", "TEXT")?;
-        // Workload identities (identities.rs) and the tokens their logins made.
+        // Workload identities (identities.rs); their logins' tokens are roll-access's.
         db.ensure_schema(identities::SCHEMA)?;
+        // Secrets' own `rlst_` tokens are gone (roll-access's grants instead); never on main.
+        db.migrate("secrets-drop-own-tokens", |c| c.execute_batch("DROP TABLE IF EXISTS tokens"))?;
         db.ensure_schema(exports::SCHEMA)?;
-        db.add_column("tokens", "identity", "TEXT")?;
         // An identity's pinned keys: a JWKS, for an issuer roll doesn't fetch (identities.rs).
         db.add_column("identities", "jwks", "TEXT")?;
         // Typed keys (required.rs).
@@ -418,8 +409,9 @@ impl Secrets {
         db.add_column("environments", "reminded_at", "INTEGER")?;
         // An ephemeral environment running vetted code may read a protected base (envs.rs).
         db.add_column("environments", "trusted", "INTEGER")?;
-        // Client addresses tokens and identities work from (tokens.rs).
-        db.add_column("tokens", "allowed_ips", "TEXT")?;
+        // The resources an ephemeral environment's preview branched: links to them aren't followed.
+        db.add_column("environments", "branches", "TEXT")?;
+        // Client addresses identities log in from (identities.rs).
         db.add_column("identities", "allowed_ips", "TEXT")?;
         // When a value stops working outside roll (a vendor's key, a certificate): ms, or null.
         db.add_column("secrets", "expires_at", "INTEGER")?;
@@ -434,6 +426,9 @@ impl Secrets {
         db.add_column("secrets", "rotation_error", "TEXT")?;
         db.add_column("secrets", "rotation_failed_at", "INTEGER")?;
         db.add_column("leases", "revoke_error", "TEXT")?;
+        // Who a dynamic lease was issued to (the caller's principal; `consumer` is a name it chose):
+        // a reader may end its own leases, not another's.
+        db.add_column("leases", "issued_by", "TEXT")?;
         // A deleted project kept only until what it issued is revoked (forget_project).
         db.add_column("projects", "forgotten_at", "INTEGER")?;
         db.ensure_schema(notices::SCHEMA)?;
@@ -443,6 +438,8 @@ impl Secrets {
         db.ensure_schema(pki::SCHEMA)?;
         db.ensure_schema(ssh::SCHEMA)?;
         db.ensure_schema(aws::SCHEMA)?;
+        // How a role trusts roll (aws.rs): absent is the ExternalId, as before there were two.
+        db.add_column("aws_roles", "trust", "TEXT")?;
         db.ensure_schema(issuer::SCHEMA)?;
         db.ensure_schema(clouds::SCHEMA)?;
         db.ensure_schema(iam::SCHEMA)?;
@@ -450,7 +447,11 @@ impl Secrets {
         let mut links = opts.links;
         let unwrap = kms::Unwrapper::new(opts.kms.clone());
         if let Some(sts) = &opts.sts {
-            links.register(Arc::new(aws::Provider { db: db.clone(), sts: sts.clone() }));
+            let issuing = match (&opts.clouds, &opts.keyring) {
+                (Some(c), Ok(keys)) => Some(aws::Issuing { url: c.issuer.clone(), keys: keys.clone() }),
+                _ => None,
+            };
+            links.register(Arc::new(aws::Provider { db: db.clone(), sts: sts.clone(), issuing }));
             links.register(Arc::new(iam::Provider { db: db.clone(), sts: sts.clone() }));
         }
         if let (Some(c), Ok(keys)) = (&opts.clouds, &opts.keyring) {
@@ -477,7 +478,7 @@ impl Secrets {
         if let (Some(outside), Ok(keys)) = (&opts.outside, &opts.keyring) {
             links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), outside: outside.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -575,7 +576,7 @@ impl Secrets {
         let failed = self.revoke_managed(self.managed_where("project_id = ?", project));
         let now = self.db.now_ms()?;
         self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "tokens", "audit", "required", "shares", "syncs", "audit_sinks", "notices", "identities", "transit_keys"] {
+            for t in ["secrets", "versions", "changes", "requests", "audit", "required", "shares", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
             c.execute("DELETE FROM leases WHERE project_id = ? AND revoked_at IS NOT NULL", [project])?;

@@ -558,12 +558,21 @@ pub fn render_doc_stored(
         None
     };
     let mut source = if raw_source.is_none() && (fs.fetch || !o.fields.is_empty()) { crate::fetch::source_bytes(stored).map(crate::fetch::parse_source).transpose()? } else { None };
-    // Vectors kept out of `_source` read back as the index holds them (floats).
+    // Vectors kept out of `_source` read back as the index holds them (floats), once: the
+    // fetch below only keeps or drops them (`SourceView::search`).
     if let (Some(idx), Some(Value::Obj(sm))) = (idx, source.as_mut())
         && table.has_vectors
         && idx.settings.get("index.mapping.exclude_source_vectors") != Some("false")
     {
         crate::engine::synthetic::vectors(table, "", sm, false);
+    }
+    // Vectors kept out of the stored source come back from the segment, already as shown,
+    // when the hit shows them or `fields` reads them.
+    if let Some(Value::Obj(sm)) = source.as_mut()
+        && !table.stripped_vectors.is_empty()
+        && crate::engine::source_vectors::wanted(table, &fs, o.force_synthetic, o.fields.iter().map(|f| f.field.as_str()))
+    {
+        crate::engine::source_vectors::patch(&table.stripped_vectors, sm, &mut crate::engine::source_vectors::InSegment(seg, local));
     }
     if let Some(raw) = raw_source {
         m.insert("_source".into(), raw);

@@ -140,3 +140,83 @@ func TestAWorkloadLogsInReadsSealedValuesAndWatchesForChanges(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 }
+
+// Values are kept for CacheTTL, revalidated with their digest (a 304 keeps them), and never kept
+// when they hold dynamic credentials.
+func TestValuesAreCachedAndRevalidatedWithTheirDigest(t *testing.T) {
+	var mu sync.Mutex
+	digest, dynamic, value := "d1", []string{}, "1"
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		tag := r.Header.Get("If-None-Match")
+		asked = append(asked, tag)
+		if r.URL.Query().Get("digest") != "1" {
+			t.Errorf("no digest asked for: %s", r.URL.RawQuery)
+		}
+		w.Header().Set("ETag", `"`+digest+`"`)
+		if tag == `"`+digest+`"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"values": map[string]string{"A": value}, "problems": []any{}, "leases": []string{}, "dynamic": dynamic, "linked": []string{}})
+	}))
+	defer srv.Close()
+	clock := time.Unix(0, 0)
+	c := &Client{API: srv.URL, Token: "rlt_x", Project: "prj_1", CacheTTL: 20 * time.Second, Now: func() time.Time { return clock }}
+	ctx := context.Background()
+	get := func() string {
+		v, err := c.Values(ctx, "production", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v.Values["A"]
+	}
+	if get() != "1" || get() != "1" || len(asked) != 1 {
+		t.Fatalf("within the TTL, from memory: %q", asked)
+	}
+	clock = clock.Add(25 * time.Second)
+	if get() != "1" || len(asked) != 2 || asked[1] != `"d1"` {
+		t.Fatalf("revalidated: %q", asked)
+	}
+	clock = clock.Add(25 * time.Second)
+	mu.Lock()
+	digest, dynamic, value = "d2", []string{"PW"}, "2"
+	mu.Unlock()
+	if get() != "2" || get() != "2" || len(asked) != 4 {
+		t.Fatalf("a change, then dynamic credentials read every time: %q", asked)
+	}
+}
+
+// Transit sends bytes as base64 and decrypts back to the same bytes, as @roll/secrets' does.
+func TestTransitSendsBase64AndDecryptsBackToTheSameBytes(t *testing.T) {
+	var sent []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		b["path"] = r.URL.Path
+		sent = append(sent, b)
+		// A server that "encrypts" by echoing: enough to check the encoding both ways.
+		if r.URL.Path == "/v1/secrets/projects/prj_1/transit/cards/encrypt" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"ciphertext": "roll:v1:" + b["plaintext"].(string)})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"plaintext": b["ciphertext"].(string)[len("roll:v1:"):]})
+	}))
+	defer srv.Close()
+	cards := (&Client{API: srv.URL, Token: "rlt_x", Project: "prj_1"}).Transit("cards")
+	ctx := context.Background()
+	ct, err := cards.Encrypt(ctx, []byte("héllo ✓"), "order:42")
+	if err != nil || sent[0]["plaintext"] != "aMOpbGxvIOKckw==" || sent[0]["context"] != "order:42" {
+		t.Fatalf("sent %v (%v)", sent, err)
+	}
+	if got, err := cards.Decrypt(ctx, ct, "order:42"); err != nil || string(got) != "héllo ✓" {
+		t.Fatalf("decrypted %q (%v)", got, err)
+	}
+	raw := []byte{0, 255, 128, 7}
+	ct, _ = cards.Encrypt(ctx, raw, "")
+	if got, _ := cards.Decrypt(ctx, ct, ""); string(got) != string(raw) || sent[2]["context"] != nil {
+		t.Fatalf("bytes: %v, context %v", got, sent[2]["context"])
+	}
+}

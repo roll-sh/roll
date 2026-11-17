@@ -77,6 +77,9 @@ pub struct InnerHitsDef {
     /// Inner hits of `nested` queries inside this one's query: rendered under each of this
     /// definition's hits (`InnerHitsContext` tree).
     pub children: Vec<InnerHitsDef>,
+    /// `query`'s weight, built on the first hit and shared by the rest: a definition belongs
+    /// to the shard whose query built it, and its hits are fetched from that shard's searcher.
+    pub weight: Arc<std::sync::OnceLock<Box<dyn search_index::Weight>>>,
 }
 
 pub fn arc<Q: search_index::Query + 'static>(q: Q) -> QueryRef {
@@ -132,6 +135,15 @@ pub fn shard_exception(idx: &IndexMeta, e: EsError) -> EsError {
     }
     let reason = format!("failed to create query: {}", e.reason());
     EsError::new(400, "query_shard_exception", reason).with_meta("index_uuid", idx.uuid.as_str()).with_meta("index", idx.name.as_str()).caused_by(e)
+}
+
+/// `ICUCollationKeywordFieldMapper`'s refusal of term-pattern queries (collation keys keep no
+/// characters to match).
+fn collation_refuses(f: &FieldInfo, query: &str) -> EsResult<()> {
+    if f.ty == "icu_collation_keyword" {
+        return Err(EsError::java(500, "unsupported_operation_exception", format!("[{query}] queries are not supported on [icu_collation_keyword] fields.")));
+    }
+    Ok(())
 }
 
 /// A `query_shard_exception` of its own (no cause).
@@ -876,6 +888,7 @@ impl<'a> QueryCtx<'a> {
             }
             return Ok(match_none("The \"prefix\" query is against a field that does not exist"));
         };
+        collation_refuses(&f, "prefix")?;
         let rw = self.rewrite_of(rewrite)?;
         let wrap = |q: MultiTermQuery| -> QueryRef { self.multi_term(&f, match rw { Some(r) => q.with_rewrite(r), None => q }) };
         if f.kind == Kind::Version {
@@ -944,6 +957,7 @@ impl<'a> QueryCtx<'a> {
             }
             return Ok(match_none("The \"wildcard\" query is against a field that does not exist"));
         };
+        collation_refuses(&f, "wildcard")?;
         self.expensive("wildcard")?;
         Self::check_keyed(&f, "wildcard")?;
         let rw = self.rewrite_of(rewrite)?;
@@ -987,6 +1001,7 @@ impl<'a> QueryCtx<'a> {
             }
             return Ok(match_none("The \"regexp\" query is against a field that does not exist"));
         };
+        collation_refuses(&f, "regexp")?;
         self.expensive("regexp")?;
         Self::check_keyed(&f, "regexp")?;
         self.check_regex_length(&r.value, "Regexp")?;
@@ -1021,6 +1036,7 @@ impl<'a> QueryCtx<'a> {
 
     fn fuzzy_query(&self, fz: &crate::query::term_level::Fuzzy) -> EsResult<QueryRef> {
         let Some(f) = self.field(&fz.field) else { return Ok(match_none("The \"fuzzy\" query was rewritten to a \"match_none\" query.")) };
+        collation_refuses(&f, "fuzzy")?;
         self.expensive("fuzzy")?;
         Self::check_keyed(&f, "fuzzy")?;
         let value = value_text(&fz.value);
@@ -1125,7 +1141,7 @@ impl<'a> QueryCtx<'a> {
                 all.extend(keep);
                 nested
             };
-            self.inner_hits.borrow_mut().push(InnerHitsDef { name, spec: ih.clone(), nested_path: Some(n.path.clone()), query: ih_child, join: None, children });
+            self.inner_hits.borrow_mut().push(InnerHitsDef { name, spec: ih.clone(), nested_path: Some(n.path.clone()), query: ih_child, join: None, children, weight: Default::default() });
         } else {
             // `NestedQueryBuilder.extractInnerHitBuilders` only looks inside a query that has
             // inner hits of its own: those of deeper queries are dropped.

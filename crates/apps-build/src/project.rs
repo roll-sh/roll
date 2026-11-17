@@ -34,8 +34,8 @@ pub struct ProjectFile {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppEntry {
-    /// The directory `roll up` uploads (relative to the file), or with `repo` the directory
-    /// in the repo that builds.
+    /// The directory `roll up` uploads (relative to the file), or with `repo` or `git` the
+    /// directory in the repo that builds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
     /// Or a public image.
@@ -44,6 +44,10 @@ pub struct AppEntry {
     /// Or a roll code repo (`owner/name`): it deploys on each landing on `branch`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+    /// Or a public Git repository's URL (`https://github.com/owner/name`): it deploys on each
+    /// new commit on `branch` (its default branch when none is named).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// `web`, `worker` or `cron`.
@@ -68,6 +72,27 @@ pub struct AppEntry {
     /// makes it says it): Heroku's `app.json` and Render's Blueprints.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub variables: BTreeMap<String, VarSpec>,
+    /// Environments besides production (Render's preview and staging environments, Railway's
+    /// environments): `[apps.web.environments.staging]`, made with the service and brought to
+    /// what the file says when it's read again.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environments: BTreeMap<String, EnvEntry>,
+}
+
+/// An environment of an app: the branch it follows, its own size and scale, and variables it
+/// starts with (as they are: a secret goes in roll secrets).
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Its own run settings over the app's: what an environment may set
+    /// (`min_instances`, `max_instances`, `cpu`, `memory_mb`, `concurrency`, `suspend_after_s`,
+    /// `sleep_after_s`; checked by the API).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<toml::Table>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variables: BTreeMap<String, String>,
 }
 
 /// A variable a project file gives its service.
@@ -108,9 +133,12 @@ impl VarSpec {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DbEntry {
-    /// `postgres` or `redis`.
+    /// One of [`DB_KINDS`].
     pub kind: String,
 }
+
+/// What `[databases]` can declare: roll's products a service links by name.
+pub const DB_KINDS: [&str; 5] = ["postgres", "redis", "bucket", "stream", "nosql"];
 
 pub fn valid_name(n: &str) -> bool {
     !n.is_empty() && n.len() <= 32 && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') && !n.starts_with('-') && !n.ends_with('-')
@@ -129,21 +157,28 @@ pub fn parse_project(text: &str) -> Result<ProjectFile, ProjectError> {
     ensure(!f.apps.is_empty(), || "roll.toml declares no [apps.<name>]".to_string())?;
     for (n, d) in &f.databases {
         ensure(valid_name(n), || format!("database {n:?}: a name is a-z, 0-9 and -, at most 32"))?;
-        ensure(matches!(d.kind.as_str(), "postgres" | "redis"), || format!("database {n}: kind is postgres or redis"))?;
+        ensure(DB_KINDS.contains(&d.kind.as_str()), || format!("database {n}: kind is {}", DB_KINDS.join(", ")))?;
+        ensure(!f.apps.contains_key(n), || format!("{n} is both a database and an app: a link would name either"))?;
     }
     for (n, a) in &f.apps {
         ensure(valid_name(n), || format!("app {n:?}: a name is a-z, 0-9 and -, at most 32"))?;
         if let Some(r) = &a.root {
             ensure(!r.starts_with('/') && !r.split('/').any(|c| c == ".."), || format!("app {n}: root is a directory inside this one (or the repo)"))?;
         }
-        match (&a.root, &a.image, &a.repo) {
-            (Some(_), None, None) | (None, Some(_), None) | (_, None, Some(_)) => {}
-            _ => return Err(err(format!("app {n}: give one of root (a directory to upload), image, or repo (with root inside it)"))),
+        let sources = [a.image.is_some(), a.repo.is_some(), a.git.is_some()].into_iter().filter(|s| *s).count();
+        if !(sources == 1 && !(a.image.is_some() && a.root.is_some()) || sources == 0 && a.root.is_some()) {
+            return Err(err(format!("app {n}: give one of root (a directory to upload), image, repo or git (with root inside it)")));
         }
-        ensure(a.branch.is_none() || a.repo.is_some(), || format!("app {n}: branch is for a repo"))?;
+        ensure(a.branch.is_none() || a.repo.is_some() || a.git.is_some(), || format!("app {n}: branch is for a repo or git"))?;
         ensure(a.kind.as_deref().is_none_or(|k| ["web", "worker", "cron"].contains(&k)), || format!("app {n}: type is web, worker or cron"))?;
+        // A database, or another app (Render's `fromService`: its private and public URLs).
         for l in &a.links {
-            ensure(f.databases.contains_key(l), || format!("app {n} links {l}, which isn't in [databases]"))?;
+            ensure(l != n, || format!("app {n} links itself"))?;
+            ensure(f.databases.contains_key(l) || f.apps.contains_key(l), || format!("app {n} links {l}, which isn't in [databases] or [apps]"))?;
+        }
+        for (e, env) in &a.environments {
+            ensure(valid_name(e) && e != "production", || format!("app {n}: environment {e:?} is a-z, 0-9 and - (production is the app's own settings)"))?;
+            ensure(env.branch.is_none() || a.repo.is_some() || a.git.is_some(), || format!("app {n}: {e}'s branch is for a repo or git"))?;
         }
         for (k, v) in &a.variables {
             match v {
@@ -191,10 +226,31 @@ pub fn entry_run(a: &AppEntry) -> serde_json::Map<String, Value> {
     run
 }
 
+/// The source a new service from this entry is made with (`POST /v1/apps/services`' `source`).
+pub fn entry_source(a: &AppEntry) -> Value {
+    let mut s = match (&a.repo, &a.git, &a.image) {
+        (Some(r), _, _) => serde_json::json!({ "kind": "repo", "repo": r }),
+        (None, Some(u), _) => serde_json::json!({ "kind": "git", "url": u }),
+        (None, None, Some(i)) => return serde_json::json!({ "kind": "image", "image": i }),
+        (None, None, None) => return serde_json::json!({ "kind": "upload" }),
+    };
+    if let Some(root) = &a.root {
+        s["root"] = Value::from(root.as_str());
+    }
+    s
+}
+
+/// What a link names in `f`: a database's kind, or `service` for another app.
+pub fn link_kind<'a>(f: &'a ProjectFile, link: &str) -> &'a str {
+    f.databases.get(link).map_or("service", |d| d.kind.as_str())
+}
+
 /// The kind of source an entry makes.
 pub fn entry_kind(a: &AppEntry) -> &'static str {
     if a.repo.is_some() {
         "repo"
+    } else if a.git.is_some() {
+        "git"
     } else if a.image.is_some() {
         "image"
     } else {
@@ -397,6 +453,23 @@ pub fn compose_to_toml(text: &str) -> Result<(String, Vec<String>), ProjectError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file declares buckets, streams and NoSQL databases, and an app links another by name
+    /// (its URLs); a self-link or a name that's both an app and a database is refused.
+    #[test]
+    fn a_file_links_buckets_streams_and_other_apps() {
+        let f = parse_project("[apps.web]\nimage = \"a:1\"\nlinks = [\"api\", \"uploads\"]\n[apps.api]\nimage = \"b:1\"\nlinks = [\"events\", \"db\"]\n[databases.uploads]\nkind = \"bucket\"\n[databases.events]\nkind = \"stream\"\n[databases.db]\nkind = \"nosql\"\n").unwrap();
+        assert_eq!(f.apps["web"].links.iter().map(|l| link_kind(&f, l)).collect::<Vec<_>>(), ["service", "bucket"]);
+        assert_eq!(f.apps["api"].links.iter().map(|l| link_kind(&f, l)).collect::<Vec<_>>(), ["stream", "nosql"]);
+        assert!(parse_project("[apps.web]\nimage = \"a:1\"\nlinks = [\"web\"]\n").is_err(), "a self-link");
+        assert!(parse_project("[apps.db]\nimage = \"a:1\"\n[databases.db]\nkind = \"redis\"\n").is_err(), "one name, two things");
+        assert!(parse_project("[apps.web]\nimage = \"a:1\"\n[databases.q]\nkind = \"mysql\"\n").is_err(), "a kind roll doesn't have");
+        // Environments besides production: a branch (a repo's or a Git URL's), its own size.
+        let f = parse_project("[apps.web]\ngit = \"https://github.com/acme/site\"\n[apps.web.environments.staging]\nbranch = \"develop\"\nrun = { max_instances = 1 }\nvariables = { LOG_LEVEL = \"debug\" }\n").unwrap();
+        assert_eq!(f.apps["web"].environments["staging"].branch.as_deref(), Some("develop"));
+        assert!(parse_project("[apps.web]\nimage = \"a:1\"\n[apps.web.environments.production]\n").is_err(), "production is the app's own");
+        assert!(parse_project("[apps.web]\nimage = \"a:1\"\n[apps.web.environments.staging]\nbranch = \"x\"\n").is_err(), "an image has no branch");
+    }
 
     #[test]
     fn a_compose_file_becomes_a_projects_roll_toml() {

@@ -20,6 +20,7 @@ use crate::query::basic::MatchNoneQuery;
 use crate::query::nested::segment_bits;
 use crate::util::bitset::FixedBitSet;
 use crate::schema::Schema;
+use crate::search::pool;
 use crate::search::{Explanation, Query, QueryRef, Scorable, ScoreMode, Scorer, Searcher, SegmentContext, Weight};
 use crate::util::java::float_to_string;
 
@@ -92,7 +93,6 @@ impl KnnQuery {
             }
             _ => (self.k, self.num_candidates),
         };
-        let mut all: Vec<(u32, f32)> = Vec::new();
         let filter = match &self.filter {
             Some(f) => {
                 let r = s.rewrite(f)?;
@@ -107,75 +107,110 @@ impl KnnQuery {
             Some(p) => Some(s.rewrite(p)?),
             None => None,
         };
+        // Filters and parents are resolved here, on the request's thread (their queries may
+        // read its thread-locals); the graph searches then run concurrently on the search
+        // pool, one task per segment, as Lucene's `AbstractKnnVectorQuery` hands each leaf to
+        // the searcher's executor. Each segment's hits are those of a serial search, and the
+        // merge below breaks ties by doc id, so the result doesn't depend on the order.
+        let mut tasks: Vec<SegmentKnn> = Vec::new();
         for seg in s.segments() {
             let Some(vr) = seg.reader.vectors(self.field) else { continue };
             if vr.is_empty() {
                 continue;
             }
             let q = vr.prepare(self.vector.as_ref()).map_err(|e| Error::illegal(e.to_string()))?;
-            let live = seg.live.clone();
             let bits = match &filter {
                 Some(f) => Some(segment_bits(s, seg, f)?),
                 None => None,
             };
-            let accept = |d: u32| live.as_ref().is_none_or(|l| l.is_live(d)) && bits.as_ref().is_none_or(|b| b.get(d));
-            // Accepted docs when filtered: filtered live docs with a vector.
-            let cost = match &bits {
+            // Filtered: the filter's live docs with a vector, as ordinals (also their count).
+            let ords = match &bits {
                 Some(b) => {
-                    let mut cost = 0u32;
-                    let mut c = vr.docs().cursor();
-                    loop {
-                        let d = c.next();
-                        if d == NO_MORE_DOCS {
-                            break;
-                        }
-                        if b.get(d) && live.as_ref().is_none_or(|l| l.is_live(d)) {
-                            cost += 1;
-                        }
-                    }
-                    if cost == 0 {
+                    let f = match &seg.live {
+                        None => vr.ord_filter(b.words()),
+                        Some(l) => vr.ord_filter(&b.words().iter().zip(l.words()).map(|(x, y)| x & y).collect::<Vec<u64>>()),
+                    };
+                    if f.count() == 0 {
                         continue;
                     }
-                    Some(cost)
+                    Some(f)
                 }
                 None => None,
             };
-            let accept_opt: Option<&dyn Fn(u32) -> bool> = if bits.is_some() || live.is_some() { Some(&accept) } else { None };
-            // One search of `kk` hits (beam `nc`): exact when asked or when the filter accepts
-            // few docs, else the graph, falling back to exact when the visit limit hits.
-            let run = |kk: usize, nc: usize| -> search_codec::vectors::KnnResult {
-                match cost {
-                    Some(cost) if self.exact || cost as usize <= kk => vr.exact_search(&q, kk, accept_opt),
-                    Some(cost) => {
-                        let r = vr.search_filtered(&q, kk, nc, &accept, cost, cost as usize + 1);
-                        if r.complete { r } else { vr.exact_search(&q, kk, accept_opt) }
-                    }
-                    None if self.exact => vr.exact_search(&q, kk, accept_opt),
-                    None => {
-                        let r = vr.search(&q, kk, nc, accept_opt, usize::MAX);
-                        if r.complete { r } else { vr.exact_search(&q, kk, Some(&accept)) }
-                    }
-                }
+            let parents = match &parent_filter {
+                Some(pf) => Some(segment_bits(s, seg, pf)?),
+                None => None,
             };
-            let res = match &parent_filter {
-                None => run(k, num_candidates),
-                Some(pf) => {
-                    let parents = segment_bits(s, seg, pf)?;
-                    diversified(vr, &q, k, num_candidates, &accept, &parents, self.exact, &run)
-                }
-            };
-            for h in res.hits {
-                if self.min_score.is_none_or(|m| h.score >= m) {
-                    all.push((seg.base + h.doc, h.score));
-                }
-            }
+            tasks.push(SegmentKnn { seg, vr, q, bits, ords, parents });
         }
+        let run_task = |t: &SegmentKnn| self.search_segment(t, k, num_candidates);
+        let mut all: Vec<(u32, f32)> = if tasks.len() < 2 {
+            tasks.iter().flat_map(run_task).collect()
+        } else {
+            // Largest segments first: workers claim tasks in this order, which balances them.
+            tasks.sort_by_key(|t| std::cmp::Reverse(t.cost()));
+            let slots: Vec<parking_lot::Mutex<Vec<(u32, f32)>>> = tasks.iter().map(|_| parking_lot::Mutex::new(Vec::new())).collect();
+            // One thread per physical core: a hyperthread sibling would add little speed to
+            // these memory-bound searches and as much CPU time.
+            let helpers = pool::physical_cores().saturating_sub(1).min(tasks.len() - 1);
+            pool::help_each_index(tasks.len(), helpers, &|i| *slots[i].lock() = run_task(&tasks[i]));
+            slots.into_iter().flat_map(|m| m.into_inner()).collect()
+        };
         if !self.per_segment {
             all.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
             all.truncate(self.k);
         }
         all.sort_by_key(|x| x.0);
         Ok(all)
+    }
+
+    /// One segment's hits (`(global doc, score)`, at least `min_score`).
+    fn search_segment(&self, t: &SegmentKnn, k: usize, num_candidates: usize) -> Vec<(u32, f32)> {
+        let (vr, q, live) = (t.vr, &t.q, &t.seg.live);
+        let accept = |d: u32| live.as_ref().is_none_or(|l| l.is_live(d)) && t.bits.as_ref().is_none_or(|b| b.get(d));
+        let accept_opt: Option<&dyn Fn(u32) -> bool> = if t.bits.is_some() || live.is_some() { Some(&accept) } else { None };
+        // One search of `kk` hits (beam `nc`): exact when asked or when the filter accepts
+        // few docs, else the graph, falling back to exact when the visit limit hits.
+        let run = |kk: usize, nc: usize| -> search_codec::vectors::KnnResult {
+            match &t.ords {
+                Some(f) if self.exact || f.count() as usize <= kk => vr.exact_search(q, kk, accept_opt),
+                Some(f) => {
+                    let r = vr.search_filtered(q, kk, nc, f, f.count() as usize + 1);
+                    if r.complete { r } else { vr.exact_search(q, kk, accept_opt) }
+                }
+                None if self.exact => vr.exact_search(q, kk, accept_opt),
+                None => {
+                    let r = vr.search(q, kk, nc, accept_opt, usize::MAX);
+                    if r.complete { r } else { vr.exact_search(q, kk, Some(&accept)) }
+                }
+            }
+        };
+        let res = match &t.parents {
+            None => run(k, num_candidates),
+            Some(parents) => diversified(vr, q, k, num_candidates, &accept, parents, self.exact, &run),
+        };
+        let base = t.seg.base;
+        res.hits.into_iter().filter(|h| self.min_score.is_none_or(|m| h.score >= m)).map(|h| (base + h.doc, h.score)).collect()
+    }
+}
+
+/// A segment's share of a k-NN search, prepared on the request's thread.
+struct SegmentKnn<'a> {
+    seg: &'a SegmentContext,
+    vr: &'a search_codec::vectors::VectorsReader,
+    q: search_codec::vectors::PreparedQuery,
+    /// The filter's docs (`None`: unfiltered).
+    bits: Option<Arc<FixedBitSet>>,
+    /// The filter's live docs with a vector, as ordinals.
+    ords: Option<search_codec::vectors::OrdFilter>,
+    /// Parents of nested vectors.
+    parents: Option<Arc<FixedBitSet>>,
+}
+
+impl SegmentKnn<'_> {
+    /// About how many vectors the search may score.
+    fn cost(&self) -> u32 {
+        self.ords.as_ref().map_or(self.vr.len(), |f| f.count())
     }
 }
 

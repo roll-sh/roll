@@ -142,6 +142,7 @@ pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
         "stream" => ("streams", "stream"),
         "queue" => ("queues", "vhost"),
         "nosql" => ("nosql", "nosql-database"),
+        "search" => ("search", "cluster"),
         // Another service's URLs: no credential, but held to the same `reveal` as the rest.
         "service" => ("apps", "service"),
         // Not a link: a repo apps reads (`apps_repo`).
@@ -275,6 +276,9 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/oauth/devices/{code}", "only a person signs a device in, as on the consent screen"),
     ("/v1/access/notify", "where approvals go is the operator's choice"),
     ("/v1/access/policy", "the rules for every token are the operator's"),
+    ("/v1/access/clients", "a token makes no machine clients: the operator, or a person signed in, makes their own"),
+    ("/v1/access/clients/{id}", "a token revokes no machine clients: the operator, or a person signed in, revokes their own"),
+    ("/v1/access/clients/{id}/rotate", "a token rotates no machine client's credential: the operator, or a person signed in, rotates their own"),
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
@@ -611,6 +615,17 @@ fn sql_action(b: &Value) -> Action {
     }
 }
 
+/// A NoSQL database's settings: `admin` when they loosen what keeps its data safe, a masking
+/// policy (applied at read time for every role: dropping it shows a reader the raw values) or a
+/// read-only flag turned off; the rest (name, idle timeout, durability, history, expiry) `write`.
+fn nosql_patch_action(b: &Value) -> Action {
+    if b.get("masking").is_some() || b.get("read_only") == Some(&Value::Bool(false)) {
+        Action::Admin
+    } else {
+        Action::Write
+    }
+}
+
 /// Redis: commands that only read are `read`, flushes `delete`, the rest `write`.
 fn redis_action(b: &Value) -> Action {
     // `{"command": ["SET", "k", "v"]}` (the route's shape), or one string.
@@ -748,6 +763,31 @@ fn apps_patch_action(b: &Value) -> Action {
     if runs { Action::Deploy } else { Action::Write }
 }
 
+/// A new roll code repo: `admin` when it connects a GitHub repository (any installation's
+/// repositories could be imported that way: listing installations is admin too), else `write`.
+fn code_repo_action(b: &Value) -> Action {
+    if b.get("source").is_some_and(Value::is_object) { Action::Admin } else { Action::Write }
+}
+
+/// Landing: `deploy`, and `admin` with `bypass: true` (it lands over the repo's required reviews,
+/// the merge queue and a secret-leak blocker; roll code allows that to its admin only).
+fn code_land_action(b: &Value) -> Action {
+    if b.get("bypass") == Some(&Value::Bool(true)) { Action::Admin } else { Action::Deploy }
+}
+
+/// A stream's settings: `delete` when they change its retention (a shorter one drops records at
+/// once), else `write`.
+fn stream_settings_action(b: &Value) -> Action {
+    if b["settings"].get("retention_ms").is_some() { Action::Delete } else { Action::Write }
+}
+
+/// A topic's change: `delete` when its configs change what's kept (`retention.*`,
+/// `cleanup.policy`, `delete.retention.ms`: records go at once), else `write` (partitions only grow).
+fn topic_change_action(b: &Value) -> Action {
+    let drops = b["configs"].as_object().is_some_and(|c| c.keys().any(|k| k.starts_with("retention.") || k == "cleanup.policy" || k == "delete.retention.ms"));
+    if drops { Action::Delete } else { Action::Write }
+}
+
 fn agent_command_action(b: &Value) -> Action {
     let kind = b.get("type").and_then(Value::as_str).unwrap_or("");
     let raises = b.get("runtime_mode").is_some_and(|m| !m.is_null()) || b.get("interaction_mode").is_some_and(|m| !m.is_null());
@@ -776,6 +816,9 @@ const PG_SECRETS: &[&str] = &["connection_uri", "app_connection_uri", "password"
 const REDIS_SECRETS: &[&str] = &["redis_url", "rest_token", "password"];
 const NOSQL_SECRETS: &[&str] = &["password", "http_token", "secret_access_key"];
 const STREAM_SECRETS: &[&str] = &["connect", "secret", "password"];
+/// Tasks: the headers a message, schedule or run forwards to its destination
+/// (`Roll-Forward-Authorization: Bearer …`, or `headers` in the body), stored as given.
+const TASKS_SECRETS: &[&str] = &["headers"];
 const STORAGE_SECRETS: &[&str] = &["webhook_secret", "secret_access_key", "session_token", "anon_key", "service_key"];
 const QUEUE_SECRETS: &[&str] = &["password", "urls", "password_hash"];
 const SEARCH_SECRETS: &[&str] = &["password"];
@@ -872,7 +915,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/streams", "streams", R, list("id")),
     row("POST", "/v1/streams", "streams", W, create("stream", "id")).reveals(STREAM_SECRETS),
     row("GET", "/v1/streams/{s}", "streams", R, one(&["s"], "stream")),
-    row("PATCH", "/v1/streams/{s}", "streams", W, one(&["s"], "stream")),
+    row("PATCH", "/v1/streams/{s}", "streams", Act::Body(stream_settings_action), one(&["s"], "stream")),
     row("DELETE", "/v1/streams/{s}", "streams", D, one(&["s"], "stream")),
     // A copy-on-write branch of the stream (roll previews): its answer has the branch's own key.
     row("POST", "/v1/streams/{s}/branches", "streams", W, one(&["s"], "stream")).reveals(STREAM_SECRETS),
@@ -882,7 +925,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/streams/{s}/topics", "streams", R, one(&["s"], "stream")),
     row("POST", "/v1/streams/{s}/topics", "streams", W, one(&["s"], "stream")),
     row("GET", "/v1/streams/{s}/topics/{t}", "streams", R, one(&["s"], "stream")),
-    row("PATCH", "/v1/streams/{s}/topics/{t}", "streams", W, one(&["s"], "stream")),
+    row("PATCH", "/v1/streams/{s}/topics/{t}", "streams", Act::Body(topic_change_action), one(&["s"], "stream")),
     row("DELETE", "/v1/streams/{s}/topics/{t}", "streams", D, one(&["s"], "stream")),
     row("GET", "/v1/streams/{s}/groups", "streams", R, one(&["s"], "stream")),
     row("GET", "/v1/streams/{s}/groups/{g}", "streams", R, one(&["s"], "stream")),
@@ -900,12 +943,12 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/tasks/publish", "tasks", W, Tgt::Product),
     row("POST", "/v1/tasks/publish/{*destination}", "tasks", W, Tgt::Product),
     row("POST", "/v1/tasks/batch", "tasks", W, Tgt::Product),
-    row("GET", "/v1/tasks/messages", "tasks", R, Tgt::Product),
+    row("GET", "/v1/tasks/messages", "tasks", R, Tgt::Product).reveals(TASKS_SECRETS),
     row("POST", "/v1/tasks/messages/cancel", "tasks", D, Tgt::Product),
-    row("GET", "/v1/tasks/messages/{id}", "tasks", R, Tgt::Product),
+    row("GET", "/v1/tasks/messages/{id}", "tasks", R, Tgt::Product).reveals(TASKS_SECRETS),
     row("DELETE", "/v1/tasks/messages/{id}", "tasks", D, Tgt::Product),
     row("POST", "/v1/tasks/messages/{id}/retry", "tasks", W, Tgt::Product),
-    row("GET", "/v1/tasks/dlq", "tasks", R, Tgt::Product),
+    row("GET", "/v1/tasks/dlq", "tasks", R, Tgt::Product).reveals(TASKS_SECRETS),
     row("POST", "/v1/tasks/dlq/retry", "tasks", W, Tgt::Product),
     row("DELETE", "/v1/tasks/dlq/{id}", "tasks", D, Tgt::Product),
     row("GET", "/v1/tasks/queues", "tasks", R, list_of("tasks-queue", "name")),
@@ -919,9 +962,9 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/tasks/topics/{name}", "tasks", D, one(&["name"], "tasks-topic")),
     row("POST", "/v1/tasks/topics/{name}/endpoints", "tasks", W, one(&["name"], "tasks-topic")),
     row("DELETE", "/v1/tasks/topics/{name}/endpoints", "tasks", W, one(&["name"], "tasks-topic")),
-    row("GET", "/v1/tasks/schedules", "tasks", R, list_of("tasks-schedule", "id")),
+    row("GET", "/v1/tasks/schedules", "tasks", R, list_of("tasks-schedule", "id")).reveals(TASKS_SECRETS),
     row("POST", "/v1/tasks/schedules", "tasks", W, Tgt::Product),
-    row("GET", "/v1/tasks/schedules/{id}", "tasks", R, one(&["id"], "tasks-schedule")),
+    row("GET", "/v1/tasks/schedules/{id}", "tasks", R, one(&["id"], "tasks-schedule")).reveals(TASKS_SECRETS),
     row("PATCH", "/v1/tasks/schedules/{id}", "tasks", W, one(&["id"], "tasks-schedule")),
     row("DELETE", "/v1/tasks/schedules/{id}", "tasks", D, one(&["id"], "tasks-schedule")),
     row("POST", "/v1/tasks/schedules/{id}/", "tasks", W, one(&["id"], "tasks-schedule")),
@@ -936,9 +979,9 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/tasks/functions/{id}", "tasks", R, one(&["id"], "tasks-function")),
     row("POST", "/v1/tasks/functions/{id}/", "tasks", W, one(&["id"], "tasks-function")),
     row("POST", "/v1/tasks/functions/{id}/cancel", "tasks", D, one(&["id"], "tasks-function")),
-    row("GET", "/v1/tasks/runs", "tasks", R, Tgt::Product),
-    row("GET", "/v1/tasks/runs/{id}", "tasks", R, Tgt::Product),
-    row("GET", "/v1/tasks/runs/{id}/wait", "tasks", R, Tgt::Product),
+    row("GET", "/v1/tasks/runs", "tasks", R, Tgt::Product).reveals(TASKS_SECRETS),
+    row("GET", "/v1/tasks/runs/{id}", "tasks", R, Tgt::Product).reveals(TASKS_SECRETS),
+    row("GET", "/v1/tasks/runs/{id}/wait", "tasks", R, Tgt::Product).reveals(TASKS_SECRETS),
     row("POST", "/v1/tasks/runs/{id}/cancel", "tasks", D, Tgt::Product),
     row("POST", "/v1/tasks/runs/{id}/rerun", "tasks", W, Tgt::Product),
     row("GET", "/v1/tasks/keys", "tasks", REVEAL, Tgt::Product),
@@ -1022,7 +1065,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/nosql/databases", "nosql", R, list("id")).reveals(NOSQL_SECRETS),
     row("POST", "/v1/nosql/databases", "nosql", W, create("nosql", "id")).reveals(NOSQL_SECRETS),
     row("GET", "/v1/nosql/databases/{id}", "nosql", R, one(PG, "nosql-database")).reveals(NOSQL_SECRETS),
-    row("PATCH", "/v1/nosql/databases/{id}", "nosql", W, one(PG, "nosql-database")).reveals(NOSQL_SECRETS),
+    row("PATCH", "/v1/nosql/databases/{id}", "nosql", Act::Body(nosql_patch_action), one(PG, "nosql-database")).reveals(NOSQL_SECRETS),
     row("DELETE", "/v1/nosql/databases/{id}", "nosql", D, one(PG, "nosql-database")),
     row("POST", "/v1/nosql/databases/{id}/branches", "nosql", W, one(PG, "nosql-database")).reveals(NOSQL_SECRETS),
     row("POST", "/v1/nosql/databases/{id}/reset", "nosql", D, one(PG, "nosql-database")).reveals(NOSQL_SECRETS),
@@ -1110,27 +1153,31 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/aws-roles", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/aws-roles", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/aws-roles/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/aws-roles/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/aws-users", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/aws-users", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/aws-users/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/aws-users/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/rotators", "secrets", R, one(&["project"], "project")),
     // A signing secret signs calls that mint vendor keys: shown only to who may also reveal.
     row("POST", "/v1/secrets/projects/{project}/rotators", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
     row("DELETE", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/transit", "secrets", ADMIN, one(&["project"], "project")),
-    row("PATCH", "/v1/secrets/projects/{project}/transit/{name}", "secrets", ADMIN, one(&["project"], "project")),
-    row("DELETE", "/v1/secrets/projects/{project}/transit/{name}", "secrets", ADMIN, one(&["project"], "project")),
-    row("POST", "/v1/secrets/projects/{project}/transit/{name}/rotate", "secrets", ADMIN, one(&["project"], "project")),
-    row("POST", "/v1/secrets/projects/{project}/transit/{name}/encrypt", "secrets", W, one(&["project"], "project")),
-    row("POST", "/v1/secrets/projects/{project}/transit/{name}/rewrap", "secrets", W, one(&["project"], "project")),
-    row("POST", "/v1/secrets/projects/{project}/transit/{name}/decrypt", "secrets", REVEAL, one(&["project"], "project")),
-    row("POST", "/v1/secrets/projects/{project}/transit/{name}/datakey", "secrets", REVEAL, one(&["project"], "project")),
-    row("POST", "/v1/secrets/projects/{project}/transit/{name}/sign", "secrets", W, one(&["project"], "project")),
-    row("POST", "/v1/secrets/projects/{project}/transit/{name}/verify", "secrets", R, one(&["project"], "project")),
-    row("POST", "/v1/secrets/projects/{project}/transit/{name}/hmac", "secrets", W, one(&["project"], "project")),
-    row("POST", "/v1/secrets/projects/{project}/transit/{name}/hmac/verify", "secrets", W, one(&["project"], "project")),
-    row("GET", "/v1/secrets/projects/{project}/transit/{name}/public", "secrets", R, one(&["project"], "project")),
+    // Each key's routes name it (`.index("name")`): a rule can grant one key
+    // (`{"id": "prj_x", "index": "payments"}`); the list and making a key stay the project's.
+    row("PATCH", "/v1/secrets/projects/{project}/transit/{name}", "secrets", ADMIN, one(&["project"], "project")).index("name"),
+    row("DELETE", "/v1/secrets/projects/{project}/transit/{name}", "secrets", ADMIN, one(&["project"], "project")).index("name"),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/rotate", "secrets", ADMIN, one(&["project"], "project")).index("name"),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/encrypt", "secrets", W, one(&["project"], "project")).index("name"),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/rewrap", "secrets", W, one(&["project"], "project")).index("name"),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/decrypt", "secrets", REVEAL, one(&["project"], "project")).index("name"),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/datakey", "secrets", REVEAL, one(&["project"], "project")).index("name"),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/sign", "secrets", W, one(&["project"], "project")).index("name"),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/verify", "secrets", R, one(&["project"], "project")).index("name"),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/hmac", "secrets", W, one(&["project"], "project")).index("name"),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/hmac/verify", "secrets", W, one(&["project"], "project")).index("name"),
+    row("GET", "/v1/secrets/projects/{project}/transit/{name}/public", "secrets", R, one(&["project"], "project")).index("name"),
     row("GET", "/v1/secrets/projects/{project}/cas", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas/{id}/sign", "secrets", W, one(&["project"], "project")),
@@ -1162,10 +1209,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions/{v}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
-    // What hands out more than the request itself: secrets' own tokens, syncs (they push values
+    // What hands out more than the request itself: syncs (they push values
     // elsewhere), audit sinks and required keys are admin; a share link of a value reveals it.
-    row("*", "/v1/secrets/projects/{project}/tokens", "secrets", ADMIN, one(&["project"], "project")),
-    row("*", "/v1/secrets/projects/{project}/tokens/", "secrets", ADMIN, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/syncs", "secrets", ADMIN, one(&["project"], "project")).reveals(&["signing_secret"]),
     row("GET", "/v1/secrets/projects/{project}/syncs", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/syncs/", "secrets", ADMIN, one(&["project"], "project")),
@@ -1179,6 +1224,8 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/secrets/projects/{project}/identities/{id}/jwks", "secrets", ADMIN, one(&["project"], "project")),
     // Renewing a lease extends a credential whoever could read it holds.
     row("POST", "/v1/secrets/projects/{project}/leases/{id}/renew", "secrets", REVEAL, one(&["project"], "project")),
+    // Ending a credential only takes access away: whoever could reveal it may.
+    row("DELETE", "/v1/secrets/projects/{project}/leases/{id}", "secrets", REVEAL, one(&["project"], "project")),
     // Exporting an environment's folder shares it with another project.
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/exports", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     // Who and what can read a folder: the project's credentials, as the tokens list (a project admin's).
@@ -1227,6 +1274,9 @@ static ROWS: &[Row] = &[
     // A private registry's login (never answered back), and unlinking a database: settings.
     row("PUT", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
     row("DELETE", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
+    // A private Git repository's login (never answered back), as a registry's.
+    row("PUT", "/v1/apps/services/{id}/git-login", "apps", W, one(PG, "service")),
+    row("DELETE", "/v1/apps/services/{id}/git-login", "apps", W, one(PG, "service")),
     // A link puts the linked resource's address and password in the service's variables, where
     // its code reads them: reveal on that resource too.
     row("PUT", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")).lends(Lend::Path("kind", "ref")),
@@ -1292,6 +1342,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/previews", "previews", W, Tgt::Create { project: None, place: None, id_field: "id" }).env(EnvFrom::Fixed("preview")),
     row("*", "/v1/previews/projects/{project}/", "previews", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/previews/projects/{project}/", "previews", R, one(&["project"], "project")),
+    // A project's preview settings carry the variable values every preview's services get
+    // (`env`, and per service `env_for`): API keys among them. A preview's own are reveal.
+    row("GET", "/v1/previews/projects/{project}/settings", "previews", R, one(&["project"], "project")).reveals(&["env", "env_for"]),
     // A project's CI bypass secret for private previews: made (and shown once) is reveal.
     row("POST", "/v1/previews/projects/{project}/bypass", "previews", REVEAL, one(&["project"], "project")),
     row("GET", "/v1/previews/projects/{project}/bypass", "previews", ADMIN, one(&["project"], "project")),
@@ -1319,6 +1372,9 @@ static ROWS: &[Row] = &[
     // Accepting a visual change is a person's call (with `visual_review = "required"` previews
     // refuses tokens anyway): admin, so a write token can't wave its own diff through.
     row("POST", "/v1/previews/{id}/visual/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Letting a fork's pull request run with the project's data (a Git URL service's preview,
+    // roll code's `approve-run`): a person's call, as accepting a visual change is.
+    row("POST", "/v1/previews/{id}/approve", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // ── roll code ──
     row("GET", "/v1/code", "code", R, Tgt::AnyGrant),
     row("GET", "/v1/code/health", "code", R, Tgt::AnyGrant),
@@ -1326,7 +1382,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/code/names/{name}", "code", R, Tgt::Product),
     row("GET", "/v1/code/names/{owner}/{repo}", "code", R, one(REPO, "repo")),
     row("GET", "/v1/code/repos", "code", R, list("full_name")),
-    row("POST", "/v1/code/repos", "code", W, create("repo", "full_name")),
+    row("POST", "/v1/code/repos", "code", Act::Body(code_repo_action), create("repo", "full_name")),
     row("GET", "/v1/code/repos/{owner}/{repo}", "code", R, one(REPO, "repo")),
     row("PATCH", "/v1/code/repos/{owner}/{repo}", "code", ADMIN, one(REPO, "repo")),
     row("DELETE", "/v1/code/repos/{owner}/{repo}", "code", D, one(REPO, "repo")),
@@ -1335,7 +1391,7 @@ static ROWS: &[Row] = &[
     // tells a reader which line holds production's key, so it's the repo's managers' (roll code
     // checks manage too): admin.
     row("*", "/v1/code/repos/{owner}/{repo}/leaks", "code", ADMIN, one(REPO, "repo")),
-    row("POST", "/v1/code/repos/{owner}/{repo}/land", "code", DEPLOY, one(REPO, "repo")),
+    row("POST", "/v1/code/repos/{owner}/{repo}/land", "code", Act::Body(code_land_action), one(REPO, "repo")),
     row("POST", "/v1/code/repos/{owner}/{repo}/queue/pause", "code", ADMIN, one(REPO, "repo")),
     row("POST", "/v1/code/repos/{owner}/{repo}/queue/resume", "code", ADMIN, one(REPO, "repo")),
     row("*", "/v1/code/repos/{owner}/{repo}/webhooks", "code", ADMIN, one(REPO, "repo")),
@@ -1344,7 +1400,7 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/code/repos/{owner}/{repo}/review-settings", "code", ADMIN, one(REPO, "repo")),
     row("*", "/v1/code/changes/{id}", "code", M, one(PG, "change")),
     row("*", "/v1/code/changes/{id}/", "code", M, one(PG, "change")),
-    row("POST", "/v1/code/changes/{id}/land", "code", DEPLOY, one(PG, "change")),
+    row("POST", "/v1/code/changes/{id}/land", "code", Act::Body(code_land_action), one(PG, "change")),
     row("POST", "/v1/code/changes/{id}/enqueue", "code", DEPLOY, one(PG, "change")),
     row("PATCH", "/v1/code/changes/{id}/enqueue", "code", DEPLOY, one(PG, "change")),
     // Running a fork's code with the repo's data is the repo's owner's call.
@@ -1371,6 +1427,13 @@ static ROWS: &[Row] = &[
     row("*", "/v1/code/agents/{owner}/", "agents", M, one(&["owner"], "owner")),
     row("POST", "/v1/code/agents/{owner}/machines/{machine}/commands", "agents", Act::Body(agent_command_action), one(&["owner"], "owner")),
     row("POST", "/v1/code/agents/{owner}/login/approve", "agents", ADMIN, one(&["owner"], "owner")),
+    // Adding a machine mints its long-lived machine token, as approving a login does.
+    row("POST", "/v1/code/agents/{owner}/machines", "agents", ADMIN, one(&["owner"], "owner")),
+    // A share is an anonymous link to a copy of the thread (prompts, code, tool output): how its
+    // content leaves the owner, as previews' and secrets' shares are.
+    row("POST", "/v1/code/agents/{owner}/threads/{thread}/shares", "agents", REVEAL, one(&["owner"], "owner")),
+    // The share list answers each share's id and link, and the id alone opens the copy: reveal.
+    row("GET", "/v1/code/agents/{owner}/shares", "agents", REVEAL, one(&["owner"], "owner")),
     row("POST", "/v1/code/agents/{owner}/login/deny", "agents", ADMIN, one(&["owner"], "owner")),
     row("*", "/v1/code/agents/{owner}/endpoints/{id}", "agents", ADMIN, one(&["owner"], "owner")),
     row("*", "/v1/code/agents/{owner}/gateway", "agents", ADMIN, one(&["owner"], "owner")),
@@ -1535,6 +1598,25 @@ mod tests {
         assert_eq!(apps_repo(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/api" } })), repo("acme/api"));
         assert!(apps_repo(&serde_json::json!({ "source": { "kind": "image", "image": "nginx" } })).is_empty());
         assert_eq!(link_target("repo"), Some(("code", "repo")));
+        // Loosening a NoSQL database's masking or read-only flag is admin; its other settings write.
+        // Credentials in read answers are hidden from tokens that may not reveal them.
+        let reveals = |m: &str, p: &str| by_path(m, p).unwrap().row.reveals;
+        assert!(reveals("GET", "/v1/previews/projects/prj_1/settings").contains(&"env"));
+        assert!(reveals("GET", "/v1/tasks/messages/msg_1").contains(&"headers") && reveals("GET", "/v1/tasks/schedules").contains(&"headers"));
+        assert_eq!(by_path("GET", "/v1/code/agents/acme/shares").unwrap().row.action("GET", &[], None), Action::Reveal);
+        // Connecting a GitHub repository, landing over the rules, and dropping a stream's
+        // records aren't the plain write or deploy their routes otherwise are.
+        assert_eq!(code_repo_action(&serde_json::json!({ "name": "web", "source": { "github": { "repo": "a/b" } } })), Action::Admin);
+        assert_eq!(code_repo_action(&serde_json::json!({ "name": "web", "source": "native" })), Action::Write);
+        assert_eq!(code_land_action(&serde_json::json!({ "bypass": true })), Action::Admin);
+        assert_eq!(code_land_action(&serde_json::json!({})), Action::Deploy);
+        assert_eq!(stream_settings_action(&serde_json::json!({ "settings": { "retention_ms": 1 } })), Action::Delete);
+        assert_eq!(stream_settings_action(&serde_json::json!({ "settings": { "max_partitions": 12 } })), Action::Write);
+        assert_eq!(topic_change_action(&serde_json::json!({ "configs": { "retention.ms": "1" } })), Action::Delete);
+        assert_eq!(topic_change_action(&serde_json::json!({ "partitions": 6, "configs": { "max.message.bytes": "2000000" } })), Action::Write);
+        assert_eq!(nosql_patch_action(&serde_json::json!({ "masking": {} })), Action::Admin);
+        assert_eq!(nosql_patch_action(&serde_json::json!({ "read_only": false })), Action::Admin);
+        assert_eq!(nosql_patch_action(&serde_json::json!({ "read_only": true, "idle_timeout": 300 })), Action::Write);
         assert_eq!(redis_action(&serde_json::json!({ "command": ["get", "k"] })), Action::Read);
         assert_eq!(redis_action(&serde_json::json!({ "command": ["FLUSHALL"] })), Action::Delete);
         assert_eq!(redis_action(&serde_json::json!({ "command": ["set", "k", "v"] })), Action::Write);
