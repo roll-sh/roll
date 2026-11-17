@@ -208,13 +208,22 @@ impl roll_previews::ports::Apps for RollApps {
             // deployment it replaces, so a retry after a crash gets the same one, and variables
             // that come back to an earlier set never get that earlier, superseded, redeploy back.
             let idem = redeploy_key(&key, &s(&env["active"]["id"]).unwrap_or_default());
-            let body = json!({ "message": format!("roll preview {}: new variables", t.preview) });
+            let mut body = json!({ "message": format!("roll preview {}: new variables", t.preview) });
+            if closed {
+                body["closed"] = json!(true);
+            }
             self.api.call_with(Method::POST, &format!("{path}/redeploy"), Some(body), Some(&idem)).await?
         } else {
-            let body = match &t.git {
+            let mut body = match &t.git {
                 Some(sha) => json!({ "revision": sha, "message": format!("roll preview {}", t.preview) }),
                 None => json!({ "message": format!("roll preview {}", t.preview) }),
             };
+            // The build itself must be closed (the node that takes the deploy says so, or refuses
+            // it: one from before the field answers 400), not only the environment's answer above
+            // (a fleet's rolling upgrade can serve the two on different nodes).
+            if closed {
+                body["closed"] = json!(true);
+            }
             let mut idem = key.clone();
             // After a failed or canceled deploy, a retry is a new deploy (a registry timeout
             // doesn't fail the preview until the next push); a crash's retry still finds its own.
