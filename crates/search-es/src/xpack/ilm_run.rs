@@ -571,6 +571,9 @@ struct Env<'a> {
     index: String,
     policy: String,
     now: i64,
+    /// The error a step that would run fails with instead: the user or API key the policy runs
+    /// as can no longer act ([`internal::principal_refusal`]).
+    refused: Option<Value>,
 }
 
 impl Env<'_> {
@@ -885,8 +888,9 @@ async fn advance(env: &Env<'_>, mut e: Exec) -> Option<Exec> {
             break;
         }
         if step == ERROR {
-            // `onErrorMaybeRetryFailedStep`: back to the failed step, counted; once per pass.
-            if e.auto_retryable != Some(true) || e != start {
+            // `onErrorMaybeRetryFailedStep`: back to the failed step, counted; once per pass
+            // (never while the policy's user or key can't act: the retry would fail again).
+            if env.refused.is_some() || e.auto_retryable != Some(true) || e != start {
                 break;
             }
             let Some(failed) = e.failed_step.clone() else { break };
@@ -910,6 +914,10 @@ async fn advance(env: &Env<'_>, mut e: Exec) -> Option<Exec> {
         }
         // A step the cached phase doesn't have stays where it is.
         let Some((next, skip)) = following(&e) else { break };
+        if let Some(err) = &env.refused {
+            e.fail(err.clone(), env.now);
+            break;
+        }
         match execute(env, &mut e).await {
             Outcome::Next => e.move_to(&phase, &next.0, next.1, Some((&env.policy, &rec)), false, true, env.now),
             Outcome::SkipAction => e.move_to(&phase, &skip.0, skip.1, Some((&env.policy, &rec)), false, true, env.now),
@@ -967,7 +975,8 @@ async fn pass(cluster: &Cluster, now: i64) {
     for (index, uuid, policy, e) in due {
         let Some(e) = e else { continue };
         let owner = ilm::policy(&cluster.state(), &policy).and_then(|r| r.pointer(&["_roll", "user"]).and_then(internal::principal_of));
-        let env = Env { cluster, index: index.clone(), policy, now };
+        let refused = internal::principal_refusal(cluster, owner.as_ref()).map(|e| e.to_value(false));
+        let env = Env { cluster, index: index.clone(), policy, now, refused };
         if let Some(next) = internal::as_principal(owner, advance(&env, e)).await {
             updates.push((index, uuid, next));
         }

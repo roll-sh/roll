@@ -204,14 +204,21 @@ fn normalize_vector(info: &FieldInfo, v: &mut Value) {
 
 /// The synthetic `_source` of `doc` under `mapping`.
 pub fn synthesize(mapping: &Mapping, ctx: &MappingCtx, table: &FieldTable, opts: Options, doc: &Map) -> Map {
+    synthesize_kept(mapping, ctx, table, opts, doc).0
+}
+
+/// [`synthesize`], and the values it kept verbatim (`_ignored_source`) in document order.
+pub fn synthesize_kept(mapping: &Mapping, ctx: &MappingCtx, table: &FieldTable, opts: Options, doc: &Map) -> (Map, Vec<super::ignored_source::Entry>) {
     let keep = opts.keep;
     if !mapping.root.is_enabled() {
         // The whole document is one `_ignored_source` value.
-        return doc.iter().filter(|(k, _)| !crate::mapping::METADATA_FIELDS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let m: Map = doc.iter().filter(|(k, _)| !crate::mapping::METADATA_FIELDS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let kept = vec![super::ignored_source::whole_document(&m)];
+        return (m, kept);
     }
     let mut copy_dests = HashSet::new();
     collect_copy_dests(&mapping.root, &mut copy_dests);
-    let w = Walk { mapping, ctx, table, keep, copy_dests, binary_fallback: opts.binary_fallback };
+    let w = Walk { mapping, ctx, table, keep, copy_dests, binary_fallback: opts.binary_fallback, kept: Default::default() };
     let mut scope = Scope::default();
     let root_dynamic = mapping.root.dynamic.unwrap_or(Dynamic::True);
     w.object_fields(&mapping.root, "", doc, &mut scope, root_dynamic, Flags::default());
@@ -221,7 +228,7 @@ pub fn synthesize(mapping: &Mapping, ctx: &MappingCtx, table: &FieldTable, opts:
         let at = out.keys().position(|k| k.as_str() > "_doc_count").unwrap_or(out.len());
         out.shift_insert(at, "_doc_count".to_string(), Value::from(c));
     }
-    out
+    (out, w.kept.into_inner())
 }
 
 fn collect_copy_dests(o: &ObjectMapper, out: &mut HashSet<String>) {
@@ -306,6 +313,8 @@ struct Walk<'a> {
     keep: Keep,
     copy_dests: HashSet<String>,
     binary_fallback: bool,
+    /// Every verbatim value, in document order across nested scopes.
+    kept: std::cell::RefCell<Vec<super::ignored_source::Entry>>,
 }
 
 // The walk threads the document position (path, scope, flags) through every step.
@@ -333,6 +342,7 @@ impl<'a> Walk<'a> {
     }
 
     fn raw(&self, scope: &mut Scope, name: String, parent: &str, v: &Value) {
+        self.kept.borrow_mut().push(super::ignored_source::Entry { name: name.clone(), parent: parent.to_string(), value: v.clone() });
         scope.ignored.push(Ignored { name, parent: parent.to_string(), value: v.clone() });
     }
 
@@ -403,6 +413,8 @@ impl<'a> Walk<'a> {
     fn object_value(&self, path: &str, c: &'a ObjectMapper, full: &str, v: &Value, scope: &mut Scope, dynamic: Dynamic, fl: Flags) {
         let keep = self.keep_of(&c.source_keep);
         match v {
+            // A disabled object keeps whatever the document gives it: `null` and scalars too.
+            Value::Null | Value::Bool(_) | Value::Num(_) | Value::Str(_) if !c.is_enabled() => self.raw(scope, full.to_string(), path, v),
             Value::Null => {}
             Value::Obj(m) => {
                 if !c.is_enabled() || keep == Keep::All || (keep == Keep::Arrays && fl.in_array) {

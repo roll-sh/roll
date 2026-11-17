@@ -188,6 +188,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     `roll_net::literal_private_host`, because IP literals skip the resolver. That covers webhooks,
     review apps, owners' own provider `base_url` (`ROLL_CODE_PROVIDER_ALLOW_PRIVATE` to allow),
     gateway upstreams and MCP clients' metadata documents. Bound what you read from it.
+  - OIDC tokens from workloads (CI jobs, clusters) are checked by `crates/roll-oidc`, shared by roll
+    secrets' workload identities and roll-access's trusted machine clients. Its `Fetch` is rolld's
+    guarded client; never write a second verifier, and never make the shared-issuer rule optional.
   - Owner-management routes check `Code::manages`/`check_manage`, not `owns`/`check_write`:
     agent tokens (`agent:<name>`) work code but never manage the owner, and review only as their
     own agent.

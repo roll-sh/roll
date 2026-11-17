@@ -275,7 +275,13 @@ impl Brancher for Redis {
 
     async fn connect(&self, _parent: &str, branch: &str, _kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>> {
         let d = self.0.get(&format!("/v1/redis/databases/{}", seg(branch))).await?;
-        Ok(vec![("REDIS_URL".into(), s(&d["redis_url"]).ok_or_else(|| anyhow::anyhow!("no redis_url"))?)])
+        let mut v = vec![("REDIS_URL".into(), s(&d["redis_url"]).ok_or_else(|| anyhow::anyhow!("no redis_url"))?)];
+        // Its HTTP API too (Upstash's REST names, as roll apps' link gives them).
+        if let Some(u) = s(&d["rest_url"]) {
+            v.push(("REDIS_REST_URL".into(), u));
+            v.push(("REDIS_REST_TOKEN".into(), s(&d["rest_token"]).unwrap_or_default()));
+        }
+        Ok(v)
     }
 
     async fn usage(&self, _parent: &str, branch: &str) -> anyhow::Result<Usage> {
