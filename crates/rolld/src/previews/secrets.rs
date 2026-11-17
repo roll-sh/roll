@@ -18,7 +18,7 @@ fn set_ops(vars: &[(String, String)]) -> Value {
 
 #[async_trait]
 impl roll_previews::ports::Secrets for Secrets {
-    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], trusted: bool, expires_at: i64) -> anyhow::Result<()> {
+    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], trusted: bool, expires_at: i64, branches: &[(roll_previews::Kind, String)]) -> anyhow::Result<()> {
         // One idempotent call: made if missing, else its labels and expiry brought to these and
         // its own keys to exactly `vars` (`replace`: overrides the rules dropped go). An unchanged
         // repeat records nothing. A different base or trust can't change in place (409
@@ -26,8 +26,20 @@ impl roll_previews::ports::Secrets for Secrets {
         let path = format!("/v1/secrets/projects/{}/environments/{}", seg(project), seg(env));
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
         let ttl_minutes = ((expires_at - now) / 60_000).max(15);
-        let body = json!({ "base": base, "labels": { "preview": env }, "ttl_minutes": ttl_minutes, "trusted": trusted, "secrets": set_ops(vars), "replace": true });
-        match self.0.call(Method::PUT, &path, Some(body.clone())).await {
+        // What the preview branched: a link to one of those parents comes back `followed` (the
+        // engine sets it from the branch), never resolved against the parent.
+        let mut body = json!({ "base": base, "labels": { "preview": env }, "ttl_minutes": ttl_minutes, "trusted": trusted, "secrets": set_ops(vars), "replace": true,
+            "branches": branches.iter().map(|(k, p)| json!({ "kind": k.as_str(), "parent": p })).collect::<Vec<_>>() });
+        // A roll secrets from before `branches` refuses it (unknown fields are a 400): sent again
+        // without, and the branches' values under the providers' names still win (`names`).
+        let answer = match self.0.call(Method::PUT, &path, Some(body.clone())).await {
+            Err(e) if e.downcast_ref::<Refused>().is_some_and(|r| r.status == StatusCode::BAD_REQUEST && r.error.contains("unknown field `branches`")) => {
+                body.as_object_mut().map(|o| o.remove("branches"));
+                self.0.call(Method::PUT, &path, Some(body.clone())).await
+            }
+            other => other,
+        };
+        match answer {
             Ok(_) => Ok(()),
             Err(e) if is_404(&e) => Ok(()),
             // A different base or trust only (roll secrets' `mismatch`): any other conflict is an
@@ -90,6 +102,15 @@ impl roll_previews::ports::Secrets for Secrets {
                 }))
                 .collect(),
             leases,
+            followed: v["followed"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|f| {
+                    let kind = roll_previews::Kind::parse(f["kind"].as_str()?).ok()?;
+                    Some((f["name"].as_str()?.to_string(), kind, f["parent"].as_str()?.to_string(), f["field"].as_str()?.to_string()))
+                })
+                .collect(),
         })
     }
 

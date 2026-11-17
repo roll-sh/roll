@@ -582,7 +582,18 @@ ranges overlap):
    The vector-speed item of docs/search/README.md's Next list holds the plan (since this run,
    `66d16fce6` searches a knn query's segments concurrently).
 5. nested `randomized-sorted-term-queries`: 1.62x OpenSearch (13.9 against 8.5; Elasticsearch
-   17.5). Not fixed; Round 9: 1.23x (12.57 against 10.21, ranges apart).
+   17.5; Round 9: 1.23x, 12.57 against 10.21). Leads since `664f44401`: every hit read all its
+   children's values for the sort (about 900 instructions a parent; Lucene's
+   `ToParentBlockJoinSortField` prunes nothing either). A parent sorts by one of its children's
+   values (`min`, `max`), so it can only beat the queue's worst entry through a child that does:
+   the children's points name those children, and their parents are the competitive docs. Once
+   the count passes its 10,000 hits the term query skips the others; before that they are counted
+   without reading their children. After: p50 3.5-4.3 ms against OpenSearch 3.9's 8.5-9.7 on the
+   same lane-b CPUs (0.45x; server CPU per request 2.8-3.5 ms against 7.4-8.7), was 12.5-13.3
+   (CPU 11.3-12.3); 58.3M → 6.2M instructions per request. Rally's 2M documents loaded by script
+   and merged to 7 segments (OpenSearch 9), Rally's param source with its seed, 5 alternating
+   rounds of 200 requests at host load 25-30, responses identical before and after; Rally rerun
+   pending.
 6. noaa indexing: Elasticsearch indexes 1.29x roll's docs/s (67.5k against 52.5k), on less CPU:
    the general document path for `double_range` and `dbe79f8f7`'s mapping walk (the noaa
    table's notes). Both fixed since: the walk by `6c2834a3e`, and the direct parser now takes
